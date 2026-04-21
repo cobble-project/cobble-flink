@@ -21,19 +21,28 @@ import org.apache.flink.api.common.state.StateTtlConfig;
 import org.apache.flink.api.common.state.ValueState;
 import org.apache.flink.api.common.state.ValueStateDescriptor;
 import org.apache.flink.api.common.time.Time;
+import org.apache.flink.api.common.typeutils.SimpleTypeSerializerSnapshot;
+import org.apache.flink.api.common.typeutils.TypeSerializerSnapshot;
 import org.apache.flink.api.common.typeutils.base.IntSerializer;
 import org.apache.flink.api.common.typeutils.base.StringSerializer;
+import org.apache.flink.api.common.typeutils.base.TypeSerializerSingleton;
 import org.apache.flink.configuration.CheckpointingOptions;
 import org.apache.flink.configuration.Configuration;
 import org.apache.flink.configuration.MemorySize;
 import org.apache.flink.core.fs.CloseableRegistry;
+import org.apache.flink.core.memory.DataInputView;
+import org.apache.flink.core.memory.DataOutputView;
 import org.apache.flink.runtime.operators.testutils.MockEnvironment;
 import org.apache.flink.runtime.operators.testutils.MockEnvironmentBuilder;
 import org.apache.flink.runtime.query.TaskKvStateRegistry;
 import org.apache.flink.runtime.state.AbstractKeyedStateBackend;
 import org.apache.flink.runtime.state.KeyGroupRange;
+import org.apache.flink.runtime.state.KeyGroupedInternalPriorityQueue;
+import org.apache.flink.runtime.state.Keyed;
 import org.apache.flink.runtime.state.KeyedStateHandle;
+import org.apache.flink.runtime.state.PriorityComparable;
 import org.apache.flink.runtime.state.TestTaskStateManagerBuilder;
+import org.apache.flink.runtime.state.heap.HeapPriorityQueueElement;
 import org.apache.flink.runtime.state.ttl.MockTtlTimeProvider;
 import org.apache.flink.runtime.state.ttl.TtlTimeProvider;
 import org.apache.flink.runtime.util.TestingTaskManagerRuntimeInfo;
@@ -41,6 +50,7 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
 import java.io.File;
+import java.io.IOException;
 import java.nio.file.Path;
 import java.util.Collections;
 import java.util.LinkedHashMap;
@@ -206,6 +216,32 @@ class CobbleStateBackendTest {
         assertEquals(2, volumes.size());
         assertEquals("s3://bucket/checkpoints/shared", volumes.get(0).baseDir);
         assertVolumeKinds(volumes.get(1), Config.VolumeUsageKind.PRIMARY_DATA_PRIORITY_HIGH);
+    }
+
+    @Test
+    void timerStateUsesHeapPriorityQueueImplementation(@TempDir Path tempDir) throws Exception {
+        try (TestBackendContext context = createBackendContext(tempDir, false, null)) {
+            CobbleKeyedStateBackend<Integer> backend = context.cobbleBackend;
+            TestTimerElementSerializer timerSerializer = new TestTimerElementSerializer();
+
+            KeyGroupedInternalPriorityQueue<TestTimerElement> queue =
+                    backend.create("timer-state", timerSerializer);
+
+            TestTimerElement later = new TestTimerElement(20L, 1);
+            TestTimerElement earlier = new TestTimerElement(10L, 2);
+
+            queue.add(later);
+            queue.add(earlier);
+
+            assertEquals(earlier, queue.peek());
+
+            backend.setCurrentKey(2);
+            assertEquals(earlier, queue.poll());
+
+            backend.setCurrentKey(1);
+            assertEquals(later, queue.poll());
+            assertTrue(queue.isEmpty());
+        }
     }
 
     @Test
@@ -669,6 +705,116 @@ class CobbleStateBackendTest {
                     "map-key-" + key + '-' + index, payload("map-value-" + key, index, valueBytes));
         }
         return values;
+    }
+
+    private static final class TestTimerElement
+            implements HeapPriorityQueueElement,
+                    PriorityComparable<TestTimerElement>,
+                    Keyed<Integer> {
+        private final long timestamp;
+        private final int key;
+        private int internalIndex = HeapPriorityQueueElement.NOT_CONTAINED;
+
+        private TestTimerElement(long timestamp, int key) {
+            this.timestamp = timestamp;
+            this.key = key;
+        }
+
+        @Override
+        public int getInternalIndex() {
+            return internalIndex;
+        }
+
+        @Override
+        public void setInternalIndex(int newIndex) {
+            this.internalIndex = newIndex;
+        }
+
+        @Override
+        public int comparePriorityTo(TestTimerElement other) {
+            return Long.compare(timestamp, other.timestamp);
+        }
+
+        @Override
+        public Integer getKey() {
+            return key;
+        }
+
+        @Override
+        public boolean equals(Object other) {
+            if (this == other) {
+                return true;
+            }
+            if (!(other instanceof TestTimerElement)) {
+                return false;
+            }
+            TestTimerElement that = (TestTimerElement) other;
+            return timestamp == that.timestamp && key == that.key;
+        }
+
+        @Override
+        public int hashCode() {
+            return (int) (31 * timestamp + key);
+        }
+    }
+
+    private static final class TestTimerElementSerializer
+            extends TypeSerializerSingleton<TestTimerElement> {
+        private static final long serialVersionUID = 1L;
+
+        @Override
+        public boolean isImmutableType() {
+            return true;
+        }
+
+        @Override
+        public TestTimerElement createInstance() {
+            return new TestTimerElement(0L, 0);
+        }
+
+        @Override
+        public TestTimerElement copy(TestTimerElement from) {
+            return new TestTimerElement(from.timestamp, from.key);
+        }
+
+        @Override
+        public TestTimerElement copy(TestTimerElement from, TestTimerElement reuse) {
+            return copy(from);
+        }
+
+        @Override
+        public int getLength() {
+            return Long.BYTES + Integer.BYTES;
+        }
+
+        @Override
+        public void serialize(TestTimerElement record, DataOutputView target) throws IOException {
+            target.writeLong(record.timestamp);
+            target.writeInt(record.key);
+        }
+
+        @Override
+        public TestTimerElement deserialize(DataInputView source) throws IOException {
+            return new TestTimerElement(source.readLong(), source.readInt());
+        }
+
+        @Override
+        public TestTimerElement deserialize(TestTimerElement reuse, DataInputView source)
+                throws IOException {
+            return deserialize(source);
+        }
+
+        @Override
+        public void copy(DataInputView source, DataOutputView target) throws IOException {
+            target.writeLong(source.readLong());
+            target.writeInt(source.readInt());
+        }
+
+        @Override
+        public TypeSerializerSnapshot<TestTimerElement> snapshotConfiguration() {
+            return new SimpleTypeSerializerSnapshot<TestTimerElement>(
+                    TestTimerElementSerializer::new) {};
+        }
     }
 
     private static final class TestBackendContext implements AutoCloseable {

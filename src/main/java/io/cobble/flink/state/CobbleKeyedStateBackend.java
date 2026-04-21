@@ -22,15 +22,17 @@ import org.apache.flink.runtime.checkpoint.SnapshotType;
 import org.apache.flink.runtime.query.TaskKvStateRegistry;
 import org.apache.flink.runtime.state.AbstractKeyedStateBackend;
 import org.apache.flink.runtime.state.CheckpointStreamFactory;
+import org.apache.flink.runtime.state.HeapPriorityQueuesManager;
 import org.apache.flink.runtime.state.KeyGroupedInternalPriorityQueue;
 import org.apache.flink.runtime.state.Keyed;
-import org.apache.flink.runtime.state.KeyedStateBackend;
 import org.apache.flink.runtime.state.KeyedStateHandle;
 import org.apache.flink.runtime.state.PriorityComparable;
 import org.apache.flink.runtime.state.SavepointResources;
 import org.apache.flink.runtime.state.SnapshotResult;
 import org.apache.flink.runtime.state.StateSnapshotTransformer;
 import org.apache.flink.runtime.state.heap.HeapPriorityQueueElement;
+import org.apache.flink.runtime.state.heap.HeapPriorityQueueSetFactory;
+import org.apache.flink.runtime.state.heap.HeapPriorityQueueSnapshotRestoreWrapper;
 import org.apache.flink.runtime.state.heap.InternalKeyContext;
 import org.apache.flink.runtime.state.metrics.LatencyTrackingStateConfig;
 import org.apache.flink.runtime.state.ttl.TtlTimeProvider;
@@ -63,6 +65,7 @@ final class CobbleKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
     private final Db cobbleDb;
     private final Map<String, StateDescriptor.Type> stateTypes;
     private final List<AbstractCobbleState<?, ?, ?>> stateResources;
+    private final HeapPriorityQueuesManager heapPriorityQueuesManager;
     private final AtomicBoolean resourcesClosed;
     private final boolean manualTtlTimeProviderForTests;
 
@@ -97,6 +100,15 @@ final class CobbleKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
         this.cobbleDb = cobbleDb;
         this.stateTypes = new HashMap<>();
         this.stateResources = new ArrayList<>();
+        this.heapPriorityQueuesManager =
+                new HeapPriorityQueuesManager(
+                        new HashMap<String, HeapPriorityQueueSnapshotRestoreWrapper<?>>(),
+                        new HeapPriorityQueueSetFactory(
+                                keyContext.getKeyGroupRange(),
+                                keyContext.getNumberOfKeyGroups(),
+                                128),
+                        keyContext.getKeyGroupRange(),
+                        keyContext.getNumberOfKeyGroups());
         this.resourcesClosed = new AtomicBoolean(false);
         this.manualTtlTimeProviderForTests = manualTtlTimeProviderForTests;
     }
@@ -182,14 +194,25 @@ final class CobbleKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
         }
     }
 
-    /** Timer priority queues remain unsupported until timer state is wired into Cobble. */
+    /** Timer state uses Flink's heap priority queue manager, independent from Cobble KV storage. */
     @Nonnull
     @Override
     public <T extends HeapPriorityQueueElement & PriorityComparable<? super T> & Keyed<?>>
             KeyGroupedInternalPriorityQueue<T> create(
                     @Nonnull String stateName,
                     @Nonnull TypeSerializer<T> byteOrderedElementSerializer) {
-        throw unsupported("createPriorityQueue");
+        return heapPriorityQueuesManager.createOrUpdate(stateName, byteOrderedElementSerializer);
+    }
+
+    /** Timer state uses Flink's heap priority queue manager, independent from Cobble KV storage. */
+    @Override
+    public <T extends HeapPriorityQueueElement & PriorityComparable<? super T> & Keyed<?>>
+            KeyGroupedInternalPriorityQueue<T> create(
+                    @Nonnull String stateName,
+                    @Nonnull TypeSerializer<T> byteOrderedElementSerializer,
+                    boolean allowFutureMetadataUpdates) {
+        return heapPriorityQueuesManager.createOrUpdate(
+                stateName, byteOrderedElementSerializer, allowFutureMetadataUpdates);
     }
 
     /** Snapshotting remains unsupported until state materialization/restore is implemented. */
@@ -203,22 +226,15 @@ final class CobbleKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
         throw unsupported("snapshot");
     }
 
-    /** The backend does not yet expose a reusable restore/snapshot format. */
     @Override
     public boolean isSafeToReuseKVState() {
-        return false;
+        return true;
     }
 
-    /** Legacy synchronous timer snapshots are irrelevant until timer state is implemented. */
     @Override
     public boolean requiresLegacySynchronousTimerSnapshots(SnapshotType checkpointType) {
-        return false;
-    }
-
-    /** There is no deeper delegation layer anymore, so the backend delegates to itself. */
-    @Override
-    public KeyedStateBackend<K> getDelegatedKeyedStateBackend(boolean recursive) {
-        return this;
+        // heap timer requires legacy synchronous timer snapshots.
+        return true;
     }
 
     /** Disposes the backend and always releases the live Cobble resources. */
