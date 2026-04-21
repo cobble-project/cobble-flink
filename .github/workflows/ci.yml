@@ -12,7 +12,6 @@ permissions:
 env:
   CARGO_TERM_COLOR: always
   COBBLE_REF: main
-  COBBLE_JAVA_VERSION: 0.2.0-SNAPSHOT
 
 jobs:
   build:
@@ -59,22 +58,8 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-cobble-flink-cargo-git-
 
-      - name: Build cobble-java for runner platform
-        working-directory: cobble/cobble-java/java
-        run: mvn --batch-mode --no-transfer-progress -DskipTests -Dspotless.check.skip=true package
-
-      - name: Install cobble-java into local Maven repo
-        working-directory: cobble/cobble-java/java
-        run: |
-          set -euo pipefail
-          jar_path="$(ls target/cobble-*.jar | head -n 1)"
-          mvn --batch-mode --no-transfer-progress org.apache.maven.plugins:maven-install-plugin:3.1.2:install-file \
-            -Dfile="${jar_path}" \
-            -DgroupId=io.github.cobble-project \
-            -DartifactId=cobble-java \
-            -Dversion="${COBBLE_JAVA_VERSION}" \
-            -Dpackaging=jar \
-            -DgeneratePom=true
+      - name: Build and install cobble-java with metadata
+        run: ./scripts/install-local-cobble-java.sh cobble/cobble-java/java
 
       - name: Check formatting
         run: mvn --batch-mode --no-transfer-progress spotless:check

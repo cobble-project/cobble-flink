@@ -9,6 +9,7 @@ import java.io.IOException;
 /** Factory for constructing the Cobble state backend from Flink configuration. */
 public class CobbleStateBackendFactory implements StateBackendFactory<CobbleStateBackend> {
 
+    /** Builds the backend from Flink config by reusing the backend's own configure path. */
     @Override
     public CobbleStateBackend createFromConfig(ReadableConfig config, ClassLoader classLoader)
             throws IllegalConfigurationException, IOException {
