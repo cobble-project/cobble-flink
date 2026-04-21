@@ -1,0 +1,83 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+    branches: [main, master]
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  COBBLE_REF: main
+  COBBLE_JAVA_VERSION: 0.2.0-SNAPSHOT
+
+jobs:
+  build:
+    name: Format check and CI
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    steps:
+      - name: Checkout cobble-flink
+        uses: actions/checkout@v5
+
+      - name: Checkout cobble branch
+        uses: actions/checkout@v5
+        with:
+          repository: cobble-project/cobble
+          ref: ${{ env.COBBLE_REF }}
+          path: cobble
+
+      - name: Setup Java
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "17"
+          cache: maven
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: stable
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/registry
+          key: ${{ runner.os }}-cobble-flink-cargo-registry-${{ hashFiles('cobble/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cobble-flink-cargo-registry-
+
+      - name: Cache cargo git
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/git
+          key: ${{ runner.os }}-cobble-flink-cargo-git-${{ hashFiles('cobble/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cobble-flink-cargo-git-
+
+      - name: Build cobble-java for runner platform
+        working-directory: cobble/cobble-java/java
+        run: mvn --batch-mode --no-transfer-progress -DskipTests -Dspotless.check.skip=true package
+
+      - name: Install cobble-java into local Maven repo
+        working-directory: cobble/cobble-java/java
+        run: |
+          set -euo pipefail
+          jar_path="$(ls target/cobble-*.jar | head -n 1)"
+          mvn --batch-mode --no-transfer-progress org.apache.maven.plugins:maven-install-plugin:3.1.2:install-file \
+            -Dfile="${jar_path}" \
+            -DgroupId=io.github.cobble-project \
+            -DartifactId=cobble-java \
+            -Dversion="${COBBLE_JAVA_VERSION}" \
+            -Dpackaging=jar \
+            -DgeneratePom=true
+
+      - name: Check formatting
+        run: mvn --batch-mode --no-transfer-progress spotless:check
+
+      - name: Run CI
+        run: mvn --batch-mode --no-transfer-progress -Dspotless.check.skip=true verify
