@@ -54,9 +54,15 @@ public class CobbleStateBackend extends AbstractManagedMemoryStateBackend
     private final CobbleMemoryConfiguration memoryConfiguration;
     private final String checkpointDirectory;
     private final boolean localDirPrimaryHighPriority;
+    private final boolean manualTtlTimeProviderForTests;
 
     public CobbleStateBackend() {
-        this(null, new CobbleMemoryConfiguration(), null, false);
+        this(null, new CobbleMemoryConfiguration(), null, false, false);
+        ensureCobbleLoaded();
+    }
+
+    CobbleStateBackend(boolean manualTtlTimeProviderForTests) {
+        this(null, new CobbleMemoryConfiguration(), null, false, manualTtlTimeProviderForTests);
         ensureCobbleLoaded();
     }
 
@@ -64,11 +70,13 @@ public class CobbleStateBackend extends AbstractManagedMemoryStateBackend
             File[] localDbDirectories,
             CobbleMemoryConfiguration memoryConfiguration,
             String checkpointDirectory,
-            boolean localDirPrimaryHighPriority) {
+            boolean localDirPrimaryHighPriority,
+            boolean manualTtlTimeProviderForTests) {
         this.localDbDirectories = localDbDirectories;
         this.memoryConfiguration = memoryConfiguration;
         this.checkpointDirectory = checkpointDirectory;
         this.localDirPrimaryHighPriority = localDirPrimaryHighPriority;
+        this.manualTtlTimeProviderForTests = manualTtlTimeProviderForTests;
     }
 
     private CobbleStateBackend(CobbleStateBackend original, ReadableConfig config) {
@@ -87,6 +95,7 @@ public class CobbleStateBackend extends AbstractManagedMemoryStateBackend
         this.localDirPrimaryHighPriority =
                 original.localDirPrimaryHighPriority
                         || config.get(CobbleOptions.LOCAL_DIR_PRIMARY_HIGH_PRIORITY);
+        this.manualTtlTimeProviderForTests = original.manualTtlTimeProviderForTests;
         this.latencyTrackingConfigBuilder = original.latencyTrackingConfigBuilder.configure(config);
     }
 
@@ -190,7 +199,8 @@ public class CobbleStateBackend extends AbstractManagedMemoryStateBackend
                         memoryConfiguration,
                         checkpointDirectory,
                         localDirPrimaryHighPriority,
-                        managedMemoryFraction)
+                        managedMemoryFraction,
+                        manualTtlTimeProviderForTests)
                 .build();
     }
 

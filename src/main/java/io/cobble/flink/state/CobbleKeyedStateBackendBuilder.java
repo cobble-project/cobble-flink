@@ -1,7 +1,7 @@
 package io.cobble.flink.state;
 
 import io.cobble.Config;
-import io.cobble.Db;
+import io.cobble.structured.Db;
 
 import org.apache.flink.api.common.typeutils.TypeSerializer;
 import org.apache.flink.core.fs.CloseableRegistry;
@@ -50,6 +50,7 @@ final class CobbleKeyedStateBackendBuilder<K> {
     private final String checkpointDirectory;
     private final boolean localDirPrimaryHighPriority;
     private final double managedMemoryFraction;
+    private final boolean manualTtlTimeProviderForTests;
 
     CobbleKeyedStateBackendBuilder(
             Environment env,
@@ -64,7 +65,8 @@ final class CobbleKeyedStateBackendBuilder<K> {
             CobbleMemoryConfiguration memoryConfiguration,
             String checkpointDirectory,
             boolean localDirPrimaryHighPriority,
-            double managedMemoryFraction) {
+            double managedMemoryFraction,
+            boolean manualTtlTimeProviderForTests) {
         this.env = env;
         this.kvStateRegistry = kvStateRegistry;
         this.keySerializer = keySerializer;
@@ -78,6 +80,7 @@ final class CobbleKeyedStateBackendBuilder<K> {
         this.checkpointDirectory = checkpointDirectory;
         this.localDirPrimaryHighPriority = localDirPrimaryHighPriority;
         this.managedMemoryFraction = managedMemoryFraction;
+        this.manualTtlTimeProviderForTests = manualTtlTimeProviderForTests;
     }
 
     /** Builds the minimal keyed-backend shell after Cobble resources are prepared. */
@@ -99,7 +102,8 @@ final class CobbleKeyedStateBackendBuilder<K> {
                             resources.volumePath,
                             resources.configPath,
                             resources.config,
-                            resources.db);
+                            resources.db,
+                            manualTtlTimeProviderForTests);
             success = true;
             return backend;
         } finally {
@@ -230,6 +234,11 @@ final class CobbleKeyedStateBackendBuilder<K> {
         for (Config.VolumeDescriptor volume : volumeLayout.volumes) {
             config.addVolume(volume);
         }
+        config.ttlEnabled = Boolean.TRUE;
+        config.timeProvider =
+                manualTtlTimeProviderForTests
+                        ? Config.TimeProviderKind.MANUAL
+                        : Config.TimeProviderKind.SYSTEM;
         config.logPath = new File(instanceBasePath, COBBLE_LOG_FILE_NAME).getAbsolutePath();
         config.logConsole = Boolean.FALSE;
 

@@ -1,12 +1,20 @@
 package io.cobble.flink.state;
 
 import io.cobble.Config;
-import io.cobble.Db;
+import io.cobble.structured.Db;
+import io.cobble.structured.ListConfig;
+import io.cobble.structured.Schema;
+import io.cobble.structured.StructuredSchemaBuilder;
 
 import org.apache.flink.api.common.ExecutionConfig;
+import org.apache.flink.api.common.state.ListStateDescriptor;
+import org.apache.flink.api.common.state.MapStateDescriptor;
 import org.apache.flink.api.common.state.State;
 import org.apache.flink.api.common.state.StateDescriptor;
+import org.apache.flink.api.common.state.ValueStateDescriptor;
 import org.apache.flink.api.common.typeutils.TypeSerializer;
+import org.apache.flink.api.common.typeutils.base.ListSerializer;
+import org.apache.flink.api.common.typeutils.base.MapSerializer;
 import org.apache.flink.api.java.tuple.Tuple2;
 import org.apache.flink.core.fs.CloseableRegistry;
 import org.apache.flink.runtime.checkpoint.CheckpointOptions;
@@ -34,13 +42,17 @@ import java.io.File;
 import java.io.IOException;
 import java.io.UncheckedIOException;
 import java.nio.file.Path;
+import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
 import java.util.concurrent.RunnableFuture;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.stream.Stream;
 
 /**
- * Minimal keyed backend shell that owns the Cobble resources while keyed-state operations remain
- * unsupported for now.
+ * Keyed backend that keeps the Cobble DB and config live and serves Flink Value/List/Map state
+ * through Cobble structured column families.
  */
 final class CobbleKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
 
@@ -49,7 +61,10 @@ final class CobbleKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
     private final Path configPath;
     private final Config cobbleConfig;
     private final Db cobbleDb;
+    private final Map<String, StateDescriptor.Type> stateTypes;
+    private final List<AbstractCobbleState<?, ?, ?>> stateResources;
     private final AtomicBoolean resourcesClosed;
+    private final boolean manualTtlTimeProviderForTests;
 
     CobbleKeyedStateBackend(
             TaskKvStateRegistry kvStateRegistry,
@@ -64,7 +79,8 @@ final class CobbleKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
             File volumePath,
             Path configPath,
             Config cobbleConfig,
-            Db cobbleDb) {
+            Db cobbleDb,
+            boolean manualTtlTimeProviderForTests) {
         super(
                 kvStateRegistry,
                 keySerializer,
@@ -79,79 +95,104 @@ final class CobbleKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
         this.configPath = configPath;
         this.cobbleConfig = cobbleConfig;
         this.cobbleDb = cobbleDb;
+        this.stateTypes = new HashMap<>();
+        this.stateResources = new ArrayList<>();
         this.resourcesClosed = new AtomicBoolean(false);
+        this.manualTtlTimeProviderForTests = manualTtlTimeProviderForTests;
     }
 
-    /** No-op until the backend starts integrating with real checkpoint notifications. */
+    /** No-op until checkpoint/snapshot integration is implemented. */
     @Override
     public void notifyCheckpointComplete(long checkpointId) {}
 
-    /** No-op until the backend starts integrating with real checkpoint notifications. */
+    /** No-op until checkpoint/snapshot integration is implemented. */
     @Override
     public void notifyCheckpointAborted(long checkpointId) {}
 
-    /** No-op until the backend starts integrating with real checkpoint notifications. */
+    /** No-op until checkpoint/snapshot integration is implemented. */
     @Override
     public void notifyCheckpointSubsumed(long checkpointId) {}
 
-    /** Savepoints stay unsupported until actual keyed-state serialization is implemented. */
+    /** Savepoints remain unsupported until real snapshot support is implemented. */
     @Nonnull
     @Override
     public SavepointResources<K> savepoint() {
         throw unsupported("savepoint");
     }
 
-    /** There is no real keyed state yet, so entry counting is intentionally unsupported. */
+    /** Counting all entries efficiently is out of scope for the current implementation. */
     @Override
     public int numKeyValueStateEntries() {
         throw unsupported("numKeyValueStateEntries");
     }
 
-    /** Key iteration depends on real state storage and is therefore unsupported for now. */
+    /** Key iteration stays unsupported until scan semantics are wired into Flink iterators. */
     @Override
     public <N> Stream<K> getKeys(String state, N namespace) {
         throw unsupported("getKeys");
     }
 
-    /** Key/namespace iteration depends on real state storage and is unsupported for now. */
+    /** Key/namespace iteration stays unsupported until scan semantics are wired in. */
     @Override
     public <N> Stream<Tuple2<K, N>> getKeysAndNamespaces(String state) {
         throw unsupported("getKeysAndNamespaces");
     }
 
-    /** State creation is blocked until Cobble-backed keyed state is implemented. */
+    /** Creates the supported Flink state wrappers and ensures their Cobble schema exists. */
     @Nonnull
     @Override
+    @SuppressWarnings("unchecked")
     public <N, SV, SEV, S extends State, IS extends S> IS createOrUpdateInternalState(
             @Nonnull TypeSerializer<N> namespaceSerializer,
             @Nonnull StateDescriptor<S, SV> stateDesc,
             @Nonnull
                     StateSnapshotTransformer.StateSnapshotTransformFactory<SEV>
-                            snapshotTransformFactory) {
-        throw unsupported("createOrUpdateInternalState");
+                            snapshotTransformFactory)
+            throws Exception {
+        ensureStateColumnFamily(stateDesc);
+
+        switch (stateDesc.getType()) {
+            case VALUE:
+                ValueStateDescriptor<SV> valueStateDescriptor =
+                        (ValueStateDescriptor<SV>) stateDesc;
+                CobbleValueState<K, N, SV> valueState =
+                        new CobbleValueState<>(
+                                this,
+                                cobbleDb,
+                                stateDesc.getName(),
+                                keySerializer,
+                                namespaceSerializer,
+                                valueStateDescriptor.getSerializer(),
+                                valueStateDescriptor.getDefaultValue(),
+                                stateDesc.getTtlConfig());
+                trackStateResource(valueState);
+                return (IS) valueState;
+            case LIST:
+                IS listState =
+                        createListState(namespaceSerializer, (ListStateDescriptor<?>) stateDesc);
+                trackStateResource((AbstractCobbleState<?, ?, ?>) listState);
+                return listState;
+            case MAP:
+                IS mapState =
+                        createMapState(namespaceSerializer, (MapStateDescriptor<?, ?>) stateDesc);
+                trackStateResource((AbstractCobbleState<?, ?, ?>) mapState);
+                return mapState;
+            default:
+                throw unsupportedState(stateDesc);
+        }
     }
 
-    /** Priority queues are not available until the real keyed-state backend exists. */
+    /** Timer priority queues remain unsupported until timer state is wired into Cobble. */
     @Nonnull
     @Override
     public <T extends HeapPriorityQueueElement & PriorityComparable<? super T> & Keyed<?>>
             KeyGroupedInternalPriorityQueue<T> create(
                     @Nonnull String stateName,
                     @Nonnull TypeSerializer<T> byteOrderedElementSerializer) {
-        throw unsupported("create");
+        throw unsupported("createPriorityQueue");
     }
 
-    /** Priority queues are not available until the real keyed-state backend exists. */
-    @Override
-    public <T extends HeapPriorityQueueElement & PriorityComparable<? super T> & Keyed<?>>
-            KeyGroupedInternalPriorityQueue<T> create(
-                    @Nonnull String stateName,
-                    @Nonnull TypeSerializer<T> byteOrderedElementSerializer,
-                    boolean allowFutureMetadataUpdates) {
-        throw unsupported("create");
-    }
-
-    /** Snapshotting is intentionally disabled while this backend only validates config flow. */
+    /** Snapshotting remains unsupported until state materialization/restore is implemented. */
     @Nonnull
     @Override
     public RunnableFuture<SnapshotResult<KeyedStateHandle>> snapshot(
@@ -162,25 +203,25 @@ final class CobbleKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
         throw unsupported("snapshot");
     }
 
-    /** The current shell backend cannot safely reuse keyed state across restore paths. */
+    /** The backend does not yet expose a reusable restore/snapshot format. */
     @Override
     public boolean isSafeToReuseKVState() {
         return false;
     }
 
-    /** Legacy synchronous timer snapshots are irrelevant until keyed state is implemented. */
+    /** Legacy synchronous timer snapshots are irrelevant until timer state is implemented. */
     @Override
     public boolean requiresLegacySynchronousTimerSnapshots(SnapshotType checkpointType) {
         return false;
     }
 
-    /** Returns this shell backend because there is no deeper delegated backend anymore. */
+    /** There is no deeper delegation layer anymore, so the backend delegates to itself. */
     @Override
     public KeyedStateBackend<K> getDelegatedKeyedStateBackend(boolean recursive) {
         return this;
     }
 
-    /** Disposes native/local Cobble resources even though keyed-state APIs are unsupported. */
+    /** Disposes the backend and always releases the live Cobble resources. */
     @Override
     public void dispose() {
         try {
@@ -192,7 +233,7 @@ final class CobbleKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
         }
     }
 
-    /** Closes the backend shell and then releases the temporary Cobble resources. */
+    /** Closes the backend and then releases the Cobble DB/resources exactly once. */
     @Override
     public void close() throws IOException {
         IOException error = null;
@@ -237,9 +278,105 @@ final class CobbleKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
         return cobbleConfig;
     }
 
-    /** Exposes the live native DB handle for tests. */
+    /** Exposes the live structured Cobble DB handle for tests and internal helpers. */
     Db getCobbleDb() {
         return cobbleDb;
+    }
+
+    /** Exposes Flink's total key-group count so state wrappers can map to Cobble buckets. */
+    int getTotalNumberOfKeyGroupsForState() {
+        return numberOfKeyGroups;
+    }
+
+    /** Creates the typed Cobble-backed Flink ListState wrapper. */
+    @SuppressWarnings("unchecked")
+    private <N, T, S extends State, IS extends S> IS createListState(
+            TypeSerializer<N> namespaceSerializer, ListStateDescriptor<?> stateDesc) {
+        ListStateDescriptor<T> listStateDescriptor = (ListStateDescriptor<T>) stateDesc;
+        return (IS)
+                new CobbleListState<>(
+                        this,
+                        cobbleDb,
+                        stateDesc.getName(),
+                        keySerializer,
+                        namespaceSerializer,
+                        (ListSerializer<T>) listStateDescriptor.getSerializer(),
+                        listStateDescriptor.getElementSerializer(),
+                        stateDesc.getTtlConfig());
+    }
+
+    /** Creates the typed Cobble-backed Flink MapState wrapper. */
+    @SuppressWarnings("unchecked")
+    private <N, UK, UV, S extends State, IS extends S> IS createMapState(
+            TypeSerializer<N> namespaceSerializer, MapStateDescriptor<?, ?> stateDesc) {
+        MapStateDescriptor<UK, UV> mapStateDescriptor = (MapStateDescriptor<UK, UV>) stateDesc;
+        return (IS)
+                new CobbleMapState<>(
+                        this,
+                        cobbleDb,
+                        stateDesc.getName(),
+                        keySerializer,
+                        namespaceSerializer,
+                        (MapSerializer<UK, UV>) mapStateDescriptor.getSerializer(),
+                        stateDesc.getTtlConfig());
+    }
+
+    /** Creates or validates the one-column-family-per-state schema contract. */
+    private <S extends State, SV> void ensureStateColumnFamily(StateDescriptor<S, SV> stateDesc)
+            throws Exception {
+        StateDescriptor.Type previousType =
+                stateTypes.putIfAbsent(stateDesc.getName(), stateDesc.getType());
+        if (previousType != null && previousType != stateDesc.getType()) {
+            throw new IllegalStateException(
+                    "State '"
+                            + stateDesc.getName()
+                            + "' was already registered as "
+                            + previousType
+                            + " but is now requested as "
+                            + stateDesc.getType()
+                            + '.');
+        }
+
+        Map<Integer, Schema.ColumnType> family =
+                cobbleDb.currentSchema().columnFamilies().get(stateDesc.getName());
+        if (family == null) {
+            try (StructuredSchemaBuilder builder = cobbleDb.updateSchema()) {
+                if (stateDesc.getType() == StateDescriptor.Type.LIST) {
+                    builder.addListColumn(stateDesc.getName(), 0, ListConfig.defaults());
+                } else {
+                    builder.addBytesColumn(stateDesc.getName(), 0);
+                }
+                builder.commit();
+            }
+            return;
+        }
+
+        if (stateDesc.getType() != StateDescriptor.Type.LIST && family.isEmpty()) {
+            return;
+        }
+
+        if (!family.containsKey(0) || family.size() != 1) {
+            throw new IllegalStateException(
+                    "Cobble state column family '"
+                            + stateDesc.getName()
+                            + "' must contain exactly column 0, but found columns "
+                            + family.keySet()
+                            + '.');
+        }
+
+        Schema.ColumnType columnType = family.get(0);
+        boolean valid =
+                stateDesc.getType() == StateDescriptor.Type.LIST
+                        ? columnType instanceof Schema.ColumnType.List
+                        : columnType instanceof Schema.ColumnType.Bytes;
+        if (!valid) {
+            throw new IllegalStateException(
+                    "Cobble state column family '"
+                            + stateDesc.getName()
+                            + "' has incompatible type for "
+                            + stateDesc.getType()
+                            + '.');
+        }
     }
 
     /** Closes the native DB exactly once and removes the temporary local working directory. */
@@ -251,9 +388,20 @@ final class CobbleKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
         IOException error = null;
 
         try {
+            closeStateResources();
+        } catch (IOException e) {
+            error = e;
+        }
+
+        try {
             cobbleDb.close();
         } catch (RuntimeException e) {
-            error = new IOException("Failed to close Cobble DB.", e);
+            IOException dbError = new IOException("Failed to close Cobble DB.", e);
+            if (error == null) {
+                error = dbError;
+            } else {
+                error.addSuppressed(dbError);
+            }
         }
 
         try {
@@ -275,9 +423,57 @@ final class CobbleKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
         }
     }
 
-    /** Creates a consistent error message for not-yet-implemented keyed-state operations. */
+    /** Tracks state-owned native option objects so the backend can close them with the DB. */
+    private void trackStateResource(AbstractCobbleState<?, ?, ?> state) {
+        stateResources.add(state);
+    }
+
+    /** Closes all state-local native resources before the shared Cobble DB goes away. */
+    private void closeStateResources() throws IOException {
+        IOException error = null;
+        for (AbstractCobbleState<?, ?, ?> stateResource : stateResources) {
+            try {
+                stateResource.close();
+            } catch (RuntimeException e) {
+                IOException closeError =
+                        new IOException(
+                                "Failed to close Cobble state resources for '"
+                                        + stateResource.columnFamily
+                                        + "'.",
+                                e);
+                if (error == null) {
+                    error = closeError;
+                } else {
+                    error.addSuppressed(closeError);
+                }
+            }
+        }
+        if (error != null) {
+            throw error;
+        }
+    }
+
+    /** Advances Cobble's manual clock for TTL tests when the backend was opened in manual mode. */
+    void setTimeForTests(long timestampMillis) {
+        if (!manualTtlTimeProviderForTests) {
+            throw new IllegalStateException(
+                    "Cobble backend is not using the manual TTL time provider.");
+        }
+        long ttlSeconds = Math.max(0L, timestampMillis / 1000L);
+        cobbleDb.setTime((int) Math.min(Integer.MAX_VALUE, ttlSeconds));
+    }
+
+    /** Creates a consistent error message for not-yet-implemented backend operations. */
     private static UnsupportedOperationException unsupported(String operation) {
         return new UnsupportedOperationException(
                 "Cobble keyed state backend operation '" + operation + "' is not implemented yet.");
+    }
+
+    /**
+     * Creates a consistent error message for state descriptor types this backend does not support.
+     */
+    private static IllegalArgumentException unsupportedState(StateDescriptor<?, ?> stateDesc) {
+        return new IllegalArgumentException(
+                "State " + stateDesc.getClass().getSimpleName() + " is not supported yet.");
     }
 }
