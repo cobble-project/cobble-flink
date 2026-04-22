@@ -228,6 +228,21 @@ class CobbleStateBackendTest {
     }
 
     @Test
+    void createVolumeDescriptorsKeepsFileCheckpointDirectoryAsFileUrl(@TempDir Path tempDir) {
+        File instanceBasePath = tempDir.resolve("instance").toFile();
+        String checkpointDirectory = tempDir.resolve("checkpoints").toUri().toString();
+
+        List<Config.VolumeDescriptor> volumes =
+                CobbleKeyedStateBackendBuilder.createVolumeDescriptors(
+                        instanceBasePath, checkpointDirectory, false);
+
+        assertEquals(
+                CobbleKeyedStateBackendBuilder.normalizeLocalPath(
+                        tempDir.resolve("checkpoints").resolve("shared").toFile()),
+                volumes.get(0).baseDir);
+    }
+
+    @Test
     void timerStateUsesHeapPriorityQueueImplementation(@TempDir Path tempDir) throws Exception {
         try (TestBackendContext context = createBackendContext(tempDir, false, null)) {
             CobbleKeyedStateBackend<Integer> backend = context.cobbleBackend;
@@ -407,7 +422,7 @@ class CobbleStateBackendTest {
 
     @Test
     void restoreFromShardSnapshotReopensStateAndSchema(@TempDir Path tempDir) throws Exception {
-        String checkpointDirectory = tempDir.resolve("checkpoints").toUri().toString();
+        String checkpointDirectory = tempDir.resolve("checkpoints").toString();
         KeyedStateHandle snapshotHandle;
 
         try (TestBackendContext context =
@@ -496,7 +511,7 @@ class CobbleStateBackendTest {
 
     @Test
     void restoreFromShardSnapshotKeepsTtlWiringActive(@TempDir Path tempDir) throws Exception {
-        String checkpointDirectory = tempDir.resolve("checkpoints").toUri().toString();
+        String checkpointDirectory = tempDir.resolve("checkpoints").toString();
         MockTtlTimeProvider ttlTimeProvider = new MockTtlTimeProvider();
         ttlTimeProvider.setCurrentTimestamp(10_000L);
         KeyedStateHandle snapshotHandle;

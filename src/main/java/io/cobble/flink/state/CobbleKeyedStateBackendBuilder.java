@@ -329,6 +329,12 @@ final class CobbleKeyedStateBackendBuilder<K> {
 
     /** Maps the remote checkpoint location to Flink's shared-state base directory. */
     private static String createCheckpointVolumeBaseDir(String normalizedCheckpointDirectory) {
+        if (normalizedCheckpointDirectory.startsWith("file://")) {
+            return normalizeLocalPath(
+                    new File(
+                            new File(URI.create(normalizedCheckpointDirectory)),
+                            AbstractFsCheckpointStorageAccess.CHECKPOINT_SHARED_STATE_DIR));
+        }
         return new org.apache.flink.core.fs.Path(
                         new org.apache.flink.core.fs.Path(normalizedCheckpointDirectory),
                         AbstractFsCheckpointStorageAccess.CHECKPOINT_SHARED_STATE_DIR)
