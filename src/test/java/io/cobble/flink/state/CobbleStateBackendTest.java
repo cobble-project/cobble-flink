@@ -41,6 +41,7 @@ import org.apache.flink.runtime.query.TaskKvStateRegistry;
 import org.apache.flink.runtime.state.AbstractKeyedStateBackend;
 import org.apache.flink.runtime.state.IncrementalRemoteKeyedStateHandle;
 import org.apache.flink.runtime.state.KeyGroupRange;
+import org.apache.flink.runtime.state.KeyGroupRangeAssignment;
 import org.apache.flink.runtime.state.KeyGroupedInternalPriorityQueue;
 import org.apache.flink.runtime.state.Keyed;
 import org.apache.flink.runtime.state.KeyedStateHandle;
@@ -563,6 +564,133 @@ class CobbleStateBackendTest {
     }
 
     @Test
+    void restoreFromSingleHandleShrinksToTargetKeyGroupRange(@TempDir Path tempDir)
+            throws Exception {
+        String checkpointDirectory = tempDir.resolve("checkpoints").toString();
+        KeyedStateHandle snapshotHandle;
+        int retainedKey = findKeyForGroup(2);
+
+        ValueStateDescriptor<String> descriptor =
+                new ValueStateDescriptor<>("rescale-value-state", StringSerializer.INSTANCE);
+
+        try (TestBackendContext context =
+                createBackendContext(
+                        tempDir.resolve("scale-up-source"),
+                        false,
+                        checkpointDirectory,
+                        null,
+                        TtlTimeProvider.DEFAULT,
+                        false,
+                        Collections.<KeyedStateHandle>emptyList(),
+                        KeyGroupRange.of(0, 15))) {
+            CobbleKeyedStateBackend<Integer> backend = context.cobbleBackend;
+            backend.setCurrentKey(retainedKey);
+            backend.getPartitionedState("rescale-ns", StringSerializer.INSTANCE, descriptor)
+                    .update("retained-value");
+
+            snapshotHandle = runCheckpointSnapshot(backend, 61L);
+        }
+
+        try (TestBackendContext context =
+                createBackendContext(
+                        tempDir.resolve("scale-up-target"),
+                        false,
+                        checkpointDirectory,
+                        null,
+                        TtlTimeProvider.DEFAULT,
+                        false,
+                        Collections.singletonList(snapshotHandle),
+                        KeyGroupRange.of(0, 7))) {
+            CobbleKeyedStateBackend<Integer> backend = context.cobbleBackend;
+            ValueState<String> valueState =
+                    backend.getPartitionedState(
+                            "rescale-ns", StringSerializer.INSTANCE, descriptor);
+
+            backend.setCurrentKey(retainedKey);
+            assertEquals("retained-value", valueState.value());
+
+            ShardSnapshot rescaledSnapshot =
+                    readSnapshotMetadata(runCheckpointSnapshot(backend, 62L)).shardSnapshot();
+            assertEquals(1, rescaledSnapshot.ranges.size());
+            assertEquals(0, rescaledSnapshot.ranges.get(0).start);
+            assertEquals(7, rescaledSnapshot.ranges.get(0).end);
+        }
+    }
+
+    @Test
+    void restoreFromMultipleHandlesExpandsIntoCombinedTargetRange(@TempDir Path tempDir)
+            throws Exception {
+        String checkpointDirectory = tempDir.resolve("checkpoints").toString();
+        ValueStateDescriptor<String> descriptor =
+                new ValueStateDescriptor<>("rescale-merge-state", StringSerializer.INSTANCE);
+        int leftKey = findKeyForGroup(2);
+        int rightKey = findKeyForGroup(10);
+        KeyedStateHandle leftSnapshotHandle;
+        KeyedStateHandle rightSnapshotHandle;
+
+        try (TestBackendContext leftContext =
+                createBackendContext(
+                        tempDir.resolve("scale-down-left"),
+                        false,
+                        checkpointDirectory,
+                        null,
+                        TtlTimeProvider.DEFAULT,
+                        false,
+                        Collections.<KeyedStateHandle>emptyList(),
+                        KeyGroupRange.of(0, 7))) {
+            CobbleKeyedStateBackend<Integer> backend = leftContext.cobbleBackend;
+            backend.setCurrentKey(leftKey);
+            backend.getPartitionedState("rescale-merge-ns", StringSerializer.INSTANCE, descriptor)
+                    .update("left-value");
+            leftSnapshotHandle = runCheckpointSnapshot(backend, 71L);
+        }
+
+        try (TestBackendContext rightContext =
+                createBackendContext(
+                        tempDir.resolve("scale-down-right"),
+                        false,
+                        checkpointDirectory,
+                        null,
+                        TtlTimeProvider.DEFAULT,
+                        false,
+                        Collections.<KeyedStateHandle>emptyList(),
+                        KeyGroupRange.of(8, 15))) {
+            CobbleKeyedStateBackend<Integer> backend = rightContext.cobbleBackend;
+            backend.setCurrentKey(rightKey);
+            backend.getPartitionedState("rescale-merge-ns", StringSerializer.INSTANCE, descriptor)
+                    .update("right-value");
+            rightSnapshotHandle = runCheckpointSnapshot(backend, 72L);
+        }
+
+        try (TestBackendContext mergedContext =
+                createBackendContext(
+                        tempDir.resolve("scale-down-target"),
+                        false,
+                        checkpointDirectory,
+                        null,
+                        TtlTimeProvider.DEFAULT,
+                        false,
+                        Arrays.asList(leftSnapshotHandle, rightSnapshotHandle),
+                        KeyGroupRange.of(0, 15))) {
+            CobbleKeyedStateBackend<Integer> backend = mergedContext.cobbleBackend;
+            ValueState<String> valueState =
+                    backend.getPartitionedState(
+                            "rescale-merge-ns", StringSerializer.INSTANCE, descriptor);
+
+            backend.setCurrentKey(leftKey);
+            assertEquals("left-value", valueState.value());
+            backend.setCurrentKey(rightKey);
+            assertEquals("right-value", valueState.value());
+
+            ShardSnapshot mergedSnapshot =
+                    readSnapshotMetadata(runCheckpointSnapshot(backend, 73L)).shardSnapshot();
+            assertEquals(1, mergedSnapshot.ranges.size());
+            assertEquals(0, mergedSnapshot.ranges.get(0).start);
+            assertEquals(15, mergedSnapshot.ranges.get(0).end);
+        }
+    }
+
+    @Test
     void valueStateReadWriteExceedsFourMemtables(@TempDir Path tempDir) throws Exception {
         try (TestBackendContext context =
                 createBackendContext(tempDir, false, null, MemorySize.ofMebiBytes(1))) {
@@ -871,6 +999,27 @@ class CobbleStateBackendTest {
             boolean manualCobbleTtlTimeProviderForTests,
             Collection<KeyedStateHandle> stateHandles)
             throws Exception {
+        return createBackendContext(
+                tempDir,
+                localDirPrimaryHighPriority,
+                checkpointDirectory,
+                fixedMemoryPerSlot,
+                ttlTimeProvider,
+                manualCobbleTtlTimeProviderForTests,
+                stateHandles,
+                KeyGroupRange.of(0, 15));
+    }
+
+    private TestBackendContext createBackendContext(
+            Path tempDir,
+            boolean localDirPrimaryHighPriority,
+            String checkpointDirectory,
+            MemorySize fixedMemoryPerSlot,
+            TtlTimeProvider ttlTimeProvider,
+            boolean manualCobbleTtlTimeProviderForTests,
+            Collection<KeyedStateHandle> stateHandles,
+            KeyGroupRange keyGroupRange)
+            throws Exception {
         Path configuredLocalDir = tempDir.resolve("configured-local-dir");
         Path taskManagerWorkingDir = tempDir.resolve("tm-working-dir");
 
@@ -911,7 +1060,7 @@ class CobbleStateBackendTest {
                             "test-operator",
                             IntSerializer.INSTANCE,
                             16,
-                            KeyGroupRange.of(0, 15),
+                            keyGroupRange,
                             kvStateRegistry,
                             ttlTimeProvider,
                             environment.getMetricGroup(),
@@ -997,6 +1146,15 @@ class CobbleStateBackendTest {
             assertEquals(entry.getValue(), mapState.get(entry.getKey()));
         }
         return expected;
+    }
+
+    private static int findKeyForGroup(int keyGroup) {
+        for (int candidate = 0; candidate < 100_000; candidate++) {
+            if (KeyGroupRangeAssignment.assignToKeyGroup(candidate, 16) == keyGroup) {
+                return candidate;
+            }
+        }
+        throw new IllegalStateException("Failed to find key for key-group " + keyGroup + '.');
     }
 
     private static void assertVolumeKinds(

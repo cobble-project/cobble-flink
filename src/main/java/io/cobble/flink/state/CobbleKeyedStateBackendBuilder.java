@@ -24,9 +24,11 @@ import java.net.URISyntaxException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collection;
 import java.util.Collections;
+import java.util.Comparator;
 import java.util.List;
 import java.util.Locale;
 import java.util.OptionalLong;
@@ -275,56 +277,170 @@ final class CobbleKeyedStateBackendBuilder<K> {
         return config;
     }
 
-    /**
-     * Phase-2 restore only supports restoring one Cobble checkpoint handle that exactly matches the
-     * current key-group range. Multi-handle rescale restore is implemented separately.
-     */
     private Db openDb(Path configPath) throws IOException {
         if (restoreStateHandles == null || restoreStateHandles.isEmpty()) {
-            return Db.open(configPath.toString());
+            return Db.open(
+                    configPath.toString(),
+                    keyGroupRange.getStartKeyGroup(),
+                    keyGroupRange.getEndKeyGroup());
         }
 
-        if (restoreStateHandles.size() != 1) {
-            throw new UnsupportedOperationException(
-                    "Cobble restore currently supports exactly one keyed state handle. Found "
-                            + restoreStateHandles.size()
-                            + '.');
+        List<RestoreSource> restoreSources = readRestoreSources();
+        if (restoreSources.isEmpty()) {
+            throw new IOException(
+                    "Cobble restore did not receive any readable checkpoint handles.");
         }
+        if (restoreSources.size() == 1
+                && keyGroupRange.equals(restoreSources.get(0).keyGroupRange)) {
+            return Db.resume(
+                    configPath.toString(), restoreSources.get(0).metadata.shardSnapshot().dbId);
+        }
+        return restoreRescaledDb(configPath, restoreSources);
+    }
 
-        KeyedStateHandle restoreHandle =
-                Preconditions.checkNotNull(
-                        restoreStateHandles.iterator().next(),
-                        "Cobble restore received a null keyed state handle.");
-        if (!(restoreHandle instanceof IncrementalRemoteKeyedStateHandle)) {
-            throw new UnsupportedOperationException(
-                    "Cobble restore currently supports only IncrementalRemoteKeyedStateHandle, but found "
-                            + restoreHandle.getClass().getName()
-                            + '.');
+    private List<RestoreSource> readRestoreSources() throws IOException {
+        List<RestoreSource> restoreSources = new ArrayList<>(restoreStateHandles.size());
+        for (KeyedStateHandle restoreHandle : restoreStateHandles) {
+            Preconditions.checkNotNull(
+                    restoreHandle, "Cobble restore received a null keyed state handle.");
+            if (!(restoreHandle instanceof IncrementalRemoteKeyedStateHandle)) {
+                throw new UnsupportedOperationException(
+                        "Cobble restore currently supports only IncrementalRemoteKeyedStateHandle, but found "
+                                + restoreHandle.getClass().getName()
+                                + '.');
+            }
+            IncrementalRemoteKeyedStateHandle incrementalHandle =
+                    (IncrementalRemoteKeyedStateHandle) restoreHandle;
+            if (incrementalHandle.getMetaStateHandle() == null) {
+                throw new IOException("Cobble restore handle did not include checkpoint metadata.");
+            }
+            CobbleSnapshotMetadata metadata;
+            try (org.apache.flink.core.fs.FSDataInputStream inputStream =
+                    incrementalHandle.getMetaStateHandle().openInputStream()) {
+                metadata = CobbleSnapshotMetadata.read(new DataInputViewStreamWrapper(inputStream));
+            }
+            restoreSources.add(new RestoreSource(incrementalHandle.getKeyGroupRange(), metadata));
         }
-        IncrementalRemoteKeyedStateHandle incrementalHandle =
-                (IncrementalRemoteKeyedStateHandle) restoreHandle;
-        if (!keyGroupRange.equals(incrementalHandle.getKeyGroupRange())) {
+        restoreSources.sort(
+                Comparator.comparingInt(source -> source.keyGroupRange.getStartKeyGroup()));
+        return restoreSources;
+    }
+
+    private Db restoreRescaledDb(Path configPath, List<RestoreSource> restoreSources)
+            throws IOException {
+        List<RestoreSource> relevantSources = new ArrayList<>(restoreSources.size());
+        for (RestoreSource source : restoreSources) {
+            if (hasIntersection(source.keyGroupRange, keyGroupRange)) {
+                relevantSources.add(source);
+            }
+        }
+        if (relevantSources.isEmpty()) {
             throw new UnsupportedOperationException(
-                    "Cobble restore currently requires matching key-group ranges. Backend range="
+                    "Cobble restore could not find any checkpoint shard covering backend range "
                             + keyGroupRange
-                            + ", restored range="
-                            + incrementalHandle.getKeyGroupRange()
                             + '.');
         }
-        if (incrementalHandle.getMetaStateHandle() == null) {
-            throw new IOException("Cobble restore handle did not include checkpoint metadata.");
-        }
+        ensureRestoreCoverage(relevantSources);
 
-        CobbleSnapshotMetadata metadata;
-        try (org.apache.flink.core.fs.FSDataInputStream inputStream =
-                incrementalHandle.getMetaStateHandle().openInputStream()) {
-            metadata = CobbleSnapshotMetadata.read(new DataInputViewStreamWrapper(inputStream));
+        RestoreSource baseSource = selectBaseSource(relevantSources);
+        CobbleSnapshotMetadata baseMetadata = baseSource.metadata;
+        Db db =
+                Db.restore(
+                        configPath.toString(),
+                        baseMetadata.shardSnapshot().snapshotId,
+                        baseMetadata.shardSnapshot().dbId);
+        boolean success = false;
+        try {
+            shrinkBaseSourceToTargetRange(db, baseSource.keyGroupRange);
+            for (RestoreSource source : relevantSources) {
+                if (source == baseSource) {
+                    continue;
+                }
+                int[] intersectionStarts = new int[] {intersectionStart(source.keyGroupRange)};
+                int[] intersectionEnds = new int[] {intersectionEnd(source.keyGroupRange)};
+                db.expandBucket(
+                        source.metadata.shardSnapshot().dbId,
+                        source.metadata.shardSnapshot().snapshotId,
+                        intersectionStarts,
+                        intersectionEnds);
+            }
+            success = true;
+            return db;
+        } finally {
+            if (!success) {
+                db.close();
+            }
         }
+    }
 
-        return Db.restore(
-                configPath.toString(),
-                metadata.shardSnapshot().snapshotId,
-                metadata.shardSnapshot().dbId);
+    private RestoreSource selectBaseSource(List<RestoreSource> restoreSources) {
+        RestoreSource baseSource = null;
+        int bestOverlap = -1;
+        for (RestoreSource source : restoreSources) {
+            int overlapSize = overlapSize(source.keyGroupRange);
+            if (overlapSize > bestOverlap) {
+                bestOverlap = overlapSize;
+                baseSource = source;
+            }
+        }
+        return Preconditions.checkNotNull(baseSource);
+    }
+
+    private void shrinkBaseSourceToTargetRange(Db db, KeyGroupRange sourceRange) {
+        List<Integer> rangeStarts = new ArrayList<>(2);
+        List<Integer> rangeEnds = new ArrayList<>(2);
+        if (sourceRange.getStartKeyGroup() < keyGroupRange.getStartKeyGroup()) {
+            rangeStarts.add(sourceRange.getStartKeyGroup());
+            rangeEnds.add(keyGroupRange.getStartKeyGroup() - 1);
+        }
+        if (sourceRange.getEndKeyGroup() > keyGroupRange.getEndKeyGroup()) {
+            rangeStarts.add(keyGroupRange.getEndKeyGroup() + 1);
+            rangeEnds.add(sourceRange.getEndKeyGroup());
+        }
+        if (!rangeStarts.isEmpty()) {
+            db.shrinkBucket(
+                    rangeStarts.stream().mapToInt(Integer::intValue).toArray(),
+                    rangeEnds.stream().mapToInt(Integer::intValue).toArray());
+        }
+    }
+
+    private void ensureRestoreCoverage(List<RestoreSource> restoreSources) {
+        int nextExpected = keyGroupRange.getStartKeyGroup();
+        for (RestoreSource source : restoreSources) {
+            int intersectionStart = intersectionStart(source.keyGroupRange);
+            int intersectionEnd = intersectionEnd(source.keyGroupRange);
+            if (intersectionStart > nextExpected) {
+                throw new UnsupportedOperationException(
+                        "Cobble restore is missing checkpoint shards for key-group range "
+                                + KeyGroupRange.of(nextExpected, intersectionStart - 1)
+                                + '.');
+            }
+            nextExpected = Math.max(nextExpected, intersectionEnd + 1);
+            if (nextExpected > keyGroupRange.getEndKeyGroup()) {
+                return;
+            }
+        }
+        throw new UnsupportedOperationException(
+                "Cobble restore is missing checkpoint shards for key-group range "
+                        + KeyGroupRange.of(nextExpected, keyGroupRange.getEndKeyGroup())
+                        + '.');
+    }
+
+    private boolean hasIntersection(KeyGroupRange sourceRange, KeyGroupRange targetRange) {
+        return sourceRange.getStartKeyGroup() <= targetRange.getEndKeyGroup()
+                && targetRange.getStartKeyGroup() <= sourceRange.getEndKeyGroup();
+    }
+
+    private int intersectionStart(KeyGroupRange sourceRange) {
+        return Math.max(sourceRange.getStartKeyGroup(), keyGroupRange.getStartKeyGroup());
+    }
+
+    private int intersectionEnd(KeyGroupRange sourceRange) {
+        return Math.min(sourceRange.getEndKeyGroup(), keyGroupRange.getEndKeyGroup());
+    }
+
+    private int overlapSize(KeyGroupRange sourceRange) {
+        return intersectionEnd(sourceRange) - intersectionStart(sourceRange) + 1;
     }
 
     /** Maps the remote checkpoint location to Flink's shared-state base directory. */
@@ -421,6 +537,16 @@ final class CobbleKeyedStateBackendBuilder<K> {
         private VolumeLayout(File localVolumePath, List<Config.VolumeDescriptor> volumes) {
             this.localVolumePath = localVolumePath;
             this.volumes = volumes;
+        }
+    }
+
+    private static final class RestoreSource {
+        private final KeyGroupRange keyGroupRange;
+        private final CobbleSnapshotMetadata metadata;
+
+        private RestoreSource(KeyGroupRange keyGroupRange, CobbleSnapshotMetadata metadata) {
+            this.keyGroupRange = keyGroupRange;
+            this.metadata = metadata;
         }
     }
 }
