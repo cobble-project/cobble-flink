@@ -5,6 +5,7 @@ import io.cobble.ShardSnapshot;
 import org.apache.flink.core.memory.DataInputView;
 import org.apache.flink.core.memory.DataOutputView;
 
+import java.io.EOFException;
 import java.io.IOException;
 import java.util.LinkedHashMap;
 import java.util.Map;
@@ -32,7 +33,23 @@ final class CobbleSnapshotMetadata {
         if (magic != MAGIC) {
             throw new IOException("Unsupported Cobble snapshot metadata magic: " + magic);
         }
+        return readPayload(input);
+    }
 
+    static CobbleSnapshotMetadata readIfPresent(DataInputView input) throws IOException {
+        final int magic;
+        try {
+            magic = input.readInt();
+        } catch (EOFException ignored) {
+            return null;
+        }
+        if (magic != MAGIC) {
+            return null;
+        }
+        return readPayload(input);
+    }
+
+    private static CobbleSnapshotMetadata readPayload(DataInputView input) throws IOException {
         int version = input.readInt();
         if (version != VERSION) {
             throw new IOException("Unsupported Cobble snapshot metadata version: " + version);

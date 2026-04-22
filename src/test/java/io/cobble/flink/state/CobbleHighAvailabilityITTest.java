@@ -12,8 +12,8 @@ import org.apache.flink.api.common.state.ValueStateDescriptor;
 import org.apache.flink.configuration.CheckpointingOptions;
 import org.apache.flink.configuration.Configuration;
 import org.apache.flink.configuration.HighAvailabilityOptions;
-import org.apache.flink.runtime.jobgraph.SavepointRestoreSettings;
 import org.apache.flink.runtime.jobgraph.JobGraph;
+import org.apache.flink.runtime.jobgraph.SavepointRestoreSettings;
 import org.apache.flink.runtime.testutils.MiniClusterResourceConfiguration;
 import org.apache.flink.streaming.api.CheckpointingMode;
 import org.apache.flink.streaming.api.environment.CheckpointConfig;
@@ -170,8 +170,7 @@ class CobbleHighAvailabilityITTest {
         while (System.nanoTime() < deadline) {
             lastObservation = observeSnapshotArtifacts(checkpointRoot);
             if (lastObservation.completedCheckpointPaths.size() >= minimumCompletedCheckpoints
-                    && lastObservation.maxManifestCopiesPerCheckpoint
-                            >= minimumOperatorDirectories
+                    && lastObservation.maxManifestCopiesPerCheckpoint >= minimumOperatorDirectories
                     && lastObservation.maxOperatorDirectories >= minimumOperatorDirectories) {
                 return lastObservation;
             }
