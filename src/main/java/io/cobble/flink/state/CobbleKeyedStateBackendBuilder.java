@@ -5,9 +5,12 @@ import io.cobble.structured.Db;
 
 import org.apache.flink.api.common.typeutils.TypeSerializer;
 import org.apache.flink.core.fs.CloseableRegistry;
+import org.apache.flink.core.memory.DataInputViewStreamWrapper;
 import org.apache.flink.runtime.execution.Environment;
 import org.apache.flink.runtime.query.TaskKvStateRegistry;
+import org.apache.flink.runtime.state.IncrementalRemoteKeyedStateHandle;
 import org.apache.flink.runtime.state.KeyGroupRange;
+import org.apache.flink.runtime.state.KeyedStateHandle;
 import org.apache.flink.runtime.state.filesystem.AbstractFsCheckpointStorageAccess;
 import org.apache.flink.runtime.state.heap.InternalKeyContextImpl;
 import org.apache.flink.runtime.state.metrics.LatencyTrackingStateConfig;
@@ -22,6 +25,7 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.Arrays;
+import java.util.Collection;
 import java.util.Collections;
 import java.util.List;
 import java.util.Locale;
@@ -45,6 +49,7 @@ final class CobbleKeyedStateBackendBuilder<K> {
     private final TtlTimeProvider ttlTimeProvider;
     private final LatencyTrackingStateConfig latencyTrackingStateConfig;
     private final CloseableRegistry cancelStreamRegistry;
+    private final Collection<KeyedStateHandle> restoreStateHandles;
     private final File instanceBasePath;
     private final CobbleMemoryConfiguration memoryConfiguration;
     private final String checkpointDirectory;
@@ -61,6 +66,7 @@ final class CobbleKeyedStateBackendBuilder<K> {
             TtlTimeProvider ttlTimeProvider,
             LatencyTrackingStateConfig latencyTrackingStateConfig,
             CloseableRegistry cancelStreamRegistry,
+            Collection<KeyedStateHandle> restoreStateHandles,
             File instanceBasePath,
             CobbleMemoryConfiguration memoryConfiguration,
             String checkpointDirectory,
@@ -75,6 +81,7 @@ final class CobbleKeyedStateBackendBuilder<K> {
         this.ttlTimeProvider = ttlTimeProvider;
         this.latencyTrackingStateConfig = latencyTrackingStateConfig;
         this.cancelStreamRegistry = cancelStreamRegistry;
+        this.restoreStateHandles = restoreStateHandles;
         this.instanceBasePath = instanceBasePath;
         this.memoryConfiguration = memoryConfiguration;
         this.checkpointDirectory = checkpointDirectory;
@@ -205,7 +212,7 @@ final class CobbleKeyedStateBackendBuilder<K> {
         Db db = null;
         boolean success = false;
         try {
-            db = Db.open(configPath.toString());
+            db = openDb(configPath);
             success = true;
             return new CobbleBackendResources(
                     instanceBasePath, volumeLayout.localVolumePath, configPath, config, db);
@@ -266,6 +273,58 @@ final class CobbleKeyedStateBackendBuilder<K> {
         }
 
         return config;
+    }
+
+    /**
+     * Phase-2 restore only supports restoring one Cobble checkpoint handle that exactly matches the
+     * current key-group range. Multi-handle rescale restore is implemented separately.
+     */
+    private Db openDb(Path configPath) throws IOException {
+        if (restoreStateHandles == null || restoreStateHandles.isEmpty()) {
+            return Db.open(configPath.toString());
+        }
+
+        if (restoreStateHandles.size() != 1) {
+            throw new UnsupportedOperationException(
+                    "Cobble restore currently supports exactly one keyed state handle. Found "
+                            + restoreStateHandles.size()
+                            + '.');
+        }
+
+        KeyedStateHandle restoreHandle =
+                Preconditions.checkNotNull(
+                        restoreStateHandles.iterator().next(),
+                        "Cobble restore received a null keyed state handle.");
+        if (!(restoreHandle instanceof IncrementalRemoteKeyedStateHandle)) {
+            throw new UnsupportedOperationException(
+                    "Cobble restore currently supports only IncrementalRemoteKeyedStateHandle, but found "
+                            + restoreHandle.getClass().getName()
+                            + '.');
+        }
+        IncrementalRemoteKeyedStateHandle incrementalHandle =
+                (IncrementalRemoteKeyedStateHandle) restoreHandle;
+        if (!keyGroupRange.equals(incrementalHandle.getKeyGroupRange())) {
+            throw new UnsupportedOperationException(
+                    "Cobble restore currently requires matching key-group ranges. Backend range="
+                            + keyGroupRange
+                            + ", restored range="
+                            + incrementalHandle.getKeyGroupRange()
+                            + '.');
+        }
+        if (incrementalHandle.getMetaStateHandle() == null) {
+            throw new IOException("Cobble restore handle did not include checkpoint metadata.");
+        }
+
+        CobbleSnapshotMetadata metadata;
+        try (org.apache.flink.core.fs.FSDataInputStream inputStream =
+                incrementalHandle.getMetaStateHandle().openInputStream()) {
+            metadata = CobbleSnapshotMetadata.read(new DataInputViewStreamWrapper(inputStream));
+        }
+
+        return Db.restore(
+                configPath.toString(),
+                metadata.shardSnapshot().snapshotId,
+                metadata.shardSnapshot().dbId);
     }
 
     /** Maps the remote checkpoint location to Flink's shared-state base directory. */

@@ -58,6 +58,8 @@ import org.junit.jupiter.api.io.TempDir;
 import java.io.File;
 import java.io.IOException;
 import java.nio.file.Path;
+import java.util.Arrays;
+import java.util.Collection;
 import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -404,6 +406,148 @@ class CobbleStateBackendTest {
     }
 
     @Test
+    void restoreFromShardSnapshotReopensStateAndSchema(@TempDir Path tempDir) throws Exception {
+        String checkpointDirectory = tempDir.resolve("checkpoints").toUri().toString();
+        KeyedStateHandle snapshotHandle;
+
+        try (TestBackendContext context =
+                createBackendContext(tempDir.resolve("source"), false, checkpointDirectory)) {
+            CobbleKeyedStateBackend<Integer> backend = context.cobbleBackend;
+
+            ValueStateDescriptor<String> valueStateDescriptor =
+                    new ValueStateDescriptor<>("restore-value-state", StringSerializer.INSTANCE);
+            ListStateDescriptor<String> listStateDescriptor =
+                    new ListStateDescriptor<>("restore-list-state", StringSerializer.INSTANCE);
+            MapStateDescriptor<String, String> mapStateDescriptor =
+                    new MapStateDescriptor<>(
+                            "restore-map-state",
+                            StringSerializer.INSTANCE,
+                            StringSerializer.INSTANCE);
+
+            backend.setCurrentKey(1);
+            backend.getPartitionedState(
+                            "restore-ns", StringSerializer.INSTANCE, valueStateDescriptor)
+                    .update("value-1");
+
+            backend.setCurrentKey(2);
+            ListState<String> listState =
+                    backend.getPartitionedState(
+                            "restore-ns", StringSerializer.INSTANCE, listStateDescriptor);
+            listState.add("left");
+            listState.add("right");
+
+            backend.setCurrentKey(3);
+            MapState<String, String> mapState =
+                    backend.getPartitionedState(
+                            "restore-ns", StringSerializer.INSTANCE, mapStateDescriptor);
+            mapState.put("left", "L");
+            mapState.put("right", "R");
+
+            snapshotHandle = runCheckpointSnapshot(backend, 51L);
+        }
+
+        try (TestBackendContext context =
+                createBackendContext(
+                        tempDir.resolve("restored"),
+                        false,
+                        checkpointDirectory,
+                        null,
+                        TtlTimeProvider.DEFAULT,
+                        false,
+                        Collections.singletonList(snapshotHandle))) {
+            CobbleKeyedStateBackend<Integer> backend = context.cobbleBackend;
+
+            Schema schema = backend.getCobbleDb().currentSchema();
+            assertTrue(schema.columnFamilies().containsKey("restore-value-state"));
+            assertTrue(schema.columnFamilies().containsKey("restore-list-state"));
+            assertTrue(schema.columnFamilies().containsKey("restore-map-state"));
+
+            ValueStateDescriptor<String> valueStateDescriptor =
+                    new ValueStateDescriptor<>("restore-value-state", StringSerializer.INSTANCE);
+            ListStateDescriptor<String> listStateDescriptor =
+                    new ListStateDescriptor<>("restore-list-state", StringSerializer.INSTANCE);
+            MapStateDescriptor<String, String> mapStateDescriptor =
+                    new MapStateDescriptor<>(
+                            "restore-map-state",
+                            StringSerializer.INSTANCE,
+                            StringSerializer.INSTANCE);
+
+            ValueState<String> valueState =
+                    backend.getPartitionedState(
+                            "restore-ns", StringSerializer.INSTANCE, valueStateDescriptor);
+            ListState<String> listState =
+                    backend.getPartitionedState(
+                            "restore-ns", StringSerializer.INSTANCE, listStateDescriptor);
+            MapState<String, String> mapState =
+                    backend.getPartitionedState(
+                            "restore-ns", StringSerializer.INSTANCE, mapStateDescriptor);
+
+            backend.setCurrentKey(1);
+            assertEquals("value-1", valueState.value());
+            assertEquals(
+                    Arrays.asList("left", "right"),
+                    toList(assertListStateValues(backend, listState, 2)));
+
+            backend.setCurrentKey(3);
+            assertEquals("L", mapState.get("left"));
+            assertEquals("R", mapState.get("right"));
+        }
+    }
+
+    @Test
+    void restoreFromShardSnapshotKeepsTtlWiringActive(@TempDir Path tempDir) throws Exception {
+        String checkpointDirectory = tempDir.resolve("checkpoints").toUri().toString();
+        MockTtlTimeProvider ttlTimeProvider = new MockTtlTimeProvider();
+        ttlTimeProvider.setCurrentTimestamp(10_000L);
+        KeyedStateHandle snapshotHandle;
+
+        ValueStateDescriptor<String> descriptor =
+                new ValueStateDescriptor<>("restore-ttl-state", StringSerializer.INSTANCE);
+        descriptor.enableTimeToLive(StateTtlConfig.newBuilder(Time.seconds(5)).build());
+
+        try (TestBackendContext context =
+                createBackendContext(
+                        tempDir.resolve("ttl-source"),
+                        false,
+                        checkpointDirectory,
+                        null,
+                        ttlTimeProvider,
+                        true,
+                        Collections.<KeyedStateHandle>emptyList())) {
+            CobbleKeyedStateBackend<Integer> backend = context.cobbleBackend;
+            backend.setTimeForTests(ttlTimeProvider.currentTimestamp());
+            backend.setCurrentKey(4);
+            backend.getPartitionedState("restore-ttl-ns", StringSerializer.INSTANCE, descriptor)
+                    .update("ttl-value");
+
+            snapshotHandle = runCheckpointSnapshot(backend, 52L);
+        }
+
+        try (TestBackendContext context =
+                createBackendContext(
+                        tempDir.resolve("ttl-restored"),
+                        false,
+                        checkpointDirectory,
+                        null,
+                        ttlTimeProvider,
+                        true,
+                        Collections.singletonList(snapshotHandle))) {
+            CobbleKeyedStateBackend<Integer> backend = context.cobbleBackend;
+            backend.setTimeForTests(ttlTimeProvider.currentTimestamp());
+            ValueState<String> restoredState =
+                    backend.getPartitionedState(
+                            "restore-ttl-ns", StringSerializer.INSTANCE, descriptor);
+
+            backend.setCurrentKey(4);
+            assertEquals("ttl-value", restoredState.value());
+
+            ttlTimeProvider.setCurrentTimestamp(16_000L);
+            backend.setTimeForTests(ttlTimeProvider.currentTimestamp());
+            assertNull(restoredState.value());
+        }
+    }
+
+    @Test
     void valueStateReadWriteExceedsFourMemtables(@TempDir Path tempDir) throws Exception {
         try (TestBackendContext context =
                 createBackendContext(tempDir, false, null, MemorySize.ofMebiBytes(1))) {
@@ -693,6 +837,25 @@ class CobbleStateBackendTest {
             TtlTimeProvider ttlTimeProvider,
             boolean manualCobbleTtlTimeProviderForTests)
             throws Exception {
+        return createBackendContext(
+                tempDir,
+                localDirPrimaryHighPriority,
+                checkpointDirectory,
+                fixedMemoryPerSlot,
+                ttlTimeProvider,
+                manualCobbleTtlTimeProviderForTests,
+                Collections.<KeyedStateHandle>emptyList());
+    }
+
+    private TestBackendContext createBackendContext(
+            Path tempDir,
+            boolean localDirPrimaryHighPriority,
+            String checkpointDirectory,
+            MemorySize fixedMemoryPerSlot,
+            TtlTimeProvider ttlTimeProvider,
+            boolean manualCobbleTtlTimeProviderForTests,
+            Collection<KeyedStateHandle> stateHandles)
+            throws Exception {
         Path configuredLocalDir = tempDir.resolve("configured-local-dir");
         Path taskManagerWorkingDir = tempDir.resolve("tm-working-dir");
 
@@ -737,7 +900,7 @@ class CobbleStateBackendTest {
                             kvStateRegistry,
                             ttlTimeProvider,
                             environment.getMetricGroup(),
-                            Collections.<KeyedStateHandle>emptyList(),
+                            stateHandles,
                             new CloseableRegistry(),
                             0.5d);
 

@@ -195,6 +195,7 @@ public class CobbleStateBackend extends AbstractManagedMemoryStateBackend
                         ttlTimeProvider,
                         latencyTrackingStateConfig,
                         cancelStreamRegistry,
+                        stateHandles,
                         instanceBasePath,
                         memoryConfiguration,
                         checkpointDirectory,
