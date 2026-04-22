@@ -11,6 +11,7 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import io.cobble.Config;
+import io.cobble.ShardSnapshot;
 import io.cobble.structured.Schema;
 
 import org.apache.flink.api.common.state.ListState;
@@ -31,18 +32,23 @@ import org.apache.flink.configuration.Configuration;
 import org.apache.flink.configuration.MemorySize;
 import org.apache.flink.core.fs.CloseableRegistry;
 import org.apache.flink.core.memory.DataInputView;
+import org.apache.flink.core.memory.DataInputViewStreamWrapper;
 import org.apache.flink.core.memory.DataOutputView;
+import org.apache.flink.runtime.checkpoint.CheckpointOptions;
 import org.apache.flink.runtime.operators.testutils.MockEnvironment;
 import org.apache.flink.runtime.operators.testutils.MockEnvironmentBuilder;
 import org.apache.flink.runtime.query.TaskKvStateRegistry;
 import org.apache.flink.runtime.state.AbstractKeyedStateBackend;
+import org.apache.flink.runtime.state.IncrementalRemoteKeyedStateHandle;
 import org.apache.flink.runtime.state.KeyGroupRange;
 import org.apache.flink.runtime.state.KeyGroupedInternalPriorityQueue;
 import org.apache.flink.runtime.state.Keyed;
 import org.apache.flink.runtime.state.KeyedStateHandle;
 import org.apache.flink.runtime.state.PriorityComparable;
+import org.apache.flink.runtime.state.SnapshotResult;
 import org.apache.flink.runtime.state.TestTaskStateManagerBuilder;
 import org.apache.flink.runtime.state.heap.HeapPriorityQueueElement;
+import org.apache.flink.runtime.state.memory.MemCheckpointStreamFactory;
 import org.apache.flink.runtime.state.ttl.MockTtlTimeProvider;
 import org.apache.flink.runtime.state.ttl.TtlTimeProvider;
 import org.apache.flink.runtime.util.TestingTaskManagerRuntimeInfo;
@@ -56,6 +62,7 @@ import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.RunnableFuture;
 
 /** Tests for {@link CobbleStateBackend}. */
 class CobbleStateBackendTest {
@@ -241,6 +248,158 @@ class CobbleStateBackendTest {
             backend.setCurrentKey(1);
             assertEquals(later, queue.poll());
             assertTrue(queue.isEmpty());
+        }
+    }
+
+    @Test
+    void shardSnapshotCheckpointUploadsMetadataIntoKeyedStateHandle(@TempDir Path tempDir)
+            throws Exception {
+        try (TestBackendContext context = createBackendContext(tempDir, false, null)) {
+            CobbleKeyedStateBackend<Integer> backend = context.cobbleBackend;
+            ValueStateDescriptor<String> descriptor =
+                    new ValueStateDescriptor<>("snapshot-state", StringSerializer.INSTANCE);
+
+            backend.setCurrentKey(7);
+            ValueState<String> state =
+                    backend.getPartitionedState(
+                            "snapshot-ns", StringSerializer.INSTANCE, descriptor);
+            state.update("snapshot-value");
+
+            KeyedStateHandle keyedStateHandle = runCheckpointSnapshot(backend, 41L);
+            IncrementalRemoteKeyedStateHandle incrementalHandle =
+                    assertInstanceOf(IncrementalRemoteKeyedStateHandle.class, keyedStateHandle);
+            assertNotNull(incrementalHandle.getMetaStateHandle());
+
+            CobbleSnapshotMetadata metadata = readSnapshotMetadata(keyedStateHandle);
+            ShardSnapshot shardSnapshot = metadata.shardSnapshot();
+
+            assertTrue(shardSnapshot.snapshotId >= 0L);
+            assertEquals(backend.getCobbleDb().id(), shardSnapshot.dbId);
+            assertFalse(shardSnapshot.manifestPath.isEmpty());
+            assertFalse(shardSnapshot.ranges.isEmpty());
+            assertTrue(shardSnapshot.columnFamilyIds.containsKey("snapshot-state"));
+            assertTrue(backend.hasTrackedSnapshot(41L));
+        }
+    }
+
+    @Test
+    void completedCheckpointLeavesPublishedShardSnapshotRetainedUntilSubsumed(@TempDir Path tempDir)
+            throws Exception {
+        try (TestBackendContext context = createBackendContext(tempDir, false, null)) {
+            CobbleKeyedStateBackend<Integer> backend = context.cobbleBackend;
+            ValueStateDescriptor<String> descriptor =
+                    new ValueStateDescriptor<>(
+                            "retained-snapshot-state", StringSerializer.INSTANCE);
+
+            backend.setCurrentKey(8);
+            backend.getPartitionedState(
+                            "retained-snapshot-ns", StringSerializer.INSTANCE, descriptor)
+                    .update("retained");
+
+            KeyedStateHandle keyedStateHandle = runCheckpointSnapshot(backend, 42L);
+            long snapshotId = readSnapshotMetadata(keyedStateHandle).shardSnapshot().snapshotId;
+
+            assertTrue(backend.hasTrackedSnapshot(42L));
+
+            backend.notifyCheckpointComplete(42L);
+            assertTrue(backend.hasTrackedSnapshot(42L));
+
+            backend.notifyCheckpointSubsumed(42L);
+            assertFalse(backend.hasTrackedSnapshot(42L));
+            assertFalse(backend.getCobbleDb().expireSnapshot(snapshotId));
+        }
+    }
+
+    @Test
+    void abortedCheckpointExpiresPublishedShardSnapshot(@TempDir Path tempDir) throws Exception {
+        try (TestBackendContext context = createBackendContext(tempDir, false, null)) {
+            CobbleKeyedStateBackend<Integer> backend = context.cobbleBackend;
+            ValueStateDescriptor<String> descriptor =
+                    new ValueStateDescriptor<>("aborted-snapshot-state", StringSerializer.INSTANCE);
+
+            backend.setCurrentKey(9);
+            backend.getPartitionedState(
+                            "aborted-snapshot-ns", StringSerializer.INSTANCE, descriptor)
+                    .update("aborted");
+
+            KeyedStateHandle keyedStateHandle = runCheckpointSnapshot(backend, 43L);
+            long snapshotId = readSnapshotMetadata(keyedStateHandle).shardSnapshot().snapshotId;
+
+            backend.notifyCheckpointAborted(43L);
+            assertFalse(backend.hasTrackedSnapshot(43L));
+            assertFalse(backend.getCobbleDb().expireSnapshot(snapshotId));
+        }
+    }
+
+    @Test
+    void subsumedCheckpointClearsAllOlderTrackedSnapshots(@TempDir Path tempDir) throws Exception {
+        try (TestBackendContext context = createBackendContext(tempDir, false, null)) {
+            CobbleKeyedStateBackend<Integer> backend = context.cobbleBackend;
+            ValueStateDescriptor<String> descriptor =
+                    new ValueStateDescriptor<>(
+                            "subsumed-watermark-state", StringSerializer.INSTANCE);
+
+            backend.setCurrentKey(11);
+            backend.getPartitionedState(
+                            "subsumed-watermark-ns", StringSerializer.INSTANCE, descriptor)
+                    .update("first");
+            long firstSnapshotId =
+                    readSnapshotMetadata(runCheckpointSnapshot(backend, 45L))
+                            .shardSnapshot()
+                            .snapshotId;
+
+            backend.setCurrentKey(12);
+            backend.getPartitionedState(
+                            "subsumed-watermark-ns", StringSerializer.INSTANCE, descriptor)
+                    .update("second");
+            long secondSnapshotId =
+                    readSnapshotMetadata(runCheckpointSnapshot(backend, 46L))
+                            .shardSnapshot()
+                            .snapshotId;
+
+            backend.setCurrentKey(13);
+            backend.getPartitionedState(
+                            "subsumed-watermark-ns", StringSerializer.INSTANCE, descriptor)
+                    .update("third");
+            long thirdSnapshotId =
+                    readSnapshotMetadata(runCheckpointSnapshot(backend, 47L))
+                            .shardSnapshot()
+                            .snapshotId;
+
+            backend.notifyCheckpointSubsumed(46L);
+
+            assertFalse(backend.hasTrackedSnapshot(45L));
+            assertFalse(backend.hasTrackedSnapshot(46L));
+            assertTrue(backend.hasTrackedSnapshot(47L));
+            assertFalse(backend.getCobbleDb().expireSnapshot(firstSnapshotId));
+            assertFalse(backend.getCobbleDb().expireSnapshot(secondSnapshotId));
+            assertTrue(backend.getCobbleDb().expireSnapshot(thirdSnapshotId));
+        }
+    }
+
+    @Test
+    void failedSnapshotMaterializationDoesNotPublishTrackedSnapshot(@TempDir Path tempDir)
+            throws Exception {
+        try (TestBackendContext context = createBackendContext(tempDir, false, null)) {
+            CobbleKeyedStateBackend<Integer> backend = context.cobbleBackend;
+            ValueStateDescriptor<String> descriptor =
+                    new ValueStateDescriptor<>("failing-snapshot-state", StringSerializer.INSTANCE);
+
+            backend.setCurrentKey(10);
+            backend.getPartitionedState(
+                            "failing-snapshot-ns", StringSerializer.INSTANCE, descriptor)
+                    .update("value");
+
+            RunnableFuture<SnapshotResult<KeyedStateHandle>> snapshotFuture =
+                    backend.snapshot(
+                            44L,
+                            System.currentTimeMillis(),
+                            new FailingCheckpointStreamFactory(),
+                            CheckpointOptions.forCheckpointWithDefaultLocation());
+
+            snapshotFuture.run();
+            assertThrows(Exception.class, snapshotFuture::get);
+            assertFalse(backend.hasTrackedSnapshot(44L));
         }
     }
 
@@ -607,6 +766,39 @@ class CobbleStateBackendTest {
         assertEquals(expected, valueState.value());
     }
 
+    private static KeyedStateHandle runCheckpointSnapshot(
+            CobbleKeyedStateBackend<Integer> backend, long checkpointId) throws Exception {
+        return runCheckpointSnapshot(
+                backend, checkpointId, new MemCheckpointStreamFactory(1024 * 1024));
+    }
+
+    private static KeyedStateHandle runCheckpointSnapshot(
+            CobbleKeyedStateBackend<Integer> backend,
+            long checkpointId,
+            org.apache.flink.runtime.state.CheckpointStreamFactory streamFactory)
+            throws Exception {
+        RunnableFuture<SnapshotResult<KeyedStateHandle>> snapshotFuture =
+                backend.snapshot(
+                        checkpointId,
+                        System.currentTimeMillis(),
+                        streamFactory,
+                        CheckpointOptions.forCheckpointWithDefaultLocation());
+        snapshotFuture.run();
+        SnapshotResult<KeyedStateHandle> snapshotResult = snapshotFuture.get();
+        assertNotNull(snapshotResult.getJobManagerOwnedSnapshot());
+        return snapshotResult.getJobManagerOwnedSnapshot();
+    }
+
+    private static CobbleSnapshotMetadata readSnapshotMetadata(KeyedStateHandle keyedStateHandle)
+            throws Exception {
+        IncrementalRemoteKeyedStateHandle incrementalHandle =
+                assertInstanceOf(IncrementalRemoteKeyedStateHandle.class, keyedStateHandle);
+        try (org.apache.flink.core.fs.FSDataInputStream inputStream =
+                incrementalHandle.getMetaStateHandle().openInputStream()) {
+            return CobbleSnapshotMetadata.read(new DataInputViewStreamWrapper(inputStream));
+        }
+    }
+
     private static Iterable<String> assertListStateValues(
             CobbleKeyedStateBackend<Integer> backend, ListState<String> listState, int key)
             throws Exception {
@@ -814,6 +1006,20 @@ class CobbleStateBackendTest {
         public TypeSerializerSnapshot<TestTimerElement> snapshotConfiguration() {
             return new SimpleTypeSerializerSnapshot<TestTimerElement>(
                     TestTimerElementSerializer::new) {};
+        }
+    }
+
+    private static final class FailingCheckpointStreamFactory extends MemCheckpointStreamFactory {
+        private FailingCheckpointStreamFactory() {
+            super(1024);
+        }
+
+        @Override
+        public org.apache.flink.runtime.state.CheckpointStateOutputStream
+                createCheckpointStateOutputStream(
+                        org.apache.flink.runtime.state.CheckpointedStateScope scope)
+                        throws IOException {
+            throw new IOException("expected failing checkpoint stream");
         }
     }
 

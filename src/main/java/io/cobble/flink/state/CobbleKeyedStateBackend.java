@@ -6,6 +6,7 @@ import io.cobble.structured.ListConfig;
 import io.cobble.structured.Schema;
 import io.cobble.structured.StructuredSchemaBuilder;
 
+import org.apache.flink.annotation.VisibleForTesting;
 import org.apache.flink.api.common.ExecutionConfig;
 import org.apache.flink.api.common.state.ListStateDescriptor;
 import org.apache.flink.api.common.state.MapStateDescriptor;
@@ -28,7 +29,9 @@ import org.apache.flink.runtime.state.Keyed;
 import org.apache.flink.runtime.state.KeyedStateHandle;
 import org.apache.flink.runtime.state.PriorityComparable;
 import org.apache.flink.runtime.state.SavepointResources;
+import org.apache.flink.runtime.state.SnapshotExecutionType;
 import org.apache.flink.runtime.state.SnapshotResult;
+import org.apache.flink.runtime.state.SnapshotStrategyRunner;
 import org.apache.flink.runtime.state.StateSnapshotTransformer;
 import org.apache.flink.runtime.state.heap.HeapPriorityQueueElement;
 import org.apache.flink.runtime.state.heap.HeapPriorityQueueSetFactory;
@@ -66,6 +69,7 @@ final class CobbleKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
     private final Map<String, StateDescriptor.Type> stateTypes;
     private final List<AbstractCobbleState<?, ?, ?>> stateResources;
     private final HeapPriorityQueuesManager heapPriorityQueuesManager;
+    private final CobbleSnapshotStrategy snapshotStrategy;
     private final AtomicBoolean resourcesClosed;
     private final boolean manualTtlTimeProviderForTests;
 
@@ -109,21 +113,26 @@ final class CobbleKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
                                 128),
                         keyContext.getKeyGroupRange(),
                         keyContext.getNumberOfKeyGroups());
+        this.snapshotStrategy =
+                new CobbleSnapshotStrategy(cobbleDb, keyGroupRange, () -> !stateTypes.isEmpty());
         this.resourcesClosed = new AtomicBoolean(false);
         this.manualTtlTimeProviderForTests = manualTtlTimeProviderForTests;
     }
 
-    /** No-op until checkpoint/snapshot integration is implemented. */
     @Override
-    public void notifyCheckpointComplete(long checkpointId) {}
+    public void notifyCheckpointComplete(long checkpointId) {
+        snapshotStrategy.notifyCheckpointComplete(checkpointId);
+    }
 
-    /** No-op until checkpoint/snapshot integration is implemented. */
     @Override
-    public void notifyCheckpointAborted(long checkpointId) {}
+    public void notifyCheckpointAborted(long checkpointId) {
+        snapshotStrategy.notifyCheckpointAborted(checkpointId);
+    }
 
-    /** No-op until checkpoint/snapshot integration is implemented. */
     @Override
-    public void notifyCheckpointSubsumed(long checkpointId) {}
+    public void notifyCheckpointSubsumed(long checkpointId) {
+        snapshotStrategy.notifyCheckpointSubsumed(checkpointId);
+    }
 
     /** Savepoints remain unsupported until real snapshot support is implemented. */
     @Nonnull
@@ -215,7 +224,6 @@ final class CobbleKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
                 stateName, byteOrderedElementSerializer, allowFutureMetadataUpdates);
     }
 
-    /** Snapshotting remains unsupported until state materialization/restore is implemented. */
     @Nonnull
     @Override
     public RunnableFuture<SnapshotResult<KeyedStateHandle>> snapshot(
@@ -223,7 +231,17 @@ final class CobbleKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
             long timestamp,
             @Nonnull CheckpointStreamFactory streamFactory,
             @Nonnull CheckpointOptions checkpointOptions) {
-        throw unsupported("snapshot");
+        try {
+            return new SnapshotStrategyRunner<>(
+                            "Cobble shard snapshot",
+                            snapshotStrategy,
+                            cancelStreamRegistry,
+                            SnapshotExecutionType.ASYNCHRONOUS)
+                    .snapshot(checkpointId, timestamp, streamFactory, checkpointOptions);
+        } catch (Exception e) {
+            throw new IllegalStateException(
+                    "Failed to start Cobble snapshot for checkpoint " + checkpointId + '.', e);
+        }
     }
 
     @Override
@@ -297,6 +315,11 @@ final class CobbleKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
     /** Exposes the live structured Cobble DB handle for tests and internal helpers. */
     Db getCobbleDb() {
         return cobbleDb;
+    }
+
+    @VisibleForTesting
+    boolean hasTrackedSnapshot(long checkpointId) {
+        return snapshotStrategy.hasTrackedSnapshot(checkpointId);
     }
 
     /** Exposes Flink's total key-group count so state wrappers can map to Cobble buckets. */
@@ -408,6 +431,8 @@ final class CobbleKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
         } catch (IOException e) {
             error = e;
         }
+
+        snapshotStrategy.close();
 
         try {
             cobbleDb.close();
