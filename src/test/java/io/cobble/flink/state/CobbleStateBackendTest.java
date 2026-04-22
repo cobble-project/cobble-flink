@@ -70,6 +70,8 @@ import java.util.concurrent.RunnableFuture;
 /** Tests for {@link CobbleStateBackend}. */
 class CobbleStateBackendTest {
 
+    private static final String CHECKPOINT_SCOPE = "op_test-operator";
+
     @Test
     void createsBackendAndLoadsNativeLibrary() {
         assertDoesNotThrow(() -> new CobbleStateBackend());
@@ -194,12 +196,13 @@ class CobbleStateBackendTest {
 
         List<Config.VolumeDescriptor> volumes =
                 CobbleKeyedStateBackendBuilder.createVolumeDescriptors(
-                        instanceBasePath, "s3a://bucket/checkpoints", false);
+                        instanceBasePath, CHECKPOINT_SCOPE, "s3a://bucket/checkpoints", false);
 
         assertEquals(2, volumes.size());
 
         Config.VolumeDescriptor checkpointVolume = volumes.get(0);
-        assertEquals("s3://bucket/checkpoints/shared", checkpointVolume.baseDir);
+        assertEquals(
+                "s3://bucket/checkpoints/shared/" + CHECKPOINT_SCOPE, checkpointVolume.baseDir);
         assertVolumeKinds(
                 checkpointVolume,
                 Config.VolumeUsageKind.PRIMARY_DATA_PRIORITY_HIGH,
@@ -221,10 +224,11 @@ class CobbleStateBackendTest {
 
         List<Config.VolumeDescriptor> volumes =
                 CobbleKeyedStateBackendBuilder.createVolumeDescriptors(
-                        instanceBasePath, "s3p://bucket/checkpoints", true);
+                        instanceBasePath, CHECKPOINT_SCOPE, "s3p://bucket/checkpoints", true);
 
         assertEquals(2, volumes.size());
-        assertEquals("s3://bucket/checkpoints/shared", volumes.get(0).baseDir);
+        assertEquals(
+                "s3://bucket/checkpoints/shared/" + CHECKPOINT_SCOPE, volumes.get(0).baseDir);
         assertVolumeKinds(volumes.get(1), Config.VolumeUsageKind.PRIMARY_DATA_PRIORITY_HIGH);
     }
 
@@ -235,11 +239,14 @@ class CobbleStateBackendTest {
 
         List<Config.VolumeDescriptor> volumes =
                 CobbleKeyedStateBackendBuilder.createVolumeDescriptors(
-                        instanceBasePath, checkpointDirectory, false);
+                        instanceBasePath, CHECKPOINT_SCOPE, checkpointDirectory, false);
 
         assertEquals(
                 CobbleKeyedStateBackendBuilder.normalizeLocalPath(
-                        tempDir.resolve("checkpoints").resolve("shared").toFile()),
+                        tempDir.resolve("checkpoints")
+                                .resolve("shared")
+                                .resolve(CHECKPOINT_SCOPE)
+                                .toFile()),
                 volumes.get(0).baseDir);
     }
 
@@ -932,10 +939,21 @@ class CobbleStateBackendTest {
         String normalizedFile =
                 CobbleKeyedStateBackendBuilder.normalizeCheckpointDirectory("file:///tmp/cp");
         assertEquals("file:///tmp/cp", normalizedFile);
+        assertEquals(
+                "file:///tmp/cp",
+                CobbleKeyedStateBackendBuilder.normalizeCheckpointDirectory("file:/tmp/cp"));
 
         assertTrue(
                 CobbleKeyedStateBackendBuilder.normalizeCheckpointDirectory("/tmp/cp")
                         .startsWith("file:///"));
+    }
+
+    @Test
+    void cobbleOperatorSnapshotDirectoryNormalizesSingleSlashFilePointers() {
+        assertEquals(
+                "file:///tmp/completed-checkpoints/cobble/op-test",
+                CobblePathUtils.cobbleOperatorSnapshotDirectory(
+                        "file:/tmp/completed-checkpoints/chk-101", "op-test"));
     }
 
     @Test

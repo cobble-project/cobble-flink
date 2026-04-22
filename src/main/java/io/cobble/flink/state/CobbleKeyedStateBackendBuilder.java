@@ -11,16 +11,14 @@ import org.apache.flink.runtime.query.TaskKvStateRegistry;
 import org.apache.flink.runtime.state.IncrementalRemoteKeyedStateHandle;
 import org.apache.flink.runtime.state.KeyGroupRange;
 import org.apache.flink.runtime.state.KeyedStateHandle;
-import org.apache.flink.runtime.state.filesystem.AbstractFsCheckpointStorageAccess;
 import org.apache.flink.runtime.state.heap.InternalKeyContextImpl;
 import org.apache.flink.runtime.state.metrics.LatencyTrackingStateConfig;
 import org.apache.flink.runtime.state.ttl.TtlTimeProvider;
+import org.apache.flink.util.IOUtils;
 import org.apache.flink.util.Preconditions;
 
 import java.io.File;
 import java.io.IOException;
-import java.net.URI;
-import java.net.URISyntaxException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -30,7 +28,6 @@ import java.util.Collection;
 import java.util.Collections;
 import java.util.Comparator;
 import java.util.List;
-import java.util.Locale;
 import java.util.OptionalLong;
 import java.util.UUID;
 
@@ -40,9 +37,6 @@ final class CobbleKeyedStateBackendBuilder<K> {
     private static final String COBBLE_CONFIG_FILE_PREFIX = "cobble-config-";
     private static final String COBBLE_DB_DIR_NAME = "cobble-db";
     private static final String COBBLE_LOG_FILE_NAME = "cobble.log";
-    private static final List<String> SUPPORTED_CHECKPOINT_SCHEMES =
-            Arrays.asList("file", "s3", "hdfs", "ftp", "oss", "cos");
-
     private final Environment env;
     private final TaskKvStateRegistry kvStateRegistry;
     private final TypeSerializer<K> keySerializer;
@@ -53,6 +47,7 @@ final class CobbleKeyedStateBackendBuilder<K> {
     private final CloseableRegistry cancelStreamRegistry;
     private final Collection<KeyedStateHandle> restoreStateHandles;
     private final File instanceBasePath;
+    private final String checkpointScopeDirectoryName;
     private final CobbleMemoryConfiguration memoryConfiguration;
     private final String checkpointDirectory;
     private final boolean localDirPrimaryHighPriority;
@@ -70,6 +65,7 @@ final class CobbleKeyedStateBackendBuilder<K> {
             CloseableRegistry cancelStreamRegistry,
             Collection<KeyedStateHandle> restoreStateHandles,
             File instanceBasePath,
+            String checkpointScopeDirectoryName,
             CobbleMemoryConfiguration memoryConfiguration,
             String checkpointDirectory,
             boolean localDirPrimaryHighPriority,
@@ -85,6 +81,7 @@ final class CobbleKeyedStateBackendBuilder<K> {
         this.cancelStreamRegistry = cancelStreamRegistry;
         this.restoreStateHandles = restoreStateHandles;
         this.instanceBasePath = instanceBasePath;
+        this.checkpointScopeDirectoryName = checkpointScopeDirectoryName;
         this.memoryConfiguration = memoryConfiguration;
         this.checkpointDirectory = checkpointDirectory;
         this.localDirPrimaryHighPriority = localDirPrimaryHighPriority;
@@ -94,6 +91,7 @@ final class CobbleKeyedStateBackendBuilder<K> {
 
     /** Builds the minimal keyed-backend shell after Cobble resources are prepared. */
     CobbleKeyedStateBackend<K> build() throws IOException {
+        CloseableRegistry cancelStreamRegistryForBackend = new CloseableRegistry();
         CobbleBackendResources resources = prepareCobbleResources();
         boolean success = false;
         try {
@@ -105,7 +103,7 @@ final class CobbleKeyedStateBackendBuilder<K> {
                             env.getExecutionConfig(),
                             ttlTimeProvider,
                             latencyTrackingStateConfig,
-                            cancelStreamRegistry,
+                            cancelStreamRegistryForBackend,
                             new InternalKeyContextImpl<>(keyGroupRange, numberOfKeyGroups),
                             resources.instanceBasePath,
                             resources.volumePath,
@@ -117,6 +115,7 @@ final class CobbleKeyedStateBackendBuilder<K> {
             return backend;
         } finally {
             if (!success) {
+                IOUtils.closeQuietly(cancelStreamRegistryForBackend);
                 resources.close();
             }
         }
@@ -124,50 +123,13 @@ final class CobbleKeyedStateBackendBuilder<K> {
 
     /** Normalizes checkpoint URIs into the set of schemes Cobble currently understands. */
     static String normalizeCheckpointDirectory(String checkpointDirectory) {
-        if (checkpointDirectory == null || checkpointDirectory.trim().isEmpty()) {
-            return null;
-        }
-
-        org.apache.flink.core.fs.Path path = new org.apache.flink.core.fs.Path(checkpointDirectory);
-        URI uri = path.toUri();
-        String scheme = uri.getScheme();
-        if (scheme == null || scheme.trim().isEmpty()) {
-            return normalizeLocalPath(new File(checkpointDirectory));
-        }
-
-        String normalizedScheme = normalizeCheckpointScheme(scheme);
-        if (!SUPPORTED_CHECKPOINT_SCHEMES.contains(normalizedScheme)) {
-            throw unsupportedCheckpointDirectory(checkpointDirectory, scheme);
-        }
-
-        if ("file".equals(normalizedScheme)) {
-            return normalizeLocalPath(new File(uri));
-        }
-
-        if (normalizedScheme.equals(scheme.toLowerCase(Locale.ROOT))) {
-            return path.toString();
-        }
-
-        try {
-            return new URI(
-                            normalizedScheme,
-                            uri.getAuthority(),
-                            uri.getPath(),
-                            uri.getQuery(),
-                            uri.getFragment())
-                    .toString();
-        } catch (URISyntaxException e) {
-            throw new IllegalArgumentException(
-                    "Failed to normalize Cobble checkpoint directory '"
-                            + checkpointDirectory
-                            + "'.",
-                    e);
-        }
+        return CobblePathUtils.normalizeStorageDirectory(checkpointDirectory);
     }
 
     /** Creates the Cobble volume descriptors that mirror the resolved local/remote layout. */
     static List<Config.VolumeDescriptor> createVolumeDescriptors(
             File instanceBasePath,
+            String checkpointScopeDirectoryName,
             String checkpointDirectory,
             boolean localDirPrimaryHighPriority) {
         File localVolumePath = new File(instanceBasePath, COBBLE_DB_DIR_NAME);
@@ -180,7 +142,9 @@ final class CobbleKeyedStateBackendBuilder<K> {
         }
 
         Config.VolumeDescriptor checkpointVolume = new Config.VolumeDescriptor();
-        checkpointVolume.baseDir = createCheckpointVolumeBaseDir(normalizedCheckpointDirectory);
+        checkpointVolume.baseDir =
+                createCheckpointVolumeBaseDir(
+                        normalizedCheckpointDirectory, checkpointScopeDirectoryName);
         checkpointVolume.kinds =
                 Arrays.asList(
                         Config.VolumeUsageKind.PRIMARY_DATA_PRIORITY_HIGH,
@@ -234,7 +198,10 @@ final class CobbleKeyedStateBackendBuilder<K> {
         return new VolumeLayout(
                 localVolumePath,
                 createVolumeDescriptors(
-                        instanceBasePath, checkpointDirectory, localDirPrimaryHighPriority));
+                        instanceBasePath,
+                        checkpointScopeDirectoryName,
+                        checkpointDirectory,
+                        localDirPrimaryHighPriority));
     }
 
     /** Fills the Cobble config object with volume, bucket, and memory settings. */
@@ -444,54 +411,15 @@ final class CobbleKeyedStateBackendBuilder<K> {
     }
 
     /** Maps the remote checkpoint location to Flink's shared-state base directory. */
-    private static String createCheckpointVolumeBaseDir(String normalizedCheckpointDirectory) {
-        if (normalizedCheckpointDirectory.startsWith("file://")) {
-            return normalizeLocalPath(
-                    new File(
-                            new File(URI.create(normalizedCheckpointDirectory)),
-                            AbstractFsCheckpointStorageAccess.CHECKPOINT_SHARED_STATE_DIR));
-        }
-        return new org.apache.flink.core.fs.Path(
-                        new org.apache.flink.core.fs.Path(normalizedCheckpointDirectory),
-                        AbstractFsCheckpointStorageAccess.CHECKPOINT_SHARED_STATE_DIR)
-                .toString();
-    }
-
-    /** Rewrites Flink-compatible aliases like s3a/s3p to the Cobble-facing scheme names. */
-    private static String normalizeCheckpointScheme(String scheme) {
-        String normalizedScheme = scheme.toLowerCase(Locale.ROOT);
-        if ("s3a".equals(normalizedScheme) || "s3p".equals(normalizedScheme)) {
-            return "s3";
-        }
-        return normalizedScheme;
+    private static String createCheckpointVolumeBaseDir(
+            String normalizedCheckpointDirectory, String checkpointScopeDirectoryName) {
+        return CobblePathUtils.checkpointOperatorSharedStatePath(
+                normalizedCheckpointDirectory, checkpointScopeDirectoryName);
     }
 
     /** Converts any local filesystem path into a stable file:// URI for Cobble config. */
     static String normalizeLocalPath(File localPath) {
-        try {
-            String normalizedPath = localPath.getAbsoluteFile().toPath().normalize().toString();
-            normalizedPath = normalizedPath.replace(File.separatorChar, '/');
-            if (!normalizedPath.startsWith("/")) {
-                normalizedPath = "/" + normalizedPath;
-            }
-            return new URI("file", "", normalizedPath, null, null).toString();
-        } catch (URISyntaxException e) {
-            throw new IllegalArgumentException(
-                    "Failed to normalize Cobble local path '" + localPath + "'.", e);
-        }
-    }
-
-    /** Builds the user-facing validation error for unsupported checkpoint schemes. */
-    private static IllegalArgumentException unsupportedCheckpointDirectory(
-            String checkpointDirectory, String scheme) {
-        return new IllegalArgumentException(
-                "Unsupported Cobble checkpoint directory '"
-                        + checkpointDirectory
-                        + "'. Scheme '"
-                        + scheme
-                        + "' is not supported. Supported schemes: "
-                        + SUPPORTED_CHECKPOINT_SCHEMES
-                        + " (s3a/s3p are normalized to s3).");
+        return CobblePathUtils.normalizeLocalPath(localPath);
     }
 
     /** Converts long-sized memory values into the int-sized fields expected by Cobble config. */

@@ -177,11 +177,24 @@ public class CobbleStateBackend extends AbstractManagedMemoryStateBackend
             throws Exception {
         ensureCobbleLoaded();
 
-        String fileCompatibleIdentifier = operatorIdentifier.replaceAll("[^a-zA-Z0-9\\-]", "_");
+        String fileCompatibleIdentifier = CobblePathUtils.toFileCompatibleName(operatorIdentifier);
         lazyInitializeForJob(env);
+        String subtaskDirectoryName =
+                String.format(
+                        "subtask_%d_attempt_%d",
+                        env.getTaskInfo().getIndexOfThisSubtask(),
+                        env.getTaskInfo().getAttemptNumber());
+        String checkpointScopeDirectoryName =
+                String.format(
+                        "op_%s",
+                        CobblePathUtils.toFileCompatibleName(env.getTaskInfo().getTaskName()));
 
         File instanceBasePath =
-                new File(getNextStoragePath(), "job_" + jobId + "_op_" + fileCompatibleIdentifier);
+                new File(
+                        new File(
+                                getNextStoragePath(),
+                                "job_" + jobId + "_op_" + fileCompatibleIdentifier),
+                        subtaskDirectoryName);
 
         LatencyTrackingStateConfig latencyTrackingStateConfig =
                 latencyTrackingConfigBuilder.setMetricGroup(metricGroup).build();
@@ -197,6 +210,7 @@ public class CobbleStateBackend extends AbstractManagedMemoryStateBackend
                         cancelStreamRegistry,
                         stateHandles,
                         instanceBasePath,
+                        checkpointScopeDirectoryName,
                         memoryConfiguration,
                         checkpointDirectory,
                         localDirPrimaryHighPriority,
@@ -225,7 +239,7 @@ public class CobbleStateBackend extends AbstractManagedMemoryStateBackend
     }
 
     /** Resolves and validates the candidate local base directories once per job execution. */
-    private void lazyInitializeForJob(Environment env) throws IOException {
+    private synchronized void lazyInitializeForJob(Environment env) throws IOException {
         if (isInitialized) {
             return;
         }
@@ -264,7 +278,7 @@ public class CobbleStateBackend extends AbstractManagedMemoryStateBackend
     }
 
     /** Picks the next local base directory in round-robin order. */
-    private File getNextStoragePath() {
+    private synchronized File getNextStoragePath() {
         int nextIndex = nextDirectory + 1;
         nextIndex = nextIndex >= initializedDbBasePaths.length ? 0 : nextIndex;
         nextDirectory = nextIndex;
