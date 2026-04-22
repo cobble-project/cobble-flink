@@ -31,7 +31,7 @@
         </dependency>
         <dependency>
             <groupId>io.github.cobble-project</groupId>
-            <artifactId>cobble-java</artifactId>
+            <artifactId>cobble</artifactId>
             <version>${cobble.java.version}</version>
         </dependency>
         <dependency>
