@@ -7,8 +7,7 @@ if [[ $# -ne 1 ]]; then
   exit 1
 fi
 
-COBBLE_JAVA_DIR="$1"
-TARGET_ARTIFACT_ID="${COBBLE_JAVA_ARTIFACT_ID:-cobble-java}"
+COBBLE_JAVA_DIR="$(cd "$1" && pwd -P)"
 MVN_CMD="${MVN_CMD:-mvn}"
 PYTHON_CMD="${PYTHON_CMD:-}"
 
@@ -62,6 +61,7 @@ PY
 
 SOURCE_ARTIFACT_ID="$(printf '%s\n' "${SOURCE_COORDS}" | sed -n '1p')"
 SOURCE_VERSION="$(printf '%s\n' "${SOURCE_COORDS}" | sed -n '2p')"
+TARGET_ARTIFACT_ID="${COBBLE_JAVA_ARTIFACT_ID:-${SOURCE_ARTIFACT_ID}}"
 
 "${MVN_CMD}" --batch-mode --no-transfer-progress -DskipTests -Dspotless.check.skip=true clean package
 
@@ -71,10 +71,12 @@ if [[ ! -f "${JAR_PATH}" ]]; then
   exit 1
 fi
 
-TMP_POM="$(mktemp)"
-trap 'rm -f "${TMP_POM}"' EXIT
+INSTALL_POM="${COBBLE_JAVA_DIR}/pom.xml"
+if [[ "${TARGET_ARTIFACT_ID}" != "${SOURCE_ARTIFACT_ID}" ]]; then
+  TMP_POM="$(mktemp)"
+  trap 'rm -f "${TMP_POM}"' EXIT
 
-"${PYTHON_CMD}" - "${COBBLE_JAVA_DIR}/pom.xml" "${TMP_POM}" "${TARGET_ARTIFACT_ID}" <<'PY'
+  "${PYTHON_CMD}" - "${COBBLE_JAVA_DIR}/pom.xml" "${TMP_POM}" "${TARGET_ARTIFACT_ID}" <<'PY'
 import sys
 import xml.etree.ElementTree as ET
 
@@ -88,9 +90,11 @@ if artifact is None:
 artifact.text = artifact_id
 ET.ElementTree(root).write(target_pom, encoding="utf-8", xml_declaration=True)
 PY
+  INSTALL_POM="${TMP_POM}"
+fi
 
 "${MVN_CMD}" --batch-mode --no-transfer-progress org.apache.maven.plugins:maven-install-plugin:3.1.2:install-file \
   -Dfile="${JAR_PATH}" \
-  -DpomFile="${TMP_POM}"
+  -DpomFile="${INSTALL_POM}"
 
 popd >/dev/null
