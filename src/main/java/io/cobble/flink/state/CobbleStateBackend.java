@@ -184,10 +184,7 @@ public class CobbleStateBackend extends AbstractManagedMemoryStateBackend
                         "subtask_%d_attempt_%d",
                         env.getTaskInfo().getIndexOfThisSubtask(),
                         env.getTaskInfo().getAttemptNumber());
-        String checkpointScopeDirectoryName =
-                String.format(
-                        "op_%s",
-                        CobblePathUtils.toFileCompatibleName(env.getTaskInfo().getTaskName()));
+        String checkpointScopeDirectoryName = "op_" + env.getJobVertexId().toHexString();
 
         File instanceBasePath =
                 new File(

@@ -312,10 +312,8 @@ final class CobbleKeyedStateBackendBuilder<K> {
         RestoreSource baseSource = selectBaseSource(relevantSources);
         CobbleSnapshotMetadata baseMetadata = baseSource.metadata;
         Db db =
-                Db.restore(
-                        configPath.toString(),
-                        baseMetadata.shardSnapshot().snapshotId,
-                        baseMetadata.shardSnapshot().dbId);
+                Db.restoreWithManifest(
+                        configPath.toString(), baseMetadata.shardSnapshot().manifestPath);
         boolean success = false;
         try {
             shrinkBaseSourceToTargetRange(db, baseSource.keyGroupRange);

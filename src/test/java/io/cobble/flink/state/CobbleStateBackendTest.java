@@ -35,6 +35,7 @@ import org.apache.flink.core.memory.DataInputView;
 import org.apache.flink.core.memory.DataInputViewStreamWrapper;
 import org.apache.flink.core.memory.DataOutputView;
 import org.apache.flink.runtime.checkpoint.CheckpointOptions;
+import org.apache.flink.runtime.jobgraph.JobVertexID;
 import org.apache.flink.runtime.operators.testutils.MockEnvironment;
 import org.apache.flink.runtime.operators.testutils.MockEnvironmentBuilder;
 import org.apache.flink.runtime.query.TaskKvStateRegistry;
@@ -69,7 +70,8 @@ import java.util.concurrent.RunnableFuture;
 
 /** Tests for {@link CobbleStateBackend}. */
 class CobbleStateBackendTest {
-
+    private static final JobVertexID TEST_JOB_VERTEX_ID =
+            JobVertexID.fromHexString("11111111111111111111111111111111");
     private static final String CHECKPOINT_SCOPE = "op_test-operator";
 
     @Test
@@ -227,8 +229,7 @@ class CobbleStateBackendTest {
                         instanceBasePath, CHECKPOINT_SCOPE, "s3p://bucket/checkpoints", true);
 
         assertEquals(2, volumes.size());
-        assertEquals(
-                "s3://bucket/checkpoints/shared/" + CHECKPOINT_SCOPE, volumes.get(0).baseDir);
+        assertEquals("s3://bucket/checkpoints/shared/" + CHECKPOINT_SCOPE, volumes.get(0).baseDir);
         assertVolumeKinds(volumes.get(1), Config.VolumeUsageKind.PRIMARY_DATA_PRIORITY_HIGH);
     }
 
@@ -1061,6 +1062,7 @@ class CobbleStateBackendTest {
         MockEnvironment environment =
                 new MockEnvironmentBuilder()
                         .setTaskName("cobble-test-task")
+                        .setJobVertexID(TEST_JOB_VERTEX_ID)
                         .setManagedMemorySize(MemorySize.ofMebiBytes(128).getBytes())
                         .setTaskManagerRuntimeInfo(
                                 new TestingTaskManagerRuntimeInfo(

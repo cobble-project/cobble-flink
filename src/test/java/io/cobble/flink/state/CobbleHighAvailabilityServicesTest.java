@@ -26,6 +26,7 @@ import org.apache.flink.runtime.checkpoint.OperatorState;
 import org.apache.flink.runtime.checkpoint.OperatorSubtaskState;
 import org.apache.flink.runtime.checkpoint.TestingCompletedCheckpointStore;
 import org.apache.flink.runtime.highavailability.HighAvailabilityServices;
+import org.apache.flink.runtime.jobgraph.JobVertexID;
 import org.apache.flink.runtime.jobgraph.OperatorID;
 import org.apache.flink.runtime.operators.testutils.MockEnvironment;
 import org.apache.flink.runtime.operators.testutils.MockEnvironmentBuilder;
@@ -52,6 +53,8 @@ import java.util.List;
 import java.util.concurrent.RunnableFuture;
 
 class CobbleHighAvailabilityServicesTest {
+    private static final JobVertexID TEST_JOB_VERTEX_ID =
+            JobVertexID.fromHexString("22222222222222222222222222222222");
 
     @Test
     void wrappedCheckpointStoreMaterializesAndCleansGlobalSnapshots(@TempDir Path tempDir)
@@ -730,6 +733,7 @@ class CobbleHighAvailabilityServicesTest {
         MockEnvironment environment =
                 new MockEnvironmentBuilder()
                         .setTaskName("cobble-ha-test-task")
+                        .setJobVertexID(TEST_JOB_VERTEX_ID)
                         .setManagedMemorySize(
                                 org.apache.flink.configuration.MemorySize.ofMebiBytes(128)
                                         .getBytes())
