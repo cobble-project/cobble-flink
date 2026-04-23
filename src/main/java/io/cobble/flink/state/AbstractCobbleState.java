@@ -32,7 +32,7 @@ abstract class AbstractCobbleState<K, N, V> implements InternalKvState<K, N, V>,
     protected final ReadOptions readOptions;
     protected final ScanOptions scanOptions;
     protected final WriteOptions writeOptions;
-    private final AtomicBoolean closed;
+    private final AtomicBoolean optionsDisposed;
     protected TypeSerializer<N> namespaceSerializer;
     protected TypeSerializer<V> valueSerializer;
 
@@ -55,7 +55,7 @@ abstract class AbstractCobbleState<K, N, V> implements InternalKvState<K, N, V>,
         this.readOptions = ReadOptions.defaultsInFamily(columnFamily);
         this.scanOptions = ScanOptions.defaults().columnFamily(columnFamily);
         this.writeOptions = createWriteOptions(columnFamily, ttlConfig);
-        this.closed = new AtomicBoolean(false);
+        this.optionsDisposed = new AtomicBoolean(false);
         this.namespaceSerializer = namespaceSerializer;
         this.valueSerializer = valueSerializer;
     }
@@ -251,7 +251,7 @@ abstract class AbstractCobbleState<K, N, V> implements InternalKvState<K, N, V>,
 
     @Override
     public void close() {
-        if (!closed.compareAndSet(false, true)) {
+        if (!optionsDisposed.compareAndSet(false, true)) {
             return;
         }
         writeOptions.close();

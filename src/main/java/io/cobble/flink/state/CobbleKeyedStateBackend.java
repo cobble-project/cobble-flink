@@ -425,13 +425,6 @@ final class CobbleKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
         }
 
         IOException error = null;
-
-        try {
-            closeStateResources();
-        } catch (IOException e) {
-            error = e;
-        }
-
         snapshotStrategy.close();
 
         try {
@@ -442,6 +435,18 @@ final class CobbleKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
                 error = dbError;
             } else {
                 error.addSuppressed(dbError);
+            }
+        }
+
+        try {
+            // We delay the state close after the db close, since the cobble close will ensure no
+            // further access. It's only safe to close state here.
+            closeStateResources();
+        } catch (IOException e) {
+            if (error == null) {
+                error = e;
+            } else {
+                error.addSuppressed(e);
             }
         }
 
@@ -469,7 +474,7 @@ final class CobbleKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
         stateResources.add(state);
     }
 
-    /** Closes all state-local native resources before the shared Cobble DB goes away. */
+    /** Closes cached state-local native option handles after the shared Cobble DB is closed. */
     private void closeStateResources() throws IOException {
         IOException error = null;
         for (AbstractCobbleState<?, ?, ?> stateResource : stateResources) {
