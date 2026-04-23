@@ -20,6 +20,7 @@
         <flink.version>1.17.2</flink.version>
         <cobble.java.version>0.2.0-SNAPSHOT</cobble.java.version>
         <junit.version>5.10.2</junit.version>
+        <surefire.test.jvm.args></surefire.test.jvm.args>
     </properties>
 
     <dependencies>
@@ -80,6 +81,7 @@
                 <artifactId>maven-surefire-plugin</artifactId>
                 <version>3.2.5</version>
                 <configuration>
+                    <argLine>${surefire.test.jvm.args}</argLine>
                     <useSystemClassLoader>true</useSystemClassLoader>
                 </configuration>
             </plugin>
@@ -115,5 +117,33 @@
             </plugin>
         </plugins>
     </build>
+
+    <profiles>
+        <profile>
+            <id>java11-plus</id>
+            <activation>
+                <jdk>[11,)</jdk>
+            </activation>
+            <properties>
+                <surefire.test.jvm.args>--add-opens=java.base/java.lang=ALL-UNNAMED
+                    --add-opens=java.base/java.util=ALL-UNNAMED</surefire.test.jvm.args>
+            </properties>
+            <build>
+                <plugins>
+                    <plugin>
+                        <artifactId>maven-compiler-plugin</artifactId>
+                        <version>3.1</version>
+                        <configuration>
+                            <fork>true</fork>
+                            <compilerArgs>
+                                <arg>-J--add-opens=java.base/java.lang=ALL-UNNAMED</arg>
+                                <arg>-J--add-opens=java.base/java.util=ALL-UNNAMED</arg>
+                            </compilerArgs>
+                        </configuration>
+                    </plugin>
+                </plugins>
+            </build>
+        </profile>
+    </profiles>
 
 </project>
