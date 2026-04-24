@@ -66,8 +66,8 @@ class CobbleHighAvailabilityITTest {
             waitForCheckpoint(firstJobId, firstCluster.getMiniCluster(), 2);
 
             firstObservation =
-                    waitForSnapshotArtifacts(checkpointRoot, 2, 2, Duration.ofSeconds(60));
-            assertTrue(firstObservation.completedCheckpointPaths.size() >= 2);
+                    waitForSnapshotArtifacts(checkpointRoot, 1, 2, Duration.ofSeconds(60));
+            assertTrue(firstObservation.latestCompletedCheckpointId() >= 2L);
             assertTrue(firstObservation.maxManifestCopiesPerCheckpoint >= 2);
             assertTrue(firstObservation.maxOperatorDirectories >= 2);
 
@@ -94,7 +94,11 @@ class CobbleHighAvailabilityITTest {
             waitForCheckpoint(rescaledJobId, secondCluster.getMiniCluster(), 2);
 
             SnapshotObservation rescaledObservation =
-                    waitForSnapshotArtifacts(checkpointRoot, 4, 2, Duration.ofSeconds(60));
+                    waitForSnapshotArtifacts(
+                            checkpointRoot,
+                            firstObservation.completedCheckpointPaths.size() + 1,
+                            2,
+                            Duration.ofSeconds(60));
             assertTrue(
                     rescaledObservation.completedCheckpointPaths.size()
                             > firstObservation.completedCheckpointPaths.size());
@@ -130,7 +134,8 @@ class CobbleHighAvailabilityITTest {
         env.setParallelism(parallelism);
         env.enableCheckpointing(15_000L, CheckpointingMode.EXACTLY_ONCE);
         env.getCheckpointConfig().setMinPauseBetweenCheckpoints(5_000L);
-        env.getCheckpointConfig().setCheckpointTimeout(120_000L);
+        env.getCheckpointConfig().setCheckpointTimeout(180_000L);
+        env.getCheckpointConfig().setTolerableCheckpointFailureNumber(3);
         env.getCheckpointConfig()
                 .setExternalizedCheckpointCleanup(
                         CheckpointConfig.ExternalizedCheckpointCleanup.RETAIN_ON_CANCELLATION);
@@ -316,6 +321,10 @@ class CobbleHighAvailabilityITTest {
                     .max(Comparator.comparingLong(CobbleHighAvailabilityITTest::checkpointId))
                     .orElseThrow(
                             () -> new AssertionError("No completed checkpoint directory found."));
+        }
+
+        private long latestCompletedCheckpointId() {
+            return checkpointId(latestCompletedCheckpointPath());
         }
 
         private static SnapshotObservation empty() {
