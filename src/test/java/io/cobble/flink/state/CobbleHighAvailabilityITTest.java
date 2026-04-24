@@ -14,6 +14,7 @@ import org.apache.flink.configuration.Configuration;
 import org.apache.flink.configuration.HighAvailabilityOptions;
 import org.apache.flink.runtime.jobgraph.JobGraph;
 import org.apache.flink.runtime.jobgraph.SavepointRestoreSettings;
+import org.apache.flink.runtime.state.filesystem.AbstractFsCheckpointStorageAccess;
 import org.apache.flink.runtime.testutils.MiniClusterResourceConfiguration;
 import org.apache.flink.streaming.api.CheckpointingMode;
 import org.apache.flink.streaming.api.environment.CheckpointConfig;
@@ -203,7 +204,7 @@ class CobbleHighAvailabilityITTest {
                 }
 
                 String fileName = path.getFileName() == null ? "" : path.getFileName().toString();
-                if (fileName.startsWith("chk-")) {
+                if (isCompletedCheckpointDirectory(path, fileName)) {
                     completedCheckpointPaths.add(path);
                     maxManifestCopiesPerCheckpoint =
                             Math.max(maxManifestCopiesPerCheckpoint, countManifestCopies(path));
@@ -233,6 +234,21 @@ class CobbleHighAvailabilityITTest {
         try (Stream<Path> children = Files.list(cobbleDirectory)) {
             return (int) children.filter(Files::isDirectory).count();
         }
+    }
+
+    private static boolean isCompletedCheckpointDirectory(Path path, String fileName) {
+        return fileName.startsWith("chk-")
+                && Files.exists(path.resolve(AbstractFsCheckpointStorageAccess.METADATA_FILE_NAME));
+    }
+
+    private static long checkpointId(Path checkpointPath) {
+        String fileName =
+                checkpointPath.getFileName() == null ? "" : checkpointPath.getFileName().toString();
+        if (!fileName.startsWith("chk-")) {
+            throw new IllegalArgumentException(
+                    "Checkpoint path does not use the expected chk-<id> format: " + checkpointPath);
+        }
+        return Long.parseLong(fileName.substring("chk-".length()));
     }
 
     private static final class ContinuousSequenceSource extends RichParallelSourceFunction<Long> {
@@ -297,7 +313,7 @@ class CobbleHighAvailabilityITTest {
 
         private Path latestCompletedCheckpointPath() {
             return completedCheckpointPaths.stream()
-                    .max(Comparator.comparing(Path::toString))
+                    .max(Comparator.comparingLong(CobbleHighAvailabilityITTest::checkpointId))
                     .orElseThrow(
                             () -> new AssertionError("No completed checkpoint directory found."));
         }
