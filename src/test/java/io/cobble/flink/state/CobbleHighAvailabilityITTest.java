@@ -14,6 +14,7 @@ import org.apache.flink.configuration.Configuration;
 import org.apache.flink.configuration.HighAvailabilityOptions;
 import org.apache.flink.runtime.jobgraph.JobGraph;
 import org.apache.flink.runtime.jobgraph.SavepointRestoreSettings;
+import org.apache.flink.runtime.state.filesystem.AbstractFsCheckpointStorageAccess;
 import org.apache.flink.runtime.testutils.MiniClusterResourceConfiguration;
 import org.apache.flink.streaming.api.CheckpointingMode;
 import org.apache.flink.streaming.api.environment.CheckpointConfig;
@@ -65,8 +66,8 @@ class CobbleHighAvailabilityITTest {
             waitForCheckpoint(firstJobId, firstCluster.getMiniCluster(), 2);
 
             firstObservation =
-                    waitForSnapshotArtifacts(checkpointRoot, 2, 2, Duration.ofSeconds(60));
-            assertTrue(firstObservation.completedCheckpointPaths.size() >= 2);
+                    waitForSnapshotArtifacts(checkpointRoot, 2L, 2, Duration.ofSeconds(60));
+            assertTrue(firstObservation.latestCompletedCheckpointId() >= 2L);
             assertTrue(firstObservation.maxManifestCopiesPerCheckpoint >= 2);
             assertTrue(firstObservation.maxOperatorDirectories >= 2);
 
@@ -93,10 +94,14 @@ class CobbleHighAvailabilityITTest {
             waitForCheckpoint(rescaledJobId, secondCluster.getMiniCluster(), 2);
 
             SnapshotObservation rescaledObservation =
-                    waitForSnapshotArtifacts(checkpointRoot, 4, 2, Duration.ofSeconds(60));
+                    waitForSnapshotArtifacts(
+                            checkpointRoot,
+                            firstObservation.latestCompletedCheckpointId() + 1L,
+                            2,
+                            Duration.ofSeconds(60));
             assertTrue(
-                    rescaledObservation.completedCheckpointPaths.size()
-                            > firstObservation.completedCheckpointPaths.size());
+                    rescaledObservation.latestCompletedCheckpointId()
+                            > firstObservation.latestCompletedCheckpointId());
             assertTrue(rescaledObservation.maxManifestCopiesPerCheckpoint >= 2);
             assertTrue(rescaledObservation.maxOperatorDirectories >= 2);
 
@@ -127,9 +132,10 @@ class CobbleHighAvailabilityITTest {
         StreamExecutionEnvironment env =
                 StreamExecutionEnvironment.getExecutionEnvironment(jobConfiguration);
         env.setParallelism(parallelism);
-        env.enableCheckpointing(15_000L, CheckpointingMode.EXACTLY_ONCE);
-        env.getCheckpointConfig().setMinPauseBetweenCheckpoints(5_000L);
-        env.getCheckpointConfig().setCheckpointTimeout(120_000L);
+        env.enableCheckpointing(5_000L, CheckpointingMode.EXACTLY_ONCE);
+        env.getCheckpointConfig().setMinPauseBetweenCheckpoints(1_000L);
+        env.getCheckpointConfig().setCheckpointTimeout(180_000L);
+        env.getCheckpointConfig().setTolerableCheckpointFailureNumber(3);
         env.getCheckpointConfig()
                 .setExternalizedCheckpointCleanup(
                         CheckpointConfig.ExternalizedCheckpointCleanup.RETAIN_ON_CANCELLATION);
@@ -161,7 +167,7 @@ class CobbleHighAvailabilityITTest {
 
     private static SnapshotObservation waitForSnapshotArtifacts(
             Path checkpointRoot,
-            int minimumCompletedCheckpoints,
+            long minimumLatestCompletedCheckpointId,
             int minimumOperatorDirectories,
             Duration timeout)
             throws Exception {
@@ -169,7 +175,9 @@ class CobbleHighAvailabilityITTest {
         SnapshotObservation lastObservation = SnapshotObservation.empty();
         while (System.nanoTime() < deadline) {
             lastObservation = observeSnapshotArtifacts(checkpointRoot);
-            if (lastObservation.completedCheckpointPaths.size() >= minimumCompletedCheckpoints
+            if (!lastObservation.completedCheckpointPaths.isEmpty()
+                    && lastObservation.latestCompletedCheckpointId()
+                            >= minimumLatestCompletedCheckpointId
                     && lastObservation.maxManifestCopiesPerCheckpoint >= minimumOperatorDirectories
                     && lastObservation.maxOperatorDirectories >= minimumOperatorDirectories) {
                 return lastObservation;
@@ -180,6 +188,8 @@ class CobbleHighAvailabilityITTest {
         throw new AssertionError(
                 "Timed out waiting for Cobble HA checkpoint artifacts. Observed checkpoints="
                         + lastObservation.completedCheckpointPaths
+                        + ", latestCompletedCheckpointId="
+                        + lastObservation.latestCompletedCheckpointIdOrDefault(-1L)
                         + ", maxManifestCopiesPerCheckpoint="
                         + lastObservation.maxManifestCopiesPerCheckpoint
                         + ", maxOperatorDirectories="
@@ -203,7 +213,7 @@ class CobbleHighAvailabilityITTest {
                 }
 
                 String fileName = path.getFileName() == null ? "" : path.getFileName().toString();
-                if (fileName.startsWith("chk-")) {
+                if (isCompletedCheckpointDirectory(path, fileName)) {
                     completedCheckpointPaths.add(path);
                     maxManifestCopiesPerCheckpoint =
                             Math.max(maxManifestCopiesPerCheckpoint, countManifestCopies(path));
@@ -235,6 +245,21 @@ class CobbleHighAvailabilityITTest {
         }
     }
 
+    private static boolean isCompletedCheckpointDirectory(Path path, String fileName) {
+        return fileName.startsWith("chk-")
+                && Files.exists(path.resolve(AbstractFsCheckpointStorageAccess.METADATA_FILE_NAME));
+    }
+
+    private static long checkpointId(Path checkpointPath) {
+        String fileName =
+                checkpointPath.getFileName() == null ? "" : checkpointPath.getFileName().toString();
+        if (!fileName.startsWith("chk-")) {
+            throw new IllegalArgumentException(
+                    "Checkpoint path does not use the expected chk-<id> format: " + checkpointPath);
+        }
+        return Long.parseLong(fileName.substring("chk-".length()));
+    }
+
     private static final class ContinuousSequenceSource extends RichParallelSourceFunction<Long> {
         private volatile boolean running = true;
 
@@ -247,9 +272,7 @@ class CobbleHighAvailabilityITTest {
                     ctx.collect(nextValue);
                     nextValue += step;
                 }
-                if ((nextValue & 1023L) == 0L) {
-                    Thread.sleep(2L);
-                }
+                Thread.sleep(1L);
             }
         }
 
@@ -297,9 +320,19 @@ class CobbleHighAvailabilityITTest {
 
         private Path latestCompletedCheckpointPath() {
             return completedCheckpointPaths.stream()
-                    .max(Comparator.comparing(Path::toString))
+                    .max(Comparator.comparingLong(CobbleHighAvailabilityITTest::checkpointId))
                     .orElseThrow(
                             () -> new AssertionError("No completed checkpoint directory found."));
+        }
+
+        private long latestCompletedCheckpointId() {
+            return checkpointId(latestCompletedCheckpointPath());
+        }
+
+        private long latestCompletedCheckpointIdOrDefault(long defaultValue) {
+            return completedCheckpointPaths.isEmpty()
+                    ? defaultValue
+                    : latestCompletedCheckpointId();
         }
 
         private static SnapshotObservation empty() {
