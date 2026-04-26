@@ -14,6 +14,7 @@ import org.apache.flink.runtime.state.internal.InternalMapState;
 import org.apache.flink.util.Preconditions;
 
 import java.io.IOException;
+import java.nio.ByteBuffer;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
@@ -53,17 +54,25 @@ final class CobbleMapState<K, N, UK, UV> extends AbstractCobbleState<K, N, Map<U
     @Override
     public UV get(UK userKey) throws IOException {
         Preconditions.checkNotNull(userKey, "MapState user key must not be null.");
-        byte[] stored = getCurrentEntryBytes(userKey);
-        return stored == null ? null : deserializeValue(userValueSerializer, stored);
+        return getEntryValueDirect(currentKey(), currentNamespace(), userKey);
     }
 
     @Override
     public void put(UK userKey, UV userValue) throws IOException {
         Preconditions.checkNotNull(userKey, "MapState user key must not be null.");
-        putBytes(
+        Preconditions.checkNotNull(userValue, "MapState user value must not be null.");
+        CobbleStateKeySerializer.DirectBufferSlice directKey =
+                directMapEntryRowKey(currentKey(), currentNamespace(), userKeySerializer, userKey);
+        CobbleStateKeySerializer.DirectBufferSlice directValue =
+                directValueSerializer.serialize(userValueSerializer, userValue);
+        db.putDirectWithOptions(
                 currentBucket(),
-                entryRowKey(currentKey(), currentNamespace(), userKey),
-                serializeValue(userValueSerializer, userValue));
+                directKey.buffer(),
+                directKey.length(),
+                STATE_COLUMN_INDEX,
+                directValue.buffer(),
+                directValue.length(),
+                writeOptions);
     }
 
     @Override
@@ -83,7 +92,7 @@ final class CobbleMapState<K, N, UK, UV> extends AbstractCobbleState<K, N, Map<U
     @Override
     public boolean contains(UK userKey) throws IOException {
         Preconditions.checkNotNull(userKey, "MapState user key must not be null.");
-        return getCurrentEntryBytes(userKey) != null;
+        return getEntryValueDirect(currentKey(), currentNamespace(), userKey) != null;
     }
 
     @Override
@@ -218,16 +227,25 @@ final class CobbleMapState<K, N, UK, UV> extends AbstractCobbleState<K, N, Map<U
         return rowKeys;
     }
 
-    private byte[] getCurrentEntryBytes(UK userKey) throws IOException {
-        return getBytes(currentBucket(), entryRowKey(currentKey(), currentNamespace(), userKey));
-    }
-
-    private byte[] getEntryBytes(K key, N namespace, UK userKey) throws IOException {
-        return getBytes(bucketForKey(key), entryRowKey(key, namespace, userKey));
-    }
-
     private byte[] entryRowKey(K key, N namespace, UK userKey) throws IOException {
         return mapEntryRowKey(key, namespace, userKeySerializer, userKey);
+    }
+
+    private UV getEntryValueDirect(K key, N namespace, UK userKey) throws IOException {
+        CobbleStateKeySerializer.DirectBufferSlice directKey =
+                directMapEntryRowKey(key, namespace, userKeySerializer, userKey);
+        try (io.cobble.structured.DirectRow directRow =
+                db.getDirectWithOptions(
+                        bucketForKey(key), directKey.buffer(), directKey.length(), readOptions)) {
+            if (directRow == null) {
+                return null;
+            }
+            ByteBuffer directValue = directRow.getBytes(STATE_COLUMN_INDEX);
+            if (directValue == null) {
+                return null;
+            }
+            return deserializeValue(userValueSerializer, directValue);
+        }
     }
 
     private <DUK> DUK deserializeUserKey(

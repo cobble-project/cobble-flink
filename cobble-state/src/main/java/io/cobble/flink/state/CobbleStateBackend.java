@@ -55,14 +55,30 @@ public class CobbleStateBackend extends AbstractManagedMemoryStateBackend
     private final String checkpointDirectory;
     private final boolean localDirPrimaryHighPriority;
     private final boolean manualTtlTimeProviderForTests;
+    private final int directIoBufferSizeBytes;
+    private final int directIoBufferPoolMaxSize;
 
     public CobbleStateBackend() {
-        this(null, new CobbleMemoryConfiguration(), null, false, false);
+        this(
+                null,
+                new CobbleMemoryConfiguration(),
+                null,
+                false,
+                false,
+                toDirectIoBufferSizeBytes(CobbleOptions.DIRECT_IO_BUFFER_SIZE.defaultValue()),
+                CobbleOptions.DIRECT_IO_BUFFER_POOL_MAX_SIZE.defaultValue());
         ensureCobbleLoaded();
     }
 
     CobbleStateBackend(boolean manualTtlTimeProviderForTests) {
-        this(null, new CobbleMemoryConfiguration(), null, false, manualTtlTimeProviderForTests);
+        this(
+                null,
+                new CobbleMemoryConfiguration(),
+                null,
+                false,
+                manualTtlTimeProviderForTests,
+                toDirectIoBufferSizeBytes(CobbleOptions.DIRECT_IO_BUFFER_SIZE.defaultValue()),
+                CobbleOptions.DIRECT_IO_BUFFER_POOL_MAX_SIZE.defaultValue());
         ensureCobbleLoaded();
     }
 
@@ -71,12 +87,16 @@ public class CobbleStateBackend extends AbstractManagedMemoryStateBackend
             CobbleMemoryConfiguration memoryConfiguration,
             String checkpointDirectory,
             boolean localDirPrimaryHighPriority,
-            boolean manualTtlTimeProviderForTests) {
+            boolean manualTtlTimeProviderForTests,
+            int directIoBufferSizeBytes,
+            int directIoBufferPoolMaxSize) {
         this.localDbDirectories = localDbDirectories;
         this.memoryConfiguration = memoryConfiguration;
         this.checkpointDirectory = checkpointDirectory;
         this.localDirPrimaryHighPriority = localDirPrimaryHighPriority;
         this.manualTtlTimeProviderForTests = manualTtlTimeProviderForTests;
+        this.directIoBufferSizeBytes = directIoBufferSizeBytes;
+        this.directIoBufferPoolMaxSize = directIoBufferPoolMaxSize;
     }
 
     private CobbleStateBackend(CobbleStateBackend original, ReadableConfig config) {
@@ -96,6 +116,11 @@ public class CobbleStateBackend extends AbstractManagedMemoryStateBackend
                 original.localDirPrimaryHighPriority
                         || config.get(CobbleOptions.LOCAL_DIR_PRIMARY_HIGH_PRIORITY);
         this.manualTtlTimeProviderForTests = original.manualTtlTimeProviderForTests;
+        this.directIoBufferSizeBytes =
+                toDirectIoBufferSizeBytes(config.get(CobbleOptions.DIRECT_IO_BUFFER_SIZE));
+        this.directIoBufferPoolMaxSize =
+                toDirectIoBufferPoolMaxSize(
+                        config.get(CobbleOptions.DIRECT_IO_BUFFER_POOL_MAX_SIZE));
         this.latencyTrackingConfigBuilder = original.latencyTrackingConfigBuilder.configure(config);
     }
 
@@ -212,8 +237,29 @@ public class CobbleStateBackend extends AbstractManagedMemoryStateBackend
                         checkpointDirectory,
                         localDirPrimaryHighPriority,
                         managedMemoryFraction,
-                        manualTtlTimeProviderForTests)
+                        manualTtlTimeProviderForTests,
+                        directIoBufferSizeBytes,
+                        directIoBufferPoolMaxSize)
                 .build();
+    }
+
+    private static int toDirectIoBufferSizeBytes(org.apache.flink.configuration.MemorySize size) {
+        long bytes = size.getBytes();
+        if (bytes <= 0 || bytes > Integer.MAX_VALUE) {
+            throw new IllegalConfigurationException(
+                    "state.backend.cobble.direct-io.buffer-size must be in (0, "
+                            + Integer.MAX_VALUE
+                            + "] bytes");
+        }
+        return (int) bytes;
+    }
+
+    private static int toDirectIoBufferPoolMaxSize(int poolMaxSize) {
+        if (poolMaxSize <= 0) {
+            throw new IllegalConfigurationException(
+                    "state.backend.cobble.direct-io.pool-max-size must be > 0");
+        }
+        return poolMaxSize;
     }
 
     /**

@@ -38,8 +38,8 @@ final class CobbleValueState<K, N, V> extends AbstractCobbleState<K, N, V>
 
     @Override
     public V value() throws IOException {
-        byte[] stored = getCurrentBytes();
-        return stored == null ? defaultValue() : deserializeValue(valueSerializer, stored);
+        V stored = getCurrentDirectValue(valueSerializer);
+        return stored == null ? defaultValue() : stored;
     }
 
     @Override
@@ -48,7 +48,7 @@ final class CobbleValueState<K, N, V> extends AbstractCobbleState<K, N, V>
             clear();
             return;
         }
-        putCurrentBytes(serializeValue(valueSerializer, value));
+        putCurrentDirectValue(valueSerializer, value);
     }
 
     @Override

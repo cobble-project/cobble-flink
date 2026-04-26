@@ -53,6 +53,8 @@ final class CobbleKeyedStateBackendBuilder<K> {
     private final boolean localDirPrimaryHighPriority;
     private final double managedMemoryFraction;
     private final boolean manualTtlTimeProviderForTests;
+    private final int directIoBufferSizeBytes;
+    private final int directIoBufferPoolMaxSize;
 
     CobbleKeyedStateBackendBuilder(
             Environment env,
@@ -70,7 +72,9 @@ final class CobbleKeyedStateBackendBuilder<K> {
             String checkpointDirectory,
             boolean localDirPrimaryHighPriority,
             double managedMemoryFraction,
-            boolean manualTtlTimeProviderForTests) {
+            boolean manualTtlTimeProviderForTests,
+            int directIoBufferSizeBytes,
+            int directIoBufferPoolMaxSize) {
         this.env = env;
         this.kvStateRegistry = kvStateRegistry;
         this.keySerializer = keySerializer;
@@ -87,6 +91,8 @@ final class CobbleKeyedStateBackendBuilder<K> {
         this.localDirPrimaryHighPriority = localDirPrimaryHighPriority;
         this.managedMemoryFraction = managedMemoryFraction;
         this.manualTtlTimeProviderForTests = manualTtlTimeProviderForTests;
+        this.directIoBufferSizeBytes = directIoBufferSizeBytes;
+        this.directIoBufferPoolMaxSize = directIoBufferPoolMaxSize;
     }
 
     /** Builds the minimal keyed-backend shell after Cobble resources are prepared. */
@@ -217,6 +223,8 @@ final class CobbleKeyedStateBackendBuilder<K> {
                         : Config.TimeProviderKind.SYSTEM;
         config.logPath = new File(instanceBasePath, COBBLE_LOG_FILE_NAME).getAbsolutePath();
         config.logConsole = Boolean.FALSE;
+        config.jniDirectBufferSize = directIoBufferSizeBytes;
+        config.jniDirectBufferPoolSize = directIoBufferPoolMaxSize;
 
         OptionalLong totalMemoryBytes =
                 memoryConfiguration.resolveTotalMemoryBytes(env, managedMemoryFraction);

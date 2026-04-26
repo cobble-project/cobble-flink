@@ -50,6 +50,22 @@ public final class CobbleOptions {
                     .defaultValue(2)
                     .withDescription("The number of memtable buffers kept in memory.");
 
+    /** Byte size of each pooled direct ByteBuffer used by Cobble structured direct reads. */
+    public static final ConfigOption<MemorySize> DIRECT_IO_BUFFER_SIZE =
+            ConfigOptions.key("state.backend.cobble.direct-io.buffer-size")
+                    .memoryType()
+                    .defaultValue(MemorySize.parse("2kb"))
+                    .withDescription(
+                            "The size of each pooled direct ByteBuffer used by Cobble structured direct reads.");
+
+    /** Maximum number of pooled direct ByteBuffers kept for Cobble structured direct reads. */
+    public static final ConfigOption<Integer> DIRECT_IO_BUFFER_POOL_MAX_SIZE =
+            ConfigOptions.key("state.backend.cobble.direct-io.pool-max-size")
+                    .intType()
+                    .defaultValue(64)
+                    .withDescription(
+                            "The maximum number of pooled direct ByteBuffers kept for Cobble structured direct reads.");
+
     /**
      * Whether the local Cobble working directory should remain a high-priority primary volume when
      * a Flink checkpoint directory is configured.
