@@ -1,6 +1,8 @@
 package io.cobble.flink.state;
 
 import io.cobble.structured.Db;
+import io.cobble.structured.DirectScanCursor;
+import io.cobble.structured.DirectScanRow;
 import io.cobble.structured.Row;
 import io.cobble.structured.ScanCursor;
 
@@ -29,6 +31,8 @@ final class CobbleMapState<K, N, UK, UV> extends AbstractCobbleState<K, N, Map<U
     private final TypeSerializer<UK> userKeySerializer;
     private final TypeSerializer<UV> userValueSerializer;
     private final DataInputDeserializer userKeyInputView;
+    private ByteBuffer directScanStartBuffer;
+    private ByteBuffer directScanEndBuffer;
 
     CobbleMapState(
             CobbleKeyedStateBackend<K> backend,
@@ -49,6 +53,8 @@ final class CobbleMapState<K, N, UK, UV> extends AbstractCobbleState<K, N, Map<U
         this.userKeySerializer = mapSerializer.getKeySerializer();
         this.userValueSerializer = mapSerializer.getValueSerializer();
         this.userKeyInputView = new DataInputDeserializer();
+        this.directScanStartBuffer = ByteBuffer.allocateDirect(128);
+        this.directScanEndBuffer = ByteBuffer.allocateDirect(128);
     }
 
     @Override
@@ -184,9 +190,16 @@ final class CobbleMapState<K, N, UK, UV> extends AbstractCobbleState<K, N, Map<U
         byte[] namespaceBytes = serializeValue(namespaceSerializer, namespace);
         LinkedHashMap<DUK, DUV> entries = new LinkedHashMap<>();
 
-        try (ScanCursor cursor = scanRows(bucket, scanStartKey(keyPrefix), scanEndKey(keyPrefix))) {
-            for (Row row : cursor) {
-                byte[] rowKey = row.getKey();
+        DirectScanBounds directScanBounds = prepareDirectScanBounds(keyPrefix);
+        try (DirectScanCursor cursor =
+                scanDirectRows(
+                        bucket,
+                        directScanBounds.startKeyBuffer,
+                        directScanBounds.startKeyLength,
+                        directScanBounds.endKeyBuffer,
+                        directScanBounds.endKeyLength)) {
+            for (DirectScanRow row : cursor) {
+                ByteBuffer rowKey = row.getKey();
                 if (!startsWithMapKeyPrefix(rowKey, keyPrefix)) {
                     break;
                 }
@@ -195,10 +208,12 @@ final class CobbleMapState<K, N, UK, UV> extends AbstractCobbleState<K, N, Map<U
                 }
                 DUK userKey =
                         deserializeUserKey(deserializedUserKeySerializer, rowKey, keyPrefix.length);
+                ByteBuffer directValue = row.getBytes(STATE_COLUMN_INDEX);
                 entries.put(
                         userKey,
-                        deserializeValue(
-                                deserializedUserValueSerializer, row.getBytes(STATE_COLUMN_INDEX)));
+                        directValue == null
+                                ? null
+                                : deserializeValue(deserializedUserValueSerializer, directValue));
             }
         }
 
@@ -256,6 +271,18 @@ final class CobbleMapState<K, N, UK, UV> extends AbstractCobbleState<K, N, Map<U
         return deserializedUserKeySerializer.deserialize(userKeyInputView);
     }
 
+    private <DUK> DUK deserializeUserKey(
+            TypeSerializer<DUK> deserializedUserKeySerializer,
+            ByteBuffer rowKey,
+            int keyPrefixLength)
+            throws IOException {
+        int userKeyLength = readTrailingInt(rowKey, Integer.BYTES);
+        ByteBuffer userKeyView = rowKey.duplicate();
+        userKeyView.position(keyPrefixLength + 1);
+        userKeyView.limit(keyPrefixLength + 1 + userKeyLength);
+        return deserializeValue(deserializedUserKeySerializer, userKeyView.slice());
+    }
+
     /** Checks whether a scanned row belongs to the current map-key range. */
     private static boolean startsWithMapKeyPrefix(byte[] bytes, byte[] keyPrefix) {
         if (bytes.length <= keyPrefix.length || bytes[keyPrefix.length] != 0) {
@@ -263,6 +290,18 @@ final class CobbleMapState<K, N, UK, UV> extends AbstractCobbleState<K, N, Map<U
         }
         for (int index = 0; index < keyPrefix.length; index++) {
             if (bytes[index] != keyPrefix[index]) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    private static boolean startsWithMapKeyPrefix(ByteBuffer bytes, byte[] keyPrefix) {
+        if (bytes.limit() <= keyPrefix.length || bytes.get(keyPrefix.length) != 0) {
+            return false;
+        }
+        for (int index = 0; index < keyPrefix.length; index++) {
+            if (bytes.get(index) != keyPrefix[index]) {
                 return false;
             }
         }
@@ -296,12 +335,46 @@ final class CobbleMapState<K, N, UK, UV> extends AbstractCobbleState<K, N, Map<U
         return true;
     }
 
+    private static boolean matchesNamespace(
+            ByteBuffer rowKey, int keyPrefixLength, byte[] namespaceBytes) {
+        if (rowKey.limit() < keyPrefixLength + 1 + namespaceBytes.length + (Integer.BYTES * 2)) {
+            return false;
+        }
+
+        int keyLength = readTrailingInt(rowKey, Integer.BYTES * 2);
+        int userKeyLength = readTrailingInt(rowKey, Integer.BYTES);
+        if (keyLength != keyPrefixLength || userKeyLength < 0) {
+            return false;
+        }
+
+        int namespaceStart = keyPrefixLength + 1 + userKeyLength;
+        int namespaceLength = rowKey.limit() - namespaceStart - (Integer.BYTES * 2);
+        if (namespaceLength != namespaceBytes.length) {
+            return false;
+        }
+
+        for (int index = 0; index < namespaceLength; index++) {
+            if (rowKey.get(namespaceStart + index) != namespaceBytes[index]) {
+                return false;
+            }
+        }
+        return true;
+    }
+
     private static int readTrailingInt(byte[] bytes, int fromEnd) {
         int start = bytes.length - fromEnd;
         return ((bytes[start] & 0xFF) << 24)
                 | ((bytes[start + 1] & 0xFF) << 16)
                 | ((bytes[start + 2] & 0xFF) << 8)
                 | (bytes[start + 3] & 0xFF);
+    }
+
+    private static int readTrailingInt(ByteBuffer bytes, int fromEnd) {
+        int start = bytes.limit() - fromEnd;
+        return ((bytes.get(start) & 0xFF) << 24)
+                | ((bytes.get(start + 1) & 0xFF) << 16)
+                | ((bytes.get(start + 2) & 0xFF) << 8)
+                | (bytes.get(start + 3) & 0xFF);
     }
 
     /** The map-entry scan starts at key + 0x00 so it skips any unrelated prefixes. */
@@ -318,5 +391,48 @@ final class CobbleMapState<K, N, UK, UV> extends AbstractCobbleState<K, N, Map<U
         byte[] result = Arrays.copyOf(bytes, bytes.length + 1);
         result[bytes.length] = suffix;
         return result;
+    }
+
+    private DirectScanBounds prepareDirectScanBounds(byte[] keyPrefix) {
+        int keyLength = keyPrefix.length + 1;
+        directScanStartBuffer = ensureCapacity(directScanStartBuffer, keyLength);
+        directScanEndBuffer = ensureCapacity(directScanEndBuffer, keyLength);
+        directScanStartBuffer.clear();
+        directScanStartBuffer.put(keyPrefix);
+        directScanStartBuffer.put((byte) 0x00);
+        directScanEndBuffer.clear();
+        directScanEndBuffer.put(keyPrefix);
+        directScanEndBuffer.put((byte) 0xFF);
+        return new DirectScanBounds(
+                directScanStartBuffer, keyLength, directScanEndBuffer, keyLength);
+    }
+
+    private static ByteBuffer ensureCapacity(ByteBuffer buffer, int requiredCapacity) {
+        if (buffer.capacity() >= requiredCapacity) {
+            return buffer;
+        }
+        int newCapacity = buffer.capacity();
+        while (newCapacity < requiredCapacity) {
+            newCapacity = Math.max(requiredCapacity, newCapacity << 1);
+        }
+        return ByteBuffer.allocateDirect(newCapacity);
+    }
+
+    private static final class DirectScanBounds {
+        private final ByteBuffer startKeyBuffer;
+        private final int startKeyLength;
+        private final ByteBuffer endKeyBuffer;
+        private final int endKeyLength;
+
+        private DirectScanBounds(
+                ByteBuffer startKeyBuffer,
+                int startKeyLength,
+                ByteBuffer endKeyBuffer,
+                int endKeyLength) {
+            this.startKeyBuffer = startKeyBuffer;
+            this.startKeyLength = startKeyLength;
+            this.endKeyBuffer = endKeyBuffer;
+            this.endKeyLength = endKeyLength;
+        }
     }
 }

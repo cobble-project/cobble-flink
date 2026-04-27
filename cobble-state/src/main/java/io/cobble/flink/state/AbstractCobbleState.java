@@ -3,6 +3,7 @@ package io.cobble.flink.state;
 import io.cobble.structured.ColumnValue;
 import io.cobble.structured.Db;
 import io.cobble.structured.DirectRow;
+import io.cobble.structured.DirectScanCursor;
 import io.cobble.structured.ReadOptions;
 import io.cobble.structured.Row;
 import io.cobble.structured.ScanCursor;
@@ -305,6 +306,21 @@ abstract class AbstractCobbleState<K, N, V> implements InternalKvState<K, N, V>,
     protected final ScanCursor scanRows(
             int bucket, byte[] startKeyInclusive, byte[] endKeyExclusive) {
         return db.scanWithOptions(bucket, startKeyInclusive, endKeyExclusive, scanOptions);
+    }
+
+    protected final DirectScanCursor scanDirectRows(
+            int bucket,
+            ByteBuffer startKeyInclusive,
+            int startKeyLength,
+            ByteBuffer endKeyExclusive,
+            int endKeyLength) {
+        return db.scanDirectWithOptions(
+                bucket,
+                startKeyInclusive,
+                startKeyLength,
+                endKeyExclusive,
+                endKeyLength,
+                scanOptions);
     }
 
     protected void clearState(K key, N namespace) throws IOException {
