@@ -252,8 +252,6 @@ public final class StateBackendBenchmarkUtils {
                 CobbleOptions.LOCAL_DIRECTORIES,
                 new File(benchmarkRoot, "cobble-local").getAbsolutePath());
         configuration.set(CobbleOptions.MEMTABLE_TYPE, "skiplist");
-        configuration.set(CobbleOptions.WRITE_BUFFER_RATIO, 0.25d);
-        configuration.set(CobbleOptions.MEMTABLE_BUFFER_COUNT, 4);
 
         CobbleStateBackend backend =
                 new CobbleStateBackend()
@@ -272,7 +270,7 @@ public final class StateBackendBenchmarkUtils {
                 resolveMetricGroup(environment),
                 Collections.<KeyedStateHandle>emptyList(),
                 cancelStreamRegistry,
-                0.5d);
+                1.0d);
     }
 
     private static JobID resolveJobId(MockEnvironment environment) {
