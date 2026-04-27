@@ -50,6 +50,53 @@ public final class CobbleOptions {
                     .defaultValue(2)
                     .withDescription("The number of memtable buffers kept in memory.");
 
+    /** Memtable implementation type used by Cobble (hash, skiplist, vec). */
+    public static final ConfigOption<String> MEMTABLE_TYPE =
+            ConfigOptions.key("state.backend.cobble.memtable.type")
+                    .stringType()
+                    .defaultValue("hash")
+                    .withDescription(
+                            "The memtable implementation used by Cobble. Supported values: hash, skiplist, vec.");
+
+    /** Compaction policy used by Cobble (round_robin, min_overlap). */
+    public static final ConfigOption<String> COMPACTION_POLICY =
+            ConfigOptions.key("state.backend.cobble.compaction.policy")
+                    .stringType()
+                    .defaultValue("round_robin")
+                    .withDescription(
+                            "The compaction policy used by Cobble. Supported values: round_robin, min_overlap.");
+
+    /** Whether Cobble should enable SST bloom filters. */
+    public static final ConfigOption<Boolean> SST_BLOOM_FILTER_ENABLED =
+            ConfigOptions.key("state.backend.cobble.sst.bloom-filter.enabled")
+                    .booleanType()
+                    .defaultValue(false)
+                    .withDescription("Whether Cobble should enable bloom filters for SST files.");
+
+    /** Bloom filter bits per key when SST bloom filters are enabled. */
+    public static final ConfigOption<Integer> SST_BLOOM_FILTER_BITS_PER_KEY =
+            ConfigOptions.key("state.backend.cobble.sst.bloom-filter.bits-per-key")
+                    .intType()
+                    .defaultValue(10)
+                    .withDescription(
+                            "The bloom filter bits-per-key value used when SST bloom filters are enabled.");
+
+    /** Whether Cobble should enable partitioned SST index/filter blocks. */
+    public static final ConfigOption<Boolean> SST_PARTITIONED_INDEX_ENABLED =
+            ConfigOptions.key("state.backend.cobble.sst.partitioned-index.enabled")
+                    .booleanType()
+                    .defaultValue(false)
+                    .withDescription(
+                            "Whether Cobble should enable partitioned index/filter blocks for SST files.");
+
+    /** Threshold above which values are separated into the value log. */
+    public static final ConfigOption<MemorySize> VALUE_SEPARATION_THRESHOLD =
+            ConfigOptions.key("state.backend.cobble.value-separation.threshold")
+                    .memoryType()
+                    .noDefaultValue()
+                    .withDescription(
+                            "Values larger than this threshold are separated into Cobble's value log.");
+
     /** Byte size of each pooled direct ByteBuffer used by Cobble structured direct reads. */
     public static final ConfigOption<MemorySize> DIRECT_IO_BUFFER_SIZE =
             ConfigOptions.key("state.backend.cobble.direct-io.buffer-size")
@@ -65,6 +112,38 @@ public final class CobbleOptions {
                     .defaultValue(64)
                     .withDescription(
                             "The maximum number of pooled direct ByteBuffers kept for Cobble structured direct reads.");
+
+    /** Maximum size of the active Cobble log file before rolling. */
+    public static final ConfigOption<MemorySize> LOG_MAX_FILE_SIZE =
+            ConfigOptions.key("state.backend.cobble.log.max-file-size")
+                    .memoryType()
+                    .defaultValue(MemorySize.parse("10mb"))
+                    .withDescription(
+                            "The maximum size of the active Cobble log file before it is rolled.");
+
+    /** Total number of Cobble log files to keep, including the active file. */
+    public static final ConfigOption<Integer> LOG_KEEP_FILES =
+            ConfigOptions.key("state.backend.cobble.log.keep-files")
+                    .intType()
+                    .defaultValue(3)
+                    .withDescription(
+                            "The total number of Cobble log files to keep, including the active file.");
+
+    /** Log level used by Cobble native logging. */
+    public static final ConfigOption<String> LOG_LEVEL =
+            ConfigOptions.key("state.backend.cobble.log.level")
+                    .stringType()
+                    .defaultValue("info")
+                    .withDescription(
+                            "The log level used by Cobble native logging. Supported values: trace, debug, info, warn, error, off.");
+
+    /** Automatically expire older Cobble snapshots after this many newer snapshots. */
+    public static final ConfigOption<Integer> SNAPSHOT_RETENTION =
+            ConfigOptions.key("state.backend.cobble.snapshot.retention")
+                    .intType()
+                    .noDefaultValue()
+                    .withDescription(
+                            "Automatically expire older Cobble snapshots after this many newer snapshots have completed.");
 
     /**
      * Whether the local Cobble working directory should remain a high-priority primary volume when

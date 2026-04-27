@@ -267,6 +267,79 @@ class CobbleStateBackendTest {
     }
 
     @Test
+    void createVolumeDescriptorsCopiesS3CheckpointCredentialsFromFlinkConfig(
+            @TempDir Path tempDir) {
+        File instanceBasePath = tempDir.resolve("instance").toFile();
+        Configuration configuration = new Configuration();
+        configuration.setString("s3.access-key", "test-access-id");
+        configuration.setString("s3.secret-key", "test-secret-key");
+
+        List<Config.VolumeDescriptor> volumes =
+                CobbleKeyedStateBackendBuilder.createVolumeDescriptors(
+                        instanceBasePath,
+                        CHECKPOINT_SCOPE,
+                        "s3://127.0.0.1:9000/cobble-test/checkpoints?endpoint_scheme=http&region=us-east-1",
+                        false,
+                        configuration);
+
+        Config.VolumeDescriptor checkpointVolume = volumes.get(0);
+        assertEquals("test-access-id", checkpointVolume.accessId);
+        assertEquals("test-secret-key", checkpointVolume.secretKey);
+        assertNotNull(checkpointVolume.customOptions);
+        assertEquals("true", checkpointVolume.customOptions.get("disable_config_load"));
+        assertEquals("true", checkpointVolume.customOptions.get("disable_ec2_metadata"));
+        assertNull(checkpointVolume.customOptions.get("endpoint"));
+    }
+
+    @Test
+    void createVolumeDescriptorsCopiesS3EndpointSettingsFromFlinkConfig(@TempDir Path tempDir) {
+        File instanceBasePath = tempDir.resolve("instance").toFile();
+        Configuration configuration = new Configuration();
+        configuration.setString("s3.endpoint", "http://127.0.0.1:9000");
+        configuration.setString("s3.path.style.access", "true");
+
+        List<Config.VolumeDescriptor> volumes =
+                CobbleKeyedStateBackendBuilder.createVolumeDescriptors(
+                        instanceBasePath,
+                        CHECKPOINT_SCOPE,
+                        "s3://cobble-test/checkpoints",
+                        false,
+                        configuration);
+
+        Config.VolumeDescriptor checkpointVolume = volumes.get(0);
+        assertNotNull(checkpointVolume.customOptions);
+        assertEquals("http://127.0.0.1:9000", checkpointVolume.customOptions.get("endpoint"));
+        assertEquals("false", checkpointVolume.customOptions.get("enable_virtual_host_style"));
+        assertEquals("us-east-1", checkpointVolume.customOptions.get("region"));
+    }
+
+    @Test
+    void createVolumeDescriptorsCopiesOssCheckpointCredentialsFromFlinkConfig(
+            @TempDir Path tempDir) {
+        File instanceBasePath = tempDir.resolve("instance").toFile();
+        Configuration configuration = new Configuration();
+        configuration.setString("fs.oss.accessKeyId", "oss-access-id");
+        configuration.setString("fs.oss.accessKeySecret", "oss-secret-key");
+        configuration.setString("fs.oss.endpoint", "oss-cn-hangzhou.aliyuncs.com");
+
+        List<Config.VolumeDescriptor> volumes =
+                CobbleKeyedStateBackendBuilder.createVolumeDescriptors(
+                        instanceBasePath,
+                        CHECKPOINT_SCOPE,
+                        "oss://example-bucket/checkpoints",
+                        false,
+                        configuration);
+
+        Config.VolumeDescriptor checkpointVolume = volumes.get(0);
+        assertEquals("oss-access-id", checkpointVolume.accessId);
+        assertEquals("oss-secret-key", checkpointVolume.secretKey);
+        assertNotNull(checkpointVolume.customOptions);
+        assertEquals(
+                "https://oss-cn-hangzhou.aliyuncs.com",
+                checkpointVolume.customOptions.get("endpoint"));
+    }
+
+    @Test
     void timerStateUsesHeapPriorityQueueImplementation(@TempDir Path tempDir) throws Exception {
         try (TestBackendContext context = createBackendContext(tempDir, false, null)) {
             CobbleKeyedStateBackend<Integer> backend = context.cobbleBackend;
@@ -289,6 +362,51 @@ class CobbleStateBackendTest {
             backend.setCurrentKey(1);
             assertEquals(later, queue.poll());
             assertTrue(queue.isEmpty());
+        }
+    }
+
+    @Test
+    void createKeyedStateBackendAppliesSelectedCobbleOptionsFromFlinkConfig(@TempDir Path tempDir)
+            throws Exception {
+        Configuration overrides = new Configuration();
+        overrides.set(CobbleOptions.MEMTABLE_TYPE, "skiplist");
+        overrides.set(CobbleOptions.COMPACTION_POLICY, "min_overlap");
+        overrides.set(CobbleOptions.SST_BLOOM_FILTER_ENABLED, true);
+        overrides.set(CobbleOptions.SST_BLOOM_FILTER_BITS_PER_KEY, 15);
+        overrides.set(CobbleOptions.SST_PARTITIONED_INDEX_ENABLED, true);
+        overrides.set(CobbleOptions.DIRECT_IO_BUFFER_SIZE, MemorySize.parse("8kb"));
+        overrides.set(CobbleOptions.DIRECT_IO_BUFFER_POOL_MAX_SIZE, 128);
+        overrides.set(CobbleOptions.LOG_LEVEL, "debug");
+        overrides.set(CobbleOptions.LOG_MAX_FILE_SIZE, MemorySize.parse("16mb"));
+        overrides.set(CobbleOptions.LOG_KEEP_FILES, 5);
+        overrides.set(CobbleOptions.VALUE_SEPARATION_THRESHOLD, MemorySize.parse("4kb"));
+        overrides.set(CobbleOptions.SNAPSHOT_RETENTION, 3);
+
+        try (TestBackendContext context =
+                createBackendContext(
+                        tempDir,
+                        false,
+                        null,
+                        null,
+                        TtlTimeProvider.DEFAULT,
+                        false,
+                        Collections.emptyList(),
+                        KeyGroupRange.of(0, 15),
+                        overrides)) {
+            Config config = context.cobbleBackend.getCobbleConfig();
+            assertEquals(Config.MemtableType.SKIPLIST, config.memtableType);
+            assertEquals(Config.CompactionPolicyKind.MIN_OVERLAP, config.compactionPolicy);
+            assertTrue(config.sstBloomFilterEnabled);
+            assertEquals(15, config.sstBloomBitsPerKey.intValue());
+            assertTrue(config.sstPartitionedIndex);
+            assertEquals(8 * 1024, config.jniDirectBufferSize.intValue());
+            assertEquals(128, config.jniDirectBufferPoolSize.intValue());
+            assertEquals("DEBUG", config.logLevel);
+            assertEquals(16 * 1024 * 1024, config.logMaxFileSize.intValue());
+            assertEquals(5, config.logKeepFiles.intValue());
+            assertEquals(4 * 1024, config.valueSeparationThreshold.intValue());
+            assertEquals(3, config.snapshotRetention.intValue());
+            assertEquals(1, config.numColumns.intValue());
         }
     }
 
@@ -1108,7 +1226,8 @@ class CobbleStateBackendTest {
                 ttlTimeProvider,
                 manualCobbleTtlTimeProviderForTests,
                 stateHandles,
-                KeyGroupRange.of(0, 15));
+                KeyGroupRange.of(0, 15),
+                new Configuration());
     }
 
     private TestBackendContext createBackendContext(
@@ -1121,6 +1240,29 @@ class CobbleStateBackendTest {
             Collection<KeyedStateHandle> stateHandles,
             KeyGroupRange keyGroupRange)
             throws Exception {
+        return createBackendContext(
+                tempDir,
+                localDirPrimaryHighPriority,
+                checkpointDirectory,
+                fixedMemoryPerSlot,
+                ttlTimeProvider,
+                manualCobbleTtlTimeProviderForTests,
+                stateHandles,
+                keyGroupRange,
+                new Configuration());
+    }
+
+    private TestBackendContext createBackendContext(
+            Path tempDir,
+            boolean localDirPrimaryHighPriority,
+            String checkpointDirectory,
+            MemorySize fixedMemoryPerSlot,
+            TtlTimeProvider ttlTimeProvider,
+            boolean manualCobbleTtlTimeProviderForTests,
+            Collection<KeyedStateHandle> stateHandles,
+            KeyGroupRange keyGroupRange,
+            Configuration extraConfiguration)
+            throws Exception {
         Path configuredLocalDir = tempDir.resolve("configured-local-dir");
         Path taskManagerWorkingDir = tempDir.resolve("tm-working-dir");
 
@@ -1128,6 +1270,8 @@ class CobbleStateBackendTest {
         configuration.set(CobbleOptions.LOCAL_DIRECTORIES, configuredLocalDir.toString());
         configuration.set(CobbleOptions.WRITE_BUFFER_RATIO, 0.25d);
         configuration.set(CobbleOptions.MEMTABLE_BUFFER_COUNT, 4);
+        configuration.set(CobbleOptions.DIRECT_IO_BUFFER_SIZE, MemorySize.parse("8kb"));
+        configuration.set(CobbleOptions.DIRECT_IO_BUFFER_POOL_MAX_SIZE, 128);
         configuration.set(
                 CobbleOptions.LOCAL_DIR_PRIMARY_HIGH_PRIORITY, localDirPrimaryHighPriority);
         if (fixedMemoryPerSlot != null) {
@@ -1136,6 +1280,7 @@ class CobbleStateBackendTest {
         if (checkpointDirectory != null) {
             configuration.set(CheckpointingOptions.CHECKPOINTS_DIRECTORY, checkpointDirectory);
         }
+        configuration.addAll(extraConfiguration);
 
         CobbleStateBackend backend =
                 new CobbleStateBackend(manualCobbleTtlTimeProviderForTests)

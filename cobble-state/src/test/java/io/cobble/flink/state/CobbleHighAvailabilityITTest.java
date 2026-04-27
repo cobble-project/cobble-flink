@@ -12,6 +12,7 @@ import org.apache.flink.api.common.state.ValueStateDescriptor;
 import org.apache.flink.configuration.CheckpointingOptions;
 import org.apache.flink.configuration.Configuration;
 import org.apache.flink.configuration.HighAvailabilityOptions;
+import org.apache.flink.configuration.MemorySize;
 import org.apache.flink.runtime.jobgraph.JobGraph;
 import org.apache.flink.runtime.jobgraph.SavepointRestoreSettings;
 import org.apache.flink.runtime.state.filesystem.AbstractFsCheckpointStorageAccess;
@@ -128,6 +129,8 @@ class CobbleHighAvailabilityITTest {
         jobConfiguration.set(CobbleOptions.LOCAL_DIRECTORIES, localStateRoot.toString());
         jobConfiguration.set(CobbleOptions.WRITE_BUFFER_RATIO, 0.25d);
         jobConfiguration.set(CobbleOptions.MEMTABLE_BUFFER_COUNT, 4);
+        jobConfiguration.set(CobbleOptions.DIRECT_IO_BUFFER_SIZE, MemorySize.parse("8kb"));
+        jobConfiguration.set(CobbleOptions.DIRECT_IO_BUFFER_POOL_MAX_SIZE, 128);
 
         StreamExecutionEnvironment env =
                 StreamExecutionEnvironment.getExecutionEnvironment(jobConfiguration);

@@ -17,6 +17,7 @@ import org.apache.flink.api.common.typeutils.base.IntSerializer;
 import org.apache.flink.api.common.typeutils.base.StringSerializer;
 import org.apache.flink.configuration.CheckpointingOptions;
 import org.apache.flink.configuration.Configuration;
+import org.apache.flink.configuration.MemorySize;
 import org.apache.flink.core.fs.CloseableRegistry;
 import org.apache.flink.runtime.checkpoint.CheckpointProperties;
 import org.apache.flink.runtime.checkpoint.CheckpointRetentionPolicy;
@@ -726,6 +727,8 @@ class CobbleHighAvailabilityServicesTest {
         configuration.set(CobbleOptions.LOCAL_DIRECTORIES, configuredLocalDir.toString());
         configuration.set(CobbleOptions.WRITE_BUFFER_RATIO, 0.25d);
         configuration.set(CobbleOptions.MEMTABLE_BUFFER_COUNT, 4);
+        configuration.set(CobbleOptions.DIRECT_IO_BUFFER_SIZE, MemorySize.parse("8kb"));
+        configuration.set(CobbleOptions.DIRECT_IO_BUFFER_POOL_MAX_SIZE, 128);
         configuration.set(CheckpointingOptions.CHECKPOINTS_DIRECTORY, checkpointDirectory);
 
         CobbleStateBackend backend =

@@ -5,6 +5,7 @@ import io.cobble.NativeLoader;
 import org.apache.flink.api.common.JobID;
 import org.apache.flink.api.common.typeutils.TypeSerializer;
 import org.apache.flink.configuration.CheckpointingOptions;
+import org.apache.flink.configuration.Configuration;
 import org.apache.flink.configuration.IllegalConfigurationException;
 import org.apache.flink.configuration.ReadableConfig;
 import org.apache.flink.core.execution.SavepointFormatType;
@@ -55,18 +56,10 @@ public class CobbleStateBackend extends AbstractManagedMemoryStateBackend
     private final String checkpointDirectory;
     private final boolean localDirPrimaryHighPriority;
     private final boolean manualTtlTimeProviderForTests;
-    private final int directIoBufferSizeBytes;
-    private final int directIoBufferPoolMaxSize;
+    private final Configuration flinkConfig;
 
     public CobbleStateBackend() {
-        this(
-                null,
-                new CobbleMemoryConfiguration(),
-                null,
-                false,
-                false,
-                toDirectIoBufferSizeBytes(CobbleOptions.DIRECT_IO_BUFFER_SIZE.defaultValue()),
-                CobbleOptions.DIRECT_IO_BUFFER_POOL_MAX_SIZE.defaultValue());
+        this(null, new CobbleMemoryConfiguration(), null, false, false, new Configuration());
         ensureCobbleLoaded();
     }
 
@@ -77,8 +70,7 @@ public class CobbleStateBackend extends AbstractManagedMemoryStateBackend
                 null,
                 false,
                 manualTtlTimeProviderForTests,
-                toDirectIoBufferSizeBytes(CobbleOptions.DIRECT_IO_BUFFER_SIZE.defaultValue()),
-                CobbleOptions.DIRECT_IO_BUFFER_POOL_MAX_SIZE.defaultValue());
+                new Configuration());
         ensureCobbleLoaded();
     }
 
@@ -88,15 +80,13 @@ public class CobbleStateBackend extends AbstractManagedMemoryStateBackend
             String checkpointDirectory,
             boolean localDirPrimaryHighPriority,
             boolean manualTtlTimeProviderForTests,
-            int directIoBufferSizeBytes,
-            int directIoBufferPoolMaxSize) {
+            Configuration flinkConfig) {
         this.localDbDirectories = localDbDirectories;
         this.memoryConfiguration = memoryConfiguration;
         this.checkpointDirectory = checkpointDirectory;
         this.localDirPrimaryHighPriority = localDirPrimaryHighPriority;
         this.manualTtlTimeProviderForTests = manualTtlTimeProviderForTests;
-        this.directIoBufferSizeBytes = directIoBufferSizeBytes;
-        this.directIoBufferPoolMaxSize = directIoBufferPoolMaxSize;
+        this.flinkConfig = flinkConfig;
     }
 
     private CobbleStateBackend(CobbleStateBackend original, ReadableConfig config) {
@@ -116,11 +106,7 @@ public class CobbleStateBackend extends AbstractManagedMemoryStateBackend
                 original.localDirPrimaryHighPriority
                         || config.get(CobbleOptions.LOCAL_DIR_PRIMARY_HIGH_PRIORITY);
         this.manualTtlTimeProviderForTests = original.manualTtlTimeProviderForTests;
-        this.directIoBufferSizeBytes =
-                toDirectIoBufferSizeBytes(config.get(CobbleOptions.DIRECT_IO_BUFFER_SIZE));
-        this.directIoBufferPoolMaxSize =
-                toDirectIoBufferPoolMaxSize(
-                        config.get(CobbleOptions.DIRECT_IO_BUFFER_POOL_MAX_SIZE));
+        this.flinkConfig = mergedConfiguration(original.flinkConfig, config);
         this.latencyTrackingConfigBuilder = original.latencyTrackingConfigBuilder.configure(config);
     }
 
@@ -238,28 +224,17 @@ public class CobbleStateBackend extends AbstractManagedMemoryStateBackend
                         localDirPrimaryHighPriority,
                         managedMemoryFraction,
                         manualTtlTimeProviderForTests,
-                        directIoBufferSizeBytes,
-                        directIoBufferPoolMaxSize)
+                        flinkConfig)
                 .build();
     }
 
-    private static int toDirectIoBufferSizeBytes(org.apache.flink.configuration.MemorySize size) {
-        long bytes = size.getBytes();
-        if (bytes <= 0 || bytes > Integer.MAX_VALUE) {
-            throw new IllegalConfigurationException(
-                    "state.backend.cobble.direct-io.buffer-size must be in (0, "
-                            + Integer.MAX_VALUE
-                            + "] bytes");
+    private static Configuration mergedConfiguration(
+            Configuration baseConfiguration, ReadableConfig additionalConfig) {
+        Configuration merged = baseConfiguration.clone();
+        if (additionalConfig instanceof Configuration) {
+            merged.addAll((Configuration) additionalConfig);
         }
-        return (int) bytes;
-    }
-
-    private static int toDirectIoBufferPoolMaxSize(int poolMaxSize) {
-        if (poolMaxSize <= 0) {
-            throw new IllegalConfigurationException(
-                    "state.backend.cobble.direct-io.pool-max-size must be > 0");
-        }
-        return poolMaxSize;
+        return merged;
     }
 
     /**
