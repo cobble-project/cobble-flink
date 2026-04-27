@@ -105,7 +105,7 @@ class CobbleStateBackendTest {
     }
 
     @Test
-    void serializeMapKeyUserKeyAndNamespaceUsesKeyAndUserKeyLengthSuffixes() throws Exception {
+    void serializeMapKeyNamespaceAndUserKeyUsesKeyAndNamespaceLengthSuffixes() throws Exception {
         byte[] keyBytes = CobbleStateKeySerializer.serialize(StringSerializer.INSTANCE, "key");
         byte[] userKeyBytes = CobbleStateKeySerializer.serialize(StringSerializer.INSTANCE, "uk");
         byte[] namespaceBytes = CobbleStateKeySerializer.serialize(StringSerializer.INSTANCE, "ns");
@@ -114,22 +114,37 @@ class CobbleStateBackendTest {
                         StringSerializer.INSTANCE, 64);
 
         byte[] encoded =
-                builder.buildMapKeyUserKeyAndNamespace(
+                builder.buildMapKeyNamespaceAndUserKey(
                         "key", StringSerializer.INSTANCE, "uk", StringSerializer.INSTANCE, "ns");
 
         assertEquals(
                 keyBytes.length
+                        + namespaceBytes.length
                         + 1
                         + userKeyBytes.length
-                        + namespaceBytes.length
                         + (Integer.BYTES * 2),
                 encoded.length);
         assertByteSegmentEquals(encoded, 0, keyBytes);
-        assertEquals(0, encoded[keyBytes.length]);
-        assertByteSegmentEquals(encoded, keyBytes.length + 1, userKeyBytes);
-        assertByteSegmentEquals(encoded, keyBytes.length + 1 + userKeyBytes.length, namespaceBytes);
-        assertEquals(userKeyBytes.length, readTrailingInt(encoded, Integer.BYTES));
+        assertByteSegmentEquals(encoded, keyBytes.length, namespaceBytes);
+        assertEquals(0, encoded[keyBytes.length + namespaceBytes.length]);
+        assertByteSegmentEquals(encoded, keyBytes.length + namespaceBytes.length + 1, userKeyBytes);
+        assertEquals(namespaceBytes.length, readTrailingInt(encoded, Integer.BYTES));
         assertEquals(keyBytes.length, readTrailingInt(encoded, Integer.BYTES * 2));
+    }
+
+    @Test
+    void serializeMapKeyNamespacePrefixContainsOnlyKeyAndNamespaceBytes() throws Exception {
+        byte[] keyBytes = CobbleStateKeySerializer.serialize(StringSerializer.INSTANCE, "key");
+        byte[] namespaceBytes = CobbleStateKeySerializer.serialize(StringSerializer.INSTANCE, "ns");
+        CobbleStateKeySerializer.ReusableSerializedKeyBuilder<String> builder =
+                new CobbleStateKeySerializer.ReusableSerializedKeyBuilder<>(
+                        StringSerializer.INSTANCE, 64);
+
+        byte[] encoded = builder.buildMapKeyNamespacePrefix("key", StringSerializer.INSTANCE, "ns");
+
+        assertEquals(keyBytes.length + namespaceBytes.length, encoded.length);
+        assertByteSegmentEquals(encoded, 0, keyBytes);
+        assertByteSegmentEquals(encoded, keyBytes.length, namespaceBytes);
     }
 
     @Test
@@ -812,6 +827,73 @@ class CobbleStateBackendTest {
             setTtlTime(backend, ttlTimeProvider, 6_000L);
             assertNull(state.get("left"));
             assertTrue(state.isEmpty());
+        }
+    }
+
+    @Test
+    void mapStateIsEmptyFiltersOtherNamespacesBeforeReturning(@TempDir Path tempDir)
+            throws Exception {
+        try (TestBackendContext context =
+                createBackendContext(tempDir, false, null, MemorySize.ofMebiBytes(1))) {
+            CobbleKeyedStateBackend<Integer> backend = context.cobbleBackend;
+            MapStateDescriptor<String, String> descriptor =
+                    new MapStateDescriptor<>(
+                            "namespace-map-state",
+                            StringSerializer.INSTANCE,
+                            StringSerializer.INSTANCE);
+
+            backend.setCurrentKey(7);
+            backend.getPartitionedState("ns-a", StringSerializer.INSTANCE, descriptor)
+                    .put("shared-user-key", "value-a");
+            backend.getPartitionedState("ns-b", StringSerializer.INSTANCE, descriptor)
+                    .put("shared-user-key", "value-b");
+
+            assertFalse(
+                    backend.getPartitionedState("ns-a", StringSerializer.INSTANCE, descriptor)
+                            .isEmpty());
+            assertFalse(
+                    backend.getPartitionedState("ns-b", StringSerializer.INSTANCE, descriptor)
+                            .isEmpty());
+            assertTrue(
+                    backend.getPartitionedState("ns-c", StringSerializer.INSTANCE, descriptor)
+                            .isEmpty());
+        }
+    }
+
+    @Test
+    void mapStateIterationAndClearStayWithinNamespace(@TempDir Path tempDir) throws Exception {
+        try (TestBackendContext context =
+                createBackendContext(tempDir, false, null, MemorySize.ofMebiBytes(1))) {
+            CobbleKeyedStateBackend<Integer> backend = context.cobbleBackend;
+            MapStateDescriptor<String, String> descriptor =
+                    new MapStateDescriptor<>(
+                            "namespace-iter-map-state",
+                            StringSerializer.INSTANCE,
+                            StringSerializer.INSTANCE);
+
+            backend.setCurrentKey(9);
+            backend.getPartitionedState("ns-a", StringSerializer.INSTANCE, descriptor)
+                    .put("shared-user-key", "value-a");
+            backend.getPartitionedState("ns-b", StringSerializer.INSTANCE, descriptor)
+                    .put("shared-user-key", "value-b");
+
+            Map<String, String> nsAEntries = new LinkedHashMap<>();
+            for (Map.Entry<String, String> entry :
+                    backend.getPartitionedState("ns-a", StringSerializer.INSTANCE, descriptor)
+                            .entries()) {
+                nsAEntries.put(entry.getKey(), entry.getValue());
+            }
+            assertEquals(Collections.singletonMap("shared-user-key", "value-a"), nsAEntries);
+
+            MapState<String, String> nsAState =
+                    backend.getPartitionedState("ns-a", StringSerializer.INSTANCE, descriptor);
+            nsAState.clear();
+            assertTrue(nsAState.isEmpty());
+
+            MapState<String, String> nsBState =
+                    backend.getPartitionedState("ns-b", StringSerializer.INSTANCE, descriptor);
+            assertFalse(nsBState.isEmpty());
+            assertEquals("value-b", nsBState.get("shared-user-key"));
         }
     }
 

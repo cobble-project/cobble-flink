@@ -86,7 +86,7 @@ final class CobbleStateKeySerializer {
             return output.getCopyOfBuffer();
         }
 
-        <K2 extends K, UK, N> byte[] buildMapKeyUserKeyAndNamespace(
+        <K2 extends K, UK, N> byte[] buildMapKeyNamespaceAndUserKey(
                 K2 key,
                 TypeSerializer<UK> userKeySerializer,
                 UK userKey,
@@ -95,12 +95,20 @@ final class CobbleStateKeySerializer {
                 throws IOException {
             ensureKeySerialized(key);
             output.setPosition(afterKeyMark);
+            namespaceSerializer.serialize(namespace, output);
+            int namespaceLength = output.length() - afterKeyMark;
             output.writeByte(0);
             userKeySerializer.serialize(userKey, output);
-            int afterUserKeyMark = output.length();
-            namespaceSerializer.serialize(namespace, output);
             output.writeInt(afterKeyMark);
-            output.writeInt(afterUserKeyMark - afterKeyMark - 1);
+            output.writeInt(namespaceLength);
+            return output.getCopyOfBuffer();
+        }
+
+        <N> byte[] buildMapKeyNamespacePrefix(
+                K key, TypeSerializer<N> namespaceSerializer, N namespace) throws IOException {
+            ensureKeySerialized(key);
+            output.setPosition(afterKeyMark);
+            namespaceSerializer.serialize(namespace, output);
             return output.getCopyOfBuffer();
         }
 
@@ -148,7 +156,7 @@ final class CobbleStateKeySerializer {
             return outputStream.currentSlice();
         }
 
-        <K2 extends K, UK, N> DirectBufferSlice buildMapKeyUserKeyAndNamespace(
+        <K2 extends K, UK, N> DirectBufferSlice buildMapKeyNamespaceAndUserKey(
                 K2 key,
                 TypeSerializer<UK> userKeySerializer,
                 UK userKey,
@@ -157,12 +165,12 @@ final class CobbleStateKeySerializer {
                 throws IOException {
             ensureKeySerialized(key);
             outputStream.setPosition(afterKeyMark);
+            namespaceSerializer.serialize(namespace, outputView);
+            int namespaceLength = outputStream.position() - afterKeyMark;
             outputView.writeByte(0);
             userKeySerializer.serialize(userKey, outputView);
-            int afterUserKeyMark = outputStream.position();
-            namespaceSerializer.serialize(namespace, outputView);
             outputView.writeInt(afterKeyMark);
-            outputView.writeInt(afterUserKeyMark - afterKeyMark - 1);
+            outputView.writeInt(namespaceLength);
             return outputStream.currentSlice();
         }
 

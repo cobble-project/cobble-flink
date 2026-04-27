@@ -141,15 +141,19 @@ abstract class AbstractCobbleState<K, N, V> implements InternalKvState<K, N, V>,
     protected final <UK> byte[] mapEntryRowKey(
             K key, N namespace, TypeSerializer<UK> userKeySerializer, UK userKey)
             throws IOException {
-        return rowKeyBuilder.buildMapKeyUserKeyAndNamespace(
+        return rowKeyBuilder.buildMapKeyNamespaceAndUserKey(
                 key, userKeySerializer, userKey, namespaceSerializer, namespace);
     }
 
     protected final <UK> CobbleStateKeySerializer.DirectBufferSlice directMapEntryRowKey(
             K key, N namespace, TypeSerializer<UK> userKeySerializer, UK userKey)
             throws IOException {
-        return directRowKeyBuilder.buildMapKeyUserKeyAndNamespace(
+        return directRowKeyBuilder.buildMapKeyNamespaceAndUserKey(
                 key, userKeySerializer, userKey, namespaceSerializer, namespace);
+    }
+
+    protected final byte[] mapKeyNamespacePrefix(K key, N namespace) throws IOException {
+        return rowKeyBuilder.buildMapKeyNamespacePrefix(key, namespaceSerializer, namespace);
     }
 
     protected final K currentKey() {
