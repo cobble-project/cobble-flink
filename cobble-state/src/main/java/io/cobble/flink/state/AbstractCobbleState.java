@@ -1,8 +1,6 @@
 package io.cobble.flink.state;
 
-import io.cobble.structured.ColumnValue;
 import io.cobble.structured.Db;
-import io.cobble.structured.DirectRow;
 import io.cobble.structured.DirectScanCursor;
 import io.cobble.structured.ReadOptions;
 import io.cobble.structured.ScanCursor;
@@ -11,14 +9,14 @@ import io.cobble.structured.WriteOptions;
 
 import org.apache.flink.api.common.state.StateTtlConfig;
 import org.apache.flink.api.common.typeutils.TypeSerializer;
+import org.apache.flink.core.memory.DataInputViewStreamWrapper;
 import org.apache.flink.runtime.state.KeyGroupRangeAssignment;
 import org.apache.flink.runtime.state.internal.InternalKvState;
 import org.apache.flink.util.Preconditions;
 
 import java.io.IOException;
+import java.io.InputStream;
 import java.nio.ByteBuffer;
-import java.util.ArrayList;
-import java.util.List;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 /** Shared plumbing for Cobble-backed Flink keyed state implementations. */
@@ -125,16 +123,8 @@ abstract class AbstractCobbleState<K, N, V> implements InternalKvState<K, N, V>,
                 key, backend.getTotalNumberOfKeyGroupsForState());
     }
 
-    protected final byte[] currentRowKey() throws IOException {
-        return rowKey(currentKey(), currentNamespace);
-    }
-
     protected final byte[] rowKey(K key, N namespace) throws IOException {
         return rowKeyBuilder.buildKeyAndNamespace(key, namespaceSerializer, namespace);
-    }
-
-    protected final byte[] keyPrefix(K key) throws IOException {
-        return rowKeyBuilder.buildKeyPrefix(key);
     }
 
     protected final <UK> byte[] mapEntryRowKey(
@@ -162,155 +152,14 @@ abstract class AbstractCobbleState<K, N, V> implements InternalKvState<K, N, V>,
                 columnFamily);
     }
 
-    protected final byte[] getBytes(K key, N namespace) throws IOException {
-        CobbleStateKeySerializer.DirectBufferSlice directKey =
-                directRowKeyBuilder.buildKeyAndNamespace(key, namespaceSerializer, namespace);
-        return getDirectBytes(bucketForKey(key), directKey);
-    }
-
-    protected final byte[] getBytes(int bucket, byte[] rowKey) throws IOException {
-        return getDirectBytes(bucket, rowKey);
-    }
-
-    protected final byte[] getCurrentBytes() throws IOException {
-        CobbleStateKeySerializer.DirectBufferSlice directKey =
-                directRowKeyBuilder.buildKeyAndNamespace(
-                        currentKey(),
-                        namespaceSerializer,
-                        Preconditions.checkNotNull(
-                                currentNamespace,
-                                "Current namespace is not set for Cobble state '%s'.",
-                                columnFamily));
-        return getDirectBytes(currentBucket(), directKey);
-    }
-
-    protected final void putCurrentBytes(byte[] value) throws IOException {
-        db.putWithOptions(
-                currentBucket(),
-                currentRowKey(),
-                STATE_COLUMN_INDEX,
-                ColumnValue.ofBytes(value),
-                writeOptions);
-    }
-
-    protected final <T> void putCurrentDirectValue(TypeSerializer<T> serializer, T value)
-            throws IOException {
-        CobbleStateKeySerializer.DirectBufferSlice directKey = currentDirectKey();
-        CobbleStateKeySerializer.DirectBufferSlice directValue =
-                directValueSerializer.serialize(serializer, value);
-        db.putDirectWithOptions(
-                currentBucket(),
-                directKey.buffer(),
-                directKey.length(),
-                STATE_COLUMN_INDEX,
-                directValue.buffer(),
-                directValue.length(),
-                writeOptions);
-    }
-
-    protected final <T> T getCurrentDirectValue(TypeSerializer<T> serializer) throws IOException {
-        CobbleStateKeySerializer.DirectBufferSlice directKey = currentDirectKey();
-        try (DirectRow directRow =
-                db.getDirectWithOptions(
-                        currentBucket(), directKey.buffer(), directKey.length(), readOptions)) {
-            if (directRow == null) {
-                return null;
-            }
-            ByteBuffer buffer = directRow.getBytes(STATE_COLUMN_INDEX);
-            return buffer == null ? null : directValueDeserializer.deserialize(serializer, buffer);
-        }
-    }
-
-    protected final <T> T getDirectValue(K key, N namespace, TypeSerializer<T> serializer)
-            throws IOException {
-        CobbleStateKeySerializer.DirectBufferSlice directKey =
-                directRowKeyBuilder.buildKeyAndNamespace(key, namespaceSerializer, namespace);
-        try (DirectRow directRow =
-                db.getDirectWithOptions(
-                        bucketForKey(key), directKey.buffer(), directKey.length(), readOptions)) {
-            if (directRow == null) {
-                return null;
-            }
-            ByteBuffer buffer = directRow.getBytes(STATE_COLUMN_INDEX);
-            return buffer == null ? null : directValueDeserializer.deserialize(serializer, buffer);
-        }
-    }
-
     protected final <T> T deserializeValue(TypeSerializer<T> serializer, ByteBuffer directValue)
             throws IOException {
         return directValueDeserializer.deserialize(serializer, directValue);
     }
 
-    protected final <T> List<T> getCurrentDirectList(TypeSerializer<T> serializer)
+    protected final <T> T deserializeValue(TypeSerializer<T> serializer, InputStream input)
             throws IOException {
-        CobbleStateKeySerializer.DirectBufferSlice directKey = currentDirectKey();
-        try (DirectRow directRow =
-                db.getDirectWithOptions(
-                        currentBucket(), directKey.buffer(), directKey.length(), readOptions)) {
-            if (directRow == null || directRow.isNull(STATE_COLUMN_INDEX)) {
-                return null;
-            }
-            return deserializeDirectList(serializer, directRow);
-        }
-    }
-
-    protected final <T> List<T> getDirectList(K key, N namespace, TypeSerializer<T> serializer)
-            throws IOException {
-        CobbleStateKeySerializer.DirectBufferSlice directKey =
-                directRowKeyBuilder.buildKeyAndNamespace(key, namespaceSerializer, namespace);
-        try (DirectRow directRow =
-                db.getDirectWithOptions(
-                        bucketForKey(key), directKey.buffer(), directKey.length(), readOptions)) {
-            if (directRow == null || directRow.isNull(STATE_COLUMN_INDEX)) {
-                return null;
-            }
-            return deserializeDirectList(serializer, directRow);
-        }
-    }
-
-    protected final void putBytes(int bucket, byte[] rowKey, byte[] value) throws IOException {
-        db.putWithOptions(
-                bucket, rowKey, STATE_COLUMN_INDEX, ColumnValue.ofBytes(value), writeOptions);
-    }
-
-    protected final void putCurrentEncodedListPayload(ByteBuffer payload, int payloadLength)
-            throws IOException {
-        CobbleStateKeySerializer.DirectBufferSlice directKey = currentDirectKey();
-        db.putEncodedListDirectWithOptions(
-                currentBucket(),
-                directKey.buffer(),
-                directKey.length(),
-                STATE_COLUMN_INDEX,
-                payload,
-                payloadLength,
-                writeOptions);
-    }
-
-    protected final void mergeCurrentEncodedListPayload(ByteBuffer payload, int payloadLength)
-            throws IOException {
-        CobbleStateKeySerializer.DirectBufferSlice directKey = currentDirectKey();
-        db.mergeEncodedListDirectWithOptions(
-                currentBucket(),
-                directKey.buffer(),
-                directKey.length(),
-                STATE_COLUMN_INDEX,
-                payload,
-                payloadLength,
-                writeOptions);
-    }
-
-    protected final void putEncodedListPayload(
-            K key, N namespace, ByteBuffer payload, int payloadLength) throws IOException {
-        CobbleStateKeySerializer.DirectBufferSlice directKey =
-                directRowKeyBuilder.buildKeyAndNamespace(key, namespaceSerializer, namespace);
-        db.putEncodedListDirectWithOptions(
-                bucketForKey(key),
-                directKey.buffer(),
-                directKey.length(),
-                STATE_COLUMN_INDEX,
-                payload,
-                payloadLength,
-                writeOptions);
+        return serializer.deserialize(new DataInputViewStreamWrapper(input));
     }
 
     protected final void delete(K key, N namespace) throws IOException {
@@ -346,48 +195,8 @@ abstract class AbstractCobbleState<K, N, V> implements InternalKvState<K, N, V>,
         delete(key, namespace);
     }
 
-    protected final <T> byte[] serializeValue(TypeSerializer<T> serializer, T value)
+    protected final CobbleStateKeySerializer.DirectBufferSlice currentDirectKey()
             throws IOException {
-        return CobbleStateKeySerializer.serialize(serializer, value);
-    }
-
-    protected final <T> T deserializeValue(TypeSerializer<T> serializer, byte[] value)
-            throws IOException {
-        return CobbleStateKeySerializer.deserialize(serializer, value);
-    }
-
-    private byte[] getDirectBytes(
-            int bucket, CobbleStateKeySerializer.DirectBufferSlice directKey) {
-        try (DirectRow directRow =
-                db.getDirectWithOptions(
-                        bucket, directKey.buffer(), directKey.length(), readOptions)) {
-            if (directRow == null) {
-                return null;
-            }
-            return toHeapBytes(directRow.getBytes(STATE_COLUMN_INDEX));
-        }
-    }
-
-    private byte[] getDirectBytes(int bucket, byte[] rowKey) {
-        try (DirectRow directRow = db.getDirectWithOptions(bucket, rowKey, readOptions)) {
-            if (directRow == null) {
-                return null;
-            }
-            return toHeapBytes(directRow.getBytes(STATE_COLUMN_INDEX));
-        }
-    }
-
-    private static byte[] toHeapBytes(ByteBuffer directBuffer) {
-        if (directBuffer == null) {
-            return null;
-        }
-        ByteBuffer view = directBuffer.duplicate();
-        byte[] copied = new byte[view.remaining()];
-        view.get(copied);
-        return copied;
-    }
-
-    private CobbleStateKeySerializer.DirectBufferSlice currentDirectKey() throws IOException {
         return directRowKeyBuilder.buildKeyAndNamespace(
                 currentKey(),
                 namespaceSerializer,
@@ -395,18 +204,6 @@ abstract class AbstractCobbleState<K, N, V> implements InternalKvState<K, N, V>,
                         currentNamespace,
                         "Current namespace is not set for Cobble state '%s'.",
                         columnFamily));
-    }
-
-    private <T> List<T> deserializeDirectList(TypeSerializer<T> serializer, DirectRow directRow)
-            throws IOException {
-        int elementCount = directRow.getListElementCount(STATE_COLUMN_INDEX);
-        List<T> decoded = new ArrayList<>(elementCount);
-        for (int i = 0; i < elementCount; i++) {
-            decoded.add(
-                    directValueDeserializer.deserialize(
-                            serializer, directRow.getListElement(STATE_COLUMN_INDEX, i)));
-        }
-        return decoded;
     }
 
     @Override

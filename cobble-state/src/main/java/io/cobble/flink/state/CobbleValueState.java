@@ -1,6 +1,7 @@
 package io.cobble.flink.state;
 
 import io.cobble.structured.Db;
+import io.cobble.structured.DirectEncodedRow;
 
 import org.apache.flink.api.common.state.StateTtlConfig;
 import org.apache.flink.api.common.typeutils.TypeSerializer;
@@ -8,7 +9,9 @@ import org.apache.flink.api.java.tuple.Tuple2;
 import org.apache.flink.queryablestate.client.state.serialization.KvStateSerializer;
 import org.apache.flink.runtime.state.internal.InternalValueState;
 
+import java.io.ByteArrayOutputStream;
 import java.io.IOException;
+import java.io.InputStream;
 
 /** Cobble-backed {@link org.apache.flink.api.common.state.ValueState}. */
 final class CobbleValueState<K, N, V> extends AbstractCobbleState<K, N, V>
@@ -38,7 +41,7 @@ final class CobbleValueState<K, N, V> extends AbstractCobbleState<K, N, V>
 
     @Override
     public V value() throws IOException {
-        V stored = getCurrentDirectValue(valueSerializer);
+        V stored = getCurrentDirectValue();
         return stored == null ? defaultValue() : stored;
     }
 
@@ -48,7 +51,7 @@ final class CobbleValueState<K, N, V> extends AbstractCobbleState<K, N, V>
             clear();
             return;
         }
-        putCurrentDirectValue(valueSerializer, value);
+        putCurrentDirectValue(value);
     }
 
     @Override
@@ -66,5 +69,55 @@ final class CobbleValueState<K, N, V> extends AbstractCobbleState<K, N, V>
 
     private V defaultValue() {
         return defaultValue == null ? null : valueSerializer.copy(defaultValue);
+    }
+
+    private V getCurrentDirectValue() throws IOException {
+        CobbleStateKeySerializer.DirectBufferSlice directKey = currentDirectKey();
+        try (DirectEncodedRow encodedRow =
+                db.getDirectEncodedRowWithOptions(
+                        currentBucket(), directKey.buffer(), directKey.length(), readOptions)) {
+            if (encodedRow == null) {
+                return null;
+            }
+            return encodedRow.decodeBytesColumn(
+                    STATE_COLUMN_INDEX, input -> deserializeValue(valueSerializer, input));
+        }
+    }
+
+    private void putCurrentDirectValue(V value) throws IOException {
+        CobbleStateKeySerializer.DirectBufferSlice directKey = currentDirectKey();
+        CobbleStateKeySerializer.DirectBufferSlice directValue =
+                directValueSerializer.serialize(valueSerializer, value);
+        db.putDirectWithOptions(
+                currentBucket(),
+                directKey.buffer(),
+                directKey.length(),
+                STATE_COLUMN_INDEX,
+                directValue.buffer(),
+                directValue.length(),
+                writeOptions);
+    }
+
+    private byte[] getBytes(K key, N namespace) throws IOException {
+        CobbleStateKeySerializer.DirectBufferSlice directKey =
+                directRowKeyBuilder.buildKeyAndNamespace(key, namespaceSerializer, namespace);
+        try (DirectEncodedRow encodedRow =
+                db.getDirectEncodedRowWithOptions(
+                        bucketForKey(key), directKey.buffer(), directKey.length(), readOptions)) {
+            if (encodedRow == null) {
+                return null;
+            }
+            return encodedRow.decodeBytesColumn(STATE_COLUMN_INDEX, CobbleValueState::readAllBytes);
+        }
+    }
+
+    private static byte[] readAllBytes(InputStream input) throws IOException {
+        ByteArrayOutputStream output = new ByteArrayOutputStream();
+        byte[] buffer = new byte[256];
+        int read;
+        while ((read = input.read(buffer)) != -1) {
+            output.write(buffer, 0, read);
+        }
+        return output.toByteArray();
     }
 }

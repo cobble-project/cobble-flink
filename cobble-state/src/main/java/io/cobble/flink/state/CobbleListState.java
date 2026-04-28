@@ -1,6 +1,7 @@
 package io.cobble.flink.state;
 
 import io.cobble.structured.Db;
+import io.cobble.structured.DirectEncodedRow;
 import io.cobble.structured.DirectListValueBuilder;
 
 import org.apache.flink.api.common.state.StateTtlConfig;
@@ -14,6 +15,7 @@ import org.apache.flink.util.Preconditions;
 
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
+import java.nio.ByteBuffer;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.List;
@@ -179,5 +181,73 @@ final class CobbleListState<K, N, V> extends AbstractCobbleState<K, N, List<V>>
         directListValueBuilder.beginElement();
         elementSerializer.serialize(value, directListValueOutputView);
         directListValueBuilder.finishElement();
+    }
+
+    private <T> List<T> getCurrentDirectList(TypeSerializer<T> serializer) throws IOException {
+        CobbleStateKeySerializer.DirectBufferSlice directKey = currentDirectKey();
+        try (DirectEncodedRow encodedRow =
+                db.getDirectEncodedRowWithOptions(
+                        currentBucket(), directKey.buffer(), directKey.length(), readOptions)) {
+            if (encodedRow == null) {
+                return null;
+            }
+            return encodedRow.decodeListColumn(
+                    STATE_COLUMN_INDEX, input -> deserializeValue(serializer, input));
+        }
+    }
+
+    private <T> List<T> getDirectList(K key, N namespace, TypeSerializer<T> serializer)
+            throws IOException {
+        CobbleStateKeySerializer.DirectBufferSlice directKey =
+                directRowKeyBuilder.buildKeyAndNamespace(key, namespaceSerializer, namespace);
+        try (DirectEncodedRow encodedRow =
+                db.getDirectEncodedRowWithOptions(
+                        bucketForKey(key), directKey.buffer(), directKey.length(), readOptions)) {
+            if (encodedRow == null) {
+                return null;
+            }
+            return encodedRow.decodeListColumn(
+                    STATE_COLUMN_INDEX, input -> deserializeValue(serializer, input));
+        }
+    }
+
+    private void putCurrentEncodedListPayload(ByteBuffer payload, int payloadLength)
+            throws IOException {
+        CobbleStateKeySerializer.DirectBufferSlice directKey = currentDirectKey();
+        db.putEncodedListDirectWithOptions(
+                currentBucket(),
+                directKey.buffer(),
+                directKey.length(),
+                STATE_COLUMN_INDEX,
+                payload,
+                payloadLength,
+                writeOptions);
+    }
+
+    private void mergeCurrentEncodedListPayload(ByteBuffer payload, int payloadLength)
+            throws IOException {
+        CobbleStateKeySerializer.DirectBufferSlice directKey = currentDirectKey();
+        db.mergeEncodedListDirectWithOptions(
+                currentBucket(),
+                directKey.buffer(),
+                directKey.length(),
+                STATE_COLUMN_INDEX,
+                payload,
+                payloadLength,
+                writeOptions);
+    }
+
+    private void putEncodedListPayload(K key, N namespace, ByteBuffer payload, int payloadLength)
+            throws IOException {
+        CobbleStateKeySerializer.DirectBufferSlice directKey =
+                directRowKeyBuilder.buildKeyAndNamespace(key, namespaceSerializer, namespace);
+        db.putEncodedListDirectWithOptions(
+                bucketForKey(key),
+                directKey.buffer(),
+                directKey.length(),
+                STATE_COLUMN_INDEX,
+                payload,
+                payloadLength,
+                writeOptions);
     }
 }

@@ -1,9 +1,10 @@
 package io.cobble.flink.state;
 
 import io.cobble.structured.Db;
-import io.cobble.structured.DirectScanBatch;
+import io.cobble.structured.DirectEncodedRow;
+import io.cobble.structured.DirectEncodedScanBatch;
+import io.cobble.structured.DirectEncodedScanRow;
 import io.cobble.structured.DirectScanCursor;
-import io.cobble.structured.DirectScanRow;
 import io.cobble.structured.Row;
 import io.cobble.structured.ScanCursor;
 import io.cobble.structured.ScanOptions;
@@ -285,16 +286,23 @@ final class CobbleMapState<K, N, UK, UV> extends AbstractCobbleState<K, N, Map<U
                         directScanBounds.endKeyBuffer,
                         directScanBounds.endKeyLength)) {
             while (true) {
-                DirectScanBatch batch = cursor.nextBatch();
+                DirectEncodedScanBatch batch = cursor.nextEncodedBatch();
                 if (batch.size() == 0) {
                     return false;
                 }
-                for (int index = 0; index < batch.size(); index++) {
-                    ByteBuffer rowKey = batch.getRow(index).getKey();
-                    if (!startsWithMapKeyNamespacePrefix(rowKey, keyNamespacePrefix)) {
-                        return false;
+                try {
+                    while (true) {
+                        DirectEncodedScanRow row = batch.nextRow();
+                        if (row == null) {
+                            break;
+                        }
+                        if (!startsWithMapKeyNamespacePrefix(row.getKey(), keyNamespacePrefix)) {
+                            return false;
+                        }
+                        return true;
                     }
-                    return true;
+                } finally {
+                    batch.close();
                 }
             }
         }
@@ -328,20 +336,39 @@ final class CobbleMapState<K, N, UK, UV> extends AbstractCobbleState<K, N, Map<U
                         directScanBounds.startKeyLength,
                         directScanBounds.endKeyBuffer,
                         directScanBounds.endKeyLength)) {
-            for (DirectScanRow row : cursor) {
-                ByteBuffer rowKey = row.getKey();
-                if (!startsWithMapKeyNamespacePrefix(rowKey, keyNamespacePrefix)) {
+            boolean done = false;
+            while (!done) {
+                DirectEncodedScanBatch batch = cursor.nextEncodedBatch();
+                if (batch.size() == 0) {
                     break;
                 }
-                DUK userKey =
-                        deserializeUserKey(
-                                deserializedUserKeySerializer, rowKey, keyNamespacePrefix.length);
-                ByteBuffer directValue = row.getBytes(STATE_COLUMN_INDEX);
-                entries.put(
-                        userKey,
-                        directValue == null
-                                ? null
-                                : deserializeValue(deserializedUserValueSerializer, directValue));
+                try {
+                    while (true) {
+                        DirectEncodedScanRow row = batch.nextRow();
+                        if (row == null) {
+                            break;
+                        }
+                        ByteBuffer rowKey = row.getKey();
+                        if (!startsWithMapKeyNamespacePrefix(rowKey, keyNamespacePrefix)) {
+                            done = true;
+                            break;
+                        }
+                        DUK userKey =
+                                deserializeUserKey(
+                                        deserializedUserKeySerializer,
+                                        rowKey,
+                                        keyNamespacePrefix.length);
+                        DUV userValue =
+                                row.decodeBytesColumn(
+                                        STATE_COLUMN_INDEX,
+                                        input ->
+                                                deserializeValue(
+                                                        deserializedUserValueSerializer, input));
+                        entries.put(userKey, userValue);
+                    }
+                } finally {
+                    batch.close();
+                }
             }
         }
 
@@ -376,17 +403,14 @@ final class CobbleMapState<K, N, UK, UV> extends AbstractCobbleState<K, N, Map<U
     private UV getEntryValueDirect(K key, N namespace, UK userKey) throws IOException {
         CobbleStateKeySerializer.DirectBufferSlice directKey =
                 directMapEntryRowKey(key, namespace, userKeySerializer, userKey);
-        try (io.cobble.structured.DirectRow directRow =
-                db.getDirectWithOptions(
+        try (DirectEncodedRow encodedRow =
+                db.getDirectEncodedRowWithOptions(
                         bucketForKey(key), directKey.buffer(), directKey.length(), readOptions)) {
-            if (directRow == null) {
+            if (encodedRow == null) {
                 return null;
             }
-            ByteBuffer directValue = directRow.getBytes(STATE_COLUMN_INDEX);
-            if (directValue == null) {
-                return null;
-            }
-            return deserializeValue(userValueSerializer, directValue);
+            return encodedRow.decodeBytesColumn(
+                    STATE_COLUMN_INDEX, input -> deserializeValue(userValueSerializer, input));
         }
     }
 
@@ -525,8 +549,7 @@ final class CobbleMapState<K, N, UK, UV> extends AbstractCobbleState<K, N, Map<U
         private final TypeSerializer<DUK> deserializedUserKeySerializer;
         private final TypeSerializer<DUV> deserializedUserValueSerializer;
 
-        private DirectScanBatch currentBatch;
-        private int currentBatchIndex;
+        private DirectEncodedScanBatch currentBatch;
         private Map.Entry<DUK, DUV> nextEntry;
         private boolean finished;
         private boolean cursorClosed;
@@ -567,14 +590,18 @@ final class CobbleMapState<K, N, UK, UV> extends AbstractCobbleState<K, N, Map<U
         private void fetchNextEntry() {
             while (!finished) {
                 try {
-                    if (currentBatch == null || currentBatchIndex >= currentBatch.size()) {
+                    if (currentBatch == null) {
                         loadNextBatch();
                         if (finished) {
                             return;
                         }
                     }
 
-                    DirectScanRow row = currentBatch.getRow(currentBatchIndex++);
+                    DirectEncodedScanRow row = currentBatch.nextRow();
+                    if (row == null) {
+                        loadNextBatch();
+                        continue;
+                    }
                     ByteBuffer rowKey = row.getKey();
                     if (!startsWithMapKeyNamespacePrefix(rowKey, keyNamespacePrefix)) {
                         finish();
@@ -585,12 +612,12 @@ final class CobbleMapState<K, N, UK, UV> extends AbstractCobbleState<K, N, Map<U
                                     deserializedUserKeySerializer,
                                     rowKey,
                                     keyNamespacePrefix.length);
-                    ByteBuffer directValue = row.getBytes(STATE_COLUMN_INDEX);
                     DUV userValue =
-                            directValue == null
-                                    ? null
-                                    : deserializeValue(
-                                            deserializedUserValueSerializer, directValue);
+                            row.decodeBytesColumn(
+                                    STATE_COLUMN_INDEX,
+                                    input ->
+                                            deserializeValue(
+                                                    deserializedUserValueSerializer, input));
                     nextEntry = new AbstractMap.SimpleImmutableEntry<>(userKey, userValue);
                     return;
                 } catch (IOException e) {
@@ -607,13 +634,12 @@ final class CobbleMapState<K, N, UK, UV> extends AbstractCobbleState<K, N, Map<U
 
         private void loadNextBatch() {
             closeCurrentBatch();
-            DirectScanBatch nextBatch = cursor.nextBatch();
+            DirectEncodedScanBatch nextBatch = cursor.nextEncodedBatch();
             if (nextBatch.size() == 0) {
                 finish();
                 return;
             }
             currentBatch = nextBatch;
-            currentBatchIndex = 0;
         }
 
         private void closeCurrentBatch() {
