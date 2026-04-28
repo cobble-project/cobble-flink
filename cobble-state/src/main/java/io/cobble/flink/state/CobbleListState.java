@@ -1,6 +1,7 @@
 package io.cobble.flink.state;
 
 import io.cobble.structured.Db;
+import io.cobble.structured.DirectListValueBuilder;
 
 import org.apache.flink.api.common.state.StateTtlConfig;
 import org.apache.flink.api.common.typeutils.TypeSerializer;
@@ -22,6 +23,8 @@ final class CobbleListState<K, N, V> extends AbstractCobbleState<K, N, List<V>>
         implements InternalListState<K, N, V> {
 
     private final TypeSerializer<V> elementSerializer;
+    private final DirectListValueBuilder directListValueBuilder;
+    private final DataOutputViewStreamWrapper directListValueOutputView;
 
     CobbleListState(
             CobbleKeyedStateBackend<K> backend,
@@ -41,6 +44,9 @@ final class CobbleListState<K, N, V> extends AbstractCobbleState<K, N, List<V>>
                 valueSerializer,
                 ttlConfig);
         this.elementSerializer = elementSerializer;
+        this.directListValueBuilder = new DirectListValueBuilder(256);
+        this.directListValueOutputView =
+                new DataOutputViewStreamWrapper(directListValueBuilder.outputStream());
     }
 
     @Override
@@ -51,13 +57,15 @@ final class CobbleListState<K, N, V> extends AbstractCobbleState<K, N, List<V>>
     @Override
     public void add(V value) throws IOException {
         Preconditions.checkNotNull(value, "You cannot add null to a ListState.");
-        mergeCurrentList(new byte[][] {serializeValue(elementSerializer, value)});
+        directListValueBuilder.clear();
+        appendListValue(value);
+        mergeCurrentEncodedListPayload(
+                directListValueBuilder.buffer(), directListValueBuilder.length());
     }
 
     @Override
     public List<V> getInternal() throws IOException {
-        byte[][] stored = getCurrentList();
-        return stored == null ? null : deserializeListValues(elementSerializer, stored);
+        return getCurrentDirectList(elementSerializer);
     }
 
     @Override
@@ -66,7 +74,9 @@ final class CobbleListState<K, N, V> extends AbstractCobbleState<K, N, List<V>>
             clear();
             return;
         }
-        putCurrentList(serializeListValues(elementSerializer, valueToStore));
+        encodeListValues(valueToStore);
+        putCurrentEncodedListPayload(
+                directListValueBuilder.buffer(), directListValueBuilder.length());
     }
 
     @Override
@@ -94,7 +104,9 @@ final class CobbleListState<K, N, V> extends AbstractCobbleState<K, N, List<V>>
         for (V value : values) {
             Preconditions.checkNotNull(value, "You cannot add null to a ListState.");
         }
-        mergeCurrentList(serializeListValues(elementSerializer, values));
+        encodeListValues(values);
+        mergeCurrentEncodedListPayload(
+                directListValueBuilder.buffer(), directListValueBuilder.length());
     }
 
     @Override
@@ -104,28 +116,26 @@ final class CobbleListState<K, N, V> extends AbstractCobbleState<K, N, List<V>>
         }
 
         K key = currentKey();
-        List<byte[]> merged = new ArrayList<>();
-        byte[][] targetValues = getList(key, target);
+        List<V> mergedValues = new ArrayList<>();
+        List<V> targetValues = getDirectList(key, target, elementSerializer);
         if (targetValues != null) {
-            for (byte[] targetValue : targetValues) {
-                merged.add(targetValue);
-            }
+            mergedValues.addAll(targetValues);
         }
 
         for (N source : sources) {
-            byte[][] sourceValues = getList(key, source);
+            List<V> sourceValues = getDirectList(key, source, elementSerializer);
             if (sourceValues != null) {
-                for (byte[] sourceValue : sourceValues) {
-                    merged.add(sourceValue);
-                }
+                mergedValues.addAll(sourceValues);
                 delete(key, source);
             }
         }
 
-        if (merged.isEmpty()) {
+        if (mergedValues.isEmpty()) {
             delete(key, target);
         } else {
-            putList(key, target, merged.toArray(new byte[0][]));
+            encodeListValues(mergedValues);
+            putEncodedListPayload(
+                    key, target, directListValueBuilder.buffer(), directListValueBuilder.length());
         }
     }
 
@@ -139,14 +149,13 @@ final class CobbleListState<K, N, V> extends AbstractCobbleState<K, N, List<V>>
         Tuple2<K, N> keyAndNamespace =
                 KvStateSerializer.deserializeKeyAndNamespace(
                         serializedKeyAndNamespace, safeKeySerializer, safeNamespaceSerializer);
-        byte[][] stored = getList(keyAndNamespace.f0, keyAndNamespace.f1);
-        if (stored == null) {
-            return null;
-        }
-
         TypeSerializer<V> safeElementSerializer =
                 ((ListSerializer<V>) safeValueSerializer).getElementSerializer();
-        List<V> values = deserializeListValues(safeElementSerializer, stored);
+        List<V> values =
+                getDirectList(keyAndNamespace.f0, keyAndNamespace.f1, safeElementSerializer);
+        if (values == null) {
+            return null;
+        }
         ByteArrayOutputStream outputStream = new ByteArrayOutputStream();
         DataOutputViewStreamWrapper outputView = new DataOutputViewStreamWrapper(outputStream);
         for (int i = 0; i < values.size(); i++) {
@@ -157,5 +166,18 @@ final class CobbleListState<K, N, V> extends AbstractCobbleState<K, N, List<V>>
         }
         outputView.flush();
         return outputStream.toByteArray();
+    }
+
+    private void encodeListValues(List<V> values) throws IOException {
+        directListValueBuilder.clear();
+        for (V value : values) {
+            appendListValue(value);
+        }
+    }
+
+    private void appendListValue(V value) throws IOException {
+        directListValueBuilder.beginElement();
+        elementSerializer.serialize(value, directListValueOutputView);
+        directListValueBuilder.finishElement();
     }
 }
