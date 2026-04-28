@@ -71,6 +71,8 @@ final class CobbleStateKeySerializer {
 
         private K cachedKey;
         private int afterKeyMark;
+        private Object cachedNamespaceValue;
+        private int namespaceLength;
 
         ReusableSerializedKeyBuilder(TypeSerializer<K> keySerializer, int initialSize) {
             this.keySerializer = keySerializer;
@@ -80,8 +82,8 @@ final class CobbleStateKeySerializer {
         <N> byte[] buildKeyAndNamespace(K key, TypeSerializer<N> namespaceSerializer, N namespace)
                 throws IOException {
             ensureKeySerialized(key);
-            output.setPosition(afterKeyMark);
-            namespaceSerializer.serialize(namespace, output);
+            ensureNamespaceSerialized(namespaceSerializer, namespace);
+            output.setPosition(afterKeyMark + namespaceLength);
             output.writeInt(afterKeyMark);
             return output.getCopyOfBuffer();
         }
@@ -94,9 +96,8 @@ final class CobbleStateKeySerializer {
                 N namespace)
                 throws IOException {
             ensureKeySerialized(key);
-            output.setPosition(afterKeyMark);
-            namespaceSerializer.serialize(namespace, output);
-            int namespaceLength = output.length() - afterKeyMark;
+            ensureNamespaceSerialized(namespaceSerializer, namespace);
+            output.setPosition(afterKeyMark + namespaceLength);
             output.writeByte(0);
             userKeySerializer.serialize(userKey, output);
             output.writeInt(afterKeyMark);
@@ -107,8 +108,8 @@ final class CobbleStateKeySerializer {
         <N> byte[] buildMapKeyNamespacePrefix(
                 K key, TypeSerializer<N> namespaceSerializer, N namespace) throws IOException {
             ensureKeySerialized(key);
-            output.setPosition(afterKeyMark);
-            namespaceSerializer.serialize(namespace, output);
+            ensureNamespaceSerialized(namespaceSerializer, namespace);
+            output.setPosition(afterKeyMark + namespaceLength);
             return output.getCopyOfBuffer();
         }
 
@@ -130,6 +131,19 @@ final class CobbleStateKeySerializer {
             keySerializer.serialize(key, output);
             afterKeyMark = output.length();
             cachedKey = key == null ? null : keySerializer.copy(key);
+            namespaceLength = 0;
+            cachedNamespaceValue = null;
+        }
+
+        private <N> void ensureNamespaceSerialized(
+                TypeSerializer<N> namespaceSerializer, N namespace) throws IOException {
+            if (namespaceLength > 0 && Objects.equals(cachedNamespaceValue, namespace)) {
+                return;
+            }
+            output.setPosition(afterKeyMark);
+            namespaceSerializer.serialize(namespace, output);
+            namespaceLength = output.length() - afterKeyMark;
+            cachedNamespaceValue = namespace == null ? null : namespaceSerializer.copy(namespace);
         }
     }
 
@@ -140,6 +154,8 @@ final class CobbleStateKeySerializer {
         private final DataOutputViewStreamWrapper outputView;
         private K cachedKey;
         private int afterKeyMark;
+        private Object cachedNamespaceValue;
+        private int namespaceLength;
 
         ReusableSerializedDirectKeyBuilder(TypeSerializer<K> keySerializer, int initialSize) {
             this.keySerializer = keySerializer;
@@ -150,8 +166,8 @@ final class CobbleStateKeySerializer {
         <N> DirectBufferSlice buildKeyAndNamespace(
                 K key, TypeSerializer<N> namespaceSerializer, N namespace) throws IOException {
             ensureKeySerialized(key);
-            outputStream.setPosition(afterKeyMark);
-            namespaceSerializer.serialize(namespace, outputView);
+            ensureNamespaceSerialized(namespaceSerializer, namespace);
+            outputStream.setPosition(afterKeyMark + namespaceLength);
             outputView.writeInt(afterKeyMark);
             return outputStream.currentSlice();
         }
@@ -164,9 +180,8 @@ final class CobbleStateKeySerializer {
                 N namespace)
                 throws IOException {
             ensureKeySerialized(key);
-            outputStream.setPosition(afterKeyMark);
-            namespaceSerializer.serialize(namespace, outputView);
-            int namespaceLength = outputStream.position() - afterKeyMark;
+            ensureNamespaceSerialized(namespaceSerializer, namespace);
+            outputStream.setPosition(afterKeyMark + namespaceLength);
             outputView.writeByte(0);
             userKeySerializer.serialize(userKey, outputView);
             outputView.writeInt(afterKeyMark);
@@ -182,6 +197,19 @@ final class CobbleStateKeySerializer {
             keySerializer.serialize(key, outputView);
             afterKeyMark = outputStream.position();
             cachedKey = key == null ? null : keySerializer.copy(key);
+            namespaceLength = 0;
+            cachedNamespaceValue = null;
+        }
+
+        private <N> void ensureNamespaceSerialized(
+                TypeSerializer<N> namespaceSerializer, N namespace) throws IOException {
+            if (namespaceLength > 0 && Objects.equals(cachedNamespaceValue, namespace)) {
+                return;
+            }
+            outputStream.setPosition(afterKeyMark);
+            namespaceSerializer.serialize(namespace, outputView);
+            namespaceLength = outputStream.position() - afterKeyMark;
+            cachedNamespaceValue = namespace == null ? null : namespaceSerializer.copy(namespace);
         }
     }
 
