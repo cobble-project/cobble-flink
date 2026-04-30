@@ -13,7 +13,6 @@ import org.apache.flink.api.common.state.StateTtlConfig;
 import org.apache.flink.api.common.typeutils.TypeSerializer;
 import org.apache.flink.api.common.typeutils.base.MapSerializer;
 import org.apache.flink.api.java.tuple.Tuple2;
-import org.apache.flink.core.memory.DataInputDeserializer;
 import org.apache.flink.queryablestate.client.state.serialization.KvStateSerializer;
 import org.apache.flink.runtime.state.internal.InternalMapState;
 import org.apache.flink.util.Preconditions;
@@ -35,8 +34,8 @@ final class CobbleMapState<K, N, UK, UV> extends AbstractCobbleState<K, N, Map<U
 
     private final TypeSerializer<UK> userKeySerializer;
     private final TypeSerializer<UV> userValueSerializer;
-    private final DataInputDeserializer userKeyInputView;
     private final ScanOptions emptyCheckScanOptions;
+    private final ScanOptions emptyCheckFastScanOptions;
     private ByteBuffer directScanStartBuffer;
     private ByteBuffer directScanEndBuffer;
 
@@ -58,8 +57,9 @@ final class CobbleMapState<K, N, UK, UV> extends AbstractCobbleState<K, N, Map<U
                 ttlConfig);
         this.userKeySerializer = mapSerializer.getKeySerializer();
         this.userValueSerializer = mapSerializer.getValueSerializer();
-        this.userKeyInputView = new DataInputDeserializer();
         this.emptyCheckScanOptions = ScanOptions.defaults().columnFamily(columnFamily).batchSize(1);
+        this.emptyCheckFastScanOptions =
+                ScanOptions.defaults().columnFamily(columnFamily).batchSize(1).maxRows(1);
         this.directScanStartBuffer = ByteBuffer.allocateDirect(128);
         this.directScanEndBuffer = ByteBuffer.allocateDirect(128);
     }
@@ -278,19 +278,85 @@ final class CobbleMapState<K, N, UK, UV> extends AbstractCobbleState<K, N, Map<U
     private boolean hasAnyEntry(K key, int bucket, N namespace) throws IOException {
         byte[] keyNamespacePrefix = mapKeyNamespacePrefix(key, namespace);
         DirectScanBounds directScanBounds = prepareDirectScanBounds(keyNamespacePrefix);
-        try (DirectScanCursor cursor =
-                scanDirectRowsForEmptyCheck(
+        EmptyCheckProbeResult fastResult =
+                probeAnyEntryFast(
                         bucket,
+                        keyNamespacePrefix,
                         directScanBounds.startKeyBuffer,
                         directScanBounds.startKeyLength,
                         directScanBounds.endKeyBuffer,
-                        directScanBounds.endKeyLength)) {
+                        directScanBounds.endKeyLength);
+        if (fastResult != EmptyCheckProbeResult.UNKNOWN) {
+            return fastResult == EmptyCheckProbeResult.PRESENT;
+        }
+        return hasAnyEntrySlowPath(
+                bucket,
+                keyNamespacePrefix,
+                directScanBounds.startKeyBuffer,
+                directScanBounds.startKeyLength,
+                directScanBounds.endKeyBuffer,
+                directScanBounds.endKeyLength);
+    }
+
+    private EmptyCheckProbeResult probeAnyEntryFast(
+            int bucket,
+            byte[] keyNamespacePrefix,
+            ByteBuffer startKeyInclusive,
+            int startKeyLength,
+            ByteBuffer endKeyExclusive,
+            int endKeyLength) {
+        try (DirectScanCursor cursor =
+                scanDirectRowsWithOptions(
+                        bucket,
+                        startKeyInclusive,
+                        startKeyLength,
+                        endKeyExclusive,
+                        endKeyLength,
+                        emptyCheckFastScanOptions)) {
+            DirectEncodedScanBatch batch = cursor.nextEncodedBatch();
+            try {
+                if (batch.size() == 0) {
+                    return EmptyCheckProbeResult.ABSENT;
+                }
+                DirectEncodedScanRow row = batch.nextRow();
+                if (row == null) {
+                    return EmptyCheckProbeResult.ABSENT;
+                }
+                ByteBuffer rowKey = row.getKey();
+                if (startsWithMapKeyNamespacePrefix(rowKey, keyNamespacePrefix)) {
+                    return EmptyCheckProbeResult.PRESENT;
+                }
+                if (isDefinitelyOutsideMapKeyNamespacePrefix(rowKey, keyNamespacePrefix)) {
+                    return EmptyCheckProbeResult.ABSENT;
+                }
+                return EmptyCheckProbeResult.UNKNOWN;
+            } finally {
+                batch.close();
+            }
+        }
+    }
+
+    private boolean hasAnyEntrySlowPath(
+            int bucket,
+            byte[] keyNamespacePrefix,
+            ByteBuffer startKeyInclusive,
+            int startKeyLength,
+            ByteBuffer endKeyExclusive,
+            int endKeyLength) {
+        try (DirectScanCursor cursor =
+                scanDirectRowsWithOptions(
+                        bucket,
+                        startKeyInclusive,
+                        startKeyLength,
+                        endKeyExclusive,
+                        endKeyLength,
+                        emptyCheckScanOptions)) {
             while (true) {
                 DirectEncodedScanBatch batch = cursor.nextEncodedBatch();
-                if (batch.size() == 0) {
-                    return false;
-                }
                 try {
+                    if (batch.size() == 0) {
+                        return false;
+                    }
                     while (true) {
                         DirectEncodedScanRow row = batch.nextRow();
                         if (row == null) {
@@ -311,9 +377,13 @@ final class CobbleMapState<K, N, UK, UV> extends AbstractCobbleState<K, N, Map<U
     @Override
     public void close() {
         try {
-            emptyCheckScanOptions.close();
+            emptyCheckFastScanOptions.close();
         } finally {
-            super.close();
+            try {
+                emptyCheckScanOptions.close();
+            } finally {
+                super.close();
+            }
         }
     }
 
@@ -339,10 +409,10 @@ final class CobbleMapState<K, N, UK, UV> extends AbstractCobbleState<K, N, Map<U
             boolean done = false;
             while (!done) {
                 DirectEncodedScanBatch batch = cursor.nextEncodedBatch();
-                if (batch.size() == 0) {
-                    break;
-                }
                 try {
+                    if (batch.size() == 0) {
+                        break;
+                    }
                     while (true) {
                         DirectEncodedScanRow row = batch.nextRow();
                         if (row == null) {
@@ -452,6 +522,21 @@ final class CobbleMapState<K, N, UK, UV> extends AbstractCobbleState<K, N, Map<U
                 && keyLength + namespaceLength == keyNamespacePrefix.length;
     }
 
+    private static boolean isDefinitelyOutsideMapKeyNamespacePrefix(
+            ByteBuffer rowKey, byte[] keyNamespacePrefix) {
+        int prefixLength = keyNamespacePrefix.length;
+        if (rowKey.limit() <= prefixLength) {
+            return true;
+        }
+        int compareLength = Math.min(prefixLength, rowKey.limit());
+        for (int i = 0; i < compareLength; i++) {
+            if (rowKey.get(i) != keyNamespacePrefix[i]) {
+                return true;
+            }
+        }
+        return rowKey.get(prefixLength) != 0;
+    }
+
     private static int readTrailingInt(byte[] bytes, int fromEnd) {
         int start = bytes.length - fromEnd;
         return ((bytes[start] & 0xFF) << 24)
@@ -509,19 +594,26 @@ final class CobbleMapState<K, N, UK, UV> extends AbstractCobbleState<K, N, Map<U
         return ByteBuffer.allocateDirect(newCapacity);
     }
 
-    private DirectScanCursor scanDirectRowsForEmptyCheck(
+    private DirectScanCursor scanDirectRowsWithOptions(
             int bucket,
             ByteBuffer startKeyInclusive,
             int startKeyLength,
             ByteBuffer endKeyExclusive,
-            int endKeyLength) {
+            int endKeyLength,
+            ScanOptions scanOptions) {
         return db.scanDirectWithOptions(
                 bucket,
                 startKeyInclusive,
                 startKeyLength,
                 endKeyExclusive,
                 endKeyLength,
-                emptyCheckScanOptions);
+                scanOptions);
+    }
+
+    private enum EmptyCheckProbeResult {
+        PRESENT,
+        ABSENT,
+        UNKNOWN
     }
 
     private static final class DirectScanBounds {
