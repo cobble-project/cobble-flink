@@ -558,9 +558,9 @@ final class CobbleMapState<K, N, UK, UV> extends AbstractCobbleState<K, N, Map<U
         return appendByte(keyNamespacePrefix, (byte) 0x00);
     }
 
-    /** The map-entry scan stops before key + namespace + 0xFF. */
+    /** The map-entry scan stops before key + namespace + 0x01. */
     private static byte[] scanEndKey(byte[] keyNamespacePrefix) {
-        return appendByte(keyNamespacePrefix, (byte) 0xFF);
+        return appendByte(keyNamespacePrefix, (byte) 0x01);
     }
 
     private static byte[] appendByte(byte[] bytes, byte suffix) {
@@ -578,7 +578,7 @@ final class CobbleMapState<K, N, UK, UV> extends AbstractCobbleState<K, N, Map<U
         directScanStartBuffer.put((byte) 0x00);
         directScanEndBuffer.clear();
         directScanEndBuffer.put(keyNamespacePrefix);
-        directScanEndBuffer.put((byte) 0xFF);
+        directScanEndBuffer.put((byte) 0x01);
         return new DirectScanBounds(
                 directScanStartBuffer, keyLength, directScanEndBuffer, keyLength);
     }
