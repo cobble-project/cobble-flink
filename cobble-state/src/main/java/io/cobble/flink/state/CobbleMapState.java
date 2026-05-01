@@ -36,6 +36,13 @@ final class CobbleMapState<K, N, UK, UV> extends AbstractCobbleState<K, N, Map<U
     private final TypeSerializer<UV> userValueSerializer;
     private final ScanOptions emptyCheckScanOptions;
     private final ScanOptions emptyCheckFastScanOptions;
+    // Fixed user-key length from serializer.getLength(); -1 means variable.
+    private final int userKeyFixedLength;
+    // Whether map row-key trailer persists key length / namespace length.
+    private final boolean mapKeyLengthStored;
+    private final boolean namespaceLengthStored;
+    // Total trailer bytes at row-key tail (0/4/8).
+    private final int mapRowTrailerBytes;
     private ByteBuffer directScanStartBuffer;
     private ByteBuffer directScanEndBuffer;
 
@@ -60,6 +67,18 @@ final class CobbleMapState<K, N, UK, UV> extends AbstractCobbleState<K, N, Map<U
         this.emptyCheckScanOptions = ScanOptions.defaults().columnFamily(columnFamily).batchSize(1);
         this.emptyCheckFastScanOptions =
                 ScanOptions.defaults().columnFamily(columnFamily).batchSize(1).maxRows(1);
+        this.userKeyFixedLength = CobbleStateKeySerializer.maybeFixedLength(userKeySerializer);
+        int keyFixedLength = CobbleStateKeySerializer.maybeFixedLength(keySerializer);
+        int namespaceFixedLength = CobbleStateKeySerializer.maybeFixedLength(namespaceSerializer);
+        this.mapKeyLengthStored =
+                CobbleStateKeySerializer.shouldStoreMapKeyLength(
+                        keyFixedLength, namespaceFixedLength, userKeyFixedLength);
+        this.namespaceLengthStored =
+                CobbleStateKeySerializer.shouldStoreMapNamespaceLength(
+                        keyFixedLength, namespaceFixedLength, userKeyFixedLength);
+        this.mapRowTrailerBytes =
+                (mapKeyLengthStored ? Integer.BYTES : 0)
+                        + (namespaceLengthStored ? Integer.BYTES : 0);
         this.directScanStartBuffer = ByteBuffer.allocateDirect(128);
         this.directScanEndBuffer = ByteBuffer.allocateDirect(128);
     }
@@ -489,37 +508,39 @@ final class CobbleMapState<K, N, UK, UV> extends AbstractCobbleState<K, N, Map<U
             ByteBuffer rowKey,
             int keyNamespacePrefixLength)
             throws IOException {
-        int userKeyLength = rowKey.limit() - keyNamespacePrefixLength - 1 - (Integer.BYTES * 2);
+        int userKeyEnd = rowKey.limit() - mapRowTrailerBytes;
+        int userKeyLength = userKeyEnd - keyNamespacePrefixLength - 1;
+        if (userKeyLength < 0) {
+            throw new IOException("Corrupted map entry row key: negative user key length.");
+        }
+        if (userKeyFixedLength >= 0 && userKeyLength != userKeyFixedLength) {
+            throw new IOException(
+                    "Corrupted map entry row key: unexpected user key length "
+                            + userKeyLength
+                            + " (expected "
+                            + userKeyFixedLength
+                            + ").");
+        }
         ByteBuffer userKeyView = rowKey.duplicate();
         userKeyView.position(keyNamespacePrefixLength + 1);
-        userKeyView.limit(keyNamespacePrefixLength + 1 + userKeyLength);
+        userKeyView.limit(userKeyEnd);
         return deserializeValue(deserializedUserKeySerializer, userKeyView.slice());
     }
 
     /** Checks map-entry row shape by separator + encoded key/namespace lengths. */
-    private static boolean startsWithMapKeyNamespacePrefix(
-            byte[] rowKey, byte[] keyNamespacePrefix) {
+    private boolean startsWithMapKeyNamespacePrefix(byte[] rowKey, byte[] keyNamespacePrefix) {
         if (rowKey.length <= keyNamespacePrefix.length || rowKey[keyNamespacePrefix.length] != 0) {
             return false;
         }
-        int keyLength = readTrailingInt(rowKey, Integer.BYTES * 2);
-        int namespaceLength = readTrailingInt(rowKey, Integer.BYTES);
-        return keyLength >= 0
-                && namespaceLength >= 0
-                && keyLength + namespaceLength == keyNamespacePrefix.length;
+        return keyNamespaceShapeMatches(rowKey.length, keyNamespacePrefix.length, rowKey);
     }
 
-    private static boolean startsWithMapKeyNamespacePrefix(
-            ByteBuffer rowKey, byte[] keyNamespacePrefix) {
+    private boolean startsWithMapKeyNamespacePrefix(ByteBuffer rowKey, byte[] keyNamespacePrefix) {
         if (rowKey.limit() <= keyNamespacePrefix.length
                 || rowKey.get(keyNamespacePrefix.length) != 0) {
             return false;
         }
-        int keyLength = readTrailingInt(rowKey, Integer.BYTES * 2);
-        int namespaceLength = readTrailingInt(rowKey, Integer.BYTES);
-        return keyLength >= 0
-                && namespaceLength >= 0
-                && keyLength + namespaceLength == keyNamespacePrefix.length;
+        return keyNamespaceShapeMatches(rowKey.limit(), keyNamespacePrefix.length, rowKey);
     }
 
     private static boolean isDefinitelyOutsideMapKeyNamespacePrefix(
@@ -551,6 +572,52 @@ final class CobbleMapState<K, N, UK, UV> extends AbstractCobbleState<K, N, Map<U
                 | ((bytes.get(start + 1) & 0xFF) << 16)
                 | ((bytes.get(start + 2) & 0xFF) << 8)
                 | (bytes.get(start + 3) & 0xFF);
+    }
+
+    private boolean keyNamespaceShapeMatches(
+            int rowKeyLength, int keyNamespacePrefixLength, byte[] rowKey) {
+        if (rowKeyLength < keyNamespacePrefixLength + 1 + mapRowTrailerBytes) {
+            return false;
+        }
+        if (!mapKeyLengthStored && !namespaceLengthStored) {
+            return true;
+        }
+        if (mapKeyLengthStored && namespaceLengthStored) {
+            int keyLength = readTrailingInt(rowKey, Integer.BYTES * 2);
+            int namespaceLength = readTrailingInt(rowKey, Integer.BYTES);
+            return keyLength >= 0
+                    && namespaceLength >= 0
+                    && keyLength + namespaceLength == keyNamespacePrefixLength;
+        }
+        if (mapKeyLengthStored) {
+            int keyLength = readTrailingInt(rowKey, Integer.BYTES);
+            return keyLength >= 0 && keyLength <= keyNamespacePrefixLength;
+        }
+        int namespaceLength = readTrailingInt(rowKey, Integer.BYTES);
+        return namespaceLength >= 0 && namespaceLength <= keyNamespacePrefixLength;
+    }
+
+    private boolean keyNamespaceShapeMatches(
+            int rowKeyLength, int keyNamespacePrefixLength, ByteBuffer rowKey) {
+        if (rowKeyLength < keyNamespacePrefixLength + 1 + mapRowTrailerBytes) {
+            return false;
+        }
+        if (!mapKeyLengthStored && !namespaceLengthStored) {
+            return true;
+        }
+        if (mapKeyLengthStored && namespaceLengthStored) {
+            int keyLength = readTrailingInt(rowKey, Integer.BYTES * 2);
+            int namespaceLength = readTrailingInt(rowKey, Integer.BYTES);
+            return keyLength >= 0
+                    && namespaceLength >= 0
+                    && keyLength + namespaceLength == keyNamespacePrefixLength;
+        }
+        if (mapKeyLengthStored) {
+            int keyLength = readTrailingInt(rowKey, Integer.BYTES);
+            return keyLength >= 0 && keyLength <= keyNamespacePrefixLength;
+        }
+        int namespaceLength = readTrailingInt(rowKey, Integer.BYTES);
+        return namespaceLength >= 0 && namespaceLength <= keyNamespacePrefixLength;
     }
 
     /** The map-entry scan starts at key + namespace + 0x00. */

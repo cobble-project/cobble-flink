@@ -92,11 +92,11 @@ class CobbleStateBackendTest {
     void serializeKeyAndNamespaceUsesKeyLengthSuffixOnly() throws Exception {
         byte[] keyBytes = CobbleStateKeySerializer.serialize(StringSerializer.INSTANCE, "key");
         byte[] namespaceBytes = CobbleStateKeySerializer.serialize(StringSerializer.INSTANCE, "ns");
-        CobbleStateKeySerializer.ReusableSerializedKeyBuilder<String> builder =
+        CobbleStateKeySerializer.ReusableSerializedKeyBuilder<String, String> builder =
                 new CobbleStateKeySerializer.ReusableSerializedKeyBuilder<>(
-                        StringSerializer.INSTANCE, 64);
+                        StringSerializer.INSTANCE, StringSerializer.INSTANCE, 64);
 
-        byte[] encoded = builder.buildKeyAndNamespace("key", StringSerializer.INSTANCE, "ns");
+        byte[] encoded = builder.buildKeyAndNamespace("key", "ns");
 
         assertEquals(keyBytes.length + namespaceBytes.length + Integer.BYTES, encoded.length);
         assertByteSegmentEquals(encoded, 0, keyBytes);
@@ -109,13 +109,13 @@ class CobbleStateBackendTest {
         byte[] keyBytes = CobbleStateKeySerializer.serialize(StringSerializer.INSTANCE, "key");
         byte[] userKeyBytes = CobbleStateKeySerializer.serialize(StringSerializer.INSTANCE, "uk");
         byte[] namespaceBytes = CobbleStateKeySerializer.serialize(StringSerializer.INSTANCE, "ns");
-        CobbleStateKeySerializer.ReusableSerializedKeyBuilder<String> builder =
+        CobbleStateKeySerializer.ReusableSerializedKeyBuilder<String, String> builder =
                 new CobbleStateKeySerializer.ReusableSerializedKeyBuilder<>(
-                        StringSerializer.INSTANCE, 64);
+                        StringSerializer.INSTANCE, StringSerializer.INSTANCE, 64);
 
         byte[] encoded =
                 builder.buildMapKeyNamespaceAndUserKey(
-                        "key", StringSerializer.INSTANCE, "uk", StringSerializer.INSTANCE, "ns");
+                        "key", StringSerializer.INSTANCE, "uk", "ns");
 
         assertEquals(
                 keyBytes.length
@@ -136,11 +136,11 @@ class CobbleStateBackendTest {
     void serializeMapKeyNamespacePrefixContainsOnlyKeyAndNamespaceBytes() throws Exception {
         byte[] keyBytes = CobbleStateKeySerializer.serialize(StringSerializer.INSTANCE, "key");
         byte[] namespaceBytes = CobbleStateKeySerializer.serialize(StringSerializer.INSTANCE, "ns");
-        CobbleStateKeySerializer.ReusableSerializedKeyBuilder<String> builder =
+        CobbleStateKeySerializer.ReusableSerializedKeyBuilder<String, String> builder =
                 new CobbleStateKeySerializer.ReusableSerializedKeyBuilder<>(
-                        StringSerializer.INSTANCE, 64);
+                        StringSerializer.INSTANCE, StringSerializer.INSTANCE, 64);
 
-        byte[] encoded = builder.buildMapKeyNamespacePrefix("key", StringSerializer.INSTANCE, "ns");
+        byte[] encoded = builder.buildMapKeyNamespacePrefix("key", "ns");
 
         assertEquals(keyBytes.length + namespaceBytes.length, encoded.length);
         assertByteSegmentEquals(encoded, 0, keyBytes);
@@ -149,17 +149,17 @@ class CobbleStateBackendTest {
 
     @Test
     void reusableSerializedKeyBuilderReusesSharedBufferUntilKeyChanges() throws Exception {
-        CobbleStateKeySerializer.ReusableSerializedKeyBuilder<String> builder =
+        CobbleStateKeySerializer.ReusableSerializedKeyBuilder<String, String> builder =
                 new CobbleStateKeySerializer.ReusableSerializedKeyBuilder<>(
-                        StringSerializer.INSTANCE, 64);
+                        StringSerializer.INSTANCE, StringSerializer.INSTANCE, 64);
 
-        builder.buildKeyAndNamespace("key", StringSerializer.INSTANCE, "ns-1");
+        builder.buildKeyAndNamespace("key", "ns-1");
         byte[] sharedBuffer = builder.sharedBuffer();
 
-        builder.buildKeyAndNamespace("key", StringSerializer.INSTANCE, "ns-2");
+        builder.buildKeyAndNamespace("key", "ns-2");
         assertSame(sharedBuffer, builder.sharedBuffer());
 
-        builder.buildKeyAndNamespace("other-key", StringSerializer.INSTANCE, "ns-3");
+        builder.buildKeyAndNamespace("other-key", "ns-3");
         assertSame(sharedBuffer, builder.sharedBuffer());
     }
 

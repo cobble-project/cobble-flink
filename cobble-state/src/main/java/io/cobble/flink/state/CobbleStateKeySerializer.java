@@ -65,50 +65,73 @@ final class CobbleStateKeySerializer {
     }
 
     /** Reusable serializer that caches the current key prefix and resets to it between writes. */
-    static final class ReusableSerializedKeyBuilder<K> {
+    static final class ReusableSerializedKeyBuilder<K, N> {
         private final TypeSerializer<K> keySerializer;
+        private final TypeSerializer<N> namespaceSerializer;
         private final DataOutputSerializer output;
+        // For key+namespace row keys, key length is only needed when both parts are variable.
+        private final boolean keyLengthStoredForKeyNamespace;
+        // Cached serializer length tags (-1 means variable-sized).
+        private final int keyLengthTag;
+        private final int namespaceLengthTag;
 
         private K cachedKey;
         private int afterKeyMark;
         private Object cachedNamespaceValue;
         private int namespaceLength;
+        // Map user-key serializer seen in the hot path; map layout flags are recalculated only
+        // when serializer instance changes.
+        private TypeSerializer<?> cachedMapUserKeySerializer;
+        private boolean mapKeyLengthStored;
+        private boolean mapNamespaceLengthStored;
 
-        ReusableSerializedKeyBuilder(TypeSerializer<K> keySerializer, int initialSize) {
+        ReusableSerializedKeyBuilder(
+                TypeSerializer<K> keySerializer,
+                TypeSerializer<N> namespaceSerializer,
+                int initialSize) {
             this.keySerializer = keySerializer;
+            this.namespaceSerializer = namespaceSerializer;
             this.output = new DataOutputSerializer(initialSize);
+            this.keyLengthTag = maybeFixedLength(keySerializer);
+            this.namespaceLengthTag = maybeFixedLength(namespaceSerializer);
+            this.keyLengthStoredForKeyNamespace =
+                    shouldStoreKeyLengthForKeyNamespace(keyLengthTag, namespaceLengthTag);
         }
 
-        <N> byte[] buildKeyAndNamespace(K key, TypeSerializer<N> namespaceSerializer, N namespace)
-                throws IOException {
+        byte[] buildKeyAndNamespace(K key, N namespace) throws IOException {
             ensureKeySerialized(key);
-            ensureNamespaceSerialized(namespaceSerializer, namespace);
+            ensureNamespaceSerialized(namespace);
             output.setPosition(afterKeyMark + namespaceLength);
-            output.writeInt(afterKeyMark);
+            if (keyLengthStoredForKeyNamespace) {
+                output.writeInt(afterKeyMark);
+            }
             return output.getCopyOfBuffer();
         }
 
-        <K2 extends K, UK, N> byte[] buildMapKeyNamespaceAndUserKey(
+        <K2 extends K, UK> byte[] buildMapKeyNamespaceAndUserKey(
                 K2 key,
                 TypeSerializer<UK> userKeySerializer,
                 UK userKey,
-                TypeSerializer<N> namespaceSerializer,
                 N namespace)
                 throws IOException {
             ensureKeySerialized(key);
-            ensureNamespaceSerialized(namespaceSerializer, namespace);
+            ensureNamespaceSerialized(namespace);
+            ensureMapKeyLayout(userKeySerializer);
             output.setPosition(afterKeyMark + namespaceLength);
             output.writeByte(0);
             userKeySerializer.serialize(userKey, output);
-            output.writeInt(afterKeyMark);
-            output.writeInt(namespaceLength);
+            if (mapKeyLengthStored) {
+                output.writeInt(afterKeyMark);
+            }
+            if (mapNamespaceLengthStored) {
+                output.writeInt(namespaceLength);
+            }
             return output.getCopyOfBuffer();
         }
 
-        <N> byte[] buildMapKeyNamespacePrefix(
-                K key, TypeSerializer<N> namespaceSerializer, N namespace) throws IOException {
+        byte[] buildMapKeyNamespacePrefix(K key, N namespace) throws IOException {
             ensureKeySerialized(key);
-            ensureNamespaceSerialized(namespaceSerializer, namespace);
+            ensureNamespaceSerialized(namespace);
             output.setPosition(afterKeyMark + namespaceLength);
             return output.getCopyOfBuffer();
         }
@@ -135,8 +158,7 @@ final class CobbleStateKeySerializer {
             cachedNamespaceValue = null;
         }
 
-        private <N> void ensureNamespaceSerialized(
-                TypeSerializer<N> namespaceSerializer, N namespace) throws IOException {
+        private void ensureNamespaceSerialized(N namespace) throws IOException {
             if (namespaceLength > 0 && Objects.equals(cachedNamespaceValue, namespace)) {
                 return;
             }
@@ -145,47 +167,84 @@ final class CobbleStateKeySerializer {
             namespaceLength = output.length() - afterKeyMark;
             cachedNamespaceValue = namespace == null ? null : namespaceSerializer.copy(namespace);
         }
+
+        private <UK> void ensureMapKeyLayout(TypeSerializer<UK> userKeySerializer) {
+            if (cachedMapUserKeySerializer == userKeySerializer) {
+                return;
+            }
+            int userKeyLengthTag = maybeFixedLength(userKeySerializer);
+            mapKeyLengthStored =
+                    shouldStoreMapKeyLength(keyLengthTag, namespaceLengthTag, userKeyLengthTag);
+            mapNamespaceLengthStored =
+                    shouldStoreMapNamespaceLength(
+                            keyLengthTag, namespaceLengthTag, userKeyLengthTag);
+            cachedMapUserKeySerializer = userKeySerializer;
+        }
     }
 
     /** Reusable key builder that writes directly into a growable direct ByteBuffer. */
-    static final class ReusableSerializedDirectKeyBuilder<K> {
+    static final class ReusableSerializedDirectKeyBuilder<K, N> {
         private final TypeSerializer<K> keySerializer;
+        private final TypeSerializer<N> namespaceSerializer;
         private final GrowingDirectBufferOutputStream outputStream;
         private final DataOutputViewStreamWrapper outputView;
+        // For key+namespace row keys, key length is only needed when both parts are variable.
+        private final boolean keyLengthStoredForKeyNamespace;
+        // Cached serializer length tags (-1 means variable-sized).
+        private final int keyLengthTag;
+        private final int namespaceLengthTag;
         private K cachedKey;
         private int afterKeyMark;
         private Object cachedNamespaceValue;
         private int namespaceLength;
+        // Map user-key serializer seen in the hot path; map layout flags are recalculated only
+        // when serializer instance changes.
+        private TypeSerializer<?> cachedMapUserKeySerializer;
+        private boolean mapKeyLengthStored;
+        private boolean mapNamespaceLengthStored;
 
-        ReusableSerializedDirectKeyBuilder(TypeSerializer<K> keySerializer, int initialSize) {
+        ReusableSerializedDirectKeyBuilder(
+                TypeSerializer<K> keySerializer,
+                TypeSerializer<N> namespaceSerializer,
+                int initialSize) {
             this.keySerializer = keySerializer;
+            this.namespaceSerializer = namespaceSerializer;
             this.outputStream = new GrowingDirectBufferOutputStream(initialSize);
             this.outputView = new DataOutputViewStreamWrapper(outputStream);
+            this.keyLengthTag = maybeFixedLength(keySerializer);
+            this.namespaceLengthTag = maybeFixedLength(namespaceSerializer);
+            this.keyLengthStoredForKeyNamespace =
+                    shouldStoreKeyLengthForKeyNamespace(keyLengthTag, namespaceLengthTag);
         }
 
-        <N> DirectBufferSlice buildKeyAndNamespace(
-                K key, TypeSerializer<N> namespaceSerializer, N namespace) throws IOException {
+        DirectBufferSlice buildKeyAndNamespace(K key, N namespace) throws IOException {
             ensureKeySerialized(key);
-            ensureNamespaceSerialized(namespaceSerializer, namespace);
+            ensureNamespaceSerialized(namespace);
             outputStream.setPosition(afterKeyMark + namespaceLength);
-            outputView.writeInt(afterKeyMark);
+            if (keyLengthStoredForKeyNamespace) {
+                outputView.writeInt(afterKeyMark);
+            }
             return outputStream.currentSlice();
         }
 
-        <K2 extends K, UK, N> DirectBufferSlice buildMapKeyNamespaceAndUserKey(
+        <K2 extends K, UK> DirectBufferSlice buildMapKeyNamespaceAndUserKey(
                 K2 key,
                 TypeSerializer<UK> userKeySerializer,
                 UK userKey,
-                TypeSerializer<N> namespaceSerializer,
                 N namespace)
                 throws IOException {
             ensureKeySerialized(key);
-            ensureNamespaceSerialized(namespaceSerializer, namespace);
+            ensureNamespaceSerialized(namespace);
+            ensureMapKeyLayout(userKeySerializer);
             outputStream.setPosition(afterKeyMark + namespaceLength);
             outputView.writeByte(0);
             userKeySerializer.serialize(userKey, outputView);
-            outputView.writeInt(afterKeyMark);
-            outputView.writeInt(namespaceLength);
+            if (mapKeyLengthStored) {
+                outputView.writeInt(afterKeyMark);
+            }
+            if (mapNamespaceLengthStored) {
+                outputView.writeInt(namespaceLength);
+            }
             return outputStream.currentSlice();
         }
 
@@ -201,8 +260,7 @@ final class CobbleStateKeySerializer {
             cachedNamespaceValue = null;
         }
 
-        private <N> void ensureNamespaceSerialized(
-                TypeSerializer<N> namespaceSerializer, N namespace) throws IOException {
+        private void ensureNamespaceSerialized(N namespace) throws IOException {
             if (namespaceLength > 0 && Objects.equals(cachedNamespaceValue, namespace)) {
                 return;
             }
@@ -210,6 +268,19 @@ final class CobbleStateKeySerializer {
             namespaceSerializer.serialize(namespace, outputView);
             namespaceLength = outputStream.position() - afterKeyMark;
             cachedNamespaceValue = namespace == null ? null : namespaceSerializer.copy(namespace);
+        }
+
+        private <UK> void ensureMapKeyLayout(TypeSerializer<UK> userKeySerializer) {
+            if (cachedMapUserKeySerializer == userKeySerializer) {
+                return;
+            }
+            int userKeyLengthTag = maybeFixedLength(userKeySerializer);
+            mapKeyLengthStored =
+                    shouldStoreMapKeyLength(keyLengthTag, namespaceLengthTag, userKeyLengthTag);
+            mapNamespaceLengthStored =
+                    shouldStoreMapNamespaceLength(
+                            keyLengthTag, namespaceLengthTag, userKeyLengthTag);
+            cachedMapUserKeySerializer = userKeySerializer;
         }
     }
 
@@ -318,5 +389,37 @@ final class CobbleStateKeySerializer {
             current.get(bytes, offset, readable);
             return readable;
         }
+    }
+
+    static int maybeFixedLength(TypeSerializer<?> serializer) {
+        return serializer.getLength();
+    }
+
+    // key+namespace has two parts; one length field is needed only when both are variable.
+    private static boolean shouldStoreKeyLengthForKeyNamespace(int keyLength, int namespaceLength) {
+        return keyLength < 0 && namespaceLength < 0;
+    }
+
+    // map key has three parts: key/namespace/userKey.
+    // We only need to persist (unknownParts - 1) lengths; this method decides whether key length
+    // is one of those persisted lengths.
+    static boolean shouldStoreMapKeyLength(int keyLength, int namespaceLength, int userKeyLength) {
+        int unknownParts =
+                (keyLength < 0 ? 1 : 0)
+                        + (namespaceLength < 0 ? 1 : 0)
+                        + (userKeyLength < 0 ? 1 : 0);
+        return keyLength < 0 && unknownParts >= 2;
+    }
+
+    // map key has three parts: key/namespace/userKey.
+    // We only need to persist (unknownParts - 1) lengths; this method decides whether namespace
+    // length is one of those persisted lengths.
+    static boolean shouldStoreMapNamespaceLength(
+            int keyLength, int namespaceLength, int userKeyLength) {
+        int unknownParts =
+                (keyLength < 0 ? 1 : 0)
+                        + (namespaceLength < 0 ? 1 : 0)
+                        + (userKeyLength < 0 ? 1 : 0);
+        return namespaceLength < 0 && unknownParts >= 2;
     }
 }

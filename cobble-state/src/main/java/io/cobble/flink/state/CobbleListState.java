@@ -199,7 +199,7 @@ final class CobbleListState<K, N, V> extends AbstractCobbleState<K, N, List<V>>
     private <T> List<T> getDirectList(K key, N namespace, TypeSerializer<T> serializer)
             throws IOException {
         CobbleStateKeySerializer.DirectBufferSlice directKey =
-                directRowKeyBuilder.buildKeyAndNamespace(key, namespaceSerializer, namespace);
+                directRowKeyBuilder.buildKeyAndNamespace(key, namespace);
         try (DirectEncodedRow encodedRow =
                 db.getDirectEncodedRowWithOptions(
                         bucketForKey(key), directKey.buffer(), directKey.length(), readOptions)) {
@@ -240,7 +240,7 @@ final class CobbleListState<K, N, V> extends AbstractCobbleState<K, N, List<V>>
     private void putEncodedListPayload(K key, N namespace, ByteBuffer payload, int payloadLength)
             throws IOException {
         CobbleStateKeySerializer.DirectBufferSlice directKey =
-                directRowKeyBuilder.buildKeyAndNamespace(key, namespaceSerializer, namespace);
+                directRowKeyBuilder.buildKeyAndNamespace(key, namespace);
         db.putEncodedListDirectWithOptions(
                 bucketForKey(key),
                 directKey.buffer(),

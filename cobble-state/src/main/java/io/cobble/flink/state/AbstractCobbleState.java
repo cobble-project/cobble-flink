@@ -28,8 +28,8 @@ abstract class AbstractCobbleState<K, N, V> implements InternalKvState<K, N, V>,
     protected final Db db;
     protected final String columnFamily;
     protected final TypeSerializer<K> keySerializer;
-    protected final CobbleStateKeySerializer.ReusableSerializedKeyBuilder<K> rowKeyBuilder;
-    protected final CobbleStateKeySerializer.ReusableSerializedDirectKeyBuilder<K>
+    protected final CobbleStateKeySerializer.ReusableSerializedKeyBuilder<K, N> rowKeyBuilder;
+    protected final CobbleStateKeySerializer.ReusableSerializedDirectKeyBuilder<K, N>
             directRowKeyBuilder;
     protected final ReadOptions readOptions;
     protected final ScanOptions scanOptions;
@@ -56,10 +56,11 @@ abstract class AbstractCobbleState<K, N, V> implements InternalKvState<K, N, V>,
         this.columnFamily = columnFamily;
         this.keySerializer = keySerializer;
         this.rowKeyBuilder =
-                new CobbleStateKeySerializer.ReusableSerializedKeyBuilder<>(keySerializer, 128);
+                new CobbleStateKeySerializer.ReusableSerializedKeyBuilder<>(
+                        keySerializer, namespaceSerializer, 128);
         this.directRowKeyBuilder =
                 new CobbleStateKeySerializer.ReusableSerializedDirectKeyBuilder<>(
-                        keySerializer, 128);
+                        keySerializer, namespaceSerializer, 128);
         this.readOptions = ReadOptions.defaultsInFamily(columnFamily);
         this.scanOptions = ScanOptions.defaults().columnFamily(columnFamily);
         this.writeOptions = createWriteOptions(columnFamily, ttlConfig);
@@ -124,25 +125,25 @@ abstract class AbstractCobbleState<K, N, V> implements InternalKvState<K, N, V>,
     }
 
     protected final byte[] rowKey(K key, N namespace) throws IOException {
-        return rowKeyBuilder.buildKeyAndNamespace(key, namespaceSerializer, namespace);
+        return rowKeyBuilder.buildKeyAndNamespace(key, namespace);
     }
 
     protected final <UK> byte[] mapEntryRowKey(
             K key, N namespace, TypeSerializer<UK> userKeySerializer, UK userKey)
             throws IOException {
         return rowKeyBuilder.buildMapKeyNamespaceAndUserKey(
-                key, userKeySerializer, userKey, namespaceSerializer, namespace);
+                key, userKeySerializer, userKey, namespace);
     }
 
     protected final <UK> CobbleStateKeySerializer.DirectBufferSlice directMapEntryRowKey(
             K key, N namespace, TypeSerializer<UK> userKeySerializer, UK userKey)
             throws IOException {
         return directRowKeyBuilder.buildMapKeyNamespaceAndUserKey(
-                key, userKeySerializer, userKey, namespaceSerializer, namespace);
+                key, userKeySerializer, userKey, namespace);
     }
 
     protected final byte[] mapKeyNamespacePrefix(K key, N namespace) throws IOException {
-        return rowKeyBuilder.buildMapKeyNamespacePrefix(key, namespaceSerializer, namespace);
+        return rowKeyBuilder.buildMapKeyNamespacePrefix(key, namespace);
     }
 
     protected final K currentKey() {
@@ -199,7 +200,6 @@ abstract class AbstractCobbleState<K, N, V> implements InternalKvState<K, N, V>,
             throws IOException {
         return directRowKeyBuilder.buildKeyAndNamespace(
                 currentKey(),
-                namespaceSerializer,
                 Preconditions.checkNotNull(
                         currentNamespace,
                         "Current namespace is not set for Cobble state '%s'.",

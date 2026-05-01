@@ -100,7 +100,7 @@ final class CobbleValueState<K, N, V> extends AbstractCobbleState<K, N, V>
 
     private byte[] getBytes(K key, N namespace) throws IOException {
         CobbleStateKeySerializer.DirectBufferSlice directKey =
-                directRowKeyBuilder.buildKeyAndNamespace(key, namespaceSerializer, namespace);
+                directRowKeyBuilder.buildKeyAndNamespace(key, namespace);
         try (DirectEncodedRow encodedRow =
                 db.getDirectEncodedRowWithOptions(
                         bucketForKey(key), directKey.buffer(), directKey.length(), readOptions)) {
