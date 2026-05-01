@@ -93,5 +93,10 @@ public class StateBenchmarkBase extends BenchmarkBase {
             listValue =
                     Collections.singletonList(RANDOM_VALUES.get(currentIndex % RANDOM_VALUE_COUNT));
         }
+
+        @TearDown(Level.Invocation)
+        public void kvTearDown() {
+            listValue = null;
+        }
     }
 }

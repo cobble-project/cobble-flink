@@ -26,13 +26,15 @@ import org.apache.flink.api.common.state.ListState;
 import org.apache.flink.api.common.state.ListStateDescriptor;
 import org.apache.flink.api.common.state.MapState;
 import org.apache.flink.api.common.state.MapStateDescriptor;
+import org.apache.flink.api.common.state.State;
+import org.apache.flink.api.common.state.StateDescriptor;
 import org.apache.flink.api.common.state.ValueState;
 import org.apache.flink.api.common.state.ValueStateDescriptor;
 import org.apache.flink.api.common.typeutils.base.LongSerializer;
-import org.apache.flink.api.common.typeutils.base.StringSerializer;
 import org.apache.flink.configuration.Configuration;
 import org.apache.flink.configuration.MemorySize;
 import org.apache.flink.contrib.streaming.state.EmbeddedRocksDBStateBackend;
+import org.apache.flink.contrib.streaming.state.RocksDBOptionsFactory;
 import org.apache.flink.core.fs.CloseableRegistry;
 import org.apache.flink.metrics.MetricGroup;
 import org.apache.flink.runtime.jobgraph.JobVertexID;
@@ -40,16 +42,25 @@ import org.apache.flink.runtime.operators.testutils.MockEnvironment;
 import org.apache.flink.runtime.operators.testutils.MockEnvironmentBuilder;
 import org.apache.flink.runtime.query.TaskKvStateRegistry;
 import org.apache.flink.runtime.state.AbstractKeyedStateBackend;
+import org.apache.flink.runtime.state.KeyedStateFunction;
 import org.apache.flink.runtime.state.KeyedStateHandle;
+import org.apache.flink.runtime.state.VoidNamespace;
+import org.apache.flink.runtime.state.VoidNamespaceSerializer;
 import org.apache.flink.runtime.state.TestTaskStateManagerBuilder;
 import org.apache.flink.runtime.state.hashmap.HashMapStateBackend;
 import org.apache.flink.runtime.state.ttl.TtlTimeProvider;
 import org.apache.flink.runtime.util.TestingTaskManagerRuntimeInfo;
 import org.apache.flink.util.FileUtils;
+import org.rocksdb.ColumnFamilyOptions;
+import org.rocksdb.DBOptions;
+import org.rocksdb.Statistics;
 
 import java.io.File;
 import java.io.IOException;
+import java.lang.reflect.InvocationTargetException;
+import java.lang.reflect.Method;
 import java.nio.file.Files;
+import java.util.Collection;
 import java.util.Collections;
 
 /** Local replacement for the upstream benchmark helper utilities. */
@@ -57,10 +68,10 @@ public final class StateBackendBenchmarkUtils {
     private static final JobVertexID BENCHMARK_JOB_VERTEX_ID =
             JobVertexID.fromHexString("22222222222222222222222222222222");
     private static final org.apache.flink.runtime.state.KeyGroupRange KEY_GROUP_RANGE =
-            org.apache.flink.runtime.state.KeyGroupRange.of(0, 127);
-    private static final int NUMBER_OF_KEY_GROUPS = 128;
+            org.apache.flink.runtime.state.KeyGroupRange.of(0, 1);
+    private static final int NUMBER_OF_KEY_GROUPS = 2;
     private static final String OPERATOR_IDENTIFIER = "state-benchmark";
-    private static final String NAMESPACE = "benchmark-ns";
+    private static volatile Statistics lastRocksDbStatistics;
 
     public enum StateBackendType {
         HEAP,
@@ -116,7 +127,7 @@ public final class StateBackendBenchmarkUtils {
             AbstractKeyedStateBackend<Long> keyedStateBackend, ValueStateDescriptor<T> descriptor)
             throws Exception {
         return keyedStateBackend.getPartitionedState(
-                NAMESPACE, StringSerializer.INSTANCE, descriptor);
+                VoidNamespace.INSTANCE, VoidNamespaceSerializer.INSTANCE, descriptor);
     }
 
     public static <UK, UV> MapState<UK, UV> getMapState(
@@ -124,14 +135,49 @@ public final class StateBackendBenchmarkUtils {
             MapStateDescriptor<UK, UV> descriptor)
             throws Exception {
         return keyedStateBackend.getPartitionedState(
-                NAMESPACE, StringSerializer.INSTANCE, descriptor);
+                VoidNamespace.INSTANCE, VoidNamespaceSerializer.INSTANCE, descriptor);
     }
 
     public static <T> ListState<T> getListState(
             AbstractKeyedStateBackend<Long> keyedStateBackend, ListStateDescriptor<T> descriptor)
             throws Exception {
         return keyedStateBackend.getPartitionedState(
-                NAMESPACE, StringSerializer.INSTANCE, descriptor);
+                VoidNamespace.INSTANCE, VoidNamespaceSerializer.INSTANCE, descriptor);
+    }
+
+    public static <S extends State, T> void applyToAllKeys(
+            AbstractKeyedStateBackend<Long> keyedStateBackend,
+            StateDescriptor<S, T> descriptor,
+            KeyedStateFunction<Long, S> function)
+            throws Exception {
+        keyedStateBackend.applyToAllKeys(
+                VoidNamespace.INSTANCE, VoidNamespaceSerializer.INSTANCE, descriptor, function);
+    }
+
+    public static <S extends State, T> boolean compactState(
+            AbstractKeyedStateBackend<Long> keyedStateBackend, StateDescriptor<S, T> descriptor)
+            throws Exception {
+        Method compactState;
+        try {
+            compactState = keyedStateBackend.getClass().getMethod("compactState", StateDescriptor.class);
+        } catch (NoSuchMethodException ignored) {
+            return false;
+        }
+        try {
+            compactState.invoke(keyedStateBackend, descriptor);
+            return true;
+        } catch (IllegalAccessException e) {
+            throw new IllegalStateException("Failed to access compactState on benchmark backend.", e);
+        } catch (InvocationTargetException e) {
+            Throwable cause = e.getCause();
+            if (cause instanceof Exception) {
+                throw (Exception) cause;
+            }
+            if (cause instanceof Error) {
+                throw (Error) cause;
+            }
+            throw new RuntimeException("Failed to compact benchmark backend state.", cause);
+        }
     }
 
     public static void cleanUp(BenchmarkBackend benchmarkBackend) throws Exception {
@@ -192,7 +238,10 @@ public final class StateBackendBenchmarkUtils {
     }
 
     private static File resolveBenchmarkDataRoot() {
-        String configured = System.getProperty("cobble.state.bench.data-dir");
+        String configured = System.getProperty("benchmark.state.data-dir");
+        if (configured == null || configured.isEmpty()) {
+            configured = System.getProperty("cobble.state.bench.data-dir");
+        }
         return configured == null ? new File("target/benchmark-state") : new File(configured);
     }
 
@@ -230,6 +279,28 @@ public final class StateBackendBenchmarkUtils {
             throws Exception {
         EmbeddedRocksDBStateBackend backend = new EmbeddedRocksDBStateBackend();
         backend.setDbStoragePath(new File(benchmarkRoot, "rocksdb").getAbsolutePath());
+        if (Boolean.getBoolean("cobble.state.bench.enable-rocksdb-statistics")) {
+            backend.setRocksDBOptions(
+                    new RocksDBOptionsFactory() {
+                        @Override
+                        public DBOptions createDBOptions(
+                                DBOptions currentOptions, Collection<AutoCloseable> handlesToClose) {
+                            Statistics statistics = new Statistics();
+                            handlesToClose.add(statistics);
+                            lastRocksDbStatistics = statistics;
+                            return currentOptions.setStatistics(statistics);
+                        }
+
+                        @Override
+                        public ColumnFamilyOptions createColumnOptions(
+                                ColumnFamilyOptions currentOptions,
+                                Collection<AutoCloseable> handlesToClose) {
+                            return currentOptions;
+                        }
+                    });
+        } else {
+            lastRocksDbStatistics = null;
+        }
         return backend.createKeyedStateBackend(
                 environment,
                 resolveJobId(environment),
@@ -252,6 +323,10 @@ public final class StateBackendBenchmarkUtils {
                 CobbleOptions.LOCAL_DIRECTORIES,
                 new File(benchmarkRoot, "cobble-local").getAbsolutePath());
         configuration.set(CobbleOptions.MEMTABLE_TYPE, "skiplist");
+        String configuredLogLevel = System.getProperty("state.backend.cobble.log.level");
+        if (configuredLogLevel != null && !configuredLogLevel.isEmpty()) {
+            configuration.set(CobbleOptions.LOG_LEVEL, configuredLogLevel);
+        }
 
         CobbleStateBackend backend =
                 new CobbleStateBackend()
@@ -315,8 +390,16 @@ public final class StateBackendBenchmarkUtils {
             return workingDir;
         }
 
+        public File getBenchmarkRoot() {
+            return benchmarkRoot;
+        }
+
         public AbstractKeyedStateBackend<Long> getKeyedStateBackend() {
             return keyedStateBackend;
         }
+    }
+
+    public static Statistics getLastRocksDbStatistics() {
+        return lastRocksDbStatistics;
     }
 }

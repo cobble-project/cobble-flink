@@ -20,11 +20,15 @@ package io.cobble.flink.state.benchmark;
 
 import static io.cobble.flink.state.benchmark.StateBenchmarkConstants.LIST_VALUE_COUNT;
 import static io.cobble.flink.state.benchmark.StateBenchmarkConstants.SETUP_KEY_COUNT;
+import static io.cobble.flink.state.benchmark.StateBackendBenchmarkUtils.applyToAllKeys;
+import static io.cobble.flink.state.benchmark.StateBackendBenchmarkUtils.compactState;
 
 import org.apache.flink.api.common.state.ListState;
 import org.apache.flink.api.common.state.ListStateDescriptor;
 import org.openjdk.jmh.annotations.Benchmark;
+import org.openjdk.jmh.annotations.Level;
 import org.openjdk.jmh.annotations.Setup;
+import org.openjdk.jmh.annotations.TearDown;
 import org.openjdk.jmh.infra.Blackhole;
 import org.openjdk.jmh.runner.Runner;
 import org.openjdk.jmh.runner.RunnerException;
@@ -37,6 +41,9 @@ import java.util.concurrent.atomic.AtomicInteger;
 
 /** Implementation for list state benchmark testing. */
 public class ListStateBenchmark extends StateBenchmarkBase {
+    private final String stateName = "listState";
+    private final ListStateDescriptor<Long> stateDesc =
+            new ListStateDescriptor<>(stateName, Long.class);
     private ListState<Long> listState;
     private List<Long> dummyLists;
 
@@ -52,18 +59,45 @@ public class ListStateBenchmark extends StateBenchmarkBase {
     @Setup
     public void setUp() throws Exception {
         keyedStateBackend = createKeyedStateBackend();
-        listState =
-                StateBackendBenchmarkUtils.getListState(
-                        keyedStateBackend, new ListStateDescriptor<>("listState", Long.class));
+        listState = StateBackendBenchmarkUtils.getListState(keyedStateBackend, stateDesc);
         dummyLists = new ArrayList<>(LIST_VALUE_COUNT);
         for (int i = 0; i < LIST_VALUE_COUNT; ++i) {
             dummyLists.add(random.nextLong());
+        }
+        keyIndex = new AtomicInteger();
+    }
+
+    @Setup(Level.Iteration)
+    public void setUpPerIteration() throws Exception {
+        if (backendType == StateBackendBenchmarkUtils.StateBackendType.COBBLE) {
+            StateBackendBenchmarkUtils.cleanUp(benchmarkBackend);
+            benchmarkBackend = StateBackendBenchmarkUtils.createKeyedStateBackend(backendType);
+            keyedStateBackend = benchmarkBackend.getKeyedStateBackend();
+            listState = StateBackendBenchmarkUtils.getListState(keyedStateBackend, stateDesc);
         }
         for (int i = 0; i < SETUP_KEY_COUNT; ++i) {
             keyedStateBackend.setCurrentKey((long) i);
             listState.add(random.nextLong());
         }
-        keyIndex = new AtomicInteger();
+        compactState(keyedStateBackend, stateDesc);
+    }
+
+    @TearDown(Level.Iteration)
+    public void tearDownPerIteration() throws Exception {
+        if (backendType == StateBackendBenchmarkUtils.StateBackendType.COBBLE) {
+            return;
+        }
+        applyToAllKeys(
+                keyedStateBackend,
+                stateDesc,
+                (key, state) -> {
+                    keyedStateBackend.setCurrentKey(key);
+                    state.clear();
+                });
+        if (!compactState(keyedStateBackend, stateDesc)) {
+            System.gc();
+        }
+        Thread.sleep(1000L);
     }
 
     @Benchmark

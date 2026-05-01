@@ -32,7 +32,14 @@ import org.openjdk.jmh.annotations.Warmup;
 @State(Thread)
 @OutputTimeUnit(MILLISECONDS)
 @BenchmarkMode(Throughput)
-@Fork(3)
+@Fork(
+        value = 3,
+        jvmArgsAppend = {
+            "-Djava.rmi.server.hostname=127.0.0.1",
+            "-Dcom.sun.management.jmxremote.authenticate=false",
+            "-Dcom.sun.management.jmxremote.ssl=false",
+            "-Dcom.sun.management.jmxremote.ssl"
+        })
 @Warmup(iterations = 10)
 @Measurement(iterations = 10)
 public class BenchmarkBase {}

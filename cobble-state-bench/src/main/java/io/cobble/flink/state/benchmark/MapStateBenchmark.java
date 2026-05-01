@@ -126,7 +126,7 @@ public class MapStateBenchmark extends StateBenchmarkBase {
         keyedStateBackend.setCurrentKey(keyValue.setUpKey);
         Iterable<Map.Entry<Long, Double>> iterable = mapState.entries();
         if (iterable != null) {
-            for (Map.Entry<Long, Double> entry : iterable) {
+            for (Map.Entry<Long, Double> entry : mapState.entries()) {
                 bh.consume(entry.getKey());
                 bh.consume(entry.getValue());
             }

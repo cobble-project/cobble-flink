@@ -24,11 +24,11 @@ import java.util.Random;
 
 /** Shared constants and pre-generated key/value pools for the state benchmarks. */
 public final class StateBenchmarkConstants {
-    public static final int MAP_KEY_COUNT = 8;
-    public static final int LIST_VALUE_COUNT = 32;
-    public static final int SETUP_KEY_COUNT = 10_000;
-    public static final int NEW_KEY_COUNT = 10_000;
-    public static final int RANDOM_VALUE_COUNT = 100_000;
+    public static final int MAP_KEY_COUNT = 10;
+    public static final int LIST_VALUE_COUNT = 100;
+    public static final int SETUP_KEY_COUNT = 500_000;
+    public static final int NEW_KEY_COUNT = 500_000;
+    public static final int RANDOM_VALUE_COUNT = 1_000_000;
 
     public static final ArrayList<Long> MAP_KEYS = new ArrayList<>(MAP_KEY_COUNT);
     public static final ArrayList<Double> MAP_VALUES = new ArrayList<>(MAP_KEY_COUNT);
@@ -40,36 +40,36 @@ public final class StateBenchmarkConstants {
         for (int i = 0; i < MAP_KEY_COUNT; i++) {
             MAP_KEYS.add((long) i);
         }
-        Collections.shuffle(MAP_KEYS, new Random(17L));
+        Collections.shuffle(MAP_KEYS);
     }
 
     static {
-        Random random = new Random(23L);
+        Random random = new Random();
         for (int i = 0; i < MAP_KEY_COUNT; i++) {
             MAP_VALUES.add(random.nextDouble());
         }
-        Collections.shuffle(MAP_VALUES, new Random(29L));
+        Collections.shuffle(MAP_VALUES);
     }
 
     static {
         for (long i = 0; i < SETUP_KEY_COUNT; i++) {
             SETUP_KEYS.add(i);
         }
-        Collections.shuffle(SETUP_KEYS, new Random(31L));
+        Collections.shuffle(SETUP_KEYS);
     }
 
     static {
         for (long i = 0; i < NEW_KEY_COUNT; i++) {
             NEW_KEYS.add(i + SETUP_KEY_COUNT);
         }
-        Collections.shuffle(NEW_KEYS, new Random(37L));
+        Collections.shuffle(NEW_KEYS);
     }
 
     static {
         for (long i = 0; i < RANDOM_VALUE_COUNT; i++) {
             RANDOM_VALUES.add(i);
         }
-        Collections.shuffle(RANDOM_VALUES, new Random(41L));
+        Collections.shuffle(RANDOM_VALUES);
     }
 
     private StateBenchmarkConstants() {}

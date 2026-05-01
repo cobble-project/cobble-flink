@@ -83,6 +83,8 @@
                     <arguments>
                         <argument>-jar</argument>
                         <argument>${project.build.directory}/benchmarks.jar</argument>
+                        <argument>-foe</argument>
+                        <argument>true</argument>
                         <argument>-rf</argument>
                         <argument>${benchmark.result.format}</argument>
                         <argument>-rff</argument>
