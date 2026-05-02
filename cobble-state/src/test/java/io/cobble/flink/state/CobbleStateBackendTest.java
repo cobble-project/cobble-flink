@@ -949,6 +949,49 @@ class CobbleStateBackendTest {
     }
 
     @Test
+    void ttlDisabledStatesRemainAfterTimeAdvanceIncludingListElements(@TempDir Path tempDir)
+            throws Exception {
+        MockTtlTimeProvider ttlTimeProvider = new MockTtlTimeProvider();
+        ttlTimeProvider.setCurrentTimestamp(0L);
+
+        try (TestBackendContext context =
+                createBackendContext(
+                        tempDir, false, null, MemorySize.ofMebiBytes(1), ttlTimeProvider, true)) {
+            CobbleKeyedStateBackend<Integer> backend = context.cobbleBackend;
+            backend.setCurrentKey(99);
+
+            ValueStateDescriptor<String> valueDescriptor =
+                    new ValueStateDescriptor<>("no-ttl-value-state", StringSerializer.INSTANCE);
+            ValueState<String> valueState =
+                    backend.getPartitionedState(
+                            "no-ttl-value-ns", StringSerializer.INSTANCE, valueDescriptor);
+            valueState.update("v");
+
+            ListStateDescriptor<String> listDescriptor =
+                    new ListStateDescriptor<>("no-ttl-list-state", StringSerializer.INSTANCE);
+            ListState<String> listState =
+                    backend.getPartitionedState(
+                            "no-ttl-list-ns", StringSerializer.INSTANCE, listDescriptor);
+            listState.add("a");
+            listState.add("b");
+
+            MapStateDescriptor<String, String> mapDescriptor =
+                    new MapStateDescriptor<>(
+                            "no-ttl-map-state", StringSerializer.INSTANCE, StringSerializer.INSTANCE);
+            MapState<String, String> mapState =
+                    backend.getPartitionedState(
+                            "no-ttl-map-ns", StringSerializer.INSTANCE, mapDescriptor);
+            mapState.put("k", "m");
+
+            setTtlTime(backend, ttlTimeProvider, 120_000L);
+
+            assertEquals("v", valueState.value());
+            assertEquals(java.util.Arrays.asList("a", "b"), toList(listState.get()));
+            assertEquals("m", mapState.get("k"));
+        }
+    }
+
+    @Test
     void mapStateIsEmptyFiltersOtherNamespacesBeforeReturning(@TempDir Path tempDir)
             throws Exception {
         try (TestBackendContext context =

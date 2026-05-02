@@ -1,6 +1,7 @@
 package io.cobble.flink.state;
 
 import io.cobble.Config;
+import io.cobble.ColumnFamilyOptions;
 import io.cobble.structured.Db;
 import io.cobble.structured.ListConfig;
 import io.cobble.structured.Schema;
@@ -379,7 +380,13 @@ final class CobbleKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
         Map<Integer, Schema.ColumnType> family =
                 cobbleDb.currentSchema().columnFamilies().get(stateDesc.getName());
         if (family == null) {
+            boolean valueTtlEnabledForState =
+                    stateDesc.getTtlConfig() != null
+                            && stateDesc.getTtlConfig().isEnabled();
             try (StructuredSchemaBuilder builder = cobbleDb.updateSchema()) {
+                builder.setColumnFamilyOptions(
+                        stateDesc.getName(),
+                        ColumnFamilyOptions.defaults().valueHasTtl(valueTtlEnabledForState));
                 if (stateDesc.getType() == StateDescriptor.Type.LIST) {
                     builder.addListColumn(stateDesc.getName(), 0, ListConfig.defaults());
                 } else {
