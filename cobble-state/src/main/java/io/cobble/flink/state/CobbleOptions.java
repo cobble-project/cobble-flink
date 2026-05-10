@@ -58,13 +58,13 @@ public final class CobbleOptions {
                     .withDescription(
                             "The memtable implementation used by Cobble. Supported values: hash, skiplist, vec.");
 
-    /** Compaction policy used by Cobble (round_robin, min_overlap). */
+    /** Compaction policy used by Cobble (round_robin, min_overlap, score_priority). */
     public static final ConfigOption<String> COMPACTION_POLICY =
             ConfigOptions.key("state.backend.cobble.compaction.policy")
                     .stringType()
                     .defaultValue("round_robin")
                     .withDescription(
-                            "The compaction policy used by Cobble. Supported values: round_robin, min_overlap.");
+                            "The compaction policy used by Cobble. Supported values: round_robin, min_overlap, score_priority.");
 
     /** Whether Cobble should enable SST bloom filters. */
     public static final ConfigOption<Boolean> SST_BLOOM_FILTER_ENABLED =
