@@ -47,12 +47,10 @@ final class CobbleFlinkConfigMapper {
                         flinkConfig.get(CobbleOptions.LOG_KEEP_FILES));
         config.logLevel = normalizeLogLevel(flinkConfig.get(CobbleOptions.LOG_LEVEL));
 
-        if (flinkConfig.contains(CobbleOptions.VALUE_SEPARATION_THRESHOLD)) {
-            config.valueSeparationThreshold =
-                    toPositiveIntBytes(
-                            CobbleOptions.VALUE_SEPARATION_THRESHOLD.key(),
-                            flinkConfig.get(CobbleOptions.VALUE_SEPARATION_THRESHOLD));
-        }
+        config.valueSeparationThreshold =
+                toPositiveIntBytes(
+                        CobbleOptions.VALUE_SEPARATION_THRESHOLD.key(),
+                        flinkConfig.get(CobbleOptions.VALUE_SEPARATION_THRESHOLD));
         if (flinkConfig.contains(CobbleOptions.SNAPSHOT_RETENTION)) {
             config.snapshotRetention =
                     requirePositive(
@@ -264,9 +262,11 @@ final class CobbleFlinkConfigMapper {
                 return Config.CompactionPolicyKind.ROUND_ROBIN;
             case "min_overlap":
                 return Config.CompactionPolicyKind.MIN_OVERLAP;
+            case "score_priority":
+                return Config.CompactionPolicyKind.SCORE_PRIORITY;
             default:
                 throw new IllegalConfigurationException(
-                        "state.backend.cobble.compaction.policy must be one of [round_robin, min_overlap], but was: "
+                        "state.backend.cobble.compaction.policy must be one of [round_robin, min_overlap, score_priority], but was: "
                                 + compactionPolicy);
         }
     }

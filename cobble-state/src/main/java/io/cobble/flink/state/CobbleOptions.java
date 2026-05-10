@@ -93,9 +93,10 @@ public final class CobbleOptions {
     public static final ConfigOption<MemorySize> VALUE_SEPARATION_THRESHOLD =
             ConfigOptions.key("state.backend.cobble.value-separation.threshold")
                     .memoryType()
-                    .noDefaultValue()
+                    .defaultValue(MemorySize.parse("1kb"))
                     .withDescription(
-                            "Values larger than this threshold are separated into Cobble's value log.");
+                            "Values larger than this threshold are separated into Cobble's value log. "
+                                    + "Default: 1kb.");
 
     /** Byte size of each pooled direct ByteBuffer used by Cobble structured direct reads. */
     public static final ConfigOption<MemorySize> DIRECT_IO_BUFFER_SIZE =
