@@ -44,9 +44,9 @@ import org.apache.flink.runtime.query.TaskKvStateRegistry;
 import org.apache.flink.runtime.state.AbstractKeyedStateBackend;
 import org.apache.flink.runtime.state.KeyedStateFunction;
 import org.apache.flink.runtime.state.KeyedStateHandle;
+import org.apache.flink.runtime.state.TestTaskStateManagerBuilder;
 import org.apache.flink.runtime.state.VoidNamespace;
 import org.apache.flink.runtime.state.VoidNamespaceSerializer;
-import org.apache.flink.runtime.state.TestTaskStateManagerBuilder;
 import org.apache.flink.runtime.state.hashmap.HashMapStateBackend;
 import org.apache.flink.runtime.state.ttl.TtlTimeProvider;
 import org.apache.flink.runtime.util.TestingTaskManagerRuntimeInfo;
@@ -159,7 +159,8 @@ public final class StateBackendBenchmarkUtils {
             throws Exception {
         Method compactState;
         try {
-            compactState = keyedStateBackend.getClass().getMethod("compactState", StateDescriptor.class);
+            compactState =
+                    keyedStateBackend.getClass().getMethod("compactState", StateDescriptor.class);
         } catch (NoSuchMethodException ignored) {
             return false;
         }
@@ -167,7 +168,8 @@ public final class StateBackendBenchmarkUtils {
             compactState.invoke(keyedStateBackend, descriptor);
             return true;
         } catch (IllegalAccessException e) {
-            throw new IllegalStateException("Failed to access compactState on benchmark backend.", e);
+            throw new IllegalStateException(
+                    "Failed to access compactState on benchmark backend.", e);
         } catch (InvocationTargetException e) {
             Throwable cause = e.getCause();
             if (cause instanceof Exception) {
@@ -284,7 +286,8 @@ public final class StateBackendBenchmarkUtils {
                     new RocksDBOptionsFactory() {
                         @Override
                         public DBOptions createDBOptions(
-                                DBOptions currentOptions, Collection<AutoCloseable> handlesToClose) {
+                                DBOptions currentOptions,
+                                Collection<AutoCloseable> handlesToClose) {
                             Statistics statistics = new Statistics();
                             handlesToClose.add(statistics);
                             lastRocksDbStatistics = statistics;

@@ -109,10 +109,7 @@ final class CobbleStateKeySerializer {
         }
 
         <K2 extends K, UK> byte[] buildMapKeyNamespaceAndUserKey(
-                K2 key,
-                TypeSerializer<UK> userKeySerializer,
-                UK userKey,
-                N namespace)
+                K2 key, TypeSerializer<UK> userKeySerializer, UK userKey, N namespace)
                 throws IOException {
             ensureKeySerialized(key);
             ensureNamespaceSerialized(namespace);
@@ -228,10 +225,7 @@ final class CobbleStateKeySerializer {
         }
 
         <K2 extends K, UK> DirectBufferSlice buildMapKeyNamespaceAndUserKey(
-                K2 key,
-                TypeSerializer<UK> userKeySerializer,
-                UK userKey,
-                N namespace)
+                K2 key, TypeSerializer<UK> userKeySerializer, UK userKey, N namespace)
                 throws IOException {
             ensureKeySerialized(key);
             ensureNamespaceSerialized(namespace);

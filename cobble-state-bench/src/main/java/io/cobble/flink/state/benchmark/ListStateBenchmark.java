@@ -18,10 +18,10 @@
 
 package io.cobble.flink.state.benchmark;
 
-import static io.cobble.flink.state.benchmark.StateBenchmarkConstants.LIST_VALUE_COUNT;
-import static io.cobble.flink.state.benchmark.StateBenchmarkConstants.SETUP_KEY_COUNT;
 import static io.cobble.flink.state.benchmark.StateBackendBenchmarkUtils.applyToAllKeys;
 import static io.cobble.flink.state.benchmark.StateBackendBenchmarkUtils.compactState;
+import static io.cobble.flink.state.benchmark.StateBenchmarkConstants.LIST_VALUE_COUNT;
+import static io.cobble.flink.state.benchmark.StateBenchmarkConstants.SETUP_KEY_COUNT;
 
 import org.apache.flink.api.common.state.ListState;
 import org.apache.flink.api.common.state.ListStateDescriptor;

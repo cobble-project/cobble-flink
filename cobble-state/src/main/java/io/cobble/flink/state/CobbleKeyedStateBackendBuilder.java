@@ -1,7 +1,7 @@
 package io.cobble.flink.state;
 
 import io.cobble.Config;
-import io.cobble.structured.Db;
+import io.cobble.Db;
 
 import org.apache.flink.api.common.typeutils.TypeSerializer;
 import org.apache.flink.configuration.Configuration;

@@ -1,11 +1,11 @@
 package io.cobble.flink.state;
 
-import io.cobble.structured.Db;
-import io.cobble.structured.DirectScanCursor;
-import io.cobble.structured.ReadOptions;
-import io.cobble.structured.ScanCursor;
-import io.cobble.structured.ScanOptions;
-import io.cobble.structured.WriteOptions;
+import io.cobble.Db;
+import io.cobble.DirectScanCursor;
+import io.cobble.ReadOptions;
+import io.cobble.ScanCursor;
+import io.cobble.ScanOptions;
+import io.cobble.WriteOptions;
 
 import org.apache.flink.api.common.state.StateTtlConfig;
 import org.apache.flink.api.common.typeutils.TypeSerializer;

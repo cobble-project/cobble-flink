@@ -98,21 +98,21 @@ public final class CobbleOptions {
                             "Values larger than this threshold are separated into Cobble's value log. "
                                     + "Default: 1kb.");
 
-    /** Byte size of each pooled direct ByteBuffer used by Cobble structured direct reads. */
+    /** Byte size of each pooled direct ByteBuffer used by Cobble direct reads. */
     public static final ConfigOption<MemorySize> DIRECT_IO_BUFFER_SIZE =
             ConfigOptions.key("state.backend.cobble.direct-io.buffer-size")
                     .memoryType()
                     .defaultValue(MemorySize.parse("2kb"))
                     .withDescription(
-                            "The size of each pooled direct ByteBuffer used by Cobble structured direct reads.");
+                            "The size of each pooled direct ByteBuffer used by Cobble direct reads.");
 
-    /** Maximum number of pooled direct ByteBuffers kept for Cobble structured direct reads. */
+    /** Maximum number of pooled direct ByteBuffers kept for Cobble direct reads. */
     public static final ConfigOption<Integer> DIRECT_IO_BUFFER_POOL_MAX_SIZE =
             ConfigOptions.key("state.backend.cobble.direct-io.pool-max-size")
                     .intType()
                     .defaultValue(64)
                     .withDescription(
-                            "The maximum number of pooled direct ByteBuffers kept for Cobble structured direct reads.");
+                            "The maximum number of pooled direct ByteBuffers kept for Cobble direct reads.");
 
     /** Maximum size of the active Cobble log file before rolling. */
     public static final ConfigOption<MemorySize> LOG_MAX_FILE_SIZE =

@@ -11,8 +11,9 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import io.cobble.Config;
+import io.cobble.MergeOperatorType;
+import io.cobble.Schema;
 import io.cobble.ShardSnapshot;
-import io.cobble.structured.Schema;
 
 import org.apache.flink.api.common.state.ListState;
 import org.apache.flink.api.common.state.ListStateDescriptor;
@@ -615,9 +616,9 @@ class CobbleStateBackendTest {
             CobbleKeyedStateBackend<Integer> backend = context.cobbleBackend;
 
             Schema schema = backend.getCobbleDb().currentSchema();
-            assertTrue(schema.columnFamilies().containsKey("restore-value-state"));
-            assertTrue(schema.columnFamilies().containsKey("restore-list-state"));
-            assertTrue(schema.columnFamilies().containsKey("restore-map-state"));
+            assertBytesColumnFamily(schema, "restore-value-state");
+            assertBytesColumnFamily(schema, "restore-list-state");
+            assertBytesColumnFamily(schema, "restore-map-state");
 
             ValueStateDescriptor<String> valueStateDescriptor =
                     new ValueStateDescriptor<>("restore-value-state", StringSerializer.INSTANCE);
@@ -857,8 +858,7 @@ class CobbleStateBackendTest {
             assertValueStateEntry(backend, valueState, entryCount - 1, payloadBytes);
 
             Schema schema = backend.getCobbleDb().currentSchema();
-            assertTrue(schema.columnFamilies().containsKey("value-state"));
-            assertTrue(schema.columnFamilies().get("value-state").isEmpty());
+            assertBytesColumnFamily(schema, "value-state");
         }
     }
 
@@ -977,7 +977,9 @@ class CobbleStateBackendTest {
 
             MapStateDescriptor<String, String> mapDescriptor =
                     new MapStateDescriptor<>(
-                            "no-ttl-map-state", StringSerializer.INSTANCE, StringSerializer.INSTANCE);
+                            "no-ttl-map-state",
+                            StringSerializer.INSTANCE,
+                            StringSerializer.INSTANCE);
             MapState<String, String> mapState =
                     backend.getPartitionedState(
                             "no-ttl-map-ns", StringSerializer.INSTANCE, mapDescriptor);
@@ -1093,9 +1095,7 @@ class CobbleStateBackendTest {
             assertEquals(lastExpected, lastActual);
 
             Schema schema = backend.getCobbleDb().currentSchema();
-            assertTrue(
-                    schema.columnFamilies().get("list-state").get(0)
-                            instanceof Schema.ColumnType.List);
+            assertBytesColumnFamily(schema, "list-state");
         }
     }
 
@@ -1132,8 +1132,7 @@ class CobbleStateBackendTest {
                             backend, mapState, keyCount - 1, entriesPerKey, valueBytes);
 
             Schema schema = backend.getCobbleDb().currentSchema();
-            assertTrue(schema.columnFamilies().containsKey("map-state"));
-            assertTrue(schema.columnFamilies().get("map-state").isEmpty());
+            assertBytesColumnFamily(schema, "map-state");
             backend.setCurrentKey(keyCount - 1);
             assertEquals(
                     lastExpected.get("map-key-" + (keyCount - 1) + "-0"),
@@ -1167,13 +1166,9 @@ class CobbleStateBackendTest {
                     .put("left", 1);
 
             Schema schema = backend.getCobbleDb().currentSchema();
-            assertTrue(schema.columnFamilies().containsKey("value-state"));
-            assertTrue(schema.columnFamilies().get("value-state").isEmpty());
-            assertTrue(
-                    schema.columnFamilies().get("list-state").get(0)
-                            instanceof Schema.ColumnType.List);
-            assertTrue(schema.columnFamilies().containsKey("map-state"));
-            assertTrue(schema.columnFamilies().get("map-state").isEmpty());
+            assertBytesColumnFamily(schema, "value-state");
+            assertBytesColumnFamily(schema, "list-state");
+            assertBytesColumnFamily(schema, "map-state");
             assertEquals("hello", valueState.value());
         }
     }
@@ -1445,6 +1440,13 @@ class CobbleStateBackendTest {
             }
         }
         throw new IllegalStateException("Failed to find key for key-group " + keyGroup + '.');
+    }
+
+    private static void assertBytesColumnFamily(Schema schema, String columnFamilyName) {
+        Schema.ColumnFamily family = schema.columnFamily(columnFamilyName);
+        assertNotNull(family, "Missing column family: " + columnFamilyName);
+        assertEquals(1, family.numColumns);
+        assertEquals(MergeOperatorType.BYTES.operatorId(), family.mergeOperatorId(0));
     }
 
     private static void assertVolumeKinds(

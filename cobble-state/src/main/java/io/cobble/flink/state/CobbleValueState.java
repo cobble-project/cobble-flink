@@ -1,7 +1,7 @@
 package io.cobble.flink.state;
 
-import io.cobble.structured.Db;
-import io.cobble.structured.DirectEncodedRow;
+import io.cobble.Db;
+import io.cobble.DirectEncodedRow;
 
 import org.apache.flink.api.common.state.StateTtlConfig;
 import org.apache.flink.api.common.typeutils.TypeSerializer;
@@ -79,7 +79,7 @@ final class CobbleValueState<K, N, V> extends AbstractCobbleState<K, N, V>
             if (encodedRow == null) {
                 return null;
             }
-            return encodedRow.decodeBytesColumn(
+            return encodedRow.decodeColumn(
                     STATE_COLUMN_INDEX, input -> deserializeValue(valueSerializer, input));
         }
     }
@@ -107,7 +107,7 @@ final class CobbleValueState<K, N, V> extends AbstractCobbleState<K, N, V>
             if (encodedRow == null) {
                 return null;
             }
-            return encodedRow.decodeBytesColumn(STATE_COLUMN_INDEX, CobbleValueState::readAllBytes);
+            return encodedRow.decodeColumn(STATE_COLUMN_INDEX, CobbleValueState::readAllBytes);
         }
     }
 

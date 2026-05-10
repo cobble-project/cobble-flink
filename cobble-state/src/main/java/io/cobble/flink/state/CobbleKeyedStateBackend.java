@@ -1,11 +1,11 @@
 package io.cobble.flink.state;
 
-import io.cobble.Config;
 import io.cobble.ColumnFamilyOptions;
-import io.cobble.structured.Db;
-import io.cobble.structured.ListConfig;
-import io.cobble.structured.Schema;
-import io.cobble.structured.StructuredSchemaBuilder;
+import io.cobble.Config;
+import io.cobble.Db;
+import io.cobble.MergeOperatorType;
+import io.cobble.Schema;
+import io.cobble.SchemaBuilder;
 
 import org.apache.flink.annotation.VisibleForTesting;
 import org.apache.flink.api.common.ExecutionConfig;
@@ -58,7 +58,7 @@ import java.util.stream.Stream;
 
 /**
  * Keyed backend that keeps the Cobble DB and config live and serves Flink Value/List/Map state
- * through Cobble structured column families.
+ * through Cobble column families.
  */
 final class CobbleKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
 
@@ -313,7 +313,7 @@ final class CobbleKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
         return cobbleConfig;
     }
 
-    /** Exposes the live structured Cobble DB handle for tests and internal helpers. */
+    /** Exposes the live Cobble DB handle for tests and internal helpers. */
     Db getCobbleDb() {
         return cobbleDb;
     }
@@ -377,50 +377,35 @@ final class CobbleKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
                             + '.');
         }
 
-        Map<Integer, Schema.ColumnType> family =
-                cobbleDb.currentSchema().columnFamilies().get(stateDesc.getName());
+        Schema.ColumnFamily family = cobbleDb.currentSchema().columnFamily(stateDesc.getName());
         if (family == null) {
             boolean valueTtlEnabledForState =
-                    stateDesc.getTtlConfig() != null
-                            && stateDesc.getTtlConfig().isEnabled();
-            try (StructuredSchemaBuilder builder = cobbleDb.updateSchema()) {
+                    stateDesc.getTtlConfig() != null && stateDesc.getTtlConfig().isEnabled();
+            try (SchemaBuilder builder = cobbleDb.updateSchema()) {
                 builder.setColumnFamilyOptions(
                         stateDesc.getName(),
                         ColumnFamilyOptions.defaults().valueHasTtl(valueTtlEnabledForState));
-                if (stateDesc.getType() == StateDescriptor.Type.LIST) {
-                    builder.addListColumn(stateDesc.getName(), 0, ListConfig.defaults());
-                } else {
-                    builder.addBytesColumn(stateDesc.getName(), 0);
-                }
+                builder.addColumn(stateDesc.getName(), 0, MergeOperatorType.BYTES, null);
                 builder.commit();
             }
             return;
         }
 
-        if (stateDesc.getType() != StateDescriptor.Type.LIST && family.isEmpty()) {
-            return;
-        }
-
-        if (!family.containsKey(0) || family.size() != 1) {
+        if (family.numColumns != 1) {
             throw new IllegalStateException(
                     "Cobble state column family '"
                             + stateDesc.getName()
-                            + "' must contain exactly column 0, but found columns "
-                            + family.keySet()
-                            + '.');
+                            + "' must contain exactly column 0, but found "
+                            + family.numColumns
+                            + " columns.");
         }
 
-        Schema.ColumnType columnType = family.get(0);
-        boolean valid =
-                stateDesc.getType() == StateDescriptor.Type.LIST
-                        ? columnType instanceof Schema.ColumnType.List
-                        : columnType instanceof Schema.ColumnType.Bytes;
-        if (!valid) {
+        if (!MergeOperatorType.BYTES.operatorId().equals(family.mergeOperatorId(0))) {
             throw new IllegalStateException(
                     "Cobble state column family '"
                             + stateDesc.getName()
-                            + "' has incompatible type for "
-                            + stateDesc.getType()
+                            + "' must use the bytes merge operator, but found "
+                            + family.mergeOperatorId(0)
                             + '.');
         }
     }

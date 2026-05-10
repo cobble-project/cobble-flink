@@ -1,7 +1,7 @@
 package io.cobble.flink.state;
 
+import io.cobble.Db;
 import io.cobble.ShardSnapshot;
-import io.cobble.structured.Db;
 
 import org.apache.flink.core.fs.CloseableRegistry;
 import org.apache.flink.core.memory.DataOutputViewStreamWrapper;
