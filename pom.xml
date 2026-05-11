@@ -87,24 +87,10 @@
                 <jdk>[11,)</jdk>
             </activation>
             <properties>
-                <surefire.test.jvm.args>--add-opens=java.base/java.lang=ALL-UNNAMED
+                <surefire.test.jvm.args>--add-exports=java.base/sun.nio.ch=ALL-UNNAMED
+                    --add-opens=java.base/java.lang=ALL-UNNAMED
                     --add-opens=java.base/java.util=ALL-UNNAMED</surefire.test.jvm.args>
             </properties>
-            <build>
-                <plugins>
-                    <plugin>
-                        <artifactId>maven-compiler-plugin</artifactId>
-                        <version>3.1</version>
-                        <configuration>
-                            <fork>true</fork>
-                            <compilerArgs>
-                                <arg>-J--add-opens=java.base/java.lang=ALL-UNNAMED</arg>
-                                <arg>-J--add-opens=java.base/java.util=ALL-UNNAMED</arg>
-                            </compilerArgs>
-                        </configuration>
-                    </plugin>
-                </plugins>
-            </build>
         </profile>
     </profiles>
 
