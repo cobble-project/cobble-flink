@@ -1,0 +1,131 @@
+name: State Benchmarks
+
+on:
+  workflow_dispatch:
+    inputs:
+      cobble_ref:
+        description: Cobble git ref to benchmark against
+        required: false
+        default: main
+      benchmarks:
+        description: JMH benchmark regex
+        required: false
+        default: io.cobble.flink.state.benchmark.*
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  benchmark:
+    name: Compare Cobble and RocksDB state performance
+    runs-on: ubuntu-latest
+    timeout-minutes: 240
+
+    steps:
+      - name: Checkout cobble-flink
+        uses: actions/checkout@v5
+
+      - name: Checkout cobble
+        uses: actions/checkout@v5
+        with:
+          repository: cobble-project/cobble
+          ref: ${{ inputs.cobble_ref }}
+          path: cobble
+
+      - name: Setup Java
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "17"
+          cache: maven
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: stable
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/registry
+          key: ${{ runner.os }}-state-bench-cargo-registry-${{ hashFiles('cobble/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-state-bench-cargo-registry-
+
+      - name: Cache cargo git
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/git
+          key: ${{ runner.os }}-state-bench-cargo-git-${{ hashFiles('cobble/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-state-bench-cargo-git-
+
+      - name: Build and install local cobble-java
+        run: ./scripts/install-local-cobble-java.sh cobble/cobble-java/java
+
+      - name: Build benchmark jar
+        run: ./mvnw --batch-mode --no-transfer-progress -pl cobble-state-bench -am -DskipTests clean package
+
+      - name: Run Cobble vs RocksDB benchmarks
+        env:
+          JDK_JAVA_OPTIONS: >-
+            --add-exports=java.base/sun.nio.ch=ALL-UNNAMED
+            --add-opens=java.base/java.lang=ALL-UNNAMED
+            --add-opens=java.base/java.util=ALL-UNNAMED
+        run: |
+          mkdir -p cobble-state-bench/target/benchmark-results
+          java -jar cobble-state-bench/target/benchmarks.jar \
+            -foe true \
+            -rf csv \
+            -rff cobble-state-bench/target/benchmark-results/state-benchmarks.csv \
+            -wi 10 \
+            -i 10 \
+            -w 1s \
+            -r 1s \
+            -f 3 \
+            -jvmArgsAppend "${JDK_JAVA_OPTIONS}" \
+            -p backendType=COBBLE,ROCKSDB \
+            "${{ inputs.benchmarks }}" \
+            | tee cobble-state-bench/target/benchmark-results/state-benchmarks.log
+
+      - name: Summarize Cobble vs RocksDB results
+        run: |
+          python3 - <<'PY'
+          import csv
+          from collections import defaultdict
+          from pathlib import Path
+
+          csv_path = Path("cobble-state-bench/target/benchmark-results/state-benchmarks.csv")
+          summary_path = Path("cobble-state-bench/target/benchmark-results/state-benchmarks-summary.md")
+          rows = list(csv.DictReader(csv_path.open()))
+          grouped = defaultdict(dict)
+          for row in rows:
+            grouped[row["Benchmark"]][row["Param: backendType"]] = float(row["Score"])
+
+          lines = [
+            "# Cobble vs RocksDB benchmark summary",
+            "",
+            "| Benchmark | RocksDB (ops/ms) | Cobble (ops/ms) | Cobble/RocksDB |",
+            "| --- | ---: | ---: | ---: |",
+          ]
+          for benchmark in sorted(grouped):
+            rocks = grouped[benchmark].get("ROCKSDB")
+            cobble = grouped[benchmark].get("COBBLE")
+            ratio = "" if not rocks or not cobble else f"{(cobble / rocks) * 100:.2f}%"
+            lines.append(
+              f"| {benchmark} | {rocks:.3f} | {cobble:.3f} | {ratio} |"
+            )
+
+          summary = "\n".join(lines) + "\n"
+          summary_path.write_text(summary)
+          print(summary)
+          PY
+
+      - name: Upload benchmark artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: state-benchmarks
+          path: cobble-state-bench/target/benchmark-results/
