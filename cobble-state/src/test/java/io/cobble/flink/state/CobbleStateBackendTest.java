@@ -438,6 +438,15 @@ class CobbleStateBackendTest {
             assertFalse(shardSnapshot.manifestPath.isEmpty());
             assertFalse(shardSnapshot.ranges.isEmpty());
             assertTrue(shardSnapshot.columnFamilyIds.containsKey("snapshot-state"));
+            assertTrue(shardSnapshot.dataSizeBytes > 0L);
+            assertTrue(shardSnapshot.incrementalDataSizeBytes > 0L);
+            assertTrue(
+                    incrementalHandle.getStateSize()
+                            > incrementalHandle.getMetaStateHandle().getStateSize());
+            assertEquals(
+                    incrementalHandle.getMetaStateHandle().getStateSize()
+                            + shardSnapshot.incrementalDataSizeBytes,
+                    incrementalHandle.getCheckpointedSize());
             assertTrue(backend.hasTrackedSnapshot(41L));
         }
     }
@@ -702,6 +711,23 @@ class CobbleStateBackendTest {
             ttlTimeProvider.setCurrentTimestamp(16_000L);
             backend.setTimeForTests(ttlTimeProvider.currentTimestamp());
             assertNull(restoredState.value());
+        }
+    }
+
+    @Test
+    void freshBackendCanReuseCheckpointDirectoryAfterPreviousJobCloses(@TempDir Path tempDir)
+            throws Exception {
+        String checkpointDirectory = tempDir.resolve("checkpoints").toString();
+
+        try (TestBackendContext firstContext =
+                createBackendContext(tempDir.resolve("first-job"), false, checkpointDirectory)) {
+            assertNotNull(firstContext.cobbleBackend.getCobbleConfig().volumes.get(0).baseDir);
+        }
+
+        try (TestBackendContext secondContext =
+                createBackendContext(tempDir.resolve("second-job"), false, checkpointDirectory)) {
+            assertNotNull(secondContext.cobbleBackend.getCobbleConfig().volumes.get(0).baseDir);
+            assertTrue(secondContext.cobbleBackend.getCobbleDb().getNativeHandle() != 0L);
         }
     }
 

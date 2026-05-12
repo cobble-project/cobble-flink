@@ -60,6 +60,8 @@ final class CobbleSnapshotMetadata {
         shardSnapshot.snapshotId = input.readLong();
         shardSnapshot.manifestPath = input.readUTF();
         shardSnapshot.timestampSeconds = input.readLong();
+        shardSnapshot.dataSizeBytes = input.readLong();
+        shardSnapshot.incrementalDataSizeBytes = input.readLong();
 
         int rangeCount = input.readInt();
         for (int index = 0; index < rangeCount; index++) {
@@ -86,6 +88,8 @@ final class CobbleSnapshotMetadata {
         output.writeLong(shardSnapshot.snapshotId);
         output.writeUTF(nullToEmpty(shardSnapshot.manifestPath));
         output.writeLong(shardSnapshot.timestampSeconds);
+        output.writeLong(shardSnapshot.dataSizeBytes);
+        output.writeLong(shardSnapshot.incrementalDataSizeBytes);
 
         output.writeInt(shardSnapshot.ranges.size());
         for (ShardSnapshot.Range range : shardSnapshot.ranges) {

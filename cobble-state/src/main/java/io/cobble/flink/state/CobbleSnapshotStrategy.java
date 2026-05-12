@@ -6,6 +6,7 @@ import io.cobble.ShardSnapshot;
 import org.apache.flink.core.fs.CloseableRegistry;
 import org.apache.flink.core.memory.DataOutputViewStreamWrapper;
 import org.apache.flink.runtime.checkpoint.CheckpointOptions;
+import org.apache.flink.runtime.state.CheckpointBoundKeyedStateHandle;
 import org.apache.flink.runtime.state.CheckpointStreamFactory;
 import org.apache.flink.runtime.state.CheckpointStreamWithResultProvider;
 import org.apache.flink.runtime.state.CheckpointedStateScope;
@@ -150,14 +151,15 @@ final class CobbleSnapshotStrategy
             success = true;
 
             return SnapshotResult.of(
-                    new IncrementalRemoteKeyedStateHandle(
+                    new ReportedIncrementalRemoteKeyedStateHandle(
                             backendIdentifier,
                             keyGroupRange,
                             checkpointId,
                             Collections.emptyList(),
                             Collections.emptyList(),
                             metaHandle,
-                            metaHandle.getStateSize()));
+                            metaHandle.getStateSize() + shardSnapshot.incrementalDataSizeBytes,
+                            metaHandle.getStateSize() + shardSnapshot.dataSizeBytes));
         } finally {
             if (!success) {
                 if (streamResult != null) {
@@ -265,6 +267,52 @@ final class CobbleSnapshotStrategy
                 throw new IOException(
                         "Failed to retain Cobble shard snapshot " + snapshot.snapshotId + '.');
             }
+        }
+    }
+
+    private static final class ReportedIncrementalRemoteKeyedStateHandle
+            extends IncrementalRemoteKeyedStateHandle {
+
+        private static final long serialVersionUID = 1L;
+
+        private final long reportedStateSize;
+
+        private ReportedIncrementalRemoteKeyedStateHandle(
+                UUID backendIdentifier,
+                KeyGroupRange keyGroupRange,
+                long checkpointId,
+                List<HandleAndLocalPath> sharedState,
+                List<HandleAndLocalPath> privateState,
+                StreamStateHandle metaStateHandle,
+                long persistedSizeOfThisCheckpoint,
+                long reportedStateSize) {
+            super(
+                    backendIdentifier,
+                    keyGroupRange,
+                    checkpointId,
+                    sharedState,
+                    privateState,
+                    metaStateHandle,
+                    persistedSizeOfThisCheckpoint);
+            this.reportedStateSize = reportedStateSize;
+        }
+
+        @Override
+        public long getStateSize() {
+            return reportedStateSize;
+        }
+
+        @Override
+        public CheckpointBoundKeyedStateHandle rebound(long checkpointId) {
+            return new ReportedIncrementalRemoteKeyedStateHandle(
+                    getBackendIdentifier(),
+                    getKeyGroupRange(),
+                    checkpointId,
+                    getSharedState(),
+                    getPrivateState(),
+                    getMetaStateHandle(),
+                    getCheckpointedSize(),
+                    reportedStateSize);
         }
     }
 
