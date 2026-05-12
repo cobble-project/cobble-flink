@@ -51,6 +51,9 @@ final class CobbleFlinkConfigMapper {
                 toPositiveIntBytes(
                         CobbleOptions.VALUE_SEPARATION_THRESHOLD.key(),
                         flinkConfig.get(CobbleOptions.VALUE_SEPARATION_THRESHOLD));
+        // Flink already owns keyed-state shard assignment, restore, and rescale routing, so the
+        // TaskManager-side Cobble DB should not also publish filesystem governance manifests.
+        config.governanceMode = Config.GovernanceMode.NOOP;
         if (flinkConfig.contains(CobbleOptions.SNAPSHOT_RETENTION)) {
             config.snapshotRetention =
                     requirePositive(

@@ -407,6 +407,7 @@ class CobbleStateBackendTest {
             assertEquals(5, config.logKeepFiles.intValue());
             assertEquals(4 * 1024, config.valueSeparationThreshold.intValue());
             assertEquals(3, config.snapshotRetention.intValue());
+            assertEquals(Config.GovernanceMode.NOOP, config.governanceMode);
             assertEquals(1, config.numColumns.intValue());
         }
     }
