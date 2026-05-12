@@ -12,7 +12,9 @@ import org.apache.flink.api.common.state.ValueStateDescriptor;
 import org.apache.flink.configuration.CheckpointingOptions;
 import org.apache.flink.configuration.Configuration;
 import org.apache.flink.configuration.HighAvailabilityOptions;
+import org.apache.flink.configuration.JobManagerOptions;
 import org.apache.flink.configuration.MemorySize;
+import org.apache.flink.configuration.RestOptions;
 import org.apache.flink.runtime.jobgraph.JobGraph;
 import org.apache.flink.runtime.jobgraph.SavepointRestoreSettings;
 import org.apache.flink.runtime.state.filesystem.AbstractFsCheckpointStorageAccess;
@@ -49,6 +51,10 @@ class CobbleHighAvailabilityITTest {
                 HighAvailabilityOptions.HA_MODE,
                 CobbleHighAvailabilityServicesFactory.class.getName());
         clusterConfiguration.setString(CobbleHighAvailabilityOptions.DELEGATE_HA_TYPE, "NONE");
+        clusterConfiguration.setString(JobManagerOptions.ADDRESS, "localhost");
+        clusterConfiguration.setInteger(JobManagerOptions.PORT, 6123);
+        clusterConfiguration.setString(RestOptions.ADDRESS, "localhost");
+        clusterConfiguration.setInteger(RestOptions.PORT, 8081);
         clusterConfiguration.set(
                 CheckpointingOptions.CHECKPOINTS_DIRECTORY, checkpointRoot.toUri().toString());
 

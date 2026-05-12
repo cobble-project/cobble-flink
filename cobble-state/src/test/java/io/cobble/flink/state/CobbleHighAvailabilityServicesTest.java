@@ -3,6 +3,7 @@ package io.cobble.flink.state;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertInstanceOf;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import io.cobble.Config;
@@ -29,6 +30,7 @@ import org.apache.flink.runtime.checkpoint.TestingCompletedCheckpointStore;
 import org.apache.flink.runtime.highavailability.HighAvailabilityServices;
 import org.apache.flink.runtime.jobgraph.JobVertexID;
 import org.apache.flink.runtime.jobgraph.OperatorID;
+import org.apache.flink.runtime.leaderretrieval.StandaloneLeaderRetrievalService;
 import org.apache.flink.runtime.operators.testutils.MockEnvironment;
 import org.apache.flink.runtime.operators.testutils.MockEnvironmentBuilder;
 import org.apache.flink.runtime.query.TaskKvStateRegistry;
@@ -219,6 +221,79 @@ class CobbleHighAvailabilityServicesTest {
                                             CobblePathUtils.cobbleOperatorSnapshotDirectory(
                                                     completedCheckpoint2.getExternalPointer(),
                                                     operatorId2.toHexString()))));
+        }
+    }
+
+    @Test
+    void wrappedCheckpointStoreDeletesManifestCopiesBeforeDiscardingChkDirectory(
+            @TempDir Path tempDir) throws Exception {
+        JobID jobId = new JobID();
+        OperatorID operatorId = new OperatorID();
+        String checkpointDirectory = tempDir.resolve("checkpoints").toString();
+        List<CompletedCheckpoint> retainedCheckpoints = new ArrayList<>();
+
+        TestingCompletedCheckpointStore innerStore =
+                createCleanerDrivenInnerStore(retainedCheckpoints, 1);
+
+        KeyedStateHandle checkpointHandle1;
+        KeyedStateHandle checkpointHandle2;
+        try (TestBackendContext context =
+                createBackendContext(
+                        tempDir.resolve("backend-cleanup"),
+                        checkpointDirectory,
+                        Collections.emptyList())) {
+            CobbleKeyedStateBackend<Integer> backend = context.backend;
+            ValueStateDescriptor<String> descriptor =
+                    new ValueStateDescriptor<>("ha-cleanup-state", StringSerializer.INSTANCE);
+
+            backend.setCurrentKey(1);
+            backend.getPartitionedState("ha-cleanup-ns", StringSerializer.INSTANCE, descriptor)
+                    .update("value-1");
+            checkpointHandle1 = runCheckpointSnapshot(backend, 301L);
+
+            backend.setCurrentKey(1);
+            backend.getPartitionedState("ha-cleanup-ns", StringSerializer.INSTANCE, descriptor)
+                    .update("value-2");
+            checkpointHandle2 = runCheckpointSnapshot(backend, 302L);
+        }
+
+        CompletedCheckpoint completedCheckpoint1 =
+                createDiscardingCompletedCheckpoint(
+                        jobId,
+                        301L,
+                        checkpointHandle1,
+                        tempDir.resolve("completed-checkpoints").resolve("chk-301"),
+                        operatorId);
+        CompletedCheckpoint completedCheckpoint2 =
+                createDiscardingCompletedCheckpoint(
+                        jobId,
+                        302L,
+                        checkpointHandle2,
+                        tempDir.resolve("completed-checkpoints").resolve("chk-302"),
+                        operatorId);
+
+        CobbleCompletedCheckpointStore store = new CobbleCompletedCheckpointStore(innerStore);
+        try {
+            store.addCheckpointAndSubsumeOldestOne(
+                    completedCheckpoint1, new CheckpointsCleaner(), () -> {});
+
+            org.apache.flink.core.fs.Path copiedManifestPath =
+                    new org.apache.flink.core.fs.Path(
+                            CobblePathUtils.checkpointGlobalSnapshotManifestCopyPath(
+                                    completedCheckpoint1.getExternalPointer(),
+                                    operatorId.toHexString()));
+            assertTrue(copiedManifestPath.getFileSystem().exists(copiedManifestPath));
+
+            store.addCheckpointAndSubsumeOldestOne(
+                    completedCheckpoint2, new CheckpointsCleaner(), () -> {});
+
+            org.apache.flink.core.fs.Path checkpointDirectoryPath =
+                    new org.apache.flink.core.fs.Path(completedCheckpoint1.getExternalPointer());
+            assertFalse(
+                    checkpointDirectoryPath.getFileSystem().exists(checkpointDirectoryPath),
+                    "subsumed chk directory should be removable after Cobble manifest copy cleanup");
+        } finally {
+            store.shutdown(JobStatus.FINISHED, new CheckpointsCleaner());
         }
     }
 
@@ -612,6 +687,11 @@ class CobbleHighAvailabilityServicesTest {
                 org.apache.flink.configuration.HighAvailabilityOptions.HA_MODE,
                 CobbleHighAvailabilityServicesFactory.class.getName());
         configuration.setString(CobbleHighAvailabilityOptions.DELEGATE_HA_TYPE, "NONE");
+        configuration.setString(
+                org.apache.flink.configuration.JobManagerOptions.ADDRESS, "localhost");
+        configuration.setInteger(org.apache.flink.configuration.JobManagerOptions.PORT, 6123);
+        configuration.setString(org.apache.flink.configuration.RestOptions.ADDRESS, "localhost");
+        configuration.setInteger(org.apache.flink.configuration.RestOptions.PORT, 8081);
 
         HighAvailabilityServices services =
                 new CobbleHighAvailabilityServicesFactory()
@@ -620,9 +700,83 @@ class CobbleHighAvailabilityServicesTest {
             assertInstanceOf(CobbleHighAvailabilityServices.class, services);
             assertInstanceOf(
                     CobbleCheckpointRecoveryFactory.class, services.getCheckpointRecoveryFactory());
+            assertInstanceOf(
+                    StandaloneLeaderRetrievalService.class,
+                    services.getResourceManagerLeaderRetriever());
         } finally {
             services.close();
         }
+    }
+
+    @Test
+    void haFactoryExplicitEmbeddedNoneModeUsesEmbeddedHaServices() throws Exception {
+        Configuration configuration = new Configuration();
+        configuration.setString(
+                org.apache.flink.configuration.HighAvailabilityOptions.HA_MODE,
+                CobbleHighAvailabilityServicesFactory.class.getName());
+        configuration.setString(CobbleHighAvailabilityOptions.DELEGATE_HA_TYPE, "NONE");
+        configuration.setString(CobbleHighAvailabilityOptions.DELEGATE_NONE_MODE, "embedded");
+
+        HighAvailabilityServices services =
+                new CobbleHighAvailabilityServicesFactory()
+                        .createHAServices(configuration, Runnable::run);
+        try {
+            assertInstanceOf(CobbleHighAvailabilityServices.class, services);
+            assertFalse(
+                    services.getResourceManagerLeaderRetriever()
+                            instanceof StandaloneLeaderRetrievalService);
+        } finally {
+            services.close();
+        }
+    }
+
+    @Test
+    void haFactoryRejectsUnknownDelegateNoneMode() {
+        Configuration configuration = new Configuration();
+        configuration.setString(
+                org.apache.flink.configuration.HighAvailabilityOptions.HA_MODE,
+                CobbleHighAvailabilityServicesFactory.class.getName());
+        configuration.setString(CobbleHighAvailabilityOptions.DELEGATE_HA_TYPE, "NONE");
+        configuration.setString(CobbleHighAvailabilityOptions.DELEGATE_NONE_MODE, "mystery");
+
+        assertThrows(
+                org.apache.flink.configuration.IllegalConfigurationException.class,
+                () ->
+                        new CobbleHighAvailabilityServicesFactory()
+                                .createHAServices(configuration, Runnable::run));
+    }
+
+    @Test
+    void autoNoneModeDetectsEmbeddedAndStandaloneHaCreationFrames() {
+        assertTrue(
+                CobbleHighAvailabilityServicesFactory.isEmbeddedHaCreationStack(
+                        new StackTraceElement[] {
+                            new StackTraceElement(
+                                    "org.apache.flink.runtime.highavailability"
+                                            + ".HighAvailabilityServicesUtils",
+                                    "createAvailableOrEmbeddedServices",
+                                    "HighAvailabilityServicesUtils.java",
+                                    78)
+                        }));
+        assertFalse(
+                CobbleHighAvailabilityServicesFactory.isEmbeddedHaCreationStack(
+                        new StackTraceElement[] {
+                            new StackTraceElement(
+                                    "org.apache.flink.runtime.highavailability"
+                                            + ".HighAvailabilityServicesUtils",
+                                    "createHighAvailabilityServices",
+                                    "HighAvailabilityServicesUtils.java",
+                                    102)
+                        }));
+        assertFalse(
+                CobbleHighAvailabilityServicesFactory.isEmbeddedHaCreationStack(
+                        new StackTraceElement[] {
+                            new StackTraceElement(
+                                    "io.cobble.flink.state.CobbleHighAvailabilityServicesFactory",
+                                    "createHAServices",
+                                    "CobbleHighAvailabilityServicesFactory.java",
+                                    58)
+                        }));
     }
 
     private CompletedCheckpoint createCompletedCheckpoint(
@@ -649,6 +803,36 @@ class CobbleHighAvailabilityServicesTest {
                 CheckpointProperties.forCheckpoint(
                         CheckpointRetentionPolicy.NEVER_RETAIN_AFTER_TERMINATION),
                 new TestCompletedCheckpointStorageLocation(
+                        new org.apache.flink.runtime.state.memory.ByteStreamStateHandle(
+                                "metadata-" + checkpointId, new byte[0]),
+                        externalPointer.toString()),
+                null);
+    }
+
+    private CompletedCheckpoint createDiscardingCompletedCheckpoint(
+            JobID jobId,
+            long checkpointId,
+            KeyedStateHandle keyedStateHandle,
+            Path externalPointer,
+            OperatorID... operatorIds) {
+        java.util.Map<OperatorID, OperatorState> operatorStates = new java.util.LinkedHashMap<>();
+        for (OperatorID operatorId : operatorIds) {
+            OperatorSubtaskState subtaskState =
+                    OperatorSubtaskState.builder().setManagedKeyedState(keyedStateHandle).build();
+            OperatorState operatorState = new OperatorState(operatorId, 1, 16);
+            operatorState.putState(0, subtaskState);
+            operatorStates.put(operatorId, operatorState);
+        }
+        return new CompletedCheckpoint(
+                jobId,
+                checkpointId,
+                checkpointId,
+                checkpointId + 1,
+                operatorStates,
+                Collections.emptyList(),
+                CheckpointProperties.forCheckpoint(
+                        CheckpointRetentionPolicy.NEVER_RETAIN_AFTER_TERMINATION),
+                new DeletingTestCompletedCheckpointStorageLocation(
                         new org.apache.flink.runtime.state.memory.ByteStreamStateHandle(
                                 "metadata-" + checkpointId, new byte[0]),
                         externalPointer.toString()),
@@ -829,6 +1013,52 @@ class CobbleHighAvailabilityServicesTest {
                 .build();
     }
 
+    private static TestingCompletedCheckpointStore createCleanerDrivenInnerStore(
+            List<CompletedCheckpoint> retainedCheckpoints, int maxRetainedCheckpoints) {
+        return TestingCompletedCheckpointStore.builder()
+                .withAddCheckpointAndSubsumeOldestOneFunction(
+                        (checkpoint, cleaner, postCleanup) -> {
+                            CompletedCheckpoint subsumed =
+                                    retainedCheckpoints.size() >= maxRetainedCheckpoints
+                                            ? retainedCheckpoints.remove(0)
+                                            : null;
+                            retainedCheckpoints.add(checkpoint);
+                            if (subsumed != null) {
+                                cleaner.addSubsumedCheckpoint(subsumed);
+                                long lowestRetainedCheckpointId =
+                                        retainedCheckpoints.stream()
+                                                .mapToLong(CompletedCheckpoint::getCheckpointID)
+                                                .min()
+                                                .orElse(Long.MAX_VALUE);
+                                cleaner.cleanSubsumedCheckpoints(
+                                        lowestRetainedCheckpointId,
+                                        Collections.emptySet(),
+                                        postCleanup,
+                                        Runnable::run);
+                            }
+                            return subsumed;
+                        })
+                .withShutdownConsumer(
+                        (jobStatus, cleaner) -> {
+                            for (CompletedCheckpoint checkpoint :
+                                    new ArrayList<>(retainedCheckpoints)) {
+                                cleaner.cleanCheckpoint(
+                                        checkpoint,
+                                        checkpoint.shouldBeDiscardedOnShutdown(jobStatus),
+                                        () -> {},
+                                        Runnable::run);
+                            }
+                            retainedCheckpoints.clear();
+                        })
+                .withGetAllCheckpointsSupplier(() -> new ArrayList<>(retainedCheckpoints))
+                .withGetNumberOfRetainedCheckpointsSupplier(retainedCheckpoints::size)
+                .withGetMaxNumberOfRetainedCheckpointsSupplier(() -> maxRetainedCheckpoints)
+                .withRequiresExternalizedCheckpointsSupplier(() -> false)
+                .withGetSharedStateRegistrySupplier(
+                        org.apache.flink.runtime.state.SharedStateRegistryImpl::new)
+                .build();
+    }
+
     private static void assertSnapshotIds(
             List<GlobalSnapshot> snapshots, long firstSnapshotId, long secondSnapshotId) {
         assertEquals(2, snapshots.size());
@@ -850,6 +1080,22 @@ class CobbleHighAvailabilityServicesTest {
         public void close() throws Exception {
             backend.close();
             environment.close();
+        }
+    }
+
+    private static final class DeletingTestCompletedCheckpointStorageLocation
+            extends TestCompletedCheckpointStorageLocation {
+
+        private DeletingTestCompletedCheckpointStorageLocation(
+                org.apache.flink.runtime.state.StreamStateHandle metadataHandle, String pointer) {
+            super(metadataHandle, pointer);
+        }
+
+        @Override
+        public void disposeStorageLocation() throws java.io.IOException {
+            org.apache.flink.core.fs.Path checkpointDirectory =
+                    new org.apache.flink.core.fs.Path(getExternalPointer());
+            checkpointDirectory.getFileSystem().delete(checkpointDirectory, false);
         }
     }
 }

@@ -11,6 +11,7 @@ import org.apache.flink.core.fs.FSDataOutputStream;
 import org.apache.flink.core.fs.FileSystem;
 import org.apache.flink.core.fs.Path;
 import org.apache.flink.core.memory.DataInputViewStreamWrapper;
+import org.apache.flink.runtime.checkpoint.Checkpoint;
 import org.apache.flink.runtime.checkpoint.CheckpointsCleaner;
 import org.apache.flink.runtime.checkpoint.CompletedCheckpoint;
 import org.apache.flink.runtime.checkpoint.CompletedCheckpointStore;
@@ -20,6 +21,8 @@ import org.apache.flink.runtime.state.IncrementalRemoteKeyedStateHandle;
 import org.apache.flink.runtime.state.KeyedStateHandle;
 import org.apache.flink.runtime.state.SharedStateRegistry;
 import org.apache.flink.util.ExceptionUtils;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import java.io.IOException;
 import java.util.ArrayList;
@@ -29,9 +32,13 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.TreeSet;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.Executor;
 
 /** Completed checkpoint store wrapper that materializes Cobble global snapshots on the JM side. */
 final class CobbleCompletedCheckpointStore implements CompletedCheckpointStore {
+
+    private static final Logger LOG = LoggerFactory.getLogger(CobbleCompletedCheckpointStore.class);
 
     private final CompletedCheckpointStore delegate;
     private final Map<String, OperatorCoordinatorHandle> coordinatorsByOperatorDirectory;
@@ -48,9 +55,9 @@ final class CobbleCompletedCheckpointStore implements CompletedCheckpointStore {
             CheckpointsCleaner checkpointsCleaner,
             Runnable postCleanup)
             throws Exception {
+        CheckpointsCleaner cobbleCleaner = wrapCleaner(checkpointsCleaner);
         CompletedCheckpoint subsumed =
-                delegate.addCheckpointAndSubsumeOldestOne(
-                        checkpoint, checkpointsCleaner, postCleanup);
+                delegate.addCheckpointAndSubsumeOldestOne(checkpoint, cobbleCleaner, postCleanup);
         materializeGlobalSnapshot(checkpoint);
         copyManifestIntoCheckpointDirectory(checkpoint);
         cleanupSubsumedCheckpoint(subsumed);
@@ -68,7 +75,7 @@ final class CobbleCompletedCheckpointStore implements CompletedCheckpointStore {
             failure = ExceptionUtils.firstOrSuppressed(e, failure);
         }
         try {
-            delegate.shutdown(jobStatus, checkpointsCleaner);
+            delegate.shutdown(jobStatus, wrapCleaner(checkpointsCleaner));
         } catch (Exception e) {
             failure = ExceptionUtils.firstOrSuppressed(e, failure);
         }
@@ -185,10 +192,29 @@ final class CobbleCompletedCheckpointStore implements CompletedCheckpointStore {
                     checkpoint.getExternalPointer(),
                     snapshotData.operatorIdHex,
                     checkpoint.getCheckpointID());
+        }
+        deleteCheckpointManifestCopies(checkpoint, snapshotDataByOperator);
+    }
+
+    private void deleteCheckpointManifestCopies(CompletedCheckpoint checkpoint) throws Exception {
+        deleteCheckpointManifestCopies(
+                checkpoint, collectCobbleShardSnapshotsByOperator(checkpoint));
+    }
+
+    private void deleteCheckpointManifestCopies(
+            CompletedCheckpoint checkpoint,
+            Map<String, OperatorSnapshotData> snapshotDataByOperator)
+            throws Exception {
+        for (OperatorSnapshotData snapshotData : snapshotDataByOperator.values()) {
             CobblePathUtils.deletePathQuietly(
                     CobblePathUtils.checkpointGlobalSnapshotManifestCopyPath(
                             checkpoint.getExternalPointer(), snapshotData.operatorIdHex));
         }
+    }
+
+    private CheckpointsCleaner wrapCleaner(CheckpointsCleaner checkpointsCleaner) {
+        return new CobbleCheckpointsCleaner(
+                checkpointsCleaner, this::deleteCheckpointManifestCopies);
     }
 
     private void recoverManagedSnapshots() throws Exception {
@@ -432,6 +458,90 @@ final class CobbleCompletedCheckpointStore implements CompletedCheckpointStore {
             this.checkpointExternalPointer = checkpointExternalPointer;
             this.operatorDirectory = operatorDirectory;
             this.retainedCheckpointIds = new TreeSet<>();
+        }
+    }
+
+    @FunctionalInterface
+    private interface CompletedCheckpointCleanupAction {
+        void cleanup(CompletedCheckpoint checkpoint) throws Exception;
+    }
+
+    private static final class CobbleCheckpointsCleaner extends CheckpointsCleaner {
+        private final CheckpointsCleaner delegate;
+        private final CompletedCheckpointCleanupAction preDiscardCleanup;
+        private final List<CompletedCheckpoint> subsumedCheckpoints;
+
+        private CobbleCheckpointsCleaner(
+                CheckpointsCleaner delegate, CompletedCheckpointCleanupAction preDiscardCleanup) {
+            this.delegate = delegate;
+            this.preDiscardCleanup = preDiscardCleanup;
+            this.subsumedCheckpoints = new ArrayList<>();
+        }
+
+        @Override
+        public void cleanCheckpoint(
+                Checkpoint checkpoint,
+                boolean shouldDiscard,
+                Runnable postCleanAction,
+                Executor executor) {
+            try {
+                maybeRunPreDiscardCleanup(checkpoint, shouldDiscard);
+            } catch (Exception e) {
+                throw new IllegalStateException(
+                        "Failed to clean Cobble checkpoint manifest copy before checkpoint discard",
+                        e);
+            }
+            delegate.cleanCheckpoint(checkpoint, shouldDiscard, postCleanAction, executor);
+        }
+
+        @Override
+        public void addSubsumedCheckpoint(CompletedCheckpoint completedCheckpoint) {
+            subsumedCheckpoints.add(completedCheckpoint);
+        }
+
+        @Override
+        public void cleanSubsumedCheckpoints(
+                long upTo, Set<Long> stillInUse, Runnable postCleanAction, Executor executor) {
+            java.util.Iterator<CompletedCheckpoint> iterator = subsumedCheckpoints.iterator();
+            while (iterator.hasNext()) {
+                CompletedCheckpoint checkpoint = iterator.next();
+                if (checkpoint.getCheckpointID() < upTo
+                        && !stillInUse.contains(checkpoint.getCheckpointID())) {
+                    try {
+                        cleanCheckpoint(
+                                checkpoint,
+                                checkpoint.shouldBeDiscardedOnSubsume(),
+                                postCleanAction,
+                                executor);
+                        iterator.remove();
+                    } catch (Exception e) {
+                        LOG.warn(
+                                "Failed to discard Cobble subsumed checkpoint {}.",
+                                checkpoint.getCheckpointID(),
+                                e);
+                    }
+                }
+            }
+        }
+
+        @Override
+        public void cleanCheckpointOnFailedStoring(
+                CompletedCheckpoint completedCheckpoint, Executor executor) {
+            delegate.cleanCheckpointOnFailedStoring(completedCheckpoint, executor);
+        }
+
+        @Override
+        public CompletableFuture<Void> closeAsync() {
+            subsumedCheckpoints.clear();
+            return delegate.closeAsync();
+        }
+
+        private void maybeRunPreDiscardCleanup(Checkpoint checkpoint, boolean shouldDiscard)
+                throws Exception {
+            if (!shouldDiscard || !(checkpoint instanceof CompletedCheckpoint)) {
+                return;
+            }
+            preDiscardCleanup.cleanup((CompletedCheckpoint) checkpoint);
         }
     }
 }
