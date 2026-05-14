@@ -10,6 +10,7 @@ import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import io.cobble.CancelledError;
 import io.cobble.Config;
 import io.cobble.MergeOperatorType;
 import io.cobble.Schema;
@@ -498,6 +499,35 @@ class CobbleStateBackendTest {
             backend.notifyCheckpointAborted(43L);
             assertFalse(backend.hasTrackedSnapshot(43L));
             assertFalse(backend.getCobbleDb().expireSnapshot(snapshotId));
+        }
+    }
+
+    @Test
+    void abortedCheckpointCancelsPendingShardSnapshot(@TempDir Path tempDir) throws Exception {
+        try (TestBackendContext context = createBackendContext(tempDir, false, null)) {
+            CobbleKeyedStateBackend<Integer> backend = context.cobbleBackend;
+            ValueStateDescriptor<String> descriptor =
+                    new ValueStateDescriptor<>("pending-abort-state", StringSerializer.INSTANCE);
+
+            backend.setCurrentKey(10);
+            backend.getPartitionedState("pending-abort-ns", StringSerializer.INSTANCE, descriptor)
+                    .update("value");
+
+            RunnableFuture<SnapshotResult<KeyedStateHandle>> snapshotFuture =
+                    backend.snapshot(
+                            44L,
+                            System.currentTimeMillis(),
+                            new MemCheckpointStreamFactory(1024 * 1024),
+                            CheckpointOptions.forCheckpointWithDefaultLocation());
+            Long snapshotId = backend.snapshotIdForCheckpoint(44L);
+            assertNotNull(snapshotId);
+
+            backend.notifyCheckpointAborted(44L);
+
+            snapshotFuture.run();
+            Exception exception = assertThrows(Exception.class, snapshotFuture::get);
+            assertFalse(backend.hasTrackedSnapshot(44L));
+            assertTrue(hasCause(exception, CancelledError.class));
         }
     }
 
@@ -1426,6 +1456,17 @@ class CobbleStateBackendTest {
         SnapshotResult<KeyedStateHandle> snapshotResult = snapshotFuture.get();
         assertNotNull(snapshotResult.getJobManagerOwnedSnapshot());
         return snapshotResult.getJobManagerOwnedSnapshot();
+    }
+
+    private static boolean hasCause(Throwable error, Class<? extends Throwable> expectedType) {
+        Throwable current = error;
+        while (current != null) {
+            if (expectedType.isInstance(current)) {
+                return true;
+            }
+            current = current.getCause();
+        }
+        return false;
     }
 
     private static CobbleSnapshotMetadata readSnapshotMetadata(KeyedStateHandle keyedStateHandle)

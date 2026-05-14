@@ -323,6 +323,11 @@ final class CobbleKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
         return snapshotStrategy.hasTrackedSnapshot(checkpointId);
     }
 
+    @VisibleForTesting
+    Long snapshotIdForCheckpoint(long checkpointId) {
+        return snapshotStrategy.snapshotIdForCheckpoint(checkpointId);
+    }
+
     /** Exposes Flink's total key-group count so state wrappers can map to Cobble buckets. */
     int getTotalNumberOfKeyGroupsForState() {
         return numberOfKeyGroups;

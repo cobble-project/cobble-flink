@@ -1,6 +1,8 @@
 package io.cobble.flink.state;
 
+import io.cobble.CancelledError;
 import io.cobble.Db;
+import io.cobble.PendingSnapshot;
 import io.cobble.ShardSnapshot;
 
 import org.apache.flink.core.fs.CloseableRegistry;
@@ -46,6 +48,7 @@ final class CobbleSnapshotStrategy
     private final Supplier<Boolean> hasRegisteredState;
     private final UUID backendIdentifier;
     private final Map<Long, TrackedSnapshot> trackedSnapshots;
+    private final Map<Long, CobbleSnapshotResources> pendingSnapshots;
 
     CobbleSnapshotStrategy(
             Db cobbleDb, KeyGroupRange keyGroupRange, Supplier<Boolean> hasRegisteredState) {
@@ -54,6 +57,7 @@ final class CobbleSnapshotStrategy
         this.hasRegisteredState = hasRegisteredState;
         this.backendIdentifier = UUID.randomUUID();
         this.trackedSnapshots = new ConcurrentHashMap<>();
+        this.pendingSnapshots = new ConcurrentHashMap<>();
     }
 
     @Override
@@ -61,7 +65,12 @@ final class CobbleSnapshotStrategy
         if (!hasRegisteredState.get()) {
             return CobbleSnapshotResources.empty();
         }
-        return new CobbleSnapshotResources(cobbleDb, cobbleDb.asyncSnapshot());
+        PendingSnapshot<ShardSnapshot> pendingSnapshot = cobbleDb.startAsyncSnapshot();
+        CobbleSnapshotResources snapshotResources =
+                new CobbleSnapshotResources(
+                        cobbleDb, pendingSnapshot.snapshotId(), pendingSnapshot.future());
+        pendingSnapshots.put(checkpointId, snapshotResources);
+        return snapshotResources;
     }
 
     @Override
@@ -83,6 +92,10 @@ final class CobbleSnapshotStrategy
     }
 
     void notifyCheckpointAborted(long checkpointId) {
+        CobbleSnapshotResources pendingSnapshot = pendingSnapshots.remove(checkpointId);
+        if (pendingSnapshot != null) {
+            pendingSnapshot.cleanupAfterAbort(checkpointId);
+        }
         TrackedSnapshot trackedSnapshot = trackedSnapshots.remove(checkpointId);
         if (trackedSnapshot != null) {
             expireNativeSnapshot(checkpointId, trackedSnapshot.snapshotId);
@@ -109,8 +122,25 @@ final class CobbleSnapshotStrategy
         return trackedSnapshots.containsKey(checkpointId);
     }
 
+    Long snapshotIdForCheckpoint(long checkpointId) {
+        TrackedSnapshot trackedSnapshot = trackedSnapshots.get(checkpointId);
+        if (trackedSnapshot != null) {
+            return trackedSnapshot.snapshotId;
+        }
+        CobbleSnapshotResources pendingSnapshot = pendingSnapshots.get(checkpointId);
+        return pendingSnapshot == null ? null : pendingSnapshot.snapshotId;
+    }
+
     void close() {
+        for (Map.Entry<Long, CobbleSnapshotResources> entry : pendingSnapshots.entrySet()) {
+            try {
+                entry.getValue().cleanupAfterAbort(entry.getKey());
+            } catch (RuntimeException ignored) {
+                // best effort cleanup during backend shutdown
+            }
+        }
         trackedSnapshots.clear();
+        pendingSnapshots.clear();
     }
 
     private SnapshotResult<KeyedStateHandle> materializeSnapshot(
@@ -147,6 +177,7 @@ final class CobbleSnapshotStrategy
             }
 
             trackedSnapshots.put(checkpointId, new TrackedSnapshot(shardSnapshot.snapshotId));
+            pendingSnapshots.remove(checkpointId);
             snapshotResources.markPublished();
             success = true;
 
@@ -161,6 +192,9 @@ final class CobbleSnapshotStrategy
                             metaHandle.getStateSize() + shardSnapshot.incrementalDataSizeBytes,
                             metaHandle.getStateSize() + shardSnapshot.dataSizeBytes));
         } finally {
+            if (!success) {
+                pendingSnapshots.remove(checkpointId);
+            }
             if (!success) {
                 if (streamResult != null) {
                     StateUtil.discardStateObjectQuietly(streamResult);
@@ -186,38 +220,25 @@ final class CobbleSnapshotStrategy
     static final class CobbleSnapshotResources implements SnapshotResources {
 
         private static final CobbleSnapshotResources EMPTY =
-                new CobbleSnapshotResources(null, CompletableFuture.completedFuture(null));
+                new CobbleSnapshotResources(null, -1L, CompletableFuture.completedFuture(null));
 
         private final Db cobbleDb;
+        private final long snapshotId;
         private final CompletableFuture<ShardSnapshot> snapshotFuture;
         private final AtomicBoolean released;
         private final AtomicBoolean published;
         private final AtomicBoolean retained;
-
-        private volatile ShardSnapshot completedSnapshot;
+        private final AtomicBoolean cleanupHandled;
 
         private CobbleSnapshotResources(
-                Db cobbleDb, CompletableFuture<ShardSnapshot> snapshotFuture) {
+                Db cobbleDb, long snapshotId, CompletableFuture<ShardSnapshot> snapshotFuture) {
             this.cobbleDb = cobbleDb;
+            this.snapshotId = snapshotId;
             this.snapshotFuture = snapshotFuture;
             this.released = new AtomicBoolean(false);
             this.published = new AtomicBoolean(false);
             this.retained = new AtomicBoolean(false);
-            this.snapshotFuture.whenComplete(
-                    (snapshot, error) -> {
-                        completedSnapshot = snapshot;
-                        if (error == null
-                                && snapshot != null
-                                && released.get()
-                                && !published.get()
-                                && cobbleDb != null) {
-                            try {
-                                cobbleDb.expireSnapshot(snapshot.snapshotId);
-                            } catch (RuntimeException ignored) {
-                                // best effort cleanup after async publication failure
-                            }
-                        }
-                    });
+            this.cleanupHandled = new AtomicBoolean(false);
         }
 
         static CobbleSnapshotResources empty() {
@@ -238,6 +259,9 @@ final class CobbleSnapshotStrategy
                 throw e;
             } catch (ExecutionException e) {
                 Throwable cause = e.getCause() == null ? e : e.getCause();
+                if (cause instanceof CancelledError) {
+                    throw new IOException("Cobble shard snapshot cancelled.", cause);
+                }
                 throw new IOException("Cobble shard snapshot failed.", cause);
             }
         }
@@ -246,12 +270,48 @@ final class CobbleSnapshotStrategy
             published.set(true);
         }
 
+        void cleanupAfterAbort(long checkpointId) {
+            if (!cleanupHandled.compareAndSet(false, true) || snapshotId < 0 || cobbleDb == null) {
+                return;
+            }
+            final boolean cancelled;
+            try {
+                cancelled = cobbleDb.cancelSnapshot(snapshotId);
+            } catch (RuntimeException e) {
+                throw new IllegalStateException(
+                        "Failed to cancel Cobble shard snapshot "
+                                + snapshotId
+                                + " for checkpoint "
+                                + checkpointId
+                                + '.',
+                        e);
+            }
+            if (!cancelled) {
+                try {
+                    cobbleDb.expireSnapshot(snapshotId);
+                } catch (RuntimeException e) {
+                    throw new IllegalStateException(
+                            "Failed to expire Cobble shard snapshot "
+                                    + snapshotId
+                                    + " for checkpoint "
+                                    + checkpointId
+                                    + '.',
+                            e);
+                }
+            }
+        }
+
         @Override
         public void release() {
             released.set(true);
-            if (completedSnapshot != null && !published.get() && cobbleDb != null) {
+            if (snapshotId >= 0
+                    && !published.get()
+                    && cobbleDb != null
+                    && cleanupHandled.compareAndSet(false, true)) {
                 try {
-                    cobbleDb.expireSnapshot(completedSnapshot.snapshotId);
+                    if (!cobbleDb.cancelSnapshot(snapshotId)) {
+                        cobbleDb.expireSnapshot(snapshotId);
+                    }
                 } catch (RuntimeException ignored) {
                     // best effort cleanup after async publication failure
                 }
