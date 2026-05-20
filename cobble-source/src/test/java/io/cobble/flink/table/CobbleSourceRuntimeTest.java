@@ -1,0 +1,80 @@
+package io.cobble.flink.table;
+
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+
+import io.cobble.GlobalSnapshot;
+import io.cobble.ShardSnapshot;
+
+import org.junit.jupiter.api.Test;
+
+import java.util.Arrays;
+import java.util.Collections;
+import java.util.List;
+
+class CobbleSourceRuntimeTest {
+
+    @Test
+    void createsStableSplitIdsFromBuckets() throws Exception {
+        GlobalSnapshot snapshot = baseSnapshot();
+
+        List<CobbleSourceSplit> splits =
+                CobbleSourceRuntime.createBucketSplits(baseConfig(2), snapshot);
+
+        assertEquals(2, splits.size());
+        assertEquals(0, splits.get(0).splitId);
+        assertEquals(0, splits.get(0).bucketId);
+        assertEquals(1, splits.get(1).splitId);
+        assertEquals(1, splits.get(1).bucketId);
+    }
+
+    @Test
+    void infersBucketCountFromSnapshotWhenConfigOmitsIt() throws Exception {
+        GlobalSnapshot snapshot = baseSnapshot();
+
+        List<CobbleSourceSplit> splits =
+                CobbleSourceRuntime.createBucketSplits(baseConfig(-1), snapshot);
+
+        assertEquals(2, splits.size());
+        assertEquals(0, splits.get(0).bucketId);
+        assertEquals(1, splits.get(1).bucketId);
+    }
+
+    @Test
+    void rejectsConfiguredBucketCountMismatch() {
+        GlobalSnapshot snapshot = baseSnapshot();
+
+        assertThrows(
+                java.io.IOException.class,
+                () -> CobbleSourceRuntime.createBucketSplits(baseConfig(3), snapshot));
+    }
+
+    private static CobbleDynamicTableSource.SerializableConfig baseConfig(int bucketCount) {
+        return new CobbleDynamicTableSource.SerializableConfig(
+                "file:///tmp/cobble-source-runtime",
+                bucketCount,
+                "1",
+                "batch",
+                1000L,
+                Collections.emptyList(),
+                Collections.emptyList());
+    }
+
+    private static GlobalSnapshot baseSnapshot() {
+        GlobalSnapshot snapshot = new GlobalSnapshot();
+        snapshot.id = 7L;
+        snapshot.totalBuckets = 2;
+        snapshot.shardSnapshots = Arrays.asList(shard(0), shard(1));
+        return snapshot;
+    }
+
+    private static ShardSnapshot shard(int bucketId) {
+        ShardSnapshot shardSnapshot = new ShardSnapshot();
+        ShardSnapshot.Range range = new ShardSnapshot.Range();
+        range.start = bucketId;
+        range.end = bucketId;
+        shardSnapshot.ranges = Collections.singletonList(range);
+        shardSnapshot.manifestPath = "file:///tmp/shard-" + bucketId;
+        return shardSnapshot;
+    }
+}

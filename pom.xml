@@ -16,6 +16,7 @@
     <modules>
         <module>cobble-state</module>
         <module>cobble-sink</module>
+        <module>cobble-source</module>
         <module>cobble-dist</module>
         <module>cobble-state-bench</module>
     </modules>

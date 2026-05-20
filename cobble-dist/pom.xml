@@ -25,6 +25,11 @@
             <artifactId>cobble-sink</artifactId>
             <version>${project.version}</version>
         </dependency>
+        <dependency>
+            <groupId>io.github.cobble-project</groupId>
+            <artifactId>cobble-source</artifactId>
+            <version>${project.version}</version>
+        </dependency>
     </dependencies>
 
     <build>
