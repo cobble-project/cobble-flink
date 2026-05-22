@@ -11,7 +11,7 @@ import java.util.Collections;
 import java.util.List;
 import java.util.Optional;
 
-/** Initial insert-only Cobble SQL sink. */
+/** Cobble SQL sink with primary-key upsert semantics. */
 final class CobbleDynamicTableSink implements DynamicTableSink {
 
     private final SerializableConfig config;
@@ -24,7 +24,7 @@ final class CobbleDynamicTableSink implements DynamicTableSink {
 
     @Override
     public ChangelogMode getChangelogMode(ChangelogMode requestedMode) {
-        return ChangelogMode.insertOnly();
+        return ChangelogMode.upsert();
     }
 
     @Override

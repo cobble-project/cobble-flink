@@ -56,6 +56,9 @@ For a minimal SQL sink table, configure:
 - `bucket` (required)
 - `sink.parallelism` (required)
 
+The sink uses primary-key upsert semantics. It materializes final state by `PRIMARY KEY`, applies
+`INSERT` / `UPDATE_AFTER`, handles `DELETE`, and ignores paired `UPDATE_BEFORE` records.
+
 Example:
 
 ```sql

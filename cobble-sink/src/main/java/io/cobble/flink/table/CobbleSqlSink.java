@@ -16,7 +16,6 @@ import org.apache.flink.streaming.api.connector.sink2.CommittableMessage;
 import org.apache.flink.streaming.api.connector.sink2.WithPostCommitTopology;
 import org.apache.flink.streaming.api.datastream.DataStream;
 import org.apache.flink.table.data.RowData;
-import org.apache.flink.types.RowKind;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -119,11 +118,6 @@ final class CobbleSqlSink
 
         @Override
         public void write(RowData element, Context context) throws IOException {
-            if (element.getRowKind() != RowKind.INSERT) {
-                throw new UnsupportedOperationException(
-                        "The initial Cobble SQL sink only supports INSERT rows, but received "
-                                + element.getRowKind());
-            }
             byte[] encodedKey = keyEncoder.encode(element);
             int bucket = hashFixedBucket(encodedKey, totalBuckets);
             if (bucket < ownedRangeStart || bucket > ownedRangeEnd) {
@@ -138,14 +132,7 @@ final class CobbleSqlSink
                                 + subtaskId
                                 + ".");
             }
-            for (CobbleRowDataCodecs.RuntimeFieldEncoder encoder : valueEncoders) {
-                byte[] encodedValue = encoder.encodeNullable(element);
-                if (encodedValue == null) {
-                    db.delete(bucket, encodedKey, encoder.structuredColumnIndex);
-                } else {
-                    db.put(bucket, encodedKey, encoder.structuredColumnIndex, encodedValue);
-                }
-            }
+            applyRowChange(db, valueEncoders, bucket, encodedKey, element);
             dirty = true;
         }
 
@@ -587,8 +574,8 @@ final class CobbleSqlSink
             expireOlderSnapshots(globalSnapshotId, writerPathByDbId);
         }
 
-        private List<ShardSnapshot> collectEndOfInputLatestShards(Map<String, String> writerPathByDbId)
-                throws IOException {
+        private List<ShardSnapshot> collectEndOfInputLatestShards(
+                Map<String, String> writerPathByDbId) throws IOException {
             List<String> dbIds = CobbleSinkPaths.listEndOfInputMarkerDbIds(config);
             List<ShardSnapshot> refreshed =
                     new ArrayList<>(Math.min(dbIds.size(), config.sinkParallelism));
@@ -617,7 +604,8 @@ final class CobbleSqlSink
                 throws IOException {
             String writerPath =
                     writerPathByDbId.computeIfAbsent(
-                            dbId, ignored -> CobbleSinkPaths.tableRootPath(config).getAbsolutePath());
+                            dbId,
+                            ignored -> CobbleSinkPaths.tableRootPath(config).getAbsolutePath());
             long deadlineNanos = System.nanoTime() + TimeUnit.SECONDS.toNanos(5L);
             while (true) {
                 try (Db db =
@@ -864,6 +852,31 @@ final class CobbleSqlSink
         return Math.floorMod(java.util.Arrays.hashCode(encodedKey), totalBuckets);
     }
 
+    static void applyRowChange(
+            Db db,
+            List<CobbleRowDataCodecs.RuntimeFieldEncoder> valueEncoders,
+            int bucket,
+            byte[] encodedKey,
+            RowData element)
+            throws IOException {
+        switch (element.getRowKind()) {
+            case INSERT:
+            case UPDATE_AFTER:
+                upsertRow(db, valueEncoders, bucket, encodedKey, element);
+                return;
+            case UPDATE_BEFORE:
+                return;
+            case DELETE:
+                deleteRow(db, valueEncoders, bucket, encodedKey);
+                return;
+            default:
+                throw new UnsupportedOperationException(
+                        "Cobble SQL sink only supports INSERT, UPDATE_BEFORE, UPDATE_AFTER, and"
+                                + " DELETE rows, but received "
+                                + element.getRowKind());
+        }
+    }
+
     static int bucketOwnerSubtask(int bucket, int totalBuckets, int sinkParallelism) {
         if (sinkParallelism <= 0) {
             throw new IllegalArgumentException("sinkParallelism must be > 0");
@@ -873,5 +886,33 @@ final class CobbleSqlSink
                     "bucket must be in [0, totalBuckets), got " + bucket);
         }
         return (int) ((((long) bucket + 1L) * (long) sinkParallelism - 1L) / (long) totalBuckets);
+    }
+
+    private static void upsertRow(
+            Db db,
+            List<CobbleRowDataCodecs.RuntimeFieldEncoder> valueEncoders,
+            int bucket,
+            byte[] encodedKey,
+            RowData element)
+            throws IOException {
+        for (CobbleRowDataCodecs.RuntimeFieldEncoder encoder : valueEncoders) {
+            byte[] encodedValue = encoder.encodeNullable(element);
+            if (encodedValue == null) {
+                db.delete(bucket, encodedKey, encoder.structuredColumnIndex);
+            } else {
+                db.put(bucket, encodedKey, encoder.structuredColumnIndex, encodedValue);
+            }
+        }
+    }
+
+    private static void deleteRow(
+            Db db,
+            List<CobbleRowDataCodecs.RuntimeFieldEncoder> valueEncoders,
+            int bucket,
+            byte[] encodedKey)
+            throws IOException {
+        for (CobbleRowDataCodecs.RuntimeFieldEncoder encoder : valueEncoders) {
+            db.delete(bucket, encodedKey, encoder.structuredColumnIndex);
+        }
     }
 }

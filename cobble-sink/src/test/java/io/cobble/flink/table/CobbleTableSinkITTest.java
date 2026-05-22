@@ -2,6 +2,7 @@ package io.cobble.flink.table;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
 
 import io.cobble.Config;
 import io.cobble.DbCoordinator;
@@ -22,6 +23,7 @@ import org.apache.flink.table.api.DataTypes;
 import org.apache.flink.table.api.Schema;
 import org.apache.flink.table.api.TableResult;
 import org.apache.flink.table.api.bridge.java.StreamTableEnvironment;
+import org.apache.flink.table.connector.ChangelogMode;
 import org.apache.flink.table.data.GenericRowData;
 import org.apache.flink.table.data.StringData;
 import org.apache.flink.table.runtime.typeutils.InternalSerializers;
@@ -123,6 +125,56 @@ class CobbleTableSinkITTest {
                     entry.getKey().longValue(),
                     (String) entry.getValue().getField(1),
                     ((Integer) entry.getValue().getField(2)).intValue());
+        }
+    }
+
+    @Test
+    void sinkDeclaresUpsertModeAndAppliesFinalPrimaryKeyState() throws Exception {
+        Path tablePath = tempDir.resolve("upsert-local");
+
+        CobbleDynamicTableSink.SerializableConfig sinkConfig =
+                new CobbleDynamicTableSink.SerializableConfig(
+                        tablePath.toUri().toString(),
+                        2,
+                        2,
+                        2,
+                        java.util.Collections.singletonList(
+                                new CobbleDynamicTableSink.SerializableField(
+                                        "id", "BIGINT", 0, -1)),
+                        java.util.Arrays.asList(
+                                new CobbleDynamicTableSink.SerializableField(
+                                        "name", "VARCHAR(2147483647)", 1, 0),
+                                new CobbleDynamicTableSink.SerializableField(
+                                        "score", "INT", 2, 1)));
+        CobbleDynamicTableSink sink = new CobbleDynamicTableSink(sinkConfig, "test");
+        assertEquals(ChangelogMode.upsert(), sink.getChangelogMode(ChangelogMode.all()));
+
+        CobbleRowDataCodecs.RuntimeKeyEncoder keyEncoder =
+                new CobbleRowDataCodecs.RuntimeKeyEncoder(sinkConfig.keyFields);
+        List<CobbleRowDataCodecs.RuntimeFieldEncoder> valueEncoders = new ArrayList<>();
+        for (CobbleDynamicTableSink.SerializableField field : sinkConfig.valueFields) {
+            valueEncoders.add(new CobbleRowDataCodecs.RuntimeFieldEncoder(field));
+        }
+
+        try (Db db = Db.open(CobbleSinkPaths.createWriterConfig(sinkConfig, 0), 0, 1)) {
+            GenericRowData insertRow = rowData(RowKind.INSERT, 2L, "name-2", 2);
+            byte[] encodedKey = keyEncoder.encode(insertRow);
+            int bucket = CobbleSqlSink.hashFixedBucket(encodedKey, sinkConfig.bucketCount);
+
+            CobbleSqlSink.applyRowChange(db, valueEncoders, bucket, encodedKey, insertRow);
+            verifyRow(bucket, encodedKey, db, "name-2", 2);
+
+            GenericRowData updateBeforeRow = rowData(RowKind.UPDATE_BEFORE, 2L, "name-2", 2);
+            CobbleSqlSink.applyRowChange(db, valueEncoders, bucket, encodedKey, updateBeforeRow);
+            verifyRow(bucket, encodedKey, db, "name-2", 2);
+
+            GenericRowData updateRow = rowData(RowKind.UPDATE_AFTER, 2L, "updated-2", 20);
+            CobbleSqlSink.applyRowChange(db, valueEncoders, bucket, encodedKey, updateRow);
+            verifyRow(bucket, encodedKey, db, "updated-2", 20);
+
+            GenericRowData deleteRow = rowData(RowKind.DELETE, 2L, "updated-2", 20);
+            CobbleSqlSink.applyRowChange(db, valueEncoders, bucket, encodedKey, deleteRow);
+            assertNull(db.get(bucket, encodedKey));
         }
     }
 
@@ -239,7 +291,8 @@ class CobbleTableSinkITTest {
             Path restoreDir = tempDir.resolve("restore-" + bucket + "-" + id);
             Db restoredDb =
                     Db.restoreWithManifest(
-                            createRestoreConfig(restoreDir, sinkConfig), shardSnapshot.manifestPath);
+                            createRestoreConfig(restoreDir, sinkConfig),
+                            shardSnapshot.manifestPath);
             try {
                 io.cobble.structured.Row row = restoredDb.get(bucket, encodedKey);
                 if (row != null) {
@@ -320,9 +373,16 @@ class CobbleTableSinkITTest {
                         DbCoordinator.open(CobbleSinkPaths.createCoordinatorConfig(sinkConfig));
                 GlobalSnapshot snapshot = coordinator.loadCurrentGlobalSnapshot();
                 if (snapshot != null
-                        && snapshot.shardSnapshots.size() == sinkConfig.sinkParallelism
-                        && containsExpectedRows(sinkConfig, snapshot, expectedRows)) {
-                    return snapshot;
+                        && snapshot.shardSnapshots.size() == sinkConfig.sinkParallelism) {
+                    try {
+                        if (containsExpectedRows(sinkConfig, snapshot, expectedRows)) {
+                            return snapshot;
+                        }
+                    } catch (IllegalStateException e) {
+                        // A freshly materialized global snapshot may become visible slightly before
+                        // all referenced shard files are readable. Retry until the snapshot is
+                        // fully materialized.
+                    }
                 }
             } finally {
                 if (coordinator != null) {
@@ -371,7 +431,8 @@ class CobbleTableSinkITTest {
             Path restoreDir = tempDir.resolve("restore-" + bucket + "-" + id + "-probe");
             Db restoredDb =
                     Db.restoreWithManifest(
-                            createRestoreConfig(restoreDir, sinkConfig), shardSnapshot.manifestPath);
+                            createRestoreConfig(restoreDir, sinkConfig),
+                            shardSnapshot.manifestPath);
             try {
                 io.cobble.structured.Row row = restoredDb.get(bucket, encodedKey);
                 if (row != null) {
@@ -383,6 +444,24 @@ class CobbleTableSinkITTest {
             }
         }
         return false;
+    }
+
+    private GenericRowData rowData(RowKind rowKind, long id, String name, int score) {
+        GenericRowData row = new GenericRowData(3);
+        row.setRowKind(rowKind);
+        row.setField(0, Long.valueOf(id));
+        row.setField(1, StringData.fromString(name));
+        row.setField(2, Integer.valueOf(score));
+        return row;
+    }
+
+    private void verifyRow(
+            int bucket, byte[] encodedKey, Db db, String expectedName, int expectedScore)
+            throws Exception {
+        io.cobble.structured.Row row = db.get(bucket, encodedKey);
+        assertNotNull(row);
+        assertEquals(expectedName, decodeString(row.getBytes(0)));
+        assertEquals(expectedScore, decodeInt(row.getBytes(1)));
     }
 
     private Throwable jobFailure(JobClient jobClient, Throwable fallback) {
