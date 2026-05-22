@@ -87,6 +87,8 @@ For a minimal SQL source table, configure:
 - `scan.poll-interval-ms` (used by `latest + streaming`; default `1000`)
 
 The source requires a `PRIMARY KEY` and at least one non-primary-key column in the table schema.
+The same table can also be used as a lookup dimension table in Flink SQL. Lookup joins currently
+require equality conditions on the full `PRIMARY KEY`.
 
 Example:
 
@@ -102,6 +104,15 @@ CREATE TABLE source_tbl (
   'scan.checkpoint-id' = 'latest',
   'scan.mode' = 'batch'
 );
+```
+
+Lookup join example:
+
+```sql
+SELECT o.order_id, o.id, d.name, d.score
+FROM orders AS o
+LEFT JOIN source_tbl FOR SYSTEM_TIME AS OF o.pt AS d
+ON o.id = d.id;
 ```
 
 Current source semantics:

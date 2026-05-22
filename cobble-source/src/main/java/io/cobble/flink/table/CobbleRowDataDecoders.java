@@ -38,9 +38,13 @@ final class CobbleRowDataDecoders {
         }
 
         RowData decode(Row row) throws IOException {
+            return decode(row.getKey(), extractColumns(row));
+        }
+
+        RowData decode(byte[] key, byte[][] columns) throws IOException {
             GenericRowData decoded = new GenericRowData(RowKind.INSERT, fieldCount);
 
-            DataInputDeserializer keyInput = new DataInputDeserializer(row.getKey());
+            DataInputDeserializer keyInput = new DataInputDeserializer(key);
             for (RuntimeFieldDecoder field : keyFields) {
                 int length = keyInput.readInt();
                 byte[] bytes = new byte[length];
@@ -49,10 +53,25 @@ final class CobbleRowDataDecoders {
             }
 
             for (RuntimeFieldDecoder field : valueFields) {
-                byte[] bytes = row.getBytes(field.structuredColumnIndex);
+                byte[] bytes =
+                        field.structuredColumnIndex < columns.length
+                                ? columns[field.structuredColumnIndex]
+                                : null;
                 decoded.setField(field.rowIndex, bytes == null ? null : field.deserialize(bytes));
             }
             return decoded;
+        }
+
+        private byte[][] extractColumns(Row row) {
+            byte[][] columns = new byte[valueFields.size()][];
+            for (RuntimeFieldDecoder field : valueFields) {
+                if (field.structuredColumnIndex >= 0
+                        && field.structuredColumnIndex < columns.length) {
+                    columns[field.structuredColumnIndex] =
+                            row.getBytes(field.structuredColumnIndex);
+                }
+            }
+            return columns;
         }
     }
 

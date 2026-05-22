@@ -144,6 +144,28 @@ final class CobbleSourceRuntime {
         Files.createDirectories(directory);
     }
 
+    static Config createLookupReaderConfig(
+            CobbleDynamicTableSource.SerializableConfig config, int totalBuckets) {
+        Config readerConfig = new Config().totalBuckets(totalBuckets);
+        readerConfig.governanceMode = Config.GovernanceMode.NOOP;
+        readerConfig.logConsole = Boolean.FALSE;
+
+        Config.ReaderConfigEntry readerOptions = new Config.ReaderConfigEntry();
+        readerOptions.blockCacheSize = 0;
+        readerOptions.reloadToleranceSeconds = 0L;
+        readerConfig.reader = readerOptions;
+
+        Config.VolumeDescriptor volume = new Config.VolumeDescriptor();
+        volume.baseDir = tableRootDirectory(config).getAbsolutePath();
+        volume.kinds =
+                Arrays.asList(
+                        Config.VolumeUsageKind.PRIMARY_DATA_PRIORITY_HIGH,
+                        Config.VolumeUsageKind.META,
+                        Config.VolumeUsageKind.SNAPSHOT);
+        readerConfig.addVolume(volume);
+        return readerConfig;
+    }
+
     static void deleteRecursively(Path path) throws IOException {
         if (path == null || !Files.exists(path)) {
             return;
