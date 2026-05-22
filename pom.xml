@@ -19,6 +19,7 @@
         <module>cobble-source</module>
         <module>cobble-dist</module>
         <module>cobble-state-bench</module>
+        <module>cobble-tests</module>
     </modules>
 
     <properties>

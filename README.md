@@ -9,6 +9,7 @@ storage semantics.
 - `cobble-source`: Cobble Flink SQL source connector.
 - `cobble-dist`: distribution jar that bundles `cobble-state`, `cobble-sink`, and `cobble-source` for deployment.
 - `cobble-state-bench`: benchmark module for Cobble state backend scenarios.
+- `cobble-tests`: end-to-end integration tests for Cobble Flink connectors and runtime flows.
 
 ## Setup
 
