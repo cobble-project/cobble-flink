@@ -6,7 +6,10 @@ import java.io.File;
 import java.io.IOException;
 import java.net.URI;
 import java.nio.file.Files;
+import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Comparator;
+import java.util.List;
 
 /** Path and config helpers for the initial Cobble SQL sink. */
 final class CobbleSinkPaths {
@@ -32,6 +35,10 @@ final class CobbleSinkPaths {
     }
 
     static File coordinatorLocalDirectory(CobbleDynamicTableSink.SerializableConfig config) {
+        return tableRootDirectory(config);
+    }
+
+    static File tableRootPath(CobbleDynamicTableSink.SerializableConfig config) {
         return tableRootDirectory(config);
     }
 
@@ -126,6 +133,22 @@ final class CobbleSinkPaths {
         for (File file : files) {
             Files.deleteIfExists(file.toPath());
         }
+    }
+
+    static List<String> listEndOfInputMarkerDbIds(
+            CobbleDynamicTableSink.SerializableConfig config) {
+        File markerDir = endOfInputMarkerDirectory(config);
+        File[] files = markerDir.listFiles((dir, name) -> name.endsWith(".marker"));
+        List<String> dbIds = new ArrayList<>();
+        if (files == null) {
+            return dbIds;
+        }
+        Arrays.sort(files, Comparator.comparingLong(File::lastModified).reversed());
+        for (File file : files) {
+            String name = file.getName();
+            dbIds.add(name.substring(0, name.length() - ".marker".length()));
+        }
+        return dbIds;
     }
 
     private static File endOfInputMarkerDirectory(

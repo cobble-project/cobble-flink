@@ -35,6 +35,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Properties;
 import java.util.Set;
+import java.util.concurrent.TimeUnit;
 
 /** Sink implementation with a global post-commit topology for snapshot materialization. */
 final class CobbleSqlSink
@@ -561,36 +562,22 @@ final class CobbleSqlSink
 
         private void refreshLatestSnapshotOnClose() throws IOException {
             GlobalSnapshot latest = coordinator.loadCurrentGlobalSnapshot();
+            Map<String, String> writerPathByDbId = loadWriterPathIndex();
             if (latest == null
                     || latest.shardSnapshots == null
                     || latest.shardSnapshots.isEmpty()) {
+                List<ShardSnapshot> initial = collectEndOfInputLatestShards(writerPathByDbId);
+                if (initial.isEmpty()) {
+                    return;
+                }
+                storeWriterPathIndex(writerPathByDbId);
+                coordinator.materializeGlobalSnapshot(config.bucketCount, 1L, initial);
+                expireOlderSnapshots(1L, writerPathByDbId);
                 return;
             }
-            Map<String, String> writerPathByDbId = loadWriterPathIndex();
             List<ShardSnapshot> refreshed = new ArrayList<>(latest.shardSnapshots.size());
             for (ShardSnapshot shard : latest.shardSnapshots) {
-                String writerPath = writerPathByDbId.get(shard.dbId);
-                if (writerPath == null) {
-                    refreshed.add(shard);
-                    continue;
-                }
-                try (Db db =
-                        Db.resume(
-                                CobbleSinkPaths.createWriterConfigForWriterPath(config, writerPath),
-                                shard.dbId)) {
-                    ShardSnapshot latestShard = db.getShardSnapshot(-1L);
-                    refreshed.add(latestShard == null ? shard : latestShard);
-                } catch (IllegalArgumentException e) {
-                    if (e.getMessage() != null
-                            && e.getMessage().contains("snapshotId out of range")) {
-                        refreshed.add(shard);
-                    } else {
-                        throw new IOException(
-                                "Failed to refresh end-of-input shard snapshot for dbId "
-                                        + shard.dbId,
-                                e);
-                    }
-                }
+                refreshed.add(loadLatestShardSnapshot(shard.dbId, writerPathByDbId, shard));
             }
             if (hasSameBucketCoverage(latest, refreshed, latest.totalBuckets)) {
                 return;
@@ -598,6 +585,70 @@ final class CobbleSqlSink
             long globalSnapshotId = latest.id + 1L;
             coordinator.materializeGlobalSnapshot(latest.totalBuckets, globalSnapshotId, refreshed);
             expireOlderSnapshots(globalSnapshotId, writerPathByDbId);
+        }
+
+        private List<ShardSnapshot> collectEndOfInputLatestShards(Map<String, String> writerPathByDbId)
+                throws IOException {
+            List<String> dbIds = CobbleSinkPaths.listEndOfInputMarkerDbIds(config);
+            List<ShardSnapshot> refreshed =
+                    new ArrayList<>(Math.min(dbIds.size(), config.sinkParallelism));
+            for (String dbId : dbIds) {
+                ShardSnapshot latestShard = loadLatestShardSnapshot(dbId, writerPathByDbId, null);
+                if (latestShard != null) {
+                    refreshed.add(latestShard);
+                    if (refreshed.size() >= config.sinkParallelism) {
+                        break;
+                    }
+                }
+            }
+            if (refreshed.size() < config.sinkParallelism) {
+                throw new IOException(
+                        "Failed to resolve enough end-of-input shard snapshots. resolved="
+                                + refreshed.size()
+                                + ", expected="
+                                + config.sinkParallelism
+                                + ".");
+            }
+            return refreshed;
+        }
+
+        private ShardSnapshot loadLatestShardSnapshot(
+                String dbId, Map<String, String> writerPathByDbId, ShardSnapshot fallback)
+                throws IOException {
+            String writerPath =
+                    writerPathByDbId.computeIfAbsent(
+                            dbId, ignored -> CobbleSinkPaths.tableRootPath(config).getAbsolutePath());
+            long deadlineNanos = System.nanoTime() + TimeUnit.SECONDS.toNanos(5L);
+            while (true) {
+                try (Db db =
+                        Db.resume(
+                                CobbleSinkPaths.createWriterConfigForWriterPath(config, writerPath),
+                                dbId)) {
+                    ShardSnapshot latestShard = db.getShardSnapshot(-1L);
+                    if (latestShard != null) {
+                        return latestShard;
+                    }
+                } catch (IllegalArgumentException e) {
+                    if (e.getMessage() == null
+                            || !e.getMessage().contains("snapshotId out of range")) {
+                        throw new IOException(
+                                "Failed to refresh end-of-input shard snapshot for dbId " + dbId,
+                                e);
+                    }
+                }
+                if (System.nanoTime() >= deadlineNanos) {
+                    return fallback;
+                }
+                try {
+                    Thread.sleep(50L);
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    throw new IOException(
+                            "Interrupted while waiting for end-of-input shard snapshot for dbId "
+                                    + dbId,
+                            e);
+                }
+            }
         }
     }
 

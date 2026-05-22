@@ -126,6 +126,84 @@ class CobbleTableSinkITTest {
         }
     }
 
+    @Test
+    void sqlSinkMaterializesGlobalSnapshotOnEndOfInputWithoutCheckpoint() throws Exception {
+        Path tablePath = tempDir.resolve("eoi-table");
+
+        CobbleDynamicTableSink.SerializableConfig sinkConfig =
+                new CobbleDynamicTableSink.SerializableConfig(
+                        tablePath.toUri().toString(),
+                        2,
+                        2,
+                        2,
+                        java.util.Collections.singletonList(
+                                new CobbleDynamicTableSink.SerializableField(
+                                        "id", "BIGINT", 0, -1)),
+                        java.util.Arrays.asList(
+                                new CobbleDynamicTableSink.SerializableField(
+                                        "name", "VARCHAR(2147483647)", 1, 0),
+                                new CobbleDynamicTableSink.SerializableField(
+                                        "score", "INT", 2, 1)));
+
+        List<Row> inputRows = createInputRows();
+        Map<Long, Row> expectedRows = expectedRows(inputRows);
+
+        StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment();
+        env.setParallelism(1);
+        env.setRestartStrategy(RestartStrategies.noRestart());
+
+        StreamTableEnvironment tableEnv = StreamTableEnvironment.create(env);
+        org.apache.flink.streaming.api.datastream.DataStream<Row> sourceStream =
+                env.fromCollection(inputRows, ROW_TYPE);
+        tableEnv.createTemporaryView(
+                "src_rows",
+                tableEnv.fromDataStream(
+                        sourceStream,
+                        Schema.newBuilder()
+                                .column("id", DataTypes.BIGINT())
+                                .column("name", DataTypes.STRING())
+                                .column("score", DataTypes.INT())
+                                .build()));
+
+        tableEnv.executeSql(
+                "CREATE TABLE cobble_sink ("
+                        + " id BIGINT,"
+                        + " name STRING,"
+                        + " score INT,"
+                        + " PRIMARY KEY (id) NOT ENFORCED"
+                        + ") WITH ("
+                        + " 'connector' = 'cobble',"
+                        + " 'path' = '"
+                        + escape(tablePath)
+                        + "',"
+                        + " 'bucket' = '2',"
+                        + " 'sink.parallelism' = '2',"
+                        + " 'snapshot.retention' = '2'"
+                        + ")");
+
+        TableResult result = tableEnv.executeSql("INSERT INTO cobble_sink SELECT * FROM src_rows");
+        result.getJobClient()
+                .orElseThrow(IllegalStateException::new)
+                .getJobExecutionResult()
+                .get(30L, TimeUnit.SECONDS);
+
+        try (DbCoordinator coordinator =
+                DbCoordinator.open(CobbleSinkPaths.createCoordinatorConfig(sinkConfig))) {
+            GlobalSnapshot snapshot = coordinator.loadCurrentGlobalSnapshot();
+            assertNotNull(snapshot);
+            assertEquals(2, snapshot.totalBuckets);
+            assertEquals(2, snapshot.shardSnapshots.size());
+            for (Map.Entry<Long, Row> entry : expectedRows.entrySet()) {
+                verifyRowFromAnyShardSnapshot(
+                        sinkConfig,
+                        snapshot,
+                        entry.getKey().longValue(),
+                        (String) entry.getValue().getField(1),
+                        ((Integer) entry.getValue().getField(2)).intValue());
+            }
+        }
+    }
+
     private List<Row> createInputRows() {
         List<Row> rows = new ArrayList<>();
         for (long id = 1L; id <= 8L; id++) {
@@ -161,7 +239,7 @@ class CobbleTableSinkITTest {
             Path restoreDir = tempDir.resolve("restore-" + bucket + "-" + id);
             Db restoredDb =
                     Db.restoreWithManifest(
-                            createRestoreConfig(restoreDir), shardSnapshot.manifestPath);
+                            createRestoreConfig(restoreDir, sinkConfig), shardSnapshot.manifestPath);
             try {
                 io.cobble.structured.Row row = restoredDb.get(bucket, encodedKey);
                 if (row != null) {
@@ -176,7 +254,8 @@ class CobbleTableSinkITTest {
         throw new AssertionError("Did not find row for id " + id + " in any shard snapshot.");
     }
 
-    private Config createRestoreConfig(Path restoreDir) {
+    private Config createRestoreConfig(
+            Path restoreDir, CobbleDynamicTableSink.SerializableConfig sinkConfig) {
         Config config = new Config().numColumns(2).totalBuckets(2);
         Config.VolumeDescriptor volume = new Config.VolumeDescriptor();
         volume.baseDir = restoreDir.toAbsolutePath().toString();
@@ -186,7 +265,8 @@ class CobbleTableSinkITTest {
                         Config.VolumeUsageKind.META);
         config.addVolume(volume);
         Config.VolumeDescriptor writerSnapshotVolume = new Config.VolumeDescriptor();
-        writerSnapshotVolume.baseDir = tempDir.resolve("table").toAbsolutePath().toString();
+        writerSnapshotVolume.baseDir =
+                CobbleSinkPaths.tableRootPath(sinkConfig).toPath().toAbsolutePath().toString();
         writerSnapshotVolume.kinds =
                 java.util.Collections.singletonList(Config.VolumeUsageKind.SNAPSHOT);
         config.addVolume(writerSnapshotVolume);
@@ -291,7 +371,7 @@ class CobbleTableSinkITTest {
             Path restoreDir = tempDir.resolve("restore-" + bucket + "-" + id + "-probe");
             Db restoredDb =
                     Db.restoreWithManifest(
-                            createRestoreConfig(restoreDir), shardSnapshot.manifestPath);
+                            createRestoreConfig(restoreDir, sinkConfig), shardSnapshot.manifestPath);
             try {
                 io.cobble.structured.Row row = restoredDb.get(bucket, encodedKey);
                 if (row != null) {
