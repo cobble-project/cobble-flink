@@ -10,64 +10,54 @@ import java.io.DataOutputStream;
 import java.io.IOException;
 import java.io.Serializable;
 
-/** Logical per-bucket split for the Cobble FLIP-27 source. */
+/** Checkpointed source split metadata for reopening one planned Cobble scan range. */
 final class CobbleSourceSplit implements SourceSplit, Serializable {
 
     private static final long serialVersionUID = 1L;
 
-    enum ScanPhase {
-        FORWARD,
-        WRAPPED,
+    /** Minimal reader lifecycle persisted in checkpoints. */
+    enum ScanState {
+        ACTIVE,
         IDLE
     }
 
-    private static final String SPLIT_ID_PREFIX = "split-";
-
-    final int splitId;
-    final int bucketId;
+    final int rangeStartBucket;
+    final int rangeEndBucket;
+    final int totalBuckets;
     final long snapshotId;
-    final String manifestPath;
-    final byte[] lastConsumedKey;
-    final byte[] anchorKey;
-    final byte[] resumeKey;
-    final ScanPhase phase;
+    final ScanState scanState;
 
     CobbleSourceSplit(
-            int splitId,
-            int bucketId,
+            int rangeStartBucket,
+            int rangeEndBucket,
+            int totalBuckets,
             long snapshotId,
-            String manifestPath,
-            byte[] lastConsumedKey,
-            byte[] anchorKey,
-            byte[] resumeKey,
-            ScanPhase phase) {
-        this.splitId = splitId;
-        this.bucketId = bucketId;
+            ScanState scanState) {
+        this.rangeStartBucket = rangeStartBucket;
+        this.rangeEndBucket = rangeEndBucket;
+        this.totalBuckets = totalBuckets;
         this.snapshotId = snapshotId;
-        this.manifestPath = manifestPath;
-        this.lastConsumedKey = copy(lastConsumedKey);
-        this.anchorKey = copy(anchorKey);
-        this.resumeKey = copy(resumeKey);
-        this.phase = phase;
+        this.scanState = scanState;
     }
 
     static CobbleSourceSplit forSnapshot(
-            int splitId, int bucketId, long snapshotId, String manifestPath) {
+            int rangeStartBucket, int rangeEndBucket, int totalBuckets, long snapshotId) {
         return new CobbleSourceSplit(
-                splitId, bucketId, snapshotId, manifestPath, null, null, null, ScanPhase.FORWARD);
+                rangeStartBucket, rangeEndBucket, totalBuckets, snapshotId, ScanState.ACTIVE);
     }
 
     @Override
     public String splitId() {
-        return SPLIT_ID_PREFIX + splitId;
+        return splitIdForRange(rangeStartBucket, rangeEndBucket, totalBuckets);
     }
 
-    private static byte[] copy(byte[] bytes) {
-        return bytes == null ? null : java.util.Arrays.copyOf(bytes, bytes.length);
+    static String splitIdForRange(int rangeStartBucket, int rangeEndBucket, int totalBuckets) {
+        return rangeStartBucket + ":" + rangeEndBucket + ":" + totalBuckets;
     }
 
+    /** Serializer for checkpointing split metadata without embedding raw ScanSplit payloads. */
     static final class Serializer implements SimpleVersionedSerializer<CobbleSourceSplit> {
-        private static final int VERSION = 2;
+        private static final int VERSION = 5;
 
         @Override
         public int getVersion() {
@@ -78,94 +68,27 @@ final class CobbleSourceSplit implements SourceSplit, Serializable {
         public byte[] serialize(CobbleSourceSplit split) throws IOException {
             ByteArrayOutputStream out = new ByteArrayOutputStream();
             DataOutputStream dataOut = new DataOutputStream(out);
-            dataOut.writeInt(split.splitId);
-            dataOut.writeInt(split.bucketId);
+            dataOut.writeInt(split.rangeStartBucket);
+            dataOut.writeInt(split.rangeEndBucket);
+            dataOut.writeInt(split.totalBuckets);
             dataOut.writeLong(split.snapshotId);
-            writeString(dataOut, split.manifestPath);
-            writeBytes(dataOut, split.lastConsumedKey);
-            writeBytes(dataOut, split.anchorKey);
-            writeBytes(dataOut, split.resumeKey);
-            dataOut.writeInt(split.phase.ordinal());
+            dataOut.writeInt(split.scanState.ordinal());
             dataOut.flush();
             return out.toByteArray();
         }
 
         @Override
         public CobbleSourceSplit deserialize(int version, byte[] serialized) throws IOException {
-            if (version == 1) {
-                return deserializeV1(serialized);
-            }
             if (version != VERSION) {
                 throw new IOException("Unsupported CobbleSourceSplit version: " + version);
             }
-            return deserializeV2(serialized);
-        }
-
-        private static CobbleSourceSplit deserializeV1(byte[] serialized) throws IOException {
-            DataInputStream input = new DataInputStream(new ByteArrayInputStream(serialized));
-            int bucketId = input.readInt();
-            return new CobbleSourceSplit(
-                    bucketId,
-                    bucketId,
-                    input.readLong(),
-                    readString(input),
-                    readBytes(input),
-                    readBytes(input),
-                    readBytes(input),
-                    ScanPhase.values()[input.readInt()]);
-        }
-
-        private static CobbleSourceSplit deserializeV2(byte[] serialized) throws IOException {
             DataInputStream input = new DataInputStream(new ByteArrayInputStream(serialized));
             return new CobbleSourceSplit(
                     input.readInt(),
                     input.readInt(),
+                    input.readInt(),
                     input.readLong(),
-                    readString(input),
-                    readBytes(input),
-                    readBytes(input),
-                    readBytes(input),
-                    ScanPhase.values()[input.readInt()]);
-        }
-
-        private static void writeString(DataOutputStream out, String value) throws IOException {
-            if (value == null) {
-                out.writeBoolean(false);
-                return;
-            }
-            out.writeBoolean(true);
-            byte[] bytes = value.getBytes(java.nio.charset.StandardCharsets.UTF_8);
-            out.writeInt(bytes.length);
-            out.write(bytes);
-        }
-
-        private static String readString(DataInputStream input) throws IOException {
-            if (!input.readBoolean()) {
-                return null;
-            }
-            int length = input.readInt();
-            byte[] bytes = new byte[length];
-            input.readFully(bytes);
-            return new String(bytes, java.nio.charset.StandardCharsets.UTF_8);
-        }
-
-        private static void writeBytes(DataOutputStream out, byte[] bytes) throws IOException {
-            if (bytes == null) {
-                out.writeInt(-1);
-                return;
-            }
-            out.writeInt(bytes.length);
-            out.write(bytes);
-        }
-
-        private static byte[] readBytes(DataInputStream input) throws IOException {
-            int length = input.readInt();
-            if (length < 0) {
-                return null;
-            }
-            byte[] bytes = new byte[length];
-            input.readFully(bytes);
-            return bytes;
+                    ScanState.values()[input.readInt()]);
         }
     }
 }

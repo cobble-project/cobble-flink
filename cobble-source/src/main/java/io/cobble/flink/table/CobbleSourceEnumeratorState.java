@@ -29,7 +29,7 @@ final class CobbleSourceEnumeratorState {
 
     static final class Serializer
             implements SimpleVersionedSerializer<CobbleSourceEnumeratorState> {
-        private static final int VERSION = 2;
+        private static final int VERSION = 1;
         private final CobbleSourceSplit.Serializer splitSerializer =
                 new CobbleSourceSplit.Serializer();
 
@@ -57,32 +57,10 @@ final class CobbleSourceEnumeratorState {
         @Override
         public CobbleSourceEnumeratorState deserialize(int version, byte[] serialized)
                 throws IOException {
-            if (version == 1) {
-                return deserializeV1(serialized);
-            }
             if (version != VERSION) {
                 throw new IOException(
                         "Unsupported Cobble source enumerator state version: " + version);
             }
-            return deserializeV2(serialized);
-        }
-
-        private CobbleSourceEnumeratorState deserializeV1(byte[] serialized) throws IOException {
-            DataInputStream input = new DataInputStream(new ByteArrayInputStream(serialized));
-            long currentSnapshotId = input.readLong();
-            int splitCount = input.readInt();
-            List<CobbleSourceSplit> splits = new ArrayList<>(splitCount);
-            for (int i = 0; i < splitCount; i++) {
-                int length = input.readInt();
-                byte[] bytes = new byte[length];
-                input.readFully(bytes);
-                splits.add(splitSerializer.deserialize(1, bytes));
-            }
-            long nextSnapshotId = currentSnapshotId > 0L ? currentSnapshotId + 1L : 0L;
-            return new CobbleSourceEnumeratorState(currentSnapshotId, nextSnapshotId, splits);
-        }
-
-        private CobbleSourceEnumeratorState deserializeV2(byte[] serialized) throws IOException {
             DataInputStream input = new DataInputStream(new ByteArrayInputStream(serialized));
             long currentSnapshotId = input.readLong();
             long nextSnapshotId = input.readLong();

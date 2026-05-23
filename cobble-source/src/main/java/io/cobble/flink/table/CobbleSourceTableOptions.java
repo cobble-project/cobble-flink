@@ -34,7 +34,7 @@ final class CobbleSourceTableOptions {
     static final ConfigOption<Long> SCAN_POLL_INTERVAL_MS =
             ConfigOptions.key("scan.poll-interval-ms")
                     .longType()
-                    .defaultValue(1000L)
+                    .defaultValue(3000L)
                     .withDescription(
                             "Polling interval in milliseconds for 'latest' + 'streaming' mode.");
 

@@ -16,17 +16,32 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 
-/** Enumerator that assigns stable per-bucket splits and refreshes them for newer snapshots. */
+/** Enumerator that assigns stable raw scan splits and refreshes them for newer snapshots. */
 final class CobbleSourceEnumerator
         implements SplitEnumerator<CobbleSourceSplit, CobbleSourceEnumeratorState> {
-
     private final CobbleDynamicTableSource.SerializableConfig config;
     private final SplitEnumeratorContext<CobbleSourceSplit> context;
-    private final Map<Integer, CobbleSourceSplit> pendingSplitsById = new LinkedHashMap<>();
-    private final Map<Integer, Integer> splitOwnerByReader = new HashMap<>();
-    private final Map<Integer, CobbleSourceSplit> latestSplitsById = new HashMap<>();
-    private long currentSnapshotId;
-    private long nextSnapshotId;
+    /**
+     * Splits that still need coordinator assignment or need to be re-pushed after a replacement.
+     */
+    private final Map<String, CobbleSourceSplit> pendingSplitsById = new LinkedHashMap<>();
+    /**
+     * Latest planned split payload for the current snapshot, keyed by the stable range triple id.
+     */
+    private final Map<String, CobbleSourceSplit> latestSplitsById = new HashMap<>();
+    /** Current runtime owner of each split, rebuilt from reader events and not checkpointed. */
+    private final Map<String, Integer> activeReaderBySplit = new HashMap<>();
+    /**
+     * Sticky assignment hint for keeping the same logical split on the same reader when possible.
+     *
+     * <p>This is runtime-only coordinator state. It is intentionally not checkpointed because the
+     * split activity state lives in reader state; after recovery the readers re-advertise ownership
+     * and rebuild the hint.
+     */
+    private final Map<String, Integer> preferredReaderBySplit = new LinkedHashMap<>();
+
+    private volatile long currentSnapshotId;
+    private volatile long nextSnapshotId;
     private boolean noMoreSplitsSignaled;
 
     CobbleSourceEnumerator(
@@ -40,14 +55,14 @@ final class CobbleSourceEnumerator
             this.currentSnapshotId = checkpoint.currentSnapshotId;
             this.nextSnapshotId = checkpoint.nextSnapshotId;
             for (CobbleSourceSplit split : checkpoint.pendingSplits) {
-                this.pendingSplitsById.put(Integer.valueOf(split.splitId), split);
+                this.pendingSplitsById.put(split.splitId(), split);
             }
             if (checkpoint.currentSnapshotId > 0L) {
                 GlobalSnapshot snapshot =
                         CobbleSourceRuntime.loadSnapshotById(config, checkpoint.currentSnapshotId);
                 for (CobbleSourceSplit split :
-                        CobbleSourceRuntime.createBucketSplits(config, snapshot)) {
-                    this.latestSplitsById.put(Integer.valueOf(split.splitId), split);
+                        CobbleSourceRuntime.createSourceSplits(config, snapshot)) {
+                    this.latestSplitsById.put(split.splitId(), split);
                 }
             }
             if (this.nextSnapshotId == 0L && this.currentSnapshotId > 0L) {
@@ -75,34 +90,7 @@ final class CobbleSourceEnumerator
                 }
             }
             assignAvailableSplits();
-            context.callAsync(
-                    new java.util.concurrent.Callable<GlobalSnapshot>() {
-                        @Override
-                        public GlobalSnapshot call() throws Exception {
-                            return CobbleSourceRuntime.loadLatestSnapshotIfNewer(
-                                    config, nextSnapshotId > 0L ? nextSnapshotId - 1L : 0L);
-                        }
-                    },
-                    new java.util.function.BiConsumer<GlobalSnapshot, Throwable>() {
-                        @Override
-                        public void accept(GlobalSnapshot snapshot, Throwable throwable) {
-                            if (throwable != null) {
-                                throw new RuntimeException(
-                                        "Failed to poll Cobble latest snapshot.", throwable);
-                            }
-                            if (snapshot != null) {
-                                try {
-                                    installLatestSnapshot(snapshot);
-                                    assignAvailableSplits();
-                                } catch (IOException e) {
-                                    throw new RuntimeException(
-                                            "Failed to refresh Cobble source splits.", e);
-                                }
-                            }
-                        }
-                    },
-                    config.pollIntervalMillis,
-                    config.pollIntervalMillis);
+            startLatestSnapshotPolling();
         } catch (Exception e) {
             throw new RuntimeException("Failed to start Cobble source enumerator.", e);
         }
@@ -117,11 +105,13 @@ final class CobbleSourceEnumerator
     @Override
     public void addSplitsBack(List<CobbleSourceSplit> splits, int subtaskId) {
         for (CobbleSourceSplit split : splits) {
-            splitOwnerByReader.remove(Integer.valueOf(split.splitId));
-            CobbleSourceSplit latest = latestSplitsById.get(Integer.valueOf(split.splitId));
+            String splitId = split.splitId();
+            activeReaderBySplit.remove(splitId);
+            preferredReaderBySplit.put(splitId, subtaskId);
+            CobbleSourceSplit latest = latestSplitsById.get(splitId);
             CobbleSourceSplit restored =
                     latest != null && latest.snapshotId > split.snapshotId ? latest : split;
-            pendingSplitsById.put(Integer.valueOf(restored.splitId), restored);
+            pendingSplitsById.put(restored.splitId(), restored);
         }
         assignAvailableSplits();
     }
@@ -137,20 +127,21 @@ final class CobbleSourceEnumerator
         if (!(sourceEvent instanceof CobbleSourceEvents.OwnedSplitsEvent)) {
             return;
         }
-        CobbleSourceEvents.OwnedSplitsEvent event =
-                (CobbleSourceEvents.OwnedSplitsEvent) sourceEvent;
-        List<Integer> currentlyOwnedByReader = new ArrayList<>();
-        for (Map.Entry<Integer, Integer> entry : splitOwnerByReader.entrySet()) {
+        List<String> currentlyOwnedByReader = new ArrayList<>();
+        for (Map.Entry<String, Integer> entry : activeReaderBySplit.entrySet()) {
             if (entry.getValue().intValue() == subtaskId) {
                 currentlyOwnedByReader.add(entry.getKey());
             }
         }
-        for (Integer splitId : currentlyOwnedByReader) {
-            splitOwnerByReader.remove(splitId);
+        for (String splitId : currentlyOwnedByReader) {
+            activeReaderBySplit.remove(splitId);
         }
-        for (int splitId : event.splitIds) {
-            splitOwnerByReader.put(Integer.valueOf(splitId), Integer.valueOf(subtaskId));
-            CobbleSourceSplit pending = pendingSplitsById.remove(Integer.valueOf(splitId));
+        CobbleSourceEvents.OwnedSplitsEvent event =
+                (CobbleSourceEvents.OwnedSplitsEvent) sourceEvent;
+        for (String splitId : event.splitIds) {
+            activeReaderBySplit.put(splitId, subtaskId);
+            preferredReaderBySplit.put(splitId, subtaskId);
+            CobbleSourceSplit pending = pendingSplitsById.remove(splitId);
             if (pending != null) {
                 context.sendEventToSourceReader(
                         subtaskId, new CobbleSourceEvents.ReplaceSplitEvent(pending));
@@ -179,9 +170,9 @@ final class CobbleSourceEnumerator
                             + ".");
         }
         currentSnapshotId = initial.id;
-        for (CobbleSourceSplit split : CobbleSourceRuntime.createBucketSplits(config, initial)) {
-            pendingSplitsById.put(Integer.valueOf(split.splitId), split);
-            latestSplitsById.put(Integer.valueOf(split.splitId), split);
+        for (CobbleSourceSplit split : CobbleSourceRuntime.createSourceSplits(config, initial)) {
+            pendingSplitsById.put(split.splitId(), split);
+            latestSplitsById.put(split.splitId(), split);
         }
         nextSnapshotId = initial.id + 1L;
     }
@@ -190,19 +181,18 @@ final class CobbleSourceEnumerator
         currentSnapshotId = snapshot.id;
         nextSnapshotId = snapshot.id + 1L;
         List<CobbleSourceSplit> latestSplits =
-                CobbleSourceRuntime.createBucketSplits(config, snapshot);
+                CobbleSourceRuntime.createSourceSplits(config, snapshot);
         latestSplitsById.clear();
         for (CobbleSourceSplit split : latestSplits) {
-            Integer splitId = Integer.valueOf(split.splitId);
+            String splitId = split.splitId();
             latestSplitsById.put(splitId, split);
-            Integer owner = splitOwnerByReader.get(splitId);
-            if (owner == null) {
-                pendingSplitsById.put(splitId, split);
-            } else {
-                pendingSplitsById.remove(splitId);
+            Integer activeReader = activeReaderBySplit.get(splitId);
+            if (activeReader != null && context.registeredReaders().containsKey(activeReader)) {
                 context.sendEventToSourceReader(
-                        owner.intValue(), new CobbleSourceEvents.ReplaceSplitEvent(split));
+                        activeReader.intValue(), new CobbleSourceEvents.ReplaceSplitEvent(split));
+                continue;
             }
+            pendingSplitsById.put(splitId, split);
         }
     }
 
@@ -217,25 +207,24 @@ final class CobbleSourceEnumerator
         Collections.sort(readers);
 
         for (Integer readerId : readers) {
-            loadByReader.put(readerId, Integer.valueOf(countOwnedSplits(readerId.intValue())));
+            loadByReader.put(readerId, countActiveSplits(readerId));
         }
 
         List<CobbleSourceSplit> pending = new ArrayList<>(pendingSplitsById.values());
         Collections.sort(
                 pending,
-                new Comparator<CobbleSourceSplit>() {
-                    @Override
-                    public int compare(CobbleSourceSplit left, CobbleSourceSplit right) {
-                        return Integer.compare(left.splitId, right.splitId);
-                    }
-                });
+                Comparator.comparingInt((CobbleSourceSplit split) -> split.rangeStartBucket)
+                        .thenComparingInt(split -> split.rangeEndBucket)
+                        .thenComparingInt(split -> split.totalBuckets));
 
         for (CobbleSourceSplit split : pending) {
-            Integer readerId = selectLeastLoadedReader(loadByReader);
+            String splitId = split.splitId();
+            Integer readerId = selectReaderForSplit(splitId, loadByReader);
             assignment.computeIfAbsent(readerId, ignored -> new ArrayList<>()).add(split);
-            pendingSplitsById.remove(Integer.valueOf(split.splitId));
-            splitOwnerByReader.put(Integer.valueOf(split.splitId), readerId);
-            loadByReader.put(readerId, Integer.valueOf(loadByReader.get(readerId).intValue() + 1));
+            pendingSplitsById.remove(splitId);
+            activeReaderBySplit.put(splitId, readerId);
+            preferredReaderBySplit.put(splitId, readerId);
+            loadByReader.put(readerId, loadByReader.get(readerId) + 1);
         }
 
         if (!assignment.isEmpty()) {
@@ -253,14 +242,22 @@ final class CobbleSourceEnumerator
         noMoreSplitsSignaled = true;
     }
 
-    private int countOwnedSplits(int readerId) {
+    private int countActiveSplits(int readerId) {
         int count = 0;
-        for (Integer owner : splitOwnerByReader.values()) {
+        for (Integer owner : activeReaderBySplit.values()) {
             if (owner.intValue() == readerId) {
                 count++;
             }
         }
         return count;
+    }
+
+    private Integer selectReaderForSplit(String splitId, Map<Integer, Integer> loadByReader) {
+        Integer preferredReader = preferredReaderBySplit.get(splitId);
+        if (preferredReader != null && loadByReader.containsKey(preferredReader)) {
+            return preferredReader;
+        }
+        return selectLeastLoadedReader(loadByReader);
     }
 
     private Integer selectLeastLoadedReader(Map<Integer, Integer> loadByReader) {
@@ -274,5 +271,27 @@ final class CobbleSourceEnumerator
             }
         }
         return selected;
+    }
+
+    private void startLatestSnapshotPolling() {
+        context.callAsync(
+                () -> CobbleSourceRuntime.loadLatestSnapshotIfNewer(config, currentSnapshotId),
+                (snapshot, throwable) -> {
+                    if (throwable != null) {
+                        throw new RuntimeException(
+                                "Failed to poll Cobble latest snapshot.", throwable);
+                    }
+                    if (snapshot == null) {
+                        return;
+                    }
+                    try {
+                        installLatestSnapshot(snapshot);
+                        assignAvailableSplits();
+                    } catch (IOException e) {
+                        throw new RuntimeException("Failed to refresh Cobble source splits.", e);
+                    }
+                },
+                config.pollIntervalMillis,
+                config.pollIntervalMillis);
     }
 }

@@ -3,28 +3,19 @@ package io.cobble.flink.table;
 import io.cobble.Config;
 import io.cobble.DbCoordinator;
 import io.cobble.GlobalSnapshot;
+import io.cobble.ScanPlan;
+import io.cobble.ScanSplit;
 import io.cobble.ShardSnapshot;
-import io.cobble.structured.Db;
 
 import java.io.File;
 import java.io.IOException;
 import java.net.URI;
-import java.nio.file.Files;
-import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
 
-/** Snapshot lookup and restore helpers for the Cobble SQL source. */
+/** Snapshot lookup and split-rebuild helpers for the Cobble FLIP-27 source. */
 final class CobbleSourceRuntime {
-
-    static final byte[] MIN_KEY = new byte[0];
-    static final byte[] MAX_KEY;
-
-    static {
-        MAX_KEY = new byte[32];
-        Arrays.fill(MAX_KEY, (byte) 0xFF);
-    }
 
     private CobbleSourceRuntime() {}
 
@@ -60,88 +51,138 @@ final class CobbleSourceRuntime {
         }
     }
 
-    static List<CobbleSourceSplit> createBucketSplits(
+    static List<CobbleSourceSplit> createSourceSplits(
             CobbleDynamicTableSource.SerializableConfig config, GlobalSnapshot snapshot)
             throws IOException {
         int bucketCount = validateSnapshot(config, snapshot);
-
-        CobbleSourceSplit[] splitsByBucket = new CobbleSourceSplit[bucketCount];
-        for (ShardSnapshot shardSnapshot : snapshot.shardSnapshots) {
-            if (shardSnapshot == null || shardSnapshot.ranges == null) {
+        boolean[] coveredBuckets = new boolean[bucketCount];
+        List<CobbleSourceSplit> splits = new ArrayList<>();
+        for (ScanSplit plannedSplit : ScanPlan.fromGlobalSnapshot(snapshot).splits()) {
+            if (plannedSplit == null
+                    || plannedSplit.shard == null
+                    || plannedSplit.shard.ranges == null) {
                 continue;
             }
-            List<Integer> coveredBuckets = flattenCoveredBuckets(shardSnapshot.ranges);
-            for (Integer coveredBucket : coveredBuckets) {
-                int bucket = coveredBucket.intValue();
-                int splitId = splitIdForBucket(bucket);
-                if (bucket < 0 || bucket >= bucketCount) {
-                    throw new IOException("Invalid bucket " + bucket + " in global snapshot.");
-                }
-                if (splitsByBucket[bucket] != null) {
-                    throw new IOException(
-                            "Duplicate shard coverage for bucket "
-                                    + bucket
-                                    + " in snapshot "
-                                    + snapshot.id
-                                    + ".");
-                }
-                splitsByBucket[bucket] =
-                        CobbleSourceSplit.forSnapshot(
-                                splitId, bucket, snapshot.id, shardSnapshot.manifestPath);
-            }
+            ShardSnapshot.Range splitRange = extractSplitRange(plannedSplit);
+            markCoveredBuckets(splitRange, bucketCount, coveredBuckets, snapshot.id);
+            splits.add(
+                    CobbleSourceSplit.forSnapshot(
+                            splitRange.start, splitRange.end, bucketCount, snapshot.id));
         }
-
-        List<CobbleSourceSplit> splits = new ArrayList<>(bucketCount);
-        for (int bucket = 0; bucket < bucketCount; bucket++) {
-            if (splitsByBucket[bucket] == null) {
-                throw new IOException(
-                        "Missing shard coverage for bucket "
-                                + bucket
-                                + " in snapshot "
-                                + snapshot.id
-                                + ".");
-            }
-            splits.add(splitsByBucket[bucket]);
-        }
+        ensureCompleteBucketCoverage(coveredBuckets, snapshot.id);
         return splits;
     }
 
-    private static List<Integer> flattenCoveredBuckets(List<ShardSnapshot.Range> ranges) {
-        List<Integer> buckets = new ArrayList<>();
-        if (ranges == null) {
-            return buckets;
+    static ScanSplit resolveSourceSplit(
+            CobbleDynamicTableSource.SerializableConfig config, CobbleSourceSplit split)
+            throws IOException {
+        GlobalSnapshot snapshot = loadSnapshotById(config, split.snapshotId);
+        int bucketCount = validateSnapshot(config, snapshot);
+        if (bucketCount != split.totalBuckets) {
+            throw new IOException(
+                    "Cobble source split "
+                            + split.splitId()
+                            + " expects "
+                            + split.totalBuckets
+                            + " buckets, but snapshot "
+                            + split.snapshotId
+                            + " has "
+                            + bucketCount
+                            + '.');
         }
-        for (ShardSnapshot.Range range : ranges) {
-            if (range == null) {
+
+        ScanSplit matchedSplit = null;
+        for (ScanSplit plannedSplit : ScanPlan.fromGlobalSnapshot(snapshot).splits()) {
+            if (plannedSplit == null
+                    || plannedSplit.shard == null
+                    || plannedSplit.shard.ranges == null) {
                 continue;
             }
-            for (int bucket = range.start; bucket <= range.end; bucket++) {
-                buckets.add(Integer.valueOf(bucket));
+            ShardSnapshot.Range splitRange = extractSplitRange(plannedSplit);
+            if (splitRange.start != split.rangeStartBucket
+                    || splitRange.end != split.rangeEndBucket) {
+                continue;
             }
+            if (matchedSplit != null) {
+                throw new IOException(
+                        "Cobble source split "
+                                + split.splitId()
+                                + " resolved to multiple scan splits in snapshot "
+                                + split.snapshotId
+                                + '.');
+            }
+            matchedSplit = plannedSplit;
         }
-        return buckets;
+        if (matchedSplit == null) {
+            throw new IOException(
+                    "Cobble source split "
+                            + split.splitId()
+                            + " is missing from snapshot "
+                            + split.snapshotId
+                            + '.');
+        }
+        return matchedSplit;
     }
 
-    private static int splitIdForBucket(int bucket) {
-        // Split identity belongs to the source split model, not to snapshot metadata.
-        // The current source still scans one bucket per split, so bucket id is the stable split id.
-        return bucket;
-    }
-
-    static Db openSnapshotDb(
-            CobbleDynamicTableSource.SerializableConfig config,
-            int totalBuckets,
-            Path restoreDirectory,
-            String manifestPath)
+    private static void ensureCompleteBucketCoverage(boolean[] coveredBuckets, long snapshotId)
             throws IOException {
-        recreateDirectory(restoreDirectory);
-        return Db.restoreWithManifest(
-                createRestoreConfig(config, totalBuckets, restoreDirectory), manifestPath);
+        for (int bucket = 0; bucket < coveredBuckets.length; bucket++) {
+            if (coveredBuckets[bucket]) {
+                continue;
+            }
+            throw new IOException(
+                    "Missing shard coverage for bucket "
+                            + bucket
+                            + " in snapshot "
+                            + snapshotId
+                            + ".");
+        }
     }
 
-    static void recreateDirectory(Path directory) throws IOException {
-        deleteRecursively(directory);
-        Files.createDirectories(directory);
+    private static ShardSnapshot.Range extractSplitRange(ScanSplit split) throws IOException {
+        if (split.shard.ranges.size() != 1 || split.shard.ranges.get(0) == null) {
+            throw new IOException(
+                    "Cobble source expects each planned scan split to have one range.");
+        }
+        return split.shard.ranges.get(0);
+    }
+
+    private static void markCoveredBuckets(
+            ShardSnapshot.Range range, int bucketCount, boolean[] coveredBuckets, long snapshotId)
+            throws IOException {
+        for (int bucket = range.start; bucket <= range.end; bucket++) {
+            if (bucket < 0 || bucket >= bucketCount) {
+                throw new IOException("Invalid bucket " + bucket + " in global snapshot.");
+            }
+            if (coveredBuckets[bucket]) {
+                throw new IOException(
+                        "Duplicate shard coverage for bucket "
+                                + bucket
+                                + " in snapshot "
+                                + snapshotId
+                                + ".");
+            }
+            coveredBuckets[bucket] = true;
+        }
+    }
+
+    static Config createSourceScanConfig(
+            CobbleDynamicTableSource.SerializableConfig config, int totalBuckets)
+            throws IOException {
+        Config scanConfig =
+                new Config().numColumns(config.valueFields.size()).totalBuckets(totalBuckets);
+        scanConfig.governanceMode = Config.GovernanceMode.NOOP;
+        scanConfig.logConsole = Boolean.FALSE;
+
+        Config.VolumeDescriptor volume = new Config.VolumeDescriptor();
+        volume.baseDir = tableRootDirectory(config).getAbsolutePath();
+        volume.kinds =
+                Arrays.asList(
+                        Config.VolumeUsageKind.PRIMARY_DATA_PRIORITY_HIGH,
+                        Config.VolumeUsageKind.META,
+                        Config.VolumeUsageKind.SNAPSHOT);
+        scanConfig.addVolume(volume);
+        return scanConfig;
     }
 
     static Config createLookupReaderConfig(
@@ -166,21 +207,6 @@ final class CobbleSourceRuntime {
         return readerConfig;
     }
 
-    static void deleteRecursively(Path path) throws IOException {
-        if (path == null || !Files.exists(path)) {
-            return;
-        }
-        if (Files.isDirectory(path)) {
-            File[] children = path.toFile().listFiles();
-            if (children != null) {
-                for (File child : children) {
-                    deleteRecursively(child.toPath());
-                }
-            }
-        }
-        Files.deleteIfExists(path);
-    }
-
     private static GlobalSnapshot loadLatestSnapshot(
             CobbleDynamicTableSource.SerializableConfig config) throws IOException {
         try (DbCoordinator coordinator = DbCoordinator.open(createCoordinatorConfig(config))) {
@@ -190,12 +216,6 @@ final class CobbleSourceRuntime {
             }
             return snapshot;
         }
-    }
-
-    static int resolveSnapshotBucketCount(
-            CobbleDynamicTableSource.SerializableConfig config, long snapshotId)
-            throws IOException {
-        return validateSnapshot(config, loadSnapshotById(config, snapshotId));
     }
 
     private static int validateSnapshot(
@@ -239,33 +259,6 @@ final class CobbleSourceRuntime {
         volume.kinds = Arrays.asList(Config.VolumeUsageKind.META, Config.VolumeUsageKind.SNAPSHOT);
         coordinatorConfig.addVolume(volume);
         return coordinatorConfig;
-    }
-
-    private static Config createRestoreConfig(
-            CobbleDynamicTableSource.SerializableConfig config,
-            int totalBuckets,
-            Path restoreDirectory)
-            throws IOException {
-        Files.createDirectories(restoreDirectory);
-
-        Config dbConfig =
-                new Config().numColumns(config.valueFields.size()).totalBuckets(totalBuckets);
-        dbConfig.governanceMode = Config.GovernanceMode.NOOP;
-        dbConfig.logConsole = Boolean.FALSE;
-
-        Config.VolumeDescriptor localVolume = new Config.VolumeDescriptor();
-        localVolume.baseDir = restoreDirectory.toAbsolutePath().toString();
-        localVolume.kinds =
-                Arrays.asList(
-                        Config.VolumeUsageKind.PRIMARY_DATA_PRIORITY_HIGH,
-                        Config.VolumeUsageKind.META);
-        dbConfig.addVolume(localVolume);
-
-        Config.VolumeDescriptor snapshotVolume = new Config.VolumeDescriptor();
-        snapshotVolume.baseDir = tableRootDirectory(config).getAbsolutePath();
-        snapshotVolume.kinds = Arrays.asList(Config.VolumeUsageKind.SNAPSHOT);
-        dbConfig.addVolume(snapshotVolume);
-        return dbConfig;
     }
 
     private static File tableRootDirectory(CobbleDynamicTableSource.SerializableConfig config) {

@@ -7,6 +7,7 @@ final class CobbleSourceEvents {
 
     private CobbleSourceEvents() {}
 
+    /** Pushes the newest split metadata for a stable logical range to its current owner. */
     static final class ReplaceSplitEvent implements SourceEvent {
         private static final long serialVersionUID = 1L;
 
@@ -17,12 +18,13 @@ final class CobbleSourceEvents {
         }
     }
 
+    /** Reports the stable split ids currently held by a reader. */
     static final class OwnedSplitsEvent implements SourceEvent {
         private static final long serialVersionUID = 1L;
 
-        final int[] splitIds;
+        final String[] splitIds;
 
-        OwnedSplitsEvent(int[] splitIds) {
+        OwnedSplitsEvent(String[] splitIds) {
             this.splitIds = splitIds;
         }
     }

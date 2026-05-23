@@ -1,8 +1,8 @@
 package io.cobble.flink.table;
 
-import io.cobble.structured.Db;
-import io.cobble.structured.Row;
-import io.cobble.structured.ScanCursor;
+import io.cobble.ScanCursor;
+import io.cobble.ScanOptions;
+import io.cobble.ScanSplit;
 
 import org.apache.flink.api.connector.source.ReaderOutput;
 import org.apache.flink.api.connector.source.SourceEvent;
@@ -10,31 +10,41 @@ import org.apache.flink.api.connector.source.SourceReader;
 import org.apache.flink.api.connector.source.SourceReaderContext;
 import org.apache.flink.core.io.InputStatus;
 import org.apache.flink.table.data.RowData;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import java.io.IOException;
-import java.nio.file.Files;
-import java.nio.file.Path;
+import java.nio.ByteBuffer;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.HashMap;
-import java.util.Iterator;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 
-/** Source reader that consumes stable bucket splits and applies snapshot replacements in place. */
+/**
+ * Source reader that reopens each planned split from its snapshot metadata and scans it to
+ * completion.
+ *
+ * <p>Checkpoint recovery does not resume from a logical key inside the split. Active splits are
+ * reopened from the start of their planned range.
+ */
 final class CobbleSourceReader implements SourceReader<RowData, CobbleSourceSplit> {
+    private static final Logger LOG = LoggerFactory.getLogger(CobbleSourceReader.class);
 
     private final CobbleDynamicTableSource.SerializableConfig config;
     private final SourceReaderContext context;
-    private final Map<Integer, BucketSplitState> ownedStatesBySplit = new HashMap<>();
-    private final ArrayDeque<BucketSplitState> runnableStates = new ArrayDeque<>();
+    private final Map<String, SourceSplitState> ownedStatesBySplit = new HashMap<>();
+    private final ArrayDeque<SourceSplitState> runnableStates = new ArrayDeque<>();
     private final CobbleRowDataDecoders.RuntimeRowDecoder rowDecoder;
+    private final int[] projectedColumnIndexes;
     private CompletableFuture<Void> availability = new CompletableFuture<>();
-    private Path workingDirectory;
-    private BucketSplitState currentState;
+    private SourceSplitState currentState;
+    private ScanOptions scanOptions;
     private boolean noMoreSplits;
     private boolean closed;
 
@@ -43,33 +53,26 @@ final class CobbleSourceReader implements SourceReader<RowData, CobbleSourceSpli
         this.config = config;
         this.context = context;
         this.rowDecoder = new CobbleRowDataDecoders.RuntimeRowDecoder(config);
+        this.projectedColumnIndexes = projectedColumnIndexes(config);
     }
 
     @Override
     public void start() {
-        try {
-            workingDirectory =
-                    Files.createTempDirectory(
-                            "cobble-source-reader-"
-                                    + Integer.toString(context.getIndexOfSubtask())
-                                    + "-");
-        } catch (IOException e) {
-            throw new RuntimeException("Failed to create Cobble source restore workspace.", e);
-        }
+        this.scanOptions = ScanOptions.forColumns(projectedColumnIndexes);
         context.sendSplitRequest();
     }
 
     @Override
     public InputStatus pollNext(ReaderOutput<RowData> output) throws Exception {
-        BucketSplitState state = moveToRunnableState();
+        SourceSplitState state = moveToRunnableState();
         if (state == null) {
             resetAvailabilityIfIdle();
             return noMoreSplits ? InputStatus.END_OF_INPUT : InputStatus.NOTHING_AVAILABLE;
         }
 
-        Row row = state.nextRow();
-        if (row != null) {
-            output.collect(rowDecoder.decode(row));
+        ScanCursor.Entry entry = state.nextEntry();
+        if (entry != null) {
+            output.collect(rowDecoder.decode(entry.key, entry.columns));
             signalAvailableIfNeeded();
             return hasMoreWork() ? InputStatus.MORE_AVAILABLE : InputStatus.NOTHING_AVAILABLE;
         }
@@ -93,7 +96,7 @@ final class CobbleSourceReader implements SourceReader<RowData, CobbleSourceSpli
     @Override
     public List<CobbleSourceSplit> snapshotState(long checkpointId) {
         List<CobbleSourceSplit> splits = new ArrayList<>(ownedStatesBySplit.size());
-        for (BucketSplitState state : ownedStatesBySplit.values()) {
+        for (SourceSplitState state : ownedStatesBySplit.values()) {
             splits.add(state.toSplit());
         }
         return splits;
@@ -110,10 +113,10 @@ final class CobbleSourceReader implements SourceReader<RowData, CobbleSourceSpli
     @Override
     public void addSplits(List<CobbleSourceSplit> splits) {
         for (CobbleSourceSplit split : splits) {
-            BucketSplitState existing = ownedStatesBySplit.get(Integer.valueOf(split.splitId));
+            SourceSplitState existing = ownedStatesBySplit.get(split.splitId());
             if (existing == null) {
-                BucketSplitState state = new BucketSplitState(split, config.isStreamingLatest());
-                ownedStatesBySplit.put(Integer.valueOf(split.splitId), state);
+                SourceSplitState state = new SourceSplitState(split, config.isStreamingLatest());
+                ownedStatesBySplit.put(split.splitId(), state);
                 enqueueIfRunnable(state);
             } else {
                 existing.restoreFromSplit(split);
@@ -137,13 +140,21 @@ final class CobbleSourceReader implements SourceReader<RowData, CobbleSourceSpli
         }
         CobbleSourceEvents.ReplaceSplitEvent event =
                 (CobbleSourceEvents.ReplaceSplitEvent) sourceEvent;
-        BucketSplitState state = ownedStatesBySplit.get(Integer.valueOf(event.split.splitId));
+        LOG.info(
+                "Reader {} received split replacement for split {} at snapshot {}.",
+                context.getIndexOfSubtask(),
+                event.split.splitId(),
+                event.split.snapshotId);
+        SourceSplitState state = ownedStatesBySplit.get(event.split.splitId());
         if (state == null) {
+            LOG.warn(
+                    "Reader {} has no owned state for replacement split {}.",
+                    context.getIndexOfSubtask(),
+                    event.split.splitId());
             return;
         }
         state.applyReplacement(event.split);
         enqueueIfRunnable(state);
-        signalOwnedSplits();
         signalAvailable();
     }
 
@@ -153,19 +164,22 @@ final class CobbleSourceReader implements SourceReader<RowData, CobbleSourceSpli
         if (currentState != null) {
             currentState.closeRuntime();
         }
-        for (BucketSplitState state : ownedStatesBySplit.values()) {
+        for (SourceSplitState state : ownedStatesBySplit.values()) {
             state.closeRuntime();
         }
-        CobbleSourceRuntime.deleteRecursively(workingDirectory);
+        if (scanOptions != null) {
+            scanOptions.close();
+            scanOptions = null;
+        }
     }
 
-    private BucketSplitState moveToRunnableState() {
+    private SourceSplitState moveToRunnableState() {
         if (currentState != null && currentState.hasWork()) {
             return currentState;
         }
         currentState = null;
         while (!runnableStates.isEmpty()) {
-            BucketSplitState next = runnableStates.pollFirst();
+            SourceSplitState next = runnableStates.pollFirst();
             next.enqueued = false;
             if (next.hasWork()) {
                 currentState = next;
@@ -179,7 +193,7 @@ final class CobbleSourceReader implements SourceReader<RowData, CobbleSourceSpli
         if (currentState != null && currentState.hasWork()) {
             return true;
         }
-        for (BucketSplitState state : runnableStates) {
+        for (SourceSplitState state : runnableStates) {
             if (state.hasWork()) {
                 return true;
             }
@@ -187,7 +201,7 @@ final class CobbleSourceReader implements SourceReader<RowData, CobbleSourceSpli
         return false;
     }
 
-    private void enqueueIfRunnable(BucketSplitState state) {
+    private void enqueueIfRunnable(SourceSplitState state) {
         if (!state.hasWork() || state.enqueued || state == currentState) {
             return;
         }
@@ -195,8 +209,8 @@ final class CobbleSourceReader implements SourceReader<RowData, CobbleSourceSpli
         state.enqueued = true;
     }
 
-    private void removeOwnedState(int splitId) {
-        BucketSplitState removed = ownedStatesBySplit.remove(Integer.valueOf(splitId));
+    private void removeOwnedState(String splitId) {
+        SourceSplitState removed = ownedStatesBySplit.remove(splitId);
         if (removed != null) {
             runnableStates.remove(removed);
             removed.enqueued = false;
@@ -205,11 +219,14 @@ final class CobbleSourceReader implements SourceReader<RowData, CobbleSourceSpli
     }
 
     private void signalOwnedSplits() {
-        List<Integer> splitIds = new ArrayList<>(ownedStatesBySplit.keySet());
+        if (!config.isStreamingLatest()) {
+            return;
+        }
+        List<String> splitIds = new ArrayList<>(ownedStatesBySplit.keySet());
         Collections.sort(splitIds);
-        int[] ids = new int[splitIds.size()];
+        String[] ids = new String[splitIds.size()];
         for (int i = 0; i < splitIds.size(); i++) {
-            ids[i] = splitIds.get(i).intValue();
+            ids[i] = splitIds.get(i);
         }
         context.sendSourceEventToCoordinator(new CobbleSourceEvents.OwnedSplitsEvent(ids));
     }
@@ -234,28 +251,28 @@ final class CobbleSourceReader implements SourceReader<RowData, CobbleSourceSpli
         }
     }
 
-    private final class BucketSplitState {
-        private final int splitId;
-        private final int bucketId;
+    /** Runtime holder for one assigned split and its reopened scan cursor. */
+    private final class SourceSplitState {
+        private final String splitId;
+        private final int rangeStartBucket;
+        private final int rangeEndBucket;
+        private final int totalBuckets;
         private final boolean streamingOwned;
         private long snapshotId;
-        private String manifestPath;
-        private byte[] lastConsumedKey;
-        private byte[] anchorKey;
-        private byte[] resumeKey;
-        private CobbleSourceSplit.ScanPhase phase;
+        private ScanSplit scanSplit;
+        private CobbleSourceSplit.ScanState scanState;
         private boolean enqueued;
         private int resolvedTotalBuckets;
-        private Db db;
         private ScanCursor cursor;
-        private Iterator<Row> iterator;
-        private Path restoreDirectory;
+        private Set<ByteBuffer> seenKeys;
 
-        private BucketSplitState(CobbleSourceSplit split, boolean streamingOwned) {
-            this.splitId = split.splitId;
-            this.bucketId = split.bucketId;
+        private SourceSplitState(CobbleSourceSplit split, boolean streamingOwned) {
+            this.splitId = split.splitId();
+            this.rangeStartBucket = split.rangeStartBucket;
+            this.rangeEndBucket = split.rangeEndBucket;
+            this.totalBuckets = split.totalBuckets;
             this.streamingOwned = streamingOwned;
-            this.resolvedTotalBuckets = config.bucketCount;
+            this.resolvedTotalBuckets = split.totalBuckets;
             restoreFromSplit(split);
         }
 
@@ -265,11 +282,8 @@ final class CobbleSourceReader implements SourceReader<RowData, CobbleSourceSpli
 
         private void restoreFromSplit(CobbleSourceSplit split) {
             this.snapshotId = split.snapshotId;
-            this.manifestPath = split.manifestPath;
-            this.lastConsumedKey = copy(split.lastConsumedKey);
-            this.anchorKey = copy(split.anchorKey);
-            this.resumeKey = copy(split.resumeKey);
-            this.phase = split.phase;
+            this.scanSplit = null;
+            this.scanState = split.scanState;
             if (config.hasConfiguredBucketCount()) {
                 this.resolvedTotalBuckets = config.bucketCount;
             }
@@ -278,139 +292,71 @@ final class CobbleSourceReader implements SourceReader<RowData, CobbleSourceSpli
 
         private void applyReplacement(CobbleSourceSplit replacement) {
             this.snapshotId = replacement.snapshotId;
-            this.manifestPath = replacement.manifestPath;
-            this.anchorKey = copy(lastConsumedKey);
-            this.resumeKey = null;
-            this.phase = CobbleSourceSplit.ScanPhase.FORWARD;
+            this.scanSplit = null;
+            this.scanState = CobbleSourceSplit.ScanState.ACTIVE;
             closeRuntime();
         }
 
         private boolean hasWork() {
-            return manifestPath != null && phase != CobbleSourceSplit.ScanPhase.IDLE;
+            return scanState == CobbleSourceSplit.ScanState.ACTIVE;
         }
 
-        private Row nextRow() throws Exception {
+        private ScanCursor.Entry nextEntry() throws Exception {
             while (hasWork()) {
                 ensureCursor();
-                while (iterator.hasNext()) {
-                    Row row = iterator.next();
-                    if (shouldSkip(row.getKey())) {
+                ScanCursor.Entry entry = cursor.nextEntry();
+                if (entry != null) {
+                    // Raw split scans can surface duplicate physical entries for the same logical
+                    // key.
+                    if (!markSeen(entry.key)) {
                         continue;
                     }
-                    byte[] key = copy(row.getKey());
-                    this.lastConsumedKey = key;
-                    this.resumeKey = key;
-                    return row;
+                    return entry;
                 }
-                advancePhase();
+                scanState = CobbleSourceSplit.ScanState.IDLE;
             }
             closeRuntime();
             return null;
         }
 
         private void ensureCursor() throws Exception {
-            if (iterator != null) {
+            if (cursor != null) {
                 return;
             }
-            if (restoreDirectory == null) {
-                restoreDirectory =
-                        workingDirectory.resolve(
-                                "split-"
-                                        + Integer.toString(splitId)
-                                        + "-bucket-"
-                                        + Integer.toString(bucketId));
+            seenKeys = new HashSet<>();
+            if (scanSplit == null) {
+                scanSplit = CobbleSourceRuntime.resolveSourceSplit(config, toSplit());
             }
-            db =
-                    CobbleSourceRuntime.openSnapshotDb(
-                            config, resolveTotalBuckets(), restoreDirectory, manifestPath);
-            cursor = db.scan(bucketId, scanStartKey(), scanEndKey());
-            iterator = cursor.iterator();
+            cursor =
+                    scanSplit.openScannerWithOptions(
+                            CobbleSourceRuntime.createSourceScanConfig(
+                                    config, resolveTotalBuckets()),
+                            scanOptions);
         }
 
         private int resolveTotalBuckets() throws IOException {
             if (resolvedTotalBuckets > 0) {
                 return resolvedTotalBuckets;
             }
-            resolvedTotalBuckets =
-                    CobbleSourceRuntime.resolveSnapshotBucketCount(config, snapshotId);
+            resolvedTotalBuckets = totalBuckets;
             return resolvedTotalBuckets;
         }
 
-        private byte[] scanStartKey() {
-            if (phase == CobbleSourceSplit.ScanPhase.WRAPPED) {
-                return CobbleSourceRuntime.MIN_KEY;
-            }
-            if (resumeKey != null) {
-                return resumeKey;
-            }
-            if (anchorKey != null) {
-                return anchorKey;
-            }
-            return CobbleSourceRuntime.MIN_KEY;
-        }
-
-        private byte[] scanEndKey() {
-            if (phase == CobbleSourceSplit.ScanPhase.WRAPPED && anchorKey != null) {
-                return anchorKey;
-            }
-            return CobbleSourceRuntime.MAX_KEY;
-        }
-
-        private boolean shouldSkip(byte[] key) {
-            if (phase == CobbleSourceSplit.ScanPhase.FORWARD) {
-                byte[] lowerBound = resumeKey != null ? resumeKey : anchorKey;
-                if (lowerBound != null && compareKeys(key, lowerBound) <= 0) {
-                    return true;
-                }
-                return false;
-            }
-            if (anchorKey != null && compareKeys(key, anchorKey) >= 0) {
-                return true;
-            }
-            if (resumeKey != null && compareKeys(key, resumeKey) <= 0) {
-                return true;
-            }
-            return false;
-        }
-
-        private void advancePhase() {
-            closeCursorOnly();
-            if (phase == CobbleSourceSplit.ScanPhase.FORWARD && anchorKey != null) {
-                phase = CobbleSourceSplit.ScanPhase.WRAPPED;
-                resumeKey = null;
-                return;
-            }
-            phase = CobbleSourceSplit.ScanPhase.IDLE;
-            anchorKey = null;
-            resumeKey = null;
+        private boolean markSeen(byte[] key) {
+            return seenKeys.add(ByteBuffer.wrap(copy(key)));
         }
 
         private CobbleSourceSplit toSplit() {
             return new CobbleSourceSplit(
-                    splitId,
-                    bucketId,
-                    snapshotId,
-                    manifestPath,
-                    lastConsumedKey,
-                    anchorKey,
-                    resumeKey,
-                    phase);
+                    rangeStartBucket, rangeEndBucket, totalBuckets, snapshotId, scanState);
         }
 
         private void closeRuntime() {
-            closeCursorOnly();
-            if (db != null) {
-                db.close();
-                db = null;
-            }
-        }
-
-        private void closeCursorOnly() {
             if (cursor != null) {
                 cursor.close();
                 cursor = null;
             }
-            iterator = null;
+            seenKeys = null;
         }
 
         private byte[] copy(byte[] bytes) {
@@ -418,23 +364,12 @@ final class CobbleSourceReader implements SourceReader<RowData, CobbleSourceSpli
         }
     }
 
-    private static int compareKeys(byte[] left, byte[] right) {
-        if (left == right) {
-            return 0;
+    private static int[] projectedColumnIndexes(
+            CobbleDynamicTableSource.SerializableConfig config) {
+        int[] indexes = new int[config.valueFields.size()];
+        for (int i = 0; i < config.valueFields.size(); i++) {
+            indexes[i] = config.valueFields.get(i).structuredColumnIndex;
         }
-        if (left == null) {
-            return -1;
-        }
-        if (right == null) {
-            return 1;
-        }
-        int min = Math.min(left.length, right.length);
-        for (int i = 0; i < min; i++) {
-            int cmp = Integer.compare(left[i] & 0xFF, right[i] & 0xFF);
-            if (cmp != 0) {
-                return cmp;
-            }
-        }
-        return Integer.compare(left.length, right.length);
+        return indexes;
     }
 }
