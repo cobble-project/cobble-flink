@@ -7,15 +7,10 @@ import org.apache.flink.runtime.state.filesystem.AbstractFsCheckpointStorageAcce
 import java.io.File;
 import java.net.URI;
 import java.net.URISyntaxException;
-import java.util.Arrays;
-import java.util.List;
 import java.util.Locale;
 
 /** Shared Cobble path helpers that keep local file URIs stable. */
 final class CobblePathUtils {
-
-    private static final List<String> SUPPORTED_CHECKPOINT_SCHEMES =
-            Arrays.asList("file", "s3", "hdfs", "ftp", "oss", "cos");
 
     private CobblePathUtils() {}
 
@@ -32,10 +27,6 @@ final class CobblePathUtils {
         }
 
         String normalizedScheme = normalizeCheckpointScheme(scheme);
-        if (!SUPPORTED_CHECKPOINT_SCHEMES.contains(normalizedScheme)) {
-            throw unsupportedCheckpointDirectory(directory, scheme);
-        }
-
         if ("file".equals(normalizedScheme)) {
             return normalizeLocalPath(new File(uri));
         }
@@ -170,18 +161,6 @@ final class CobblePathUtils {
             return "s3";
         }
         return normalizedScheme;
-    }
-
-    private static IllegalArgumentException unsupportedCheckpointDirectory(
-            String checkpointDirectory, String scheme) {
-        return new IllegalArgumentException(
-                "Unsupported Cobble checkpoint directory '"
-                        + checkpointDirectory
-                        + "'. Scheme '"
-                        + scheme
-                        + "' is not supported. Supported schemes: "
-                        + SUPPORTED_CHECKPOINT_SCHEMES
-                        + " (s3a/s3p are normalized to s3).");
     }
 
     private static String snapshotManifestName(long checkpointId) {

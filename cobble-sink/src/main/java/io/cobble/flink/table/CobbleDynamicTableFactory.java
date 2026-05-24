@@ -1,5 +1,7 @@
 package io.cobble.flink.table;
 
+import io.cobble.flink.common.CobbleLoader;
+
 import org.apache.flink.configuration.ConfigOption;
 import org.apache.flink.configuration.MemorySize;
 import org.apache.flink.configuration.ReadableConfig;
@@ -53,6 +55,7 @@ public final class CobbleDynamicTableFactory implements DynamicTableSinkFactory 
 
     @Override
     public DynamicTableSink createDynamicTableSink(Context context) {
+        CobbleLoader.ensureCobbleLoaded();
         FactoryUtil.TableFactoryHelper helper = FactoryUtil.createTableFactoryHelper(this, context);
         helper.validate();
 
@@ -189,11 +192,11 @@ public final class CobbleDynamicTableFactory implements DynamicTableSinkFactory 
         URI parsed = URI.create(trimmed);
         URI normalized =
                 parsed.getScheme() == null ? Paths.get(trimmed).toAbsolutePath().toUri() : parsed;
-        if (!"file".equalsIgnoreCase(normalized.getScheme())) {
+        if (normalized.getScheme() == null || normalized.getScheme().trim().isEmpty()) {
             throw new ValidationException(
                     CobbleTableOptions.PATH.key()
-                            + " currently supports only local file paths, but got "
-                            + normalized);
+                            + " must be a valid path or URI, but got "
+                            + path);
         }
         return normalized.toString();
     }

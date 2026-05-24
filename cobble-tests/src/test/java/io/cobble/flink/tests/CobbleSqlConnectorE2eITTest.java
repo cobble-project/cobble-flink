@@ -114,6 +114,57 @@ class CobbleSqlConnectorE2eITTest {
                 collectRows(tableEnv.executeSql(lookupQuery)));
     }
 
+    @Test
+    void sqlSinkAndSourceSupportFlinkCustomSchemeThroughNativeFallback() throws Exception {
+        Path tablePath = tempDir.resolve("mockfs-table");
+        String mockFsUri = toMockFsUri(tablePath);
+
+        StreamTableEnvironment writerTableEnv = createTableEnvironment();
+        writerTableEnv.executeSql(
+                "CREATE TABLE cobble_sink ("
+                        + " id BIGINT,"
+                        + " name STRING,"
+                        + " score INT,"
+                        + " PRIMARY KEY (id) NOT ENFORCED"
+                        + ") WITH ("
+                        + " 'connector' = 'cobble',"
+                        + " 'path' = '"
+                        + escape(mockFsUri)
+                        + "',"
+                        + " 'bucket' = '2',"
+                        + " 'sink.parallelism' = '2',"
+                        + " 'snapshot.retention' = '2'"
+                        + ")");
+        awaitJobCompletion(
+                writerTableEnv.executeSql(
+                        "INSERT INTO cobble_sink VALUES "
+                                + "(1, 'name-1', 10),"
+                                + "(2, 'name-2', 20),"
+                                + "(7, 'name-7', 70),"
+                                + "(8, 'name-8', 80)"));
+
+        StreamTableEnvironment readerTableEnv = createTableEnvironment();
+        readerTableEnv.executeSql(
+                "CREATE TABLE cobble_source ("
+                        + " id BIGINT,"
+                        + " name STRING,"
+                        + " score INT,"
+                        + " PRIMARY KEY (id) NOT ENFORCED"
+                        + ") WITH ("
+                        + " 'connector' = 'cobble',"
+                        + " 'path' = '"
+                        + escape(mockFsUri)
+                        + "',"
+                        + " 'scan.checkpoint-id' = 'latest',"
+                        + " 'scan.mode' = 'batch'"
+                        + ")");
+
+        assertEquals(
+                Arrays.asList("1,name-1,10", "2,name-2,20", "7,name-7,70", "8,name-8,80"),
+                collectRows(
+                        readerTableEnv.executeSql("SELECT id, name, score FROM cobble_source")));
+    }
+
     private StreamTableEnvironment createTableEnvironment() {
         StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment();
         env.setParallelism(1);
@@ -175,6 +226,18 @@ class CobbleSqlConnectorE2eITTest {
     }
 
     private static String escape(Path path) {
-        return path.toAbsolutePath().toString().replace("\\", "\\\\");
+        return escape(path.toAbsolutePath().toString());
+    }
+
+    private static String escape(String value) {
+        return value.replace("\\", "\\\\");
+    }
+
+    private static String toMockFsUri(Path path) {
+        String normalized = path.toAbsolutePath().toString().replace('\\', '/');
+        if (!normalized.startsWith("/")) {
+            normalized = "/" + normalized;
+        }
+        return "mockfs://" + normalized;
     }
 }

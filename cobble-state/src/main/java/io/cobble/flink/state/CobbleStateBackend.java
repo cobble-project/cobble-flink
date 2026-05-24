@@ -1,6 +1,6 @@
 package io.cobble.flink.state;
 
-import io.cobble.NativeLoader;
+import io.cobble.flink.common.CobbleLoader;
 
 import org.apache.flink.api.common.JobID;
 import org.apache.flink.api.common.typeutils.TypeSerializer;
@@ -112,7 +112,7 @@ public class CobbleStateBackend extends AbstractManagedMemoryStateBackend
 
     /** Ensures the Cobble JNI library is loaded before any backend work starts. */
     static void ensureCobbleLoaded() {
-        NativeLoader.load();
+        CobbleLoader.ensureCobbleLoaded();
     }
 
     /** Rebuilds the backend with Flink-side configuration applied to Cobble options. */

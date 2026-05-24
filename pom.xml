@@ -14,6 +14,7 @@
     <packaging>pom</packaging>
 
     <modules>
+        <module>cobble-common</module>
         <module>cobble-state</module>
         <module>cobble-sink</module>
         <module>cobble-source</module>

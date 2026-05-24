@@ -84,7 +84,7 @@ final class CobbleSinkPaths {
         dbConfig.addVolume(localVolume);
 
         Config.VolumeDescriptor sharedSnapshotVolume = new Config.VolumeDescriptor();
-        sharedSnapshotVolume.baseDir = tableRootDirectory(config).getAbsolutePath();
+        sharedSnapshotVolume.baseDir = config.pathUri;
         sharedSnapshotVolume.kinds = Arrays.asList(Config.VolumeUsageKind.SNAPSHOT);
         dbConfig.addVolume(sharedSnapshotVolume);
         return dbConfig;
@@ -175,10 +175,14 @@ final class CobbleSinkPaths {
 
     private static File tableRootDirectory(CobbleDynamicTableSink.SerializableConfig config) {
         URI uri = URI.create(config.pathUri);
-        if (!"file".equalsIgnoreCase(uri.getScheme())) {
-            throw new IllegalArgumentException(
-                    "Cobble sink currently supports only file:// paths, but got " + config.pathUri);
+        if ("file".equalsIgnoreCase(uri.getScheme())) {
+            return new File(uri);
         }
-        return new File(uri);
+        String path = uri.getPath();
+        if (path == null || path.trim().isEmpty()) {
+            throw new IllegalArgumentException(
+                    "Cobble sink path must include a valid URI path, but got " + config.pathUri);
+        }
+        return new File(path);
     }
 }

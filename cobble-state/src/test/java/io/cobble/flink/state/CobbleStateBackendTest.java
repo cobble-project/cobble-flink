@@ -1253,10 +1253,10 @@ class CobbleStateBackendTest {
     }
 
     @Test
-    void normalizeCheckpointDirectoryRejectsUnsupportedScheme() {
-        assertThrows(
-                IllegalArgumentException.class,
-                () -> CobbleKeyedStateBackendBuilder.normalizeCheckpointDirectory("http://tmp/cp"));
+    void normalizeCheckpointDirectoryKeepsCustomSchemes() {
+        assertEquals(
+                "http://tmp/cp",
+                CobbleKeyedStateBackendBuilder.normalizeCheckpointDirectory("http://tmp/cp"));
     }
 
     private TestBackendContext createBackendContext(

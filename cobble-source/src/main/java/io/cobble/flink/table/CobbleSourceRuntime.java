@@ -7,9 +7,7 @@ import io.cobble.ScanPlan;
 import io.cobble.ScanSplit;
 import io.cobble.ShardSnapshot;
 
-import java.io.File;
 import java.io.IOException;
-import java.net.URI;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
@@ -179,7 +177,7 @@ final class CobbleSourceRuntime {
         scanConfig.logConsole = false;
 
         Config.VolumeDescriptor volume = new Config.VolumeDescriptor();
-        volume.baseDir = tableRootDirectory(config).getAbsolutePath();
+        volume.baseDir = config.pathUri;
         volume.kinds =
                 Arrays.asList(
                         Config.VolumeUsageKind.PRIMARY_DATA_PRIORITY_HIGH,
@@ -204,7 +202,7 @@ final class CobbleSourceRuntime {
         readerConfig.reader = readerOptions;
 
         Config.VolumeDescriptor volume = new Config.VolumeDescriptor();
-        volume.baseDir = tableRootDirectory(config).getAbsolutePath();
+        volume.baseDir = config.pathUri;
         volume.kinds =
                 Arrays.asList(
                         Config.VolumeUsageKind.PRIMARY_DATA_PRIORITY_HIGH,
@@ -262,20 +260,10 @@ final class CobbleSourceRuntime {
         coordinatorConfig.logConsole = false;
 
         Config.VolumeDescriptor volume = new Config.VolumeDescriptor();
-        volume.baseDir = tableRootDirectory(config).getAbsolutePath();
+        volume.baseDir = config.pathUri;
         volume.kinds = Arrays.asList(Config.VolumeUsageKind.META, Config.VolumeUsageKind.SNAPSHOT);
         coordinatorConfig.addVolume(volume);
         return coordinatorConfig;
-    }
-
-    private static File tableRootDirectory(CobbleDynamicTableSource.SerializableConfig config) {
-        URI uri = URI.create(config.pathUri);
-        if (!"file".equalsIgnoreCase(uri.getScheme())) {
-            throw new IllegalArgumentException(
-                    "Cobble source currently supports only file:// paths, but got "
-                            + config.pathUri);
-        }
-        return new File(uri);
     }
 
     private static void applyReadMemoryPolicy(Config config) {
