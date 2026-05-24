@@ -2,6 +2,7 @@ package io.cobble.flink.table;
 
 import org.apache.flink.configuration.ConfigOption;
 import org.apache.flink.configuration.ConfigOptions;
+import org.apache.flink.configuration.MemorySize;
 
 /** Connector options for the initial Cobble SQL source. */
 final class CobbleSourceTableOptions {
@@ -37,6 +38,14 @@ final class CobbleSourceTableOptions {
                     .defaultValue(3000L)
                     .withDescription(
                             "Polling interval in milliseconds for 'latest' + 'streaming' mode.");
+
+    static final ConfigOption<MemorySize> SOURCE_BLOCK_CACHE_MEMORY =
+            ConfigOptions.key("source.block-cache-memory")
+                    .memoryType()
+                    .defaultValue(MemorySize.ZERO)
+                    .withDescription(
+                            "Cobble source lookup block-cache size. Scan path keeps a fixed small"
+                                    + " block cache budget and does not use this option.");
 
     private CobbleSourceTableOptions() {}
 }

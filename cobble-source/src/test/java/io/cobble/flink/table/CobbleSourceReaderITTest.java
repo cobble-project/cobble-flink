@@ -335,6 +335,7 @@ class CobbleSourceReaderITTest {
                 checkpointId,
                 scanMode,
                 50L,
+                256L * 1024L * 1024L,
                 Collections.singletonList(
                         new CobbleDynamicTableSource.SerializableField("id", "BIGINT", 0, 0)),
                 Arrays.asList(

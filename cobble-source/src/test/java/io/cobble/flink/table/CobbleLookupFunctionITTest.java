@@ -35,10 +35,12 @@ class CobbleLookupFunctionITTest {
         CobbleLookupFunction lookup = openLookupFunction(tablePath, "latest", "batch");
         try {
             assertEquals("name-2,20", lookupValue(lookup, 2L));
+            assertEquals("name-7,70", lookupValue(lookup, 7L));
 
             writeDimensionRows(tablePath, Arrays.asList("2,name-2-updated,200", "7,name-7,70"));
 
             assertEquals("name-2,20", lookupValue(lookup, 2L));
+            assertEquals("name-7,70", lookupValue(lookup, 7L));
         } finally {
             lookup.close();
         }
@@ -52,10 +54,12 @@ class CobbleLookupFunctionITTest {
         CobbleLookupFunction lookup = openLookupFunction(tablePath, "latest", "streaming");
         try {
             assertEquals("name-2,20", lookupValue(lookup, 2L));
+            assertEquals("name-7,70", lookupValue(lookup, 7L));
 
             writeDimensionRows(tablePath, Arrays.asList("2,name-2-updated,200", "7,name-7,70"));
 
             assertEquals("name-2-updated,200", lookupValue(lookup, 2L));
+            assertEquals("name-7,70", lookupValue(lookup, 7L));
         } finally {
             lookup.close();
         }
@@ -69,10 +73,12 @@ class CobbleLookupFunctionITTest {
         CobbleLookupFunction lookup = openLookupFunction(tablePath, "1", "batch");
         try {
             assertEquals("name-2,20", lookupValue(lookup, 2L));
+            assertEquals("name-7,70", lookupValue(lookup, 7L));
 
             writeDimensionRows(tablePath, Arrays.asList("2,name-2-updated,200", "7,name-7,70"));
 
             assertEquals("name-2,20", lookupValue(lookup, 2L));
+            assertEquals("name-7,70", lookupValue(lookup, 7L));
         } finally {
             lookup.close();
         }
@@ -110,6 +116,7 @@ class CobbleLookupFunctionITTest {
                 checkpointId,
                 scanMode,
                 50L,
+                256L * 1024L * 1024L,
                 Collections.singletonList(
                         new CobbleDynamicTableSource.SerializableField("id", "BIGINT", 0, -1)),
                 Arrays.asList(

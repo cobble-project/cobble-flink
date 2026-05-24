@@ -17,6 +17,9 @@ import java.util.List;
 /** Snapshot lookup and split-rebuild helpers for the Cobble FLIP-27 source. */
 final class CobbleSourceRuntime {
 
+    // We give scan source a small block cache size
+    private static final int SCAN_BLOCK_CACHE_BYTES = 8 * 1024 * 1024;
+
     private CobbleSourceRuntime() {}
 
     static GlobalSnapshot loadConfiguredSnapshot(CobbleDynamicTableSource.SerializableConfig config)
@@ -171,8 +174,9 @@ final class CobbleSourceRuntime {
             throws IOException {
         Config scanConfig =
                 new Config().numColumns(config.valueFields.size()).totalBuckets(totalBuckets);
+        applyReadMemoryPolicy(scanConfig);
         scanConfig.governanceMode = Config.GovernanceMode.NOOP;
-        scanConfig.logConsole = Boolean.FALSE;
+        scanConfig.logConsole = false;
 
         Config.VolumeDescriptor volume = new Config.VolumeDescriptor();
         volume.baseDir = tableRootDirectory(config).getAbsolutePath();
@@ -189,10 +193,13 @@ final class CobbleSourceRuntime {
             CobbleDynamicTableSource.SerializableConfig config, int totalBuckets) {
         Config readerConfig = new Config().totalBuckets(totalBuckets);
         readerConfig.governanceMode = Config.GovernanceMode.NOOP;
-        readerConfig.logConsole = Boolean.FALSE;
+        readerConfig.logConsole = false;
 
         Config.ReaderConfigEntry readerOptions = new Config.ReaderConfigEntry();
-        readerOptions.blockCacheSize = 0;
+        readerOptions.blockCacheSize =
+                nonNegativeInt(
+                        config.sourceBlockCacheMemoryBytes,
+                        CobbleSourceTableOptions.SOURCE_BLOCK_CACHE_MEMORY.key());
         readerOptions.reloadToleranceSeconds = 0L;
         readerConfig.reader = readerOptions;
 
@@ -252,7 +259,7 @@ final class CobbleSourceRuntime {
             coordinatorConfig.totalBuckets(config.bucketCount);
         }
         coordinatorConfig.governanceMode = Config.GovernanceMode.NOOP;
-        coordinatorConfig.logConsole = Boolean.FALSE;
+        coordinatorConfig.logConsole = false;
 
         Config.VolumeDescriptor volume = new Config.VolumeDescriptor();
         volume.baseDir = tableRootDirectory(config).getAbsolutePath();
@@ -269,5 +276,21 @@ final class CobbleSourceRuntime {
                             + config.pathUri);
         }
         return new File(uri);
+    }
+
+    private static void applyReadMemoryPolicy(Config config) {
+        config.memtableCapacity = 1;
+        config.memtableBufferCount = 1;
+        config.blockCacheSize = SCAN_BLOCK_CACHE_BYTES;
+        config.blockCacheHybridEnabled = false;
+        config.blockCacheHybridDiskSize = 0;
+    }
+
+    private static int nonNegativeInt(long value, String optionKey) {
+        if (value < 0L || value > Integer.MAX_VALUE) {
+            throw new IllegalArgumentException(
+                    optionKey + " must be in [0, " + Integer.MAX_VALUE + "].");
+        }
+        return (int) value;
     }
 }

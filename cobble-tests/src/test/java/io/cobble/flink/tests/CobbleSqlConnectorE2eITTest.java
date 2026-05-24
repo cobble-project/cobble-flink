@@ -50,6 +50,7 @@ class CobbleSqlConnectorE2eITTest {
                         + " 'path' = '"
                         + escape(tablePath)
                         + "',"
+                        + " 'source.block-cache-memory' = '256mb',"
                         + " 'scan.checkpoint-id' = 'latest',"
                         + " 'scan.mode' = 'batch'"
                         + ")");

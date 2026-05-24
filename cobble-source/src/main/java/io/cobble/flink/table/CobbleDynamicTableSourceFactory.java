@@ -1,6 +1,7 @@
 package io.cobble.flink.table;
 
 import org.apache.flink.configuration.ConfigOption;
+import org.apache.flink.configuration.MemorySize;
 import org.apache.flink.configuration.ReadableConfig;
 import org.apache.flink.table.api.ValidationException;
 import org.apache.flink.table.catalog.ResolvedSchema;
@@ -45,6 +46,7 @@ public final class CobbleDynamicTableSourceFactory implements DynamicTableSource
         options.add(CobbleSourceTableOptions.SCAN_CHECKPOINT_ID);
         options.add(CobbleSourceTableOptions.SCAN_MODE);
         options.add(CobbleSourceTableOptions.SCAN_POLL_INTERVAL_MS);
+        options.add(CobbleSourceTableOptions.SOURCE_BLOCK_CACHE_MEMORY);
         return options;
     }
 
@@ -55,13 +57,13 @@ public final class CobbleDynamicTableSourceFactory implements DynamicTableSource
 
         ReadableConfig options = helper.getOptions();
         String pathUri = normalizePathToUri(options.get(CobbleSourceTableOptions.PATH));
-        int bucketCount =
-                options.getOptional(CobbleSourceTableOptions.BUCKET).orElse(Integer.valueOf(-1));
+        int bucketCount = options.getOptional(CobbleSourceTableOptions.BUCKET).orElse(-1);
         String checkpointId =
                 normalizeCheckpointId(options.get(CobbleSourceTableOptions.SCAN_CHECKPOINT_ID));
         String scanMode = normalizeScanMode(options.get(CobbleSourceTableOptions.SCAN_MODE));
-        long pollIntervalMillis =
-                options.get(CobbleSourceTableOptions.SCAN_POLL_INTERVAL_MS).longValue();
+        long pollIntervalMillis = options.get(CobbleSourceTableOptions.SCAN_POLL_INTERVAL_MS);
+        MemorySize sourceBlockCacheMemory =
+                options.get(CobbleSourceTableOptions.SOURCE_BLOCK_CACHE_MEMORY);
 
         if (bucketCount == 0 || bucketCount < -1) {
             throw new ValidationException(CobbleSourceTableOptions.BUCKET.key() + " must be > 0");
@@ -69,6 +71,10 @@ public final class CobbleDynamicTableSourceFactory implements DynamicTableSource
         if (pollIntervalMillis <= 0L) {
             throw new ValidationException(
                     CobbleSourceTableOptions.SCAN_POLL_INTERVAL_MS.key() + " must be > 0");
+        }
+        if (sourceBlockCacheMemory.getBytes() < 0L) {
+            throw new ValidationException(
+                    CobbleSourceTableOptions.SOURCE_BLOCK_CACHE_MEMORY.key() + " must be >= 0");
         }
         if ("streaming".equals(scanMode) && !"latest".equals(checkpointId)) {
             throw new ValidationException(
@@ -88,7 +94,7 @@ public final class CobbleDynamicTableSourceFactory implements DynamicTableSource
         List<RowType.RowField> physicalFields = physicalRowType.getFields();
         Map<String, Integer> fieldIndexByName = new HashMap<>();
         for (int i = 0; i < physicalFields.size(); i++) {
-            fieldIndexByName.put(physicalFields.get(i).getName(), Integer.valueOf(i));
+            fieldIndexByName.put(physicalFields.get(i).getName(), i);
         }
 
         List<CobbleDynamicTableSource.SerializableField> keyFields = new ArrayList<>();
@@ -140,6 +146,7 @@ public final class CobbleDynamicTableSourceFactory implements DynamicTableSource
                         checkpointId,
                         scanMode,
                         pollIntervalMillis,
+                        sourceBlockCacheMemory.getBytes(),
                         keyFields,
                         valueFields);
         return new CobbleDynamicTableSource(

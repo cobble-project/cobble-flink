@@ -1,8 +1,10 @@
 package io.cobble.flink.table;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 
+import io.cobble.Config;
 import io.cobble.GlobalSnapshot;
 import io.cobble.ShardSnapshot;
 
@@ -54,6 +56,24 @@ class CobbleSourceRuntimeTest {
                 () -> CobbleSourceRuntime.createSourceSplits(baseConfig(3), snapshot));
     }
 
+    @Test
+    void appliesReadMemoryBudgetToBlockCache() throws Exception {
+        CobbleDynamicTableSource.SerializableConfig config = baseConfig(4);
+        Config scanConfig = CobbleSourceRuntime.createSourceScanConfig(config, 4);
+        Config lookupConfig = CobbleSourceRuntime.createLookupReaderConfig(config, 4);
+
+        assertEquals(1, scanConfig.memtableCapacity.intValue());
+        assertEquals(1, scanConfig.memtableBufferCount.intValue());
+        assertEquals(8 * 1024 * 1024, scanConfig.blockCacheSize.intValue());
+        assertEquals(false, scanConfig.blockCacheHybridEnabled.booleanValue());
+        assertEquals(0, scanConfig.blockCacheHybridDiskSize.intValue());
+
+        assertNull(lookupConfig.memtableCapacity);
+        assertNull(lookupConfig.memtableBufferCount);
+        assertNull(lookupConfig.blockCacheSize);
+        assertEquals(256 * 1024 * 1024, lookupConfig.reader.blockCacheSize.intValue());
+    }
+
     private static CobbleDynamicTableSource.SerializableConfig baseConfig(int bucketCount) {
         return new CobbleDynamicTableSource.SerializableConfig(
                 "file:///tmp/cobble-source-runtime",
@@ -61,6 +81,7 @@ class CobbleSourceRuntimeTest {
                 "1",
                 "batch",
                 1000L,
+                256L * 1024L * 1024L,
                 Collections.emptyList(),
                 Collections.emptyList());
     }

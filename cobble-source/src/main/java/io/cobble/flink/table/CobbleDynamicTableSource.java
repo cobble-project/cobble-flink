@@ -90,6 +90,7 @@ final class CobbleDynamicTableSource implements ScanTableSource, LookupTableSour
         final String scanCheckpointId;
         final String scanMode;
         final long pollIntervalMillis;
+        final long sourceBlockCacheMemoryBytes;
         final List<SerializableField> keyFields;
         final List<SerializableField> valueFields;
 
@@ -99,6 +100,7 @@ final class CobbleDynamicTableSource implements ScanTableSource, LookupTableSour
                 String scanCheckpointId,
                 String scanMode,
                 long pollIntervalMillis,
+                long sourceBlockCacheMemoryBytes,
                 List<SerializableField> keyFields,
                 List<SerializableField> valueFields) {
             this.pathUri = pathUri;
@@ -106,6 +108,7 @@ final class CobbleDynamicTableSource implements ScanTableSource, LookupTableSour
             this.scanCheckpointId = scanCheckpointId;
             this.scanMode = scanMode;
             this.pollIntervalMillis = pollIntervalMillis;
+            this.sourceBlockCacheMemoryBytes = sourceBlockCacheMemoryBytes;
             this.keyFields = Collections.unmodifiableList(new ArrayList<>(keyFields));
             this.valueFields = Collections.unmodifiableList(new ArrayList<>(valueFields));
         }
@@ -117,6 +120,7 @@ final class CobbleDynamicTableSource implements ScanTableSource, LookupTableSour
                     scanCheckpointId,
                     scanMode,
                     pollIntervalMillis,
+                    sourceBlockCacheMemoryBytes,
                     keyFields,
                     valueFields);
         }
