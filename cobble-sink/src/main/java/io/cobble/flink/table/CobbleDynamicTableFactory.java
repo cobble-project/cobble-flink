@@ -1,6 +1,7 @@
 package io.cobble.flink.table;
 
 import org.apache.flink.configuration.ConfigOption;
+import org.apache.flink.configuration.MemorySize;
 import org.apache.flink.configuration.ReadableConfig;
 import org.apache.flink.table.api.ValidationException;
 import org.apache.flink.table.catalog.ResolvedSchema;
@@ -44,6 +45,8 @@ public final class CobbleDynamicTableFactory implements DynamicTableSinkFactory 
     public Set<ConfigOption<?>> optionalOptions() {
         Set<ConfigOption<?>> options = new HashSet<>();
         options.add(CobbleTableOptions.SNAPSHOT_RETENTION);
+        options.add(CobbleTableOptions.SINK_USE_MANAGED_MEMORY_ALLOCATOR);
+        options.add(CobbleTableOptions.SINK_WRITER_BUFFER_MEMORY);
         options.add(FactoryUtil.SINK_PARALLELISM);
         return options;
     }
@@ -55,8 +58,12 @@ public final class CobbleDynamicTableFactory implements DynamicTableSinkFactory 
 
         ReadableConfig options = helper.getOptions();
         String pathUri = normalizePathToUri(options.get(CobbleTableOptions.PATH));
-        int bucketCount = options.get(CobbleTableOptions.BUCKET).intValue();
-        int snapshotRetention = options.get(CobbleTableOptions.SNAPSHOT_RETENTION).intValue();
+        int bucketCount = options.get(CobbleTableOptions.BUCKET);
+        int snapshotRetention = options.get(CobbleTableOptions.SNAPSHOT_RETENTION);
+        boolean sinkUseManagedMemoryAllocator =
+                options.get(CobbleTableOptions.SINK_USE_MANAGED_MEMORY_ALLOCATOR);
+        MemorySize sinkWriterBufferMemory =
+                options.get(CobbleTableOptions.SINK_WRITER_BUFFER_MEMORY);
         Integer sinkParallelism = options.get(FactoryUtil.SINK_PARALLELISM);
 
         if (bucketCount <= 0) {
@@ -69,6 +76,10 @@ public final class CobbleDynamicTableFactory implements DynamicTableSinkFactory 
         if (sinkParallelism == null || sinkParallelism.intValue() <= 0) {
             throw new ValidationException(
                     FactoryUtil.SINK_PARALLELISM.key() + " must be configured with a value > 0.");
+        }
+        if (sinkWriterBufferMemory.getBytes() <= 0L) {
+            throw new ValidationException(
+                    CobbleTableOptions.SINK_WRITER_BUFFER_MEMORY.key() + " must be > 0.");
         }
 
         ResolvedSchema resolvedSchema = context.getCatalogTable().getResolvedSchema();
@@ -84,7 +95,7 @@ public final class CobbleDynamicTableFactory implements DynamicTableSinkFactory 
         List<RowType.RowField> physicalFields = physicalRowType.getFields();
         Map<String, Integer> fieldIndexByName = new HashMap<>();
         for (int i = 0; i < physicalFields.size(); i++) {
-            fieldIndexByName.put(physicalFields.get(i).getName(), Integer.valueOf(i));
+            fieldIndexByName.put(physicalFields.get(i).getName(), i);
         }
 
         List<CobbleDynamicTableSink.SerializableField> keyFields = new ArrayList<>();
@@ -135,6 +146,8 @@ public final class CobbleDynamicTableFactory implements DynamicTableSinkFactory 
                         bucketCount,
                         snapshotRetention,
                         sinkParallelism.intValue(),
+                        sinkUseManagedMemoryAllocator,
+                        sinkWriterBufferMemory.getBytes(),
                         keyFields,
                         valueFields);
         return new CobbleDynamicTableSink(config, context.getObjectIdentifier().asSummaryString());

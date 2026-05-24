@@ -59,12 +59,21 @@ final class CobbleSinkPaths {
         Config dbConfig =
                 new Config().numColumns(config.valueFields.size()).totalBuckets(config.bucketCount);
         dbConfig.snapshotRetention = null;
-        dbConfig.snapshotOnlyTrack = Boolean.TRUE;
-        dbConfig.snapshotDisableIncrementalBaseLink = Boolean.TRUE;
+        dbConfig.snapshotOnlyTrack = true;
+        dbConfig.snapshotDisableIncrementalBaseLink = true;
         dbConfig.memtableType = Config.MemtableType.VEC;
         dbConfig.governanceMode = Config.GovernanceMode.NOOP;
-        dbConfig.logConsole = Boolean.FALSE;
+        dbConfig.logConsole = false;
         dbConfig.logPath = new File(localDir, "cobble-writer.log").getAbsolutePath();
+        // Sink writes are append/update heavy and do not require block cache.
+        dbConfig.blockCacheSize = 0;
+        dbConfig.blockCacheHybridEnabled = false;
+        dbConfig.blockCacheHybridDiskSize = 0;
+        dbConfig.memtableCapacity =
+                positiveInt(
+                        config.sinkWriterBufferMemoryBytes,
+                        CobbleTableOptions.SINK_WRITER_BUFFER_MEMORY.key());
+        dbConfig.memtableBufferCount = 1;
 
         Config.VolumeDescriptor localVolume = new Config.VolumeDescriptor();
         localVolume.baseDir = localDir.getAbsolutePath();
@@ -81,6 +90,14 @@ final class CobbleSinkPaths {
         return dbConfig;
     }
 
+    private static int positiveInt(long value, String optionKey) {
+        if (value <= 0L || value > Integer.MAX_VALUE) {
+            throw new IllegalArgumentException(
+                    optionKey + " must be in (0, " + Integer.MAX_VALUE + "].");
+        }
+        return (int) value;
+    }
+
     static Config createCoordinatorConfig(CobbleDynamicTableSink.SerializableConfig config)
             throws IOException {
         File localDir = coordinatorLocalDirectory(config);
@@ -88,7 +105,7 @@ final class CobbleSinkPaths {
 
         Config coordinatorConfig = new Config().totalBuckets(config.bucketCount);
         coordinatorConfig.governanceMode = Config.GovernanceMode.NOOP;
-        coordinatorConfig.logConsole = Boolean.FALSE;
+        coordinatorConfig.logConsole = false;
         coordinatorConfig.logPath = new File(localDir, "cobble-coordinator.log").getAbsolutePath();
 
         Config.VolumeDescriptor localVolume = new Config.VolumeDescriptor();

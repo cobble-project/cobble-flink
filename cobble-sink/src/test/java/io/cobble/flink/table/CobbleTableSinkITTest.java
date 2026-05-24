@@ -58,6 +58,8 @@ class CobbleTableSinkITTest {
                         2,
                         2,
                         2,
+                        true,
+                        16L * 1024L * 1024L,
                         java.util.Collections.singletonList(
                                 new CobbleDynamicTableSink.SerializableField(
                                         "id", "BIGINT", 0, -1)),
@@ -103,6 +105,8 @@ class CobbleTableSinkITTest {
                         + "',"
                         + " 'bucket' = '2',"
                         + " 'sink.parallelism' = '2',"
+                        + " 'sink.use-managed-memory-allocator' = 'true',"
+                        + " 'sink.writer-buffer-memory' = '16 mb',"
                         + " 'snapshot.retention' = '2'"
                         + ")");
 
@@ -138,6 +142,8 @@ class CobbleTableSinkITTest {
                         2,
                         2,
                         2,
+                        false,
+                        256L * 1024L * 1024L,
                         java.util.Collections.singletonList(
                                 new CobbleDynamicTableSink.SerializableField(
                                         "id", "BIGINT", 0, -1)),
@@ -179,6 +185,32 @@ class CobbleTableSinkITTest {
     }
 
     @Test
+    void sinkWriterConfigDisablesBlockCacheAndUsesManagedWriterBudget() throws Exception {
+        Path tablePath = tempDir.resolve("managed-memory-config");
+        CobbleDynamicTableSink.SerializableConfig sinkConfig =
+                new CobbleDynamicTableSink.SerializableConfig(
+                        tablePath.toUri().toString(),
+                        2,
+                        2,
+                        2,
+                        true,
+                        32L * 1024L * 1024L,
+                        java.util.Collections.singletonList(
+                                new CobbleDynamicTableSink.SerializableField(
+                                        "id", "BIGINT", 0, -1)),
+                        java.util.Collections.singletonList(
+                                new CobbleDynamicTableSink.SerializableField(
+                                        "name", "VARCHAR(2147483647)", 1, 0)));
+
+        Config writerConfig = CobbleSinkPaths.createWriterConfig(sinkConfig, 0);
+        assertEquals(0, writerConfig.blockCacheSize.intValue());
+        assertEquals(false, writerConfig.blockCacheHybridEnabled.booleanValue());
+        assertEquals(0, writerConfig.blockCacheHybridDiskSize.intValue());
+        assertEquals(32 * 1024 * 1024, writerConfig.memtableCapacity.intValue());
+        assertEquals(1, writerConfig.memtableBufferCount.intValue());
+    }
+
+    @Test
     void sqlSinkMaterializesGlobalSnapshotOnEndOfInputWithoutCheckpoint() throws Exception {
         Path tablePath = tempDir.resolve("eoi-table");
 
@@ -188,6 +220,8 @@ class CobbleTableSinkITTest {
                         2,
                         2,
                         2,
+                        false,
+                        256L * 1024L * 1024L,
                         java.util.Collections.singletonList(
                                 new CobbleDynamicTableSink.SerializableField(
                                         "id", "BIGINT", 0, -1)),

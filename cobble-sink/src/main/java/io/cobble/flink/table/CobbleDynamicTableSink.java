@@ -1,5 +1,6 @@
 package io.cobble.flink.table;
 
+import org.apache.flink.core.memory.ManagedMemoryUseCase;
 import org.apache.flink.table.connector.ChangelogMode;
 import org.apache.flink.table.connector.sink.DataStreamSinkProvider;
 import org.apache.flink.table.connector.sink.DynamicTableSink;
@@ -41,13 +42,23 @@ final class CobbleDynamicTableSink implements DynamicTableSink {
                                 new BucketOwnerPartitioner(),
                                 new BucketOwnerKeySelector(
                                         keyEncoder, config.bucketCount, config.sinkParallelism));
-                return routed.sinkTo(new CobbleSqlSink(config))
-                        .setParallelism(config.sinkParallelism);
+                org.apache.flink.streaming.api.datastream.DataStreamSink<?> sink =
+                        routed.sinkTo(new CobbleSqlSink(config))
+                                .setParallelism(config.sinkParallelism);
+                if (config.sinkUseManagedMemoryAllocator) {
+                    // We only declare here, but not allocate and return since the sink v2 does
+                    // not expose proper memory manager APIs.
+                    sink.getTransformation()
+                            .declareManagedMemoryUseCaseAtOperatorScope(
+                                    ManagedMemoryUseCase.OPERATOR,
+                                    mebiBytes(config.sinkWriterBufferMemoryBytes));
+                }
+                return sink;
             }
 
             @Override
             public Optional<Integer> getParallelism() {
-                return Optional.of(Integer.valueOf(config.sinkParallelism));
+                return Optional.of(config.sinkParallelism);
             }
         };
     }
@@ -82,8 +93,7 @@ final class CobbleDynamicTableSink implements DynamicTableSink {
         @Override
         public Integer getKey(RowData value) throws Exception {
             int bucket = CobbleSqlSink.hashFixedBucket(keyEncoder.encode(value), bucketCount);
-            return Integer.valueOf(
-                    CobbleSqlSink.bucketOwnerSubtask(bucket, bucketCount, sinkParallelism));
+            return CobbleSqlSink.bucketOwnerSubtask(bucket, bucketCount, sinkParallelism);
         }
     }
 
@@ -105,6 +115,8 @@ final class CobbleDynamicTableSink implements DynamicTableSink {
         final int bucketCount;
         final int snapshotRetention;
         final int sinkParallelism;
+        final boolean sinkUseManagedMemoryAllocator;
+        final long sinkWriterBufferMemoryBytes;
         final List<SerializableField> keyFields;
         final List<SerializableField> valueFields;
 
@@ -113,12 +125,16 @@ final class CobbleDynamicTableSink implements DynamicTableSink {
                 int bucketCount,
                 int snapshotRetention,
                 int sinkParallelism,
+                boolean sinkUseManagedMemoryAllocator,
+                long sinkWriterBufferMemoryBytes,
                 List<SerializableField> keyFields,
                 List<SerializableField> valueFields) {
             this.pathUri = pathUri;
             this.bucketCount = bucketCount;
             this.snapshotRetention = snapshotRetention;
             this.sinkParallelism = sinkParallelism;
+            this.sinkUseManagedMemoryAllocator = sinkUseManagedMemoryAllocator;
+            this.sinkWriterBufferMemoryBytes = sinkWriterBufferMemoryBytes;
             this.keyFields = Collections.unmodifiableList(new ArrayList<>(keyFields));
             this.valueFields = Collections.unmodifiableList(new ArrayList<>(valueFields));
         }
@@ -129,9 +145,22 @@ final class CobbleDynamicTableSink implements DynamicTableSink {
                     bucketCount,
                     snapshotRetention,
                     sinkParallelism,
+                    sinkUseManagedMemoryAllocator,
+                    sinkWriterBufferMemoryBytes,
                     keyFields,
                     valueFields);
         }
+    }
+
+    private static int mebiBytes(long bytes) {
+        if (bytes <= 0L) {
+            return 1;
+        }
+        long rounded = (bytes + (1024L * 1024L) - 1L) / (1024L * 1024L);
+        if (rounded > Integer.MAX_VALUE) {
+            return Integer.MAX_VALUE;
+        }
+        return (int) rounded;
     }
 
     /** Serializable field mapping from Flink physical row to Cobble key/value bytes. */
