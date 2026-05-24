@@ -11,7 +11,8 @@ class CobbleSourceSplitSerializerTest {
     void roundTripsCurrentSplitState() throws Exception {
         CobbleSourceSplit.Serializer serializer = new CobbleSourceSplit.Serializer();
         CobbleSourceSplit split =
-                new CobbleSourceSplit(2, 3, 8, 9L, CobbleSourceSplit.ScanState.IDLE);
+                new CobbleSourceSplit(
+                        2, 3, 8, 9L, 3, new byte[] {4, 5}, CobbleSourceSplit.ScanState.WRAP);
 
         byte[] bytes = serializer.serialize(split);
         CobbleSourceSplit restored = serializer.deserialize(serializer.getVersion(), bytes);
@@ -21,13 +22,16 @@ class CobbleSourceSplitSerializerTest {
         assertEquals(3, restored.rangeEndBucket);
         assertEquals(8, restored.totalBuckets);
         assertEquals(9L, restored.snapshotId);
-        assertEquals(CobbleSourceSplit.ScanState.IDLE, restored.scanState);
+        assertEquals(3, restored.startBucket);
+        org.junit.jupiter.api.Assertions.assertArrayEquals(
+                new byte[] {4, 5}, restored.startKeyExclusive);
+        assertEquals(CobbleSourceSplit.ScanState.WRAP, restored.scanState);
     }
 
     @Test
     void javaSerializesReplaceSplitEventPayload() throws Exception {
         CobbleSourceSplit split =
-                new CobbleSourceSplit(2, 3, 8, 9L, CobbleSourceSplit.ScanState.IDLE);
+                new CobbleSourceSplit(2, 3, 8, 9L, -1, null, CobbleSourceSplit.ScanState.IDLE);
         CobbleSourceEvents.ReplaceSplitEvent event =
                 new CobbleSourceEvents.ReplaceSplitEvent(split);
 
@@ -46,6 +50,7 @@ class CobbleSourceSplitSerializerTest {
         assertEquals(3, restored.split.rangeEndBucket);
         assertEquals(8, restored.split.totalBuckets);
         assertEquals(9L, restored.split.snapshotId);
+        assertEquals(-1, restored.split.startBucket);
         assertEquals(CobbleSourceSplit.ScanState.IDLE, restored.split.scanState);
     }
 }

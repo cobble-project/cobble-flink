@@ -10,7 +10,10 @@ import java.io.DataOutputStream;
 import java.io.IOException;
 import java.io.Serializable;
 
-/** Checkpointed source split metadata for reopening one planned Cobble scan range. */
+/**
+ * Checkpointed source split metadata for reopening one planned Cobble scan range, including the
+ * last emitted bucket/key position when a split resumes in place.
+ */
 final class CobbleSourceSplit implements SourceSplit, Serializable {
 
     private static final long serialVersionUID = 1L;
@@ -18,6 +21,7 @@ final class CobbleSourceSplit implements SourceSplit, Serializable {
     /** Minimal reader lifecycle persisted in checkpoints. */
     enum ScanState {
         ACTIVE,
+        WRAP,
         IDLE
     }
 
@@ -25,6 +29,8 @@ final class CobbleSourceSplit implements SourceSplit, Serializable {
     final int rangeEndBucket;
     final int totalBuckets;
     final long snapshotId;
+    final int startBucket;
+    final byte[] startKeyExclusive;
     final ScanState scanState;
 
     CobbleSourceSplit(
@@ -32,18 +38,28 @@ final class CobbleSourceSplit implements SourceSplit, Serializable {
             int rangeEndBucket,
             int totalBuckets,
             long snapshotId,
+            int startBucket,
+            byte[] startKeyExclusive,
             ScanState scanState) {
         this.rangeStartBucket = rangeStartBucket;
         this.rangeEndBucket = rangeEndBucket;
         this.totalBuckets = totalBuckets;
         this.snapshotId = snapshotId;
+        this.startBucket = startBucket;
+        this.startKeyExclusive = copyOrNull(startKeyExclusive);
         this.scanState = scanState;
     }
 
     static CobbleSourceSplit forSnapshot(
             int rangeStartBucket, int rangeEndBucket, int totalBuckets, long snapshotId) {
         return new CobbleSourceSplit(
-                rangeStartBucket, rangeEndBucket, totalBuckets, snapshotId, ScanState.ACTIVE);
+                rangeStartBucket,
+                rangeEndBucket,
+                totalBuckets,
+                snapshotId,
+                -1,
+                null,
+                ScanState.ACTIVE);
     }
 
     @Override
@@ -57,7 +73,7 @@ final class CobbleSourceSplit implements SourceSplit, Serializable {
 
     /** Serializer for checkpointing split metadata without embedding raw ScanSplit payloads. */
     static final class Serializer implements SimpleVersionedSerializer<CobbleSourceSplit> {
-        private static final int VERSION = 5;
+        private static final int VERSION = 6;
 
         @Override
         public int getVersion() {
@@ -72,6 +88,8 @@ final class CobbleSourceSplit implements SourceSplit, Serializable {
             dataOut.writeInt(split.rangeEndBucket);
             dataOut.writeInt(split.totalBuckets);
             dataOut.writeLong(split.snapshotId);
+            dataOut.writeInt(split.startBucket);
+            writeBytes(dataOut, split.startKeyExclusive);
             dataOut.writeInt(split.scanState.ordinal());
             dataOut.flush();
             return out.toByteArray();
@@ -88,7 +106,32 @@ final class CobbleSourceSplit implements SourceSplit, Serializable {
                     input.readInt(),
                     input.readInt(),
                     input.readLong(),
+                    input.readInt(),
+                    readBytes(input),
                     ScanState.values()[input.readInt()]);
         }
+
+        private static void writeBytes(DataOutputStream out, byte[] bytes) throws IOException {
+            if (bytes == null) {
+                out.writeInt(-1);
+                return;
+            }
+            out.writeInt(bytes.length);
+            out.write(bytes);
+        }
+
+        private static byte[] readBytes(DataInputStream input) throws IOException {
+            int length = input.readInt();
+            if (length < 0) {
+                return null;
+            }
+            byte[] bytes = new byte[length];
+            input.readFully(bytes);
+            return bytes;
+        }
+    }
+
+    private static byte[] copyOrNull(byte[] bytes) {
+        return bytes == null ? null : java.util.Arrays.copyOf(bytes, bytes.length);
     }
 }

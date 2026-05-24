@@ -1,9 +1,11 @@
 package io.cobble.flink.table;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNull;
 
 import org.junit.jupiter.api.Test;
 
+/** Serializer coverage for checkpointed enumerator metadata. */
 class CobbleSourceEnumeratorStateSerializerTest {
 
     @Test
@@ -28,5 +30,8 @@ class CobbleSourceEnumeratorStateSerializerTest {
         assertEquals(2, restored.pendingSplits.get(0).rangeStartBucket);
         assertEquals(3, restored.pendingSplits.get(0).rangeEndBucket);
         assertEquals(8, restored.pendingSplits.get(0).totalBuckets);
+        assertEquals(-1, restored.pendingSplits.get(0).startBucket);
+        assertNull(restored.pendingSplits.get(0).startKeyExclusive);
+        assertEquals(CobbleSourceSplit.ScanState.ACTIVE, restored.pendingSplits.get(0).scanState);
     }
 }
