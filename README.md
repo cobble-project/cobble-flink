@@ -4,12 +4,12 @@ storage semantics.
 
 ## Modules
 
-- `cobble-state`: Cobble Flink state backend and HA integration.
-- `cobble-sink`: Cobble Flink SQL sink connector.
-- `cobble-source`: Cobble Flink SQL source connector.
-- `cobble-dist`: distribution jar that bundles `cobble-state`, `cobble-sink`, and `cobble-source` for deployment.
-- `cobble-state-bench`: benchmark module for Cobble state backend scenarios.
-- `cobble-tests`: end-to-end integration tests for Cobble Flink connectors and runtime flows.
+- `cobble-flink-state`: Cobble Flink state backend and HA integration.
+- `cobble-flink-sink`: Cobble Flink SQL sink connector.
+- `cobble-flink-source`: Cobble Flink SQL source connector.
+- `cobble-flink-dist`: distribution jar that bundles `cobble-flink-state`, `cobble-flink-sink`, and `cobble-flink-source` for deployment.
+- `cobble-flink-state-bench`: benchmark module for Cobble state backend scenarios.
+- `cobble-flink-tests`: end-to-end integration tests for Cobble Flink connectors and runtime flows.
 
 ## Setup
 
@@ -17,15 +17,15 @@ storage semantics.
    ```bash
    ./mvnw -DskipTests package
    ```
-2. Copy one deployment jar into your Flink `lib/` directory. `cobble-dist` contains the state backend, sink, and source connector:
+2. Copy one deployment jar into your Flink `lib/` directory. `cobble-flink-dist` contains the state backend, sink, and source connector:
    ```bash
-   cp cobble-dist/target/cobble-dist-*.jar $FLINK_HOME/lib/
+   cp cobble-dist/target/cobble-flink-dist-*.jar $FLINK_HOME/lib/
    ```
 3. Start the Flink cluster.
 
 ## Get Started
 
-### cobble-state
+### Flink's State Backend
 
 For a minimal run, configure Cobble with the full factory class names:
 
@@ -48,7 +48,7 @@ cobble.ha.delegate.type: kubernetes
 If your original HA was a custom factory, set `cobble.ha.delegate.type` to that fully qualified
 factory class name instead.
 
-### cobble-sink
+### Flink's Sink
 
 For a minimal SQL sink table, configure:
 
@@ -75,7 +75,7 @@ CREATE TABLE sink_tbl (
 );
 ```
 
-### cobble-source
+### Flink's Source
 
 For a minimal SQL source table, configure:
 

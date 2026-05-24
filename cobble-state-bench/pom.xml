@@ -11,8 +11,8 @@
         <relativePath>../pom.xml</relativePath>
     </parent>
 
-    <artifactId>cobble-state-bench</artifactId>
-    <name>cobble-state-bench</name>
+    <artifactId>cobble-flink-state-bench</artifactId>
+    <name>cobble-flink-state-bench</name>
 
     <properties>
         <jmh.version>1.37</jmh.version>
@@ -28,7 +28,7 @@
     <dependencies>
         <dependency>
             <groupId>io.github.cobble-project</groupId>
-            <artifactId>cobble-state</artifactId>
+            <artifactId>cobble-flink-state</artifactId>
             <version>${project.version}</version>
         </dependency>
         <dependency>

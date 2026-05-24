@@ -1,6 +1,6 @@
-# cobble-state-bench
+# Cobble Flink State Benchmarks
 
-`cobble-state-bench` contains JMH benchmarks for comparing Flink keyed state performance across:
+`cobble-flink-state-bench` contains JMH benchmarks for comparing Flink keyed state performance across:
 
 - Flink `HashMapStateBackend` (`HEAP`)
 - Flink `EmbeddedRocksDBStateBackend` (`ROCKSDB`)
@@ -36,13 +36,13 @@ This module supports the same style as `flink-benchmarks`: build the uber jar an
 Run the full Cobble state benchmark suite from the repository root:
 
 ```bash
-./mvnw -pl cobble-state-bench -am clean package exec:exec
+./mvnw -pl :cobble-flink-state-bench -am clean package exec:exec
 ```
 
 Run a narrower subset by overriding the benchmark regex:
 
 ```bash
-./mvnw -pl cobble-state-bench -am clean package exec:exec \
+./mvnw -pl :cobble-flink-state-bench -am clean package exec:exec \
   -Dbenchmarks="io.cobble.flink.state.benchmark.ValueStateBenchmark.*"
 ```
 
@@ -51,7 +51,7 @@ Run a narrower subset by overriding the benchmark regex:
 First build the jar:
 
 ```bash
-./mvnw -pl cobble-state-bench -am clean package
+./mvnw -pl :cobble-flink-state-bench -am clean package
 ```
 
 Then run it directly with standard JMH arguments:

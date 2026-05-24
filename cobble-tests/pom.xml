@@ -11,19 +11,19 @@
         <relativePath>../pom.xml</relativePath>
     </parent>
 
-    <artifactId>cobble-tests</artifactId>
-    <name>cobble-tests</name>
+    <artifactId>cobble-flink-tests</artifactId>
+    <name>cobble-flink-tests</name>
 
     <dependencies>
         <dependency>
             <groupId>io.github.cobble-project</groupId>
-            <artifactId>cobble-sink</artifactId>
+            <artifactId>cobble-flink-sink</artifactId>
             <version>${project.version}</version>
             <scope>test</scope>
         </dependency>
         <dependency>
             <groupId>io.github.cobble-project</groupId>
-            <artifactId>cobble-source</artifactId>
+            <artifactId>cobble-flink-source</artifactId>
             <version>${project.version}</version>
             <scope>test</scope>
         </dependency>

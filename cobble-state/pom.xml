@@ -11,8 +11,8 @@
         <relativePath>../pom.xml</relativePath>
     </parent>
 
-    <artifactId>cobble-state</artifactId>
-    <name>cobble-state</name>
+    <artifactId>cobble-flink-state</artifactId>
+    <name>cobble-flink-state</name>
 
     <dependencies>
         <dependency>
@@ -34,7 +34,7 @@
         </dependency>
         <dependency>
             <groupId>io.github.cobble-project</groupId>
-            <artifactId>cobble-common</artifactId>
+            <artifactId>cobble-flink-common</artifactId>
             <version>${project.version}</version>
         </dependency>
         <dependency>

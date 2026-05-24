@@ -11,23 +11,23 @@
         <relativePath>../pom.xml</relativePath>
     </parent>
 
-    <artifactId>cobble-dist</artifactId>
-    <name>cobble-dist</name>
+    <artifactId>cobble-flink-dist</artifactId>
+    <name>cobble-flink-dist</name>
 
     <dependencies>
         <dependency>
             <groupId>io.github.cobble-project</groupId>
-            <artifactId>cobble-state</artifactId>
+            <artifactId>cobble-flink-state</artifactId>
             <version>${project.version}</version>
         </dependency>
         <dependency>
             <groupId>io.github.cobble-project</groupId>
-            <artifactId>cobble-sink</artifactId>
+            <artifactId>cobble-flink-sink</artifactId>
             <version>${project.version}</version>
         </dependency>
         <dependency>
             <groupId>io.github.cobble-project</groupId>
-            <artifactId>cobble-source</artifactId>
+            <artifactId>cobble-flink-source</artifactId>
             <version>${project.version}</version>
         </dependency>
     </dependencies>

@@ -67,7 +67,7 @@ jobs:
         run: ./scripts/install-local-cobble-java.sh cobble/cobble-java/java
 
       - name: Build benchmark jar
-        run: ./mvnw --batch-mode --no-transfer-progress -pl cobble-state-bench -am -DskipTests clean package
+        run: ./mvnw --batch-mode --no-transfer-progress -pl :cobble-flink-state-bench -am -DskipTests clean package
 
       - name: Run Cobble vs RocksDB benchmarks
         env:

@@ -11,8 +11,8 @@
         <relativePath>../pom.xml</relativePath>
     </parent>
 
-    <artifactId>cobble-common</artifactId>
-    <name>cobble-common</name>
+    <artifactId>cobble-flink-common</artifactId>
+    <name>cobble-flink-common</name>
 
     <dependencies>
         <dependency>
