@@ -128,6 +128,29 @@ final class CobblePathUtils {
                 String.format(Locale.ROOT, "COBBLE-SNAPSHOT-%s-MANIFEST", operatorIdHex));
     }
 
+    /**
+     * Returns the volume root that contains a shard snapshot manifest.
+     *
+     * <p>A shard manifest lives at {@code <volume>/<db-id>/snapshot/SNAPSHOT-*}. During rescale the
+     * new backend writes into a fresh operator volume, but restore still needs read access to the
+     * source volume referenced by checkpoint metadata.
+     */
+    static String snapshotVolumeDirectory(String snapshotManifestPath, String dbId) {
+        Path manifestPath = new Path(normalizeStorageDirectory(snapshotManifestPath));
+        Path snapshotDirectory = requireParent(manifestPath, "snapshot manifest");
+        Path dbDirectory = requireParent(snapshotDirectory, "snapshot directory");
+        if (!dbId.equals(dbDirectory.getName())) {
+            throw new IllegalArgumentException(
+                    "Cobble snapshot manifest DB directory '"
+                            + dbDirectory.getName()
+                            + "' does not match DB id '"
+                            + dbId
+                            + "'.");
+        }
+        return normalizeStorageDirectory(
+                requireParent(dbDirectory, "snapshot DB directory").toString());
+    }
+
     static boolean deletePathQuietly(String normalizedPath) throws Exception {
         Path path = new Path(normalizedPath);
         FileSystem fileSystem = path.getFileSystem();
@@ -153,6 +176,15 @@ final class CobblePathUtils {
                             + checkpointExternalPointer);
         }
         return parent.toString();
+    }
+
+    private static Path requireParent(Path path, String description) {
+        Path parent = path.getParent();
+        if (parent == null) {
+            throw new IllegalArgumentException(
+                    "Cobble " + description + " has no parent directory: " + path);
+        }
+        return parent;
     }
 
     private static String normalizeCheckpointScheme(String scheme) {

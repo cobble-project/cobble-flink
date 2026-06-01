@@ -28,8 +28,10 @@ import java.util.Arrays;
 import java.util.Collection;
 import java.util.Collections;
 import java.util.Comparator;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.OptionalLong;
+import java.util.Set;
 import java.util.UUID;
 
 /** Builder that prepares Cobble resources for the current keyed backend shell. */
@@ -214,16 +216,55 @@ final class CobbleKeyedStateBackendBuilder<K> {
     }
 
     /** Computes the local volume root and the full Cobble volume list for this backend instance. */
-    private VolumeLayout createVolumeLayout() {
+    private VolumeLayout createVolumeLayout() throws IOException {
         File localVolumePath = new File(instanceBasePath, COBBLE_DB_DIR_NAME);
-        return new VolumeLayout(
-                localVolumePath,
-                createVolumeDescriptors(
-                        instanceBasePath,
-                        checkpointScopeDirectoryName,
-                        checkpointDirectory,
-                        localDirPrimaryHighPriority,
-                        flinkConfig));
+        List<Config.VolumeDescriptor> volumes =
+                new ArrayList<>(
+                        createVolumeDescriptors(
+                                instanceBasePath,
+                                checkpointScopeDirectoryName,
+                                checkpointDirectory,
+                                localDirPrimaryHighPriority,
+                                flinkConfig));
+        addRestoreSourceReadonlyVolumes(volumes);
+        return new VolumeLayout(localVolumePath, volumes);
+    }
+
+    /**
+     * Keeps source checkpoint volumes readable while a rescaled backend writes to its own volume.
+     *
+     * <p>Snapshot manifests contain absolute paths into the source operator's shared-state volume.
+     * A new Flink job receives a fresh shared-state directory, so native restore cannot resolve
+     * those paths unless the source volume is also present in the new config. READONLY is
+     * intentional: restored files may be copied into the new primary volume, but the old checkpoint
+     * remains immutable.
+     */
+    private void addRestoreSourceReadonlyVolumes(List<Config.VolumeDescriptor> volumes)
+            throws IOException {
+        if (restoreStateHandles == null || restoreStateHandles.isEmpty()) {
+            return;
+        }
+
+        Set<String> configuredBaseDirectories = new LinkedHashSet<>();
+        for (Config.VolumeDescriptor volume : volumes) {
+            configuredBaseDirectories.add(volume.baseDir);
+        }
+        for (RestoreSource restoreSource : readRestoreSources()) {
+            String sourceVolumeDirectory =
+                    CobblePathUtils.snapshotVolumeDirectory(
+                            restoreSource.metadata.shardSnapshot().manifestPath,
+                            restoreSource.metadata.shardSnapshot().dbId);
+            if (!configuredBaseDirectories.add(sourceVolumeDirectory)) {
+                continue;
+            }
+
+            Config.VolumeDescriptor readonlyVolume = new Config.VolumeDescriptor();
+            readonlyVolume.baseDir = sourceVolumeDirectory;
+            readonlyVolume.kinds = Collections.singletonList(Config.VolumeUsageKind.READONLY);
+            CobbleFlinkConfigMapper.applyCheckpointVolumeOptions(
+                    readonlyVolume, sourceVolumeDirectory, flinkConfig);
+            volumes.add(readonlyVolume);
+        }
     }
 
     /** Fills the Cobble config object with volume, bucket, and memory settings. */
