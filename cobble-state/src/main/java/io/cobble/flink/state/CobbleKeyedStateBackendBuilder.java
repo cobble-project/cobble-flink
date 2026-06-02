@@ -226,30 +226,33 @@ final class CobbleKeyedStateBackendBuilder<K> {
                                 checkpointDirectory,
                                 localDirPrimaryHighPriority,
                                 flinkConfig));
-        addRestoreSourceReadonlyVolumes(volumes);
+        addRestoreSourceVolumes(volumes);
         return new VolumeLayout(localVolumePath, volumes);
     }
 
     /**
-     * Keeps source checkpoint volumes readable while a rescaled backend writes to its own volume.
+     * Keeps source checkpoint volumes available while a restored backend opens its writable DB.
      *
      * <p>Snapshot manifests contain absolute paths into the source operator's shared-state volume.
      * A new Flink job receives a fresh shared-state directory, so native restore cannot resolve
-     * those paths unless the source volume is also present in the new config. READONLY is
-     * intentional: restored files may be copied into the new primary volume, but the old checkpoint
-     * remains immutable.
+     * those paths unless the source volume is also present in the new config. A same-range restore
+     * claims its single source DB and resumes it in place, so that source volume remains writable.
+     * Rescale creates a new DB from one or more source manifests instead, so its source volumes
+     * stay READONLY.
      */
-    private void addRestoreSourceReadonlyVolumes(List<Config.VolumeDescriptor> volumes)
-            throws IOException {
+    private void addRestoreSourceVolumes(List<Config.VolumeDescriptor> volumes) throws IOException {
         if (restoreStateHandles == null || restoreStateHandles.isEmpty()) {
             return;
         }
 
+        List<RestoreSource> restoreSources = readRestoreSources();
+        boolean resumeSingleSource = canResumeSingleSource(restoreSources);
+        List<Config.VolumeDescriptor> claimedSourceVolumes = new ArrayList<>();
         Set<String> configuredBaseDirectories = new LinkedHashSet<>();
         for (Config.VolumeDescriptor volume : volumes) {
             configuredBaseDirectories.add(volume.baseDir);
         }
-        for (RestoreSource restoreSource : readRestoreSources()) {
+        for (RestoreSource restoreSource : restoreSources) {
             String sourceVolumeDirectory =
                     CobblePathUtils.snapshotVolumeDirectory(
                             restoreSource.metadata.shardSnapshot().manifestPath,
@@ -258,13 +261,27 @@ final class CobbleKeyedStateBackendBuilder<K> {
                 continue;
             }
 
-            Config.VolumeDescriptor readonlyVolume = new Config.VolumeDescriptor();
-            readonlyVolume.baseDir = sourceVolumeDirectory;
-            readonlyVolume.kinds = Collections.singletonList(Config.VolumeUsageKind.READONLY);
+            Config.VolumeDescriptor sourceVolume = new Config.VolumeDescriptor();
+            sourceVolume.baseDir = sourceVolumeDirectory;
+            sourceVolume.kinds =
+                    resumeSingleSource
+                            ? Arrays.asList(
+                                    Config.VolumeUsageKind.PRIMARY_DATA_PRIORITY_HIGH,
+                                    Config.VolumeUsageKind.META,
+                                    Config.VolumeUsageKind.SNAPSHOT)
+                            : Collections.singletonList(Config.VolumeUsageKind.READONLY);
             CobbleFlinkConfigMapper.applyCheckpointVolumeOptions(
-                    readonlyVolume, sourceVolumeDirectory, flinkConfig);
-            volumes.add(readonlyVolume);
+                    sourceVolume, sourceVolumeDirectory, flinkConfig);
+            if (resumeSingleSource) {
+                claimedSourceVolumes.add(sourceVolume);
+            } else {
+                volumes.add(sourceVolume);
+            }
         }
+        // Db.resume() loads manifests from the first snapshot-persistable volume. Put the claimed
+        // source first so resume opens the old DB before it starts writing snapshots for the new
+        // job.
+        volumes.addAll(0, claimedSourceVolumes);
     }
 
     /** Fills the Cobble config object with volume, bucket, and memory settings. */
@@ -321,12 +338,16 @@ final class CobbleKeyedStateBackendBuilder<K> {
             throw new IOException(
                     "Cobble restore did not receive any readable checkpoint handles.");
         }
-        if (restoreSources.size() == 1
-                && keyGroupRange.equals(restoreSources.get(0).keyGroupRange)) {
+        if (canResumeSingleSource(restoreSources)) {
             return Db.resume(
                     configPath.toString(), restoreSources.get(0).metadata.shardSnapshot().dbId);
         }
         return restoreRescaledDb(configPath, restoreSources);
+    }
+
+    private boolean canResumeSingleSource(List<RestoreSource> restoreSources) {
+        return restoreSources.size() == 1
+                && keyGroupRange.equals(restoreSources.get(0).keyGroupRange);
     }
 
     private List<RestoreSource> readRestoreSources() throws IOException {

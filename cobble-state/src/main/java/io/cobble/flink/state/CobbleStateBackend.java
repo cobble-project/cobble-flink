@@ -122,10 +122,10 @@ public class CobbleStateBackend extends AbstractManagedMemoryStateBackend
         return new CobbleStateBackend(this, config);
     }
 
-    /** The backend only manages local/native resources, so no-claim restore is fine. */
+    /** Cobble restore currently takes ownership of its source snapshot volumes. */
     @Override
     public boolean supportsNoClaimRestoreMode() {
-        return true;
+        return false;
     }
 
     /** Savepoint format is delegated to Flink's default operator-state handling for now. */

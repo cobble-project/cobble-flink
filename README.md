@@ -48,6 +48,10 @@ cobble.ha.delegate.type: kubernetes
 If your original HA was a custom factory, set `cobble.ha.delegate.type` to that fully qualified
 factory class name instead.
 
+Cobble restore and rescale currently support only Flink's `CLAIM` restore mode because restored
+snapshot volumes are incorporated into the writable native DB lifecycle. `NO_CLAIM` and `LEGACY`
+restore modes are not supported.
+
 ### Flink's Sink
 
 For a minimal SQL sink table, configure:

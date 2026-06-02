@@ -14,6 +14,7 @@ import org.apache.flink.api.java.tuple.Tuple2;
 import org.apache.flink.configuration.CheckpointingOptions;
 import org.apache.flink.configuration.Configuration;
 import org.apache.flink.runtime.jobgraph.JobGraph;
+import org.apache.flink.runtime.jobgraph.RestoreMode;
 import org.apache.flink.runtime.jobgraph.SavepointRestoreSettings;
 import org.apache.flink.runtime.minicluster.MiniCluster;
 import org.apache.flink.streaming.api.environment.CheckpointConfig;
@@ -130,7 +131,7 @@ class CobbleRescaleCheckpointManuallyITTest {
                         expectedElementsPerKey,
                         false);
         restoredJobGraph.setSavepointRestoreSettings(
-                SavepointRestoreSettings.forPath(checkpointPath));
+                SavepointRestoreSettings.forPath(checkpointPath, false, RestoreMode.CLAIM));
 
         miniCluster.submitJob(restoredJobGraph).get(30, TimeUnit.SECONDS);
         miniCluster.requestJobResult(restoredJobGraph.getJobID()).get(180, TimeUnit.SECONDS);

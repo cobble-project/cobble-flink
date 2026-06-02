@@ -16,6 +16,7 @@ import org.apache.flink.configuration.JobManagerOptions;
 import org.apache.flink.configuration.MemorySize;
 import org.apache.flink.configuration.RestOptions;
 import org.apache.flink.runtime.jobgraph.JobGraph;
+import org.apache.flink.runtime.jobgraph.RestoreMode;
 import org.apache.flink.runtime.jobgraph.SavepointRestoreSettings;
 import org.apache.flink.runtime.state.filesystem.AbstractFsCheckpointStorageAccess;
 import org.apache.flink.runtime.testutils.MiniClusterResourceConfiguration;
@@ -169,7 +170,8 @@ class CobbleHighAvailabilityITTest {
 
         JobGraph jobGraph = env.getStreamGraph().getJobGraph();
         if (restorePath != null) {
-            jobGraph.setSavepointRestoreSettings(SavepointRestoreSettings.forPath(restorePath));
+            jobGraph.setSavepointRestoreSettings(
+                    SavepointRestoreSettings.forPath(restorePath, false, RestoreMode.CLAIM));
         }
         return jobGraph;
     }

@@ -82,6 +82,11 @@ class CobbleStateBackendTest {
     }
 
     @Test
+    void stateBackendSupportsOnlyClaimRestoreMode() {
+        assertFalse(new CobbleStateBackend().supportsNoClaimRestoreMode());
+    }
+
+    @Test
     void factoryCreatesCobbleStateBackend() throws Exception {
         CobbleStateBackendFactory factory = new CobbleStateBackendFactory();
 
@@ -606,6 +611,7 @@ class CobbleStateBackendTest {
     @Test
     void restoreFromShardSnapshotReopensStateAndSchema(@TempDir Path tempDir) throws Exception {
         String checkpointDirectory = tempDir.resolve("checkpoints").toString();
+        String restoredCheckpointDirectory = tempDir.resolve("restored-checkpoints").toString();
         KeyedStateHandle snapshotHandle;
 
         try (TestBackendContext context =
@@ -648,7 +654,7 @@ class CobbleStateBackendTest {
                 createBackendContext(
                         tempDir.resolve("restored"),
                         false,
-                        checkpointDirectory,
+                        restoredCheckpointDirectory,
                         null,
                         TtlTimeProvider.DEFAULT,
                         false,
@@ -659,6 +665,19 @@ class CobbleStateBackendTest {
             assertBytesColumnFamily(schema, "restore-value-state");
             assertBytesColumnFamily(schema, "restore-list-state");
             assertBytesColumnFamily(schema, "restore-map-state");
+            assertEquals(3, backend.getCobbleConfig().volumes.size());
+            assertVolumeKinds(
+                    backend.getCobbleConfig().volumes.get(0),
+                    Config.VolumeUsageKind.PRIMARY_DATA_PRIORITY_HIGH,
+                    Config.VolumeUsageKind.META,
+                    Config.VolumeUsageKind.SNAPSHOT);
+            assertVolumeKinds(
+                    backend.getCobbleConfig().volumes.get(1),
+                    Config.VolumeUsageKind.PRIMARY_DATA_PRIORITY_HIGH,
+                    Config.VolumeUsageKind.META,
+                    Config.VolumeUsageKind.SNAPSHOT);
+            assertVolumeKinds(
+                    backend.getCobbleConfig().volumes.get(2), Config.VolumeUsageKind.CACHE);
 
             ValueStateDescriptor<String> valueStateDescriptor =
                     new ValueStateDescriptor<>("restore-value-state", StringSerializer.INSTANCE);
@@ -766,6 +785,7 @@ class CobbleStateBackendTest {
     void restoreFromSingleHandleShrinksToTargetKeyGroupRange(@TempDir Path tempDir)
             throws Exception {
         String checkpointDirectory = tempDir.resolve("checkpoints").toString();
+        String restoredCheckpointDirectory = tempDir.resolve("restored-checkpoints").toString();
         KeyedStateHandle snapshotHandle;
         int retainedKey = findKeyForGroup(2);
 
@@ -794,13 +814,16 @@ class CobbleStateBackendTest {
                 createBackendContext(
                         tempDir.resolve("scale-up-target"),
                         false,
-                        checkpointDirectory,
+                        restoredCheckpointDirectory,
                         null,
                         TtlTimeProvider.DEFAULT,
                         false,
                         Collections.singletonList(snapshotHandle),
                         KeyGroupRange.of(0, 7))) {
             CobbleKeyedStateBackend<Integer> backend = context.cobbleBackend;
+            assertEquals(3, backend.getCobbleConfig().volumes.size());
+            assertVolumeKinds(
+                    backend.getCobbleConfig().volumes.get(2), Config.VolumeUsageKind.READONLY);
             ValueState<String> valueState =
                     backend.getPartitionedState(
                             "rescale-ns", StringSerializer.INSTANCE, descriptor);
