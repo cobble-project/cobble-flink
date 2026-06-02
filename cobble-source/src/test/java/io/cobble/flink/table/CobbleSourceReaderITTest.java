@@ -205,7 +205,13 @@ class CobbleSourceReaderITTest {
                     .computeIfAbsent(Long.valueOf(row.getLong(0)), ignored -> new ArrayList<>())
                     .add(row.getString(1).toString());
         }
-        assertEquals(640, namesById.size());
+        List<Long> missingIds = new ArrayList<>();
+        for (long id = 1L; id <= 640L; id++) {
+            if (!namesById.containsKey(Long.valueOf(id))) {
+                missingIds.add(Long.valueOf(id));
+            }
+        }
+        assertEquals(640, namesById.size(), "missing=" + missingIds);
         for (long id = 1L; id <= 640L; id++) {
             org.junit.jupiter.api.Assertions.assertTrue(namesById.containsKey(Long.valueOf(id)));
         }
