@@ -160,7 +160,11 @@ final class CobbleStateKeySerializer {
                 return;
             }
             output.setPosition(afterKeyMark);
-            namespaceSerializer.serialize(namespace, output);
+            if (namespace != null) {
+                namespaceSerializer.serialize(namespace, output);
+            }
+            // Flink may set a null namespace explicitly; encode it as a zero-length namespace
+            // instead of calling serializers that do not accept null values.
             namespaceLength = output.length() - afterKeyMark;
             cachedNamespaceValue = namespace == null ? null : namespaceSerializer.copy(namespace);
         }
@@ -259,7 +263,10 @@ final class CobbleStateKeySerializer {
                 return;
             }
             outputStream.setPosition(afterKeyMark);
-            namespaceSerializer.serialize(namespace, outputView);
+            if (namespace != null) {
+                namespaceSerializer.serialize(namespace, outputView);
+            }
+            // See the heap builder above: explicit null namespace is a valid Flink state access.
             namespaceLength = outputStream.position() - afterKeyMark;
             cachedNamespaceValue = namespace == null ? null : namespaceSerializer.copy(namespace);
         }

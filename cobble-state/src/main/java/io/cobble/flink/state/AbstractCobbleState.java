@@ -1,11 +1,11 @@
 package io.cobble.flink.state;
 
-import io.cobble.Db;
-import io.cobble.DirectScanCursor;
-import io.cobble.ReadOptions;
-import io.cobble.ScanCursor;
-import io.cobble.ScanOptions;
-import io.cobble.WriteOptions;
+import io.cobble.structured.Db;
+import io.cobble.structured.DirectScanCursor;
+import io.cobble.structured.ReadOptions;
+import io.cobble.structured.ScanCursor;
+import io.cobble.structured.ScanOptions;
+import io.cobble.structured.WriteOptions;
 
 import org.apache.flink.api.common.state.StateTtlConfig;
 import org.apache.flink.api.common.typeutils.TypeSerializer;
@@ -42,6 +42,10 @@ abstract class AbstractCobbleState<K, N, V> implements InternalKvState<K, N, V>,
     protected TypeSerializer<V> valueSerializer;
 
     protected N currentNamespace;
+    // Flink table/window operators can deliberately use a null namespace for accumulator state.
+    // Keep a separate "was set" bit so explicit null is different from an uninitialized state
+    // access.
+    protected boolean currentNamespaceSet;
 
     AbstractCobbleState(
             CobbleKeyedStateBackend<K> backend,
@@ -91,7 +95,7 @@ abstract class AbstractCobbleState<K, N, V> implements InternalKvState<K, N, V>,
     @Override
     public final void clear() {
         K key = backend.getCurrentKey();
-        if (key == null || currentNamespace == null) {
+        if (key == null || !currentNamespaceSet) {
             return;
         }
 
@@ -105,8 +109,8 @@ abstract class AbstractCobbleState<K, N, V> implements InternalKvState<K, N, V>,
 
     @Override
     public final void setCurrentNamespace(N namespace) {
-        this.currentNamespace =
-                Preconditions.checkNotNull(namespace, "Namespace must not be null.");
+        this.currentNamespace = namespace;
+        this.currentNamespaceSet = true;
     }
 
     @Override
@@ -198,12 +202,15 @@ abstract class AbstractCobbleState<K, N, V> implements InternalKvState<K, N, V>,
 
     protected final CobbleStateKeySerializer.DirectBufferSlice currentDirectKey()
             throws IOException {
-        return directRowKeyBuilder.buildKeyAndNamespace(
-                currentKey(),
-                Preconditions.checkNotNull(
-                        currentNamespace,
-                        "Current namespace is not set for Cobble state '%s'.",
-                        columnFamily));
+        return directRowKeyBuilder.buildKeyAndNamespace(currentKey(), checkedCurrentNamespace());
+    }
+
+    protected final N checkedCurrentNamespace() {
+        Preconditions.checkState(
+                currentNamespaceSet,
+                "Current namespace is not set for Cobble state '%s'.",
+                columnFamily);
+        return currentNamespace;
     }
 
     @Override

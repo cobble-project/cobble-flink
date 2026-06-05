@@ -12,9 +12,8 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import io.cobble.CancelledError;
 import io.cobble.Config;
-import io.cobble.MergeOperatorType;
-import io.cobble.Schema;
 import io.cobble.ShardSnapshot;
+import io.cobble.structured.Schema;
 
 import org.apache.flink.api.common.state.ListState;
 import org.apache.flink.api.common.state.ListStateDescriptor;
@@ -52,6 +51,7 @@ import org.apache.flink.runtime.state.PriorityComparable;
 import org.apache.flink.runtime.state.SnapshotResult;
 import org.apache.flink.runtime.state.TestTaskStateManagerBuilder;
 import org.apache.flink.runtime.state.heap.HeapPriorityQueueElement;
+import org.apache.flink.runtime.state.internal.InternalKvState;
 import org.apache.flink.runtime.state.memory.MemCheckpointStreamFactory;
 import org.apache.flink.runtime.state.ttl.MockTtlTimeProvider;
 import org.apache.flink.runtime.state.ttl.TtlTimeProvider;
@@ -68,6 +68,7 @@ import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.RunnableFuture;
 
 /** Tests for {@link CobbleStateBackend}. */
@@ -84,6 +85,29 @@ class CobbleStateBackendTest {
     @Test
     void stateBackendSupportsOnlyClaimRestoreMode() {
         assertFalse(new CobbleStateBackend().supportsNoClaimRestoreMode());
+    }
+
+    @Test
+    void timerServiceFactoryConfigurationFollowsRocksDbStylePrecedence() {
+        Configuration heapConfiguration = new Configuration();
+        heapConfiguration.setString(CobbleOptions.TIMER_SERVICE_FACTORY.key(), "HEAP");
+
+        CobbleStateBackend defaultBackend = new CobbleStateBackend();
+        CobbleStateBackend configuredBackend =
+                defaultBackend.configure(heapConfiguration, getClass().getClassLoader());
+        assertEquals(
+                CobbleStateBackend.PriorityQueueStateType.COBBLE,
+                defaultBackend.getPriorityQueueStateType());
+        assertEquals(
+                CobbleStateBackend.PriorityQueueStateType.HEAP,
+                configuredBackend.getPriorityQueueStateType());
+
+        defaultBackend.setPriorityQueueStateType(CobbleStateBackend.PriorityQueueStateType.COBBLE);
+        assertEquals(
+                CobbleStateBackend.PriorityQueueStateType.COBBLE,
+                defaultBackend
+                        .configure(heapConfiguration, getClass().getClassLoader())
+                        .getPriorityQueueStateType());
     }
 
     @Test
@@ -168,6 +192,33 @@ class CobbleStateBackendTest {
 
         builder.buildKeyAndNamespace("other-key", "ns-3");
         assertSame(sharedBuffer, builder.sharedBuffer());
+    }
+
+    @Test
+    void valueStateSupportsExplicitNullNamespace(@TempDir Path tempDir) throws Exception {
+        try (TestBackendContext context = createBackendContext(tempDir, false, null)) {
+            CobbleKeyedStateBackend<Integer> backend = context.cobbleBackend;
+            ValueStateDescriptor<String> descriptor =
+                    new ValueStateDescriptor<>("null-namespace-state", StringSerializer.INSTANCE);
+
+            backend.setCurrentKey(1);
+            ValueState<String> state =
+                    backend.getPartitionedState("initial", StringSerializer.INSTANCE, descriptor);
+            @SuppressWarnings("unchecked")
+            InternalKvState<Integer, String, String> internalState =
+                    (InternalKvState<Integer, String, String>) state;
+
+            internalState.setCurrentNamespace(null);
+            state.update("null-namespace");
+            assertEquals("null-namespace", state.value());
+
+            internalState.setCurrentNamespace("regular-namespace");
+            state.update("regular-namespace");
+            assertEquals("regular-namespace", state.value());
+
+            internalState.setCurrentNamespace(null);
+            assertEquals("null-namespace", state.value());
+        }
     }
 
     @Test
@@ -347,13 +398,19 @@ class CobbleStateBackendTest {
     }
 
     @Test
-    void timerStateUsesHeapPriorityQueueImplementation(@TempDir Path tempDir) throws Exception {
+    void timerStateUsesCobblePriorityQueueImplementation(@TempDir Path tempDir) throws Exception {
         try (TestBackendContext context = createBackendContext(tempDir, false, null)) {
             CobbleKeyedStateBackend<Integer> backend = context.cobbleBackend;
             TestTimerElementSerializer timerSerializer = new TestTimerElementSerializer();
 
             KeyGroupedInternalPriorityQueue<TestTimerElement> queue =
                     backend.create("timer-state", timerSerializer);
+            assertInstanceOf(CobbleTimerPriorityQueue.class, queue);
+            CobbleTimerPriorityQueue<TestTimerElement> cobbleQueue =
+                    (CobbleTimerPriorityQueue<TestTimerElement>) queue;
+            assertEquals(1, cobbleQueue.bucketForKeyGroup(1));
+            assertEquals(2, cobbleQueue.bucketForKeyGroup(2));
+            assertTrue(backend.requiresLegacySynchronousTimerSnapshots(null));
 
             TestTimerElement later = new TestTimerElement(20L, 1);
             TestTimerElement earlier = new TestTimerElement(10L, 2);
@@ -361,6 +418,8 @@ class CobbleStateBackendTest {
             queue.add(later);
             queue.add(earlier);
 
+            assertTrue(queue.getSubsetForKeyGroup(1).isEmpty());
+            assertTrue(queue.getSubsetForKeyGroup(2).isEmpty());
             assertEquals(earlier, queue.peek());
 
             backend.setCurrentKey(2);
@@ -369,6 +428,211 @@ class CobbleStateBackendTest {
             backend.setCurrentKey(1);
             assertEquals(later, queue.poll());
             assertTrue(queue.isEmpty());
+        }
+    }
+
+    @Test
+    void timerStateCanUseHeapPriorityQueueImplementation(@TempDir Path tempDir) throws Exception {
+        Configuration overrides = new Configuration();
+        overrides.set(
+                CobbleOptions.TIMER_SERVICE_FACTORY,
+                CobbleStateBackend.PriorityQueueStateType.HEAP);
+
+        try (TestBackendContext context =
+                createBackendContext(
+                        tempDir,
+                        false,
+                        null,
+                        null,
+                        TtlTimeProvider.DEFAULT,
+                        false,
+                        Collections.emptyList(),
+                        KeyGroupRange.of(0, 15),
+                        overrides)) {
+            CobbleKeyedStateBackend<Integer> backend = context.cobbleBackend;
+            KeyGroupedInternalPriorityQueue<TestTimerElement> queue =
+                    backend.create("heap-timer-state", new TestTimerElementSerializer());
+            TestTimerElement later = new TestTimerElement(20L, findKeyForGroup(1));
+            TestTimerElement earlier = new TestTimerElement(10L, findKeyForGroup(2));
+
+            assertFalse(queue instanceof CobbleTimerPriorityQueue);
+            assertFalse(
+                    backend.getCobbleDb()
+                            .currentSchema()
+                            .columnFamilies()
+                            .containsKey(
+                                    CobblePriorityQueueSetFactory.timerQueueColumnFamilyName(
+                                            "heap-timer-state")));
+            assertTrue(queue.add(later));
+            assertTrue(queue.add(earlier));
+            assertEquals(Collections.singleton(later), queue.getSubsetForKeyGroup(1));
+            assertEquals(Collections.singleton(earlier), queue.getSubsetForKeyGroup(2));
+            assertEquals(earlier, queue.poll());
+            assertEquals(later, queue.poll());
+            assertTrue(queue.isEmpty());
+        }
+    }
+
+    @Test
+    void rejectsRestoringCobbleTimersIntoHeapQueues(@TempDir Path tempDir) throws Exception {
+        String checkpointDirectory = tempDir.resolve("checkpoints").toString();
+        KeyedStateHandle snapshotHandle;
+
+        try (TestBackendContext context =
+                createBackendContext(tempDir.resolve("source"), false, checkpointDirectory)) {
+            KeyGroupedInternalPriorityQueue<TestTimerElement> queue =
+                    context.cobbleBackend.create("timer-state", new TestTimerElementSerializer());
+            assertTrue(queue.add(new TestTimerElement(10L, findKeyForGroup(2))));
+            snapshotHandle = runCheckpointSnapshot(context.cobbleBackend, 87L);
+        }
+
+        Configuration heapConfiguration = new Configuration();
+        heapConfiguration.set(
+                CobbleOptions.TIMER_SERVICE_FACTORY,
+                CobbleStateBackend.PriorityQueueStateType.HEAP);
+        UnsupportedOperationException error =
+                assertThrows(
+                        UnsupportedOperationException.class,
+                        () ->
+                                createBackendContext(
+                                        tempDir.resolve("restored"),
+                                        false,
+                                        checkpointDirectory,
+                                        null,
+                                        TtlTimeProvider.DEFAULT,
+                                        false,
+                                        Collections.singletonList(snapshotHandle),
+                                        KeyGroupRange.of(0, 15),
+                                        heapConfiguration));
+        assertTrue(error.getMessage().contains(CobbleOptions.TIMER_SERVICE_FACTORY.key()));
+    }
+
+    @Test
+    void timerStateRestoresFromCobbleSnapshot(@TempDir Path tempDir) throws Exception {
+        String checkpointDirectory = tempDir.resolve("checkpoints").toString();
+        KeyedStateHandle snapshotHandle;
+        Set<TestTimerElement> keyGroupOneOverlaySnapshot;
+        Set<TestTimerElement> keyGroupTwoOverlaySnapshot;
+
+        try (TestBackendContext context =
+                createBackendContext(tempDir.resolve("source"), false, checkpointDirectory)) {
+            CobbleKeyedStateBackend<Integer> backend = context.cobbleBackend;
+            TestTimerElementSerializer timerSerializer = new TestTimerElementSerializer();
+            KeyGroupedInternalPriorityQueue<TestTimerElement> queue =
+                    backend.create("timer-state", timerSerializer);
+
+            TestTimerElement first = new TestTimerElement(10L, findKeyForGroup(2));
+            TestTimerElement second = new TestTimerElement(20L, findKeyForGroup(1));
+            TestTimerElement third = new TestTimerElement(30L, findKeyForGroup(2));
+
+            queue.add(third);
+            queue.add(first);
+            queue.add(second);
+
+            assertEquals(first, queue.poll());
+            keyGroupOneOverlaySnapshot = queue.getSubsetForKeyGroup(1);
+            keyGroupTwoOverlaySnapshot = queue.getSubsetForKeyGroup(2);
+            snapshotHandle = runCheckpointSnapshot(backend, 88L);
+        }
+
+        try (TestBackendContext context =
+                createBackendContext(
+                        tempDir.resolve("restored"),
+                        false,
+                        checkpointDirectory,
+                        null,
+                        TtlTimeProvider.DEFAULT,
+                        false,
+                        Collections.singletonList(snapshotHandle))) {
+            CobbleKeyedStateBackend<Integer> backend = context.cobbleBackend;
+            KeyGroupedInternalPriorityQueue<TestTimerElement> restoredQueue =
+                    backend.create("timer-state", new TestTimerElementSerializer());
+
+            restoredQueue.addAll(keyGroupOneOverlaySnapshot);
+            restoredQueue.addAll(keyGroupTwoOverlaySnapshot);
+            assertEquals(2, restoredQueue.size());
+            assertEquals(new TestTimerElement(20L, findKeyForGroup(1)), restoredQueue.peek());
+            assertEquals(new TestTimerElement(20L, findKeyForGroup(1)), restoredQueue.poll());
+            assertEquals(new TestTimerElement(30L, findKeyForGroup(2)), restoredQueue.poll());
+            assertTrue(restoredQueue.isEmpty());
+        }
+    }
+
+    @Test
+    void timerStateAcceptsEarlierTimerAfterPolling(@TempDir Path tempDir) throws Exception {
+        try (TestBackendContext context = createBackendContext(tempDir, false, null)) {
+            CobbleKeyedStateBackend<Integer> backend = context.cobbleBackend;
+            KeyGroupedInternalPriorityQueue<TestTimerElement> queue =
+                    backend.create("timer-state", new TestTimerElementSerializer());
+            int key = findKeyForGroup(2);
+            TestTimerElement later = new TestTimerElement(20L, key);
+            TestTimerElement earlier = new TestTimerElement(10L, key);
+
+            assertTrue(queue.add(later));
+            assertEquals(later, queue.poll());
+            assertTrue(queue.add(earlier));
+            assertEquals(Collections.singleton(earlier), queue.getSubsetForKeyGroup(2));
+            assertEquals(earlier, queue.poll());
+            assertTrue(queue.getSubsetForKeyGroup(2).isEmpty());
+            assertTrue(queue.isEmpty());
+        }
+    }
+
+    @Test
+    void timerStateAcceptsSameTimerAfterPolling(@TempDir Path tempDir) throws Exception {
+        try (TestBackendContext context = createBackendContext(tempDir, false, null)) {
+            CobbleKeyedStateBackend<Integer> backend = context.cobbleBackend;
+            KeyGroupedInternalPriorityQueue<TestTimerElement> queue =
+                    backend.create("timer-state", new TestTimerElementSerializer());
+            TestTimerElement timer = new TestTimerElement(20L, findKeyForGroup(2));
+
+            assertTrue(queue.add(timer));
+            assertEquals(timer, queue.poll());
+            assertTrue(queue.add(timer));
+            assertEquals(Collections.singleton(timer), queue.getSubsetForKeyGroup(2));
+            assertEquals(timer, queue.poll());
+            assertTrue(queue.isEmpty());
+        }
+    }
+
+    @Test
+    void timerStateRestoresLateTimerFromLegacyOverlaySnapshot(@TempDir Path tempDir)
+            throws Exception {
+        String checkpointDirectory = tempDir.resolve("checkpoints").toString();
+        KeyedStateHandle snapshotHandle;
+        Set<TestTimerElement> overlaySnapshot;
+        int key = findKeyForGroup(2);
+        TestTimerElement consumed = new TestTimerElement(20L, key);
+        TestTimerElement late = new TestTimerElement(10L, key);
+
+        try (TestBackendContext context =
+                createBackendContext(tempDir.resolve("source"), false, checkpointDirectory)) {
+            CobbleKeyedStateBackend<Integer> backend = context.cobbleBackend;
+            KeyGroupedInternalPriorityQueue<TestTimerElement> queue =
+                    backend.create("timer-state", new TestTimerElementSerializer());
+
+            assertTrue(queue.add(consumed));
+            assertEquals(consumed, queue.poll());
+            assertTrue(queue.add(late));
+            overlaySnapshot = queue.getSubsetForKeyGroup(2);
+            snapshotHandle = runCheckpointSnapshot(backend, 89L);
+        }
+
+        try (TestBackendContext context =
+                createBackendContext(
+                        tempDir.resolve("restored"),
+                        false,
+                        checkpointDirectory,
+                        null,
+                        TtlTimeProvider.DEFAULT,
+                        false,
+                        Collections.singletonList(snapshotHandle))) {
+            KeyGroupedInternalPriorityQueue<TestTimerElement> restoredQueue =
+                    context.cobbleBackend.create("timer-state", new TestTimerElementSerializer());
+
+            restoredQueue.addAll(overlaySnapshot);
+            assertEquals(late, restoredQueue.poll());
+            assertTrue(restoredQueue.isEmpty());
         }
     }
 
@@ -676,8 +940,6 @@ class CobbleStateBackendTest {
                     Config.VolumeUsageKind.PRIMARY_DATA_PRIORITY_HIGH,
                     Config.VolumeUsageKind.META,
                     Config.VolumeUsageKind.SNAPSHOT);
-            assertVolumeKinds(
-                    backend.getCobbleConfig().volumes.get(2), Config.VolumeUsageKind.CACHE);
 
             ValueStateDescriptor<String> valueStateDescriptor =
                     new ValueStateDescriptor<>("restore-value-state", StringSerializer.INSTANCE);
@@ -821,9 +1083,6 @@ class CobbleStateBackendTest {
                         Collections.singletonList(snapshotHandle),
                         KeyGroupRange.of(0, 7))) {
             CobbleKeyedStateBackend<Integer> backend = context.cobbleBackend;
-            assertEquals(3, backend.getCobbleConfig().volumes.size());
-            assertVolumeKinds(
-                    backend.getCobbleConfig().volumes.get(2), Config.VolumeUsageKind.READONLY);
             ValueState<String> valueState =
                     backend.getPartitionedState(
                             "rescale-ns", StringSerializer.INSTANCE, descriptor);
@@ -836,6 +1095,9 @@ class CobbleStateBackendTest {
             assertEquals(1, rescaledSnapshot.ranges.size());
             assertEquals(0, rescaledSnapshot.ranges.get(0).start);
             assertEquals(7, rescaledSnapshot.ranges.get(0).end);
+            assertEquals(3, backend.getCobbleConfig().volumes.size());
+            assertVolumeKinds(
+                    backend.getCobbleConfig().volumes.get(2), Config.VolumeUsageKind.READONLY);
         }
     }
 
@@ -1534,10 +1796,14 @@ class CobbleStateBackendTest {
     }
 
     private static void assertBytesColumnFamily(Schema schema, String columnFamilyName) {
-        Schema.ColumnFamily family = schema.columnFamily(columnFamilyName);
+        Map<Integer, Schema.ColumnType> family = schema.columnFamilies().get(columnFamilyName);
         assertNotNull(family, "Missing column family: " + columnFamilyName);
-        assertEquals(1, family.numColumns);
-        assertEquals(MergeOperatorType.BYTES.operatorId(), family.mergeOperatorId(0));
+        if (family.isEmpty()) {
+            return;
+        }
+        assertEquals(1, family.size());
+        assertTrue(family.containsKey(0));
+        assertTrue(family.get(0) instanceof Schema.ColumnType.Bytes);
     }
 
     private static void assertVolumeKinds(

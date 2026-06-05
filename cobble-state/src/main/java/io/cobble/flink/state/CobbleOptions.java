@@ -19,6 +19,15 @@ public final class CobbleOptions {
                                     + ClusterOptions.TASK_MANAGER_PROCESS_WORKING_DIR_BASE.key()
                                     + ".");
 
+    /** Timer-service priority queue implementation used by the Cobble state backend. */
+    public static final ConfigOption<CobbleStateBackend.PriorityQueueStateType>
+            TIMER_SERVICE_FACTORY =
+                    ConfigOptions.key("state.backend.cobble.timer-service.factory")
+                            .enumType(CobbleStateBackend.PriorityQueueStateType.class)
+                            .defaultValue(CobbleStateBackend.PriorityQueueStateType.COBBLE)
+                            .withDescription(
+                                    "This determines the factory for timer service state implementation.");
+
     /** Whether Cobble should use the managed memory budget of the slot. */
     public static final ConfigOption<Boolean> USE_MANAGED_MEMORY =
             ConfigOptions.key("state.backend.cobble.memory.managed")

@@ -1,9 +1,9 @@
 package io.cobble.flink.state;
 
 import io.cobble.CancelledError;
-import io.cobble.Db;
 import io.cobble.PendingSnapshot;
 import io.cobble.ShardSnapshot;
+import io.cobble.structured.Db;
 
 import org.apache.flink.core.fs.CloseableRegistry;
 import org.apache.flink.core.memory.DataOutputViewStreamWrapper;
@@ -46,15 +46,20 @@ final class CobbleSnapshotStrategy
     private final Db cobbleDb;
     private final KeyGroupRange keyGroupRange;
     private final Supplier<Boolean> hasRegisteredState;
+    private final Supplier<Boolean> hasCobbleTimers;
     private final UUID backendIdentifier;
     private final Map<Long, TrackedSnapshot> trackedSnapshots;
     private final Map<Long, CobbleSnapshotResources> pendingSnapshots;
 
     CobbleSnapshotStrategy(
-            Db cobbleDb, KeyGroupRange keyGroupRange, Supplier<Boolean> hasRegisteredState) {
+            Db cobbleDb,
+            KeyGroupRange keyGroupRange,
+            Supplier<Boolean> hasRegisteredState,
+            Supplier<Boolean> hasCobbleTimers) {
         this.cobbleDb = cobbleDb;
         this.keyGroupRange = keyGroupRange;
         this.hasRegisteredState = hasRegisteredState;
+        this.hasCobbleTimers = hasCobbleTimers;
         this.backendIdentifier = UUID.randomUUID();
         this.trackedSnapshots = new ConcurrentHashMap<>();
         this.pendingSnapshots = new ConcurrentHashMap<>();
@@ -158,7 +163,7 @@ final class CobbleSnapshotStrategy
         boolean success = false;
         try {
             ShardSnapshot shardSnapshot = snapshotResources.awaitSnapshot();
-            CobbleSnapshotMetadata.fromShardSnapshot(shardSnapshot)
+            CobbleSnapshotMetadata.fromShardSnapshot(shardSnapshot, hasCobbleTimers.get())
                     .write(
                             new DataOutputViewStreamWrapper(
                                     streamProvider.getCheckpointOutputStream()));

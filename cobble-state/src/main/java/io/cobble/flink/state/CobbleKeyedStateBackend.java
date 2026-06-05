@@ -2,10 +2,9 @@ package io.cobble.flink.state;
 
 import io.cobble.ColumnFamilyOptions;
 import io.cobble.Config;
-import io.cobble.Db;
-import io.cobble.MergeOperatorType;
-import io.cobble.Schema;
-import io.cobble.SchemaBuilder;
+import io.cobble.structured.Db;
+import io.cobble.structured.Schema;
+import io.cobble.structured.StructuredSchemaBuilder;
 
 import org.apache.flink.annotation.VisibleForTesting;
 import org.apache.flink.api.common.ExecutionConfig;
@@ -29,6 +28,7 @@ import org.apache.flink.runtime.state.KeyGroupedInternalPriorityQueue;
 import org.apache.flink.runtime.state.Keyed;
 import org.apache.flink.runtime.state.KeyedStateHandle;
 import org.apache.flink.runtime.state.PriorityComparable;
+import org.apache.flink.runtime.state.PriorityQueueSetFactory;
 import org.apache.flink.runtime.state.SavepointResources;
 import org.apache.flink.runtime.state.SnapshotExecutionType;
 import org.apache.flink.runtime.state.SnapshotResult;
@@ -68,8 +68,9 @@ final class CobbleKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
     private final Config cobbleConfig;
     private final Db cobbleDb;
     private final Map<String, StateDescriptor.Type> stateTypes;
-    private final List<AbstractCobbleState<?, ?, ?>> stateResources;
+    private final PriorityQueueSetFactory priorityQueueFactory;
     private final HeapPriorityQueuesManager heapPriorityQueuesManager;
+    private final List<AbstractCobbleState<?, ?, ?>> stateResources;
     private final CobbleSnapshotStrategy snapshotStrategy;
     private final AtomicBoolean resourcesClosed;
     private final boolean manualTtlTimeProviderForTests;
@@ -88,7 +89,9 @@ final class CobbleKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
             Path configPath,
             Config cobbleConfig,
             Db cobbleDb,
-            boolean manualTtlTimeProviderForTests) {
+            boolean manualTtlTimeProviderForTests,
+            boolean restoredNativeQueuesMayContainEntries,
+            CobbleStateBackend.PriorityQueueStateType priorityQueueStateType) {
         super(
                 kvStateRegistry,
                 keySerializer,
@@ -104,18 +107,27 @@ final class CobbleKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
         this.cobbleConfig = cobbleConfig;
         this.cobbleDb = cobbleDb;
         this.stateTypes = new HashMap<>();
-        this.stateResources = new ArrayList<>();
+        this.priorityQueueFactory =
+                createPriorityQueueFactory(
+                        cobbleDb,
+                        keyContext,
+                        restoredNativeQueuesMayContainEntries,
+                        priorityQueueStateType);
         this.heapPriorityQueuesManager =
-                new HeapPriorityQueuesManager(
-                        new HashMap<String, HeapPriorityQueueSnapshotRestoreWrapper<?>>(),
-                        new HeapPriorityQueueSetFactory(
+                priorityQueueFactory instanceof HeapPriorityQueueSetFactory
+                        ? new HeapPriorityQueuesManager(
+                                new HashMap<String, HeapPriorityQueueSnapshotRestoreWrapper<?>>(),
+                                (HeapPriorityQueueSetFactory) priorityQueueFactory,
                                 keyContext.getKeyGroupRange(),
-                                keyContext.getNumberOfKeyGroups(),
-                                128),
-                        keyContext.getKeyGroupRange(),
-                        keyContext.getNumberOfKeyGroups());
+                                keyContext.getNumberOfKeyGroups())
+                        : null;
+        this.stateResources = new ArrayList<>();
         this.snapshotStrategy =
-                new CobbleSnapshotStrategy(cobbleDb, keyGroupRange, () -> !stateTypes.isEmpty());
+                new CobbleSnapshotStrategy(
+                        cobbleDb,
+                        keyGroupRange,
+                        () -> !stateTypes.isEmpty() || hasCobblePriorityQueues(),
+                        this::hasCobblePriorityQueues);
         this.resourcesClosed = new AtomicBoolean(false);
         this.manualTtlTimeProviderForTests = manualTtlTimeProviderForTests;
     }
@@ -204,24 +216,26 @@ final class CobbleKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
         }
     }
 
-    /** Timer state uses Flink's heap priority queue manager, independent from Cobble KV storage. */
     @Nonnull
     @Override
     public <T extends HeapPriorityQueueElement & PriorityComparable<? super T> & Keyed<?>>
             KeyGroupedInternalPriorityQueue<T> create(
                     @Nonnull String stateName,
                     @Nonnull TypeSerializer<T> byteOrderedElementSerializer) {
-        return heapPriorityQueuesManager.createOrUpdate(stateName, byteOrderedElementSerializer);
+        return create(stateName, byteOrderedElementSerializer, false);
     }
 
-    /** Timer state uses Flink's heap priority queue manager, independent from Cobble KV storage. */
     @Override
     public <T extends HeapPriorityQueueElement & PriorityComparable<? super T> & Keyed<?>>
             KeyGroupedInternalPriorityQueue<T> create(
                     @Nonnull String stateName,
                     @Nonnull TypeSerializer<T> byteOrderedElementSerializer,
                     boolean allowFutureMetadataUpdates) {
-        return heapPriorityQueuesManager.createOrUpdate(
+        if (heapPriorityQueuesManager != null) {
+            return heapPriorityQueuesManager.createOrUpdate(
+                    stateName, byteOrderedElementSerializer, allowFutureMetadataUpdates);
+        }
+        return priorityQueueFactory.create(
                 stateName, byteOrderedElementSerializer, allowFutureMetadataUpdates);
     }
 
@@ -252,7 +266,9 @@ final class CobbleKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
 
     @Override
     public boolean requiresLegacySynchronousTimerSnapshots(SnapshotType checkpointType) {
-        // heap timer requires legacy synchronous timer snapshots.
+        // Heap queues already rely on Flink's timer snapshot path. Cobble queues use that same
+        // path for the prefetched overlay because pollBatchDirect() has already advanced the
+        // native cursor before snapshotting the shard.
         return true;
     }
 
@@ -366,7 +382,13 @@ final class CobbleKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
                         stateDesc.getTtlConfig());
     }
 
-    /** Creates or validates the one-column-family-per-state schema contract. */
+    /**
+     * Creates or validates the bytes-only column-family contract for keyed state.
+     *
+     * <p>Structured schema families default unspecified columns to bytes, so an existing family
+     * with no explicit typed columns is still valid for our state layout as long as column 0 stays
+     * bytes-typed.
+     */
     private <S extends State, SV> void ensureStateColumnFamily(StateDescriptor<S, SV> stateDesc)
             throws Exception {
         StateDescriptor.Type previousType =
@@ -382,35 +404,35 @@ final class CobbleKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
                             + '.');
         }
 
-        Schema.ColumnFamily family = cobbleDb.currentSchema().columnFamily(stateDesc.getName());
+        java.util.Map<Integer, Schema.ColumnType> family =
+                cobbleDb.currentSchema().columnFamilies().get(stateDesc.getName());
         if (family == null) {
             boolean valueTtlEnabledForState =
                     stateDesc.getTtlConfig() != null && stateDesc.getTtlConfig().isEnabled();
-            try (SchemaBuilder builder = cobbleDb.updateSchema()) {
+            try (StructuredSchemaBuilder builder = cobbleDb.updateSchema()) {
                 builder.setColumnFamilyOptions(
                         stateDesc.getName(),
                         ColumnFamilyOptions.defaults().valueHasTtl(valueTtlEnabledForState));
-                builder.addColumn(stateDesc.getName(), 0, MergeOperatorType.BYTES, null);
+                builder.addBytesColumn(stateDesc.getName(), 0);
                 builder.commit();
             }
             return;
         }
 
-        if (family.numColumns != 1) {
+        if (!family.isEmpty() && (family.size() != 1 || !family.containsKey(0))) {
             throw new IllegalStateException(
                     "Cobble state column family '"
                             + stateDesc.getName()
-                            + "' must contain exactly column 0, but found "
-                            + family.numColumns
+                            + "' must be bytes-only with at most explicit column 0, but found "
+                            + family.keySet()
                             + " columns.");
         }
 
-        if (!MergeOperatorType.BYTES.operatorId().equals(family.mergeOperatorId(0))) {
+        if (!family.isEmpty() && !(family.get(0) instanceof Schema.ColumnType.Bytes)) {
             throw new IllegalStateException(
                     "Cobble state column family '"
                             + stateDesc.getName()
-                            + "' must use the bytes merge operator, but found "
-                            + family.mergeOperatorId(0)
+                            + "' must store bytes values in column 0."
                             + '.');
         }
     }
@@ -423,6 +445,12 @@ final class CobbleKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
 
         IOException error = null;
         snapshotStrategy.close();
+
+        try {
+            closeTimerQueues();
+        } catch (IOException e) {
+            error = e;
+        }
 
         try {
             cobbleDb.close();
@@ -469,6 +497,39 @@ final class CobbleKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
     /** Tracks state-owned native option objects so the backend can close them with the DB. */
     private void trackStateResource(AbstractCobbleState<?, ?, ?> state) {
         stateResources.add(state);
+    }
+
+    /** Releases Cobble timer queues before the native DB closes. */
+    private void closeTimerQueues() throws IOException {
+        if (priorityQueueFactory instanceof CobblePriorityQueueSetFactory) {
+            ((CobblePriorityQueueSetFactory) priorityQueueFactory).close();
+        }
+    }
+
+    private boolean hasCobblePriorityQueues() {
+        return priorityQueueFactory instanceof CobblePriorityQueueSetFactory
+                && ((CobblePriorityQueueSetFactory) priorityQueueFactory).hasQueues();
+    }
+
+    private static PriorityQueueSetFactory createPriorityQueueFactory(
+            Db cobbleDb,
+            InternalKeyContext<?> keyContext,
+            boolean restoredNativeQueuesMayContainEntries,
+            CobbleStateBackend.PriorityQueueStateType priorityQueueStateType) {
+        switch (priorityQueueStateType) {
+            case HEAP:
+                return new HeapPriorityQueueSetFactory(
+                        keyContext.getKeyGroupRange(), keyContext.getNumberOfKeyGroups(), 128);
+            case COBBLE:
+                return new CobblePriorityQueueSetFactory(
+                        cobbleDb,
+                        keyContext.getKeyGroupRange(),
+                        keyContext.getNumberOfKeyGroups(),
+                        restoredNativeQueuesMayContainEntries);
+            default:
+                throw new IllegalArgumentException(
+                        "Unknown Cobble priority queue state type: " + priorityQueueStateType);
+        }
     }
 
     /** Closes cached state-local native option handles after the shared Cobble DB is closed. */

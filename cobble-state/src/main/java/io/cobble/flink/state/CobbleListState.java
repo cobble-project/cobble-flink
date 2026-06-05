@@ -1,7 +1,7 @@
 package io.cobble.flink.state;
 
-import io.cobble.Db;
-import io.cobble.DirectEncodedRow;
+import io.cobble.structured.Db;
+import io.cobble.structured.DirectEncodedRow;
 
 import org.apache.flink.api.common.state.StateTtlConfig;
 import org.apache.flink.api.common.typeutils.TypeSerializer;
@@ -155,7 +155,7 @@ final class CobbleListState<K, N, V> extends AbstractCobbleState<K, N, List<V>>
             if (encodedRow == null) {
                 return null;
             }
-            return encodedRow.decodeColumn(
+            return encodedRow.decodeBytesColumn(
                     STATE_COLUMN_INDEX, directListSerializer::copyRawWithoutTrailingDelimiter);
         }
     }
@@ -168,7 +168,7 @@ final class CobbleListState<K, N, V> extends AbstractCobbleState<K, N, List<V>>
             if (encodedRow == null) {
                 return null;
             }
-            return encodedRow.decodeColumn(
+            return encodedRow.decodeBytesColumn(
                     STATE_COLUMN_INDEX, input -> directListSerializer.decode(serializer, input));
         }
     }
@@ -181,7 +181,7 @@ final class CobbleListState<K, N, V> extends AbstractCobbleState<K, N, List<V>>
             if (encodedRow == null) {
                 return null;
             }
-            return encodedRow.decodeColumn(STATE_COLUMN_INDEX, directListSerializer::copyRaw);
+            return encodedRow.decodeBytesColumn(STATE_COLUMN_INDEX, directListSerializer::copyRaw);
         }
     }
 

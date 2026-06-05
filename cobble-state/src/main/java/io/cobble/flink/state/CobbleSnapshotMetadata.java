@@ -19,13 +19,16 @@ final class CobbleSnapshotMetadata {
     private static final int VERSION = 1;
 
     private final ShardSnapshot shardSnapshot;
+    private final boolean containsCobbleTimers;
 
-    private CobbleSnapshotMetadata(ShardSnapshot shardSnapshot) {
+    private CobbleSnapshotMetadata(ShardSnapshot shardSnapshot, boolean containsCobbleTimers) {
         this.shardSnapshot = shardSnapshot;
+        this.containsCobbleTimers = containsCobbleTimers;
     }
 
-    static CobbleSnapshotMetadata fromShardSnapshot(ShardSnapshot shardSnapshot) {
-        return new CobbleSnapshotMetadata(shardSnapshot);
+    static CobbleSnapshotMetadata fromShardSnapshot(
+            ShardSnapshot shardSnapshot, boolean containsCobbleTimers) {
+        return new CobbleSnapshotMetadata(shardSnapshot, containsCobbleTimers);
     }
 
     static CobbleSnapshotMetadata read(DataInputView input) throws IOException {
@@ -78,7 +81,8 @@ final class CobbleSnapshotMetadata {
         }
         shardSnapshot.columnFamilyIds = columnFamilyIds;
 
-        return new CobbleSnapshotMetadata(shardSnapshot);
+        boolean containsCobbleTimers = input.readBoolean();
+        return new CobbleSnapshotMetadata(shardSnapshot, containsCobbleTimers);
     }
 
     void write(DataOutputView output) throws IOException {
@@ -102,10 +106,15 @@ final class CobbleSnapshotMetadata {
             output.writeUTF(entry.getKey());
             output.writeInt(entry.getValue());
         }
+        output.writeBoolean(containsCobbleTimers);
     }
 
     ShardSnapshot shardSnapshot() {
         return shardSnapshot;
+    }
+
+    boolean containsCobbleTimers() {
+        return containsCobbleTimers;
     }
 
     private static String nullToEmpty(String value) {

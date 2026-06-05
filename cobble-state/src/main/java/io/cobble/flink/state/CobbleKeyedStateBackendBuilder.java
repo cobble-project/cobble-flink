@@ -1,7 +1,7 @@
 package io.cobble.flink.state;
 
 import io.cobble.Config;
-import io.cobble.Db;
+import io.cobble.structured.Db;
 
 import org.apache.flink.api.common.typeutils.TypeSerializer;
 import org.apache.flink.configuration.Configuration;
@@ -57,6 +57,7 @@ final class CobbleKeyedStateBackendBuilder<K> {
     private final double managedMemoryFraction;
     private final boolean manualTtlTimeProviderForTests;
     private final Configuration flinkConfig;
+    private final CobbleStateBackend.PriorityQueueStateType priorityQueueStateType;
 
     CobbleKeyedStateBackendBuilder(
             Environment env,
@@ -75,7 +76,8 @@ final class CobbleKeyedStateBackendBuilder<K> {
             boolean localDirPrimaryHighPriority,
             double managedMemoryFraction,
             boolean manualTtlTimeProviderForTests,
-            Configuration flinkConfig) {
+            Configuration flinkConfig,
+            CobbleStateBackend.PriorityQueueStateType priorityQueueStateType) {
         this.env = env;
         this.kvStateRegistry = kvStateRegistry;
         this.keySerializer = keySerializer;
@@ -93,14 +95,20 @@ final class CobbleKeyedStateBackendBuilder<K> {
         this.managedMemoryFraction = managedMemoryFraction;
         this.manualTtlTimeProviderForTests = manualTtlTimeProviderForTests;
         this.flinkConfig = flinkConfig;
+        this.priorityQueueStateType = priorityQueueStateType;
     }
 
-    /** Builds the minimal keyed-backend shell after Cobble resources are prepared. */
+    /** Builds the keyed backend after Cobble resources are prepared. */
     CobbleKeyedStateBackend<K> build() throws IOException {
         CloseableRegistry cancelStreamRegistryForBackend = new CloseableRegistry();
+        validateTimerBackendRestoreCompatibility();
         CobbleBackendResources resources = prepareCobbleResources();
         boolean success = false;
         try {
+            // Restored native timer queues can contain rows before Flink recreates their logical
+            // queue objects. Mark their cached sizes unknown so size() discovers them lazily.
+            boolean restoredNativeQueuesMayContainEntries =
+                    restoreStateHandles != null && !restoreStateHandles.isEmpty();
             CobbleKeyedStateBackend<K> backend =
                     new CobbleKeyedStateBackend<>(
                             kvStateRegistry,
@@ -116,13 +124,38 @@ final class CobbleKeyedStateBackendBuilder<K> {
                             resources.configPath,
                             resources.config,
                             resources.db,
-                            manualTtlTimeProviderForTests);
+                            manualTtlTimeProviderForTests,
+                            restoredNativeQueuesMayContainEntries,
+                            priorityQueueStateType);
             success = true;
             return backend;
         } finally {
             if (!success) {
                 IOUtils.closeQuietly(cancelStreamRegistryForBackend);
                 resources.close();
+            }
+        }
+    }
+
+    /**
+     * Prevents a Cobble-backed timer checkpoint from silently losing native timers when restored
+     * into heap queues. Cobble checkpoints split timer state between native priority-queue column
+     * families and Flink's legacy overlay snapshot; restoring only the overlay into HEAP would drop
+     * the native tail.
+     */
+    private void validateTimerBackendRestoreCompatibility() throws IOException {
+        if (priorityQueueStateType != CobbleStateBackend.PriorityQueueStateType.HEAP
+                || restoreStateHandles == null
+                || restoreStateHandles.isEmpty()) {
+            return;
+        }
+        for (RestoreSource restoreSource : readRestoreSources()) {
+            if (restoreSource.metadata.containsCobbleTimers()) {
+                throw new UnsupportedOperationException(
+                        "Cannot restore a checkpoint written with the COBBLE timer-service "
+                                + "backend into HEAP timer queues. Keep "
+                                + CobbleOptions.TIMER_SERVICE_FACTORY.key()
+                                + " unchanged across restore.");
             }
         }
     }

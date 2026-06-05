@@ -1,13 +1,17 @@
 package io.cobble.flink.state;
 
+import static org.apache.flink.configuration.description.TextElement.text;
+
 import io.cobble.flink.common.CobbleLoader;
 
 import org.apache.flink.api.common.JobID;
 import org.apache.flink.api.common.typeutils.TypeSerializer;
 import org.apache.flink.configuration.CheckpointingOptions;
 import org.apache.flink.configuration.Configuration;
+import org.apache.flink.configuration.DescribedEnum;
 import org.apache.flink.configuration.IllegalConfigurationException;
 import org.apache.flink.configuration.ReadableConfig;
+import org.apache.flink.configuration.description.InlineElement;
 import org.apache.flink.core.execution.SavepointFormatType;
 import org.apache.flink.core.fs.CloseableRegistry;
 import org.apache.flink.metrics.MetricGroup;
@@ -23,6 +27,7 @@ import org.apache.flink.runtime.state.OperatorStateBackend;
 import org.apache.flink.runtime.state.OperatorStateHandle;
 import org.apache.flink.runtime.state.metrics.LatencyTrackingStateConfig;
 import org.apache.flink.runtime.state.ttl.TtlTimeProvider;
+import org.apache.flink.util.Preconditions;
 
 import javax.annotation.Nonnull;
 
@@ -37,9 +42,8 @@ import java.util.UUID;
 /**
  * Cobble-backed state backend bootstrap for Flink 1.17.
  *
- * <p>The current version derives Cobble memory and storage directories from Flink
- * configuration/runtime and opens a live Cobble DB while the keyed-state API remains intentionally
- * unimplemented.
+ * <p>The backend derives Cobble memory, storage directories, and timer-queue implementation from
+ * Flink configuration and opens one live structured Cobble DB per keyed backend.
  */
 public class CobbleStateBackend extends AbstractManagedMemoryStateBackend
         implements ConfigurableStateBackend {
@@ -57,9 +61,10 @@ public class CobbleStateBackend extends AbstractManagedMemoryStateBackend
     private final boolean localDirPrimaryHighPriority;
     private final boolean manualTtlTimeProviderForTests;
     private final Configuration flinkConfig;
+    private PriorityQueueStateType priorityQueueStateType;
 
     public CobbleStateBackend() {
-        this(null, new CobbleMemoryConfiguration(), null, false, false, new Configuration());
+        this(null, new CobbleMemoryConfiguration(), null, false, false, new Configuration(), null);
         ensureCobbleLoaded();
     }
 
@@ -70,7 +75,8 @@ public class CobbleStateBackend extends AbstractManagedMemoryStateBackend
                 null,
                 false,
                 manualTtlTimeProviderForTests,
-                new Configuration());
+                new Configuration(),
+                null);
         ensureCobbleLoaded();
     }
 
@@ -80,13 +86,15 @@ public class CobbleStateBackend extends AbstractManagedMemoryStateBackend
             String checkpointDirectory,
             boolean localDirPrimaryHighPriority,
             boolean manualTtlTimeProviderForTests,
-            Configuration flinkConfig) {
+            Configuration flinkConfig,
+            PriorityQueueStateType priorityQueueStateType) {
         this.localDbDirectories = localDbDirectories;
         this.memoryConfiguration = memoryConfiguration;
         this.checkpointDirectory = checkpointDirectory;
         this.localDirPrimaryHighPriority = localDirPrimaryHighPriority;
         this.manualTtlTimeProviderForTests = manualTtlTimeProviderForTests;
         this.flinkConfig = flinkConfig;
+        this.priorityQueueStateType = priorityQueueStateType;
     }
 
     private CobbleStateBackend(CobbleStateBackend original, ReadableConfig config) {
@@ -107,6 +115,10 @@ public class CobbleStateBackend extends AbstractManagedMemoryStateBackend
                         || config.get(CobbleOptions.LOCAL_DIR_PRIMARY_HIGH_PRIORITY);
         this.manualTtlTimeProviderForTests = original.manualTtlTimeProviderForTests;
         this.flinkConfig = mergedConfiguration(original.flinkConfig, config);
+        this.priorityQueueStateType =
+                original.priorityQueueStateType != null
+                        ? original.priorityQueueStateType
+                        : config.get(CobbleOptions.TIMER_SERVICE_FACTORY);
         this.latencyTrackingConfigBuilder = original.latencyTrackingConfigBuilder.configure(config);
     }
 
@@ -120,6 +132,20 @@ public class CobbleStateBackend extends AbstractManagedMemoryStateBackend
     public CobbleStateBackend configure(ReadableConfig config, ClassLoader classLoader)
             throws IllegalConfigurationException {
         return new CobbleStateBackend(this, config);
+    }
+
+    /** Returns the configured timer-service priority queue implementation. */
+    public PriorityQueueStateType getPriorityQueueStateType() {
+        return priorityQueueStateType != null
+                ? priorityQueueStateType
+                : CobbleOptions.TIMER_SERVICE_FACTORY.defaultValue();
+    }
+
+    /** Selects the timer-service priority queue implementation. */
+    public void setPriorityQueueStateType(PriorityQueueStateType priorityQueueStateType) {
+        this.priorityQueueStateType =
+                Preconditions.checkNotNull(
+                        priorityQueueStateType, "priorityQueueStateType must not be null");
     }
 
     /** Cobble restore currently takes ownership of its source snapshot volumes. */
@@ -224,7 +250,8 @@ public class CobbleStateBackend extends AbstractManagedMemoryStateBackend
                         localDirPrimaryHighPriority,
                         managedMemoryFraction,
                         manualTtlTimeProviderForTests,
-                        flinkConfig)
+                        flinkConfig,
+                        getPriorityQueueStateType())
                 .build();
     }
 
@@ -320,5 +347,22 @@ public class CobbleStateBackend extends AbstractManagedMemoryStateBackend
             files.add(new File(trimmed));
         }
         return files.toArray(new File[0]);
+    }
+
+    /** Timer-service priority queue implementations supported by the Cobble state backend. */
+    public enum PriorityQueueStateType implements DescribedEnum {
+        HEAP(text("Heap-based")),
+        COBBLE(text("Implementation based on Cobble"));
+
+        private final InlineElement description;
+
+        PriorityQueueStateType(InlineElement description) {
+            this.description = description;
+        }
+
+        @Override
+        public InlineElement getDescription() {
+            return description;
+        }
     }
 }

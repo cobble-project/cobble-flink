@@ -74,6 +74,14 @@ final class CobbleCompletedCheckpointStore implements CompletedCheckpointStore {
         } catch (Exception e) {
             failure = ExceptionUtils.firstOrSuppressed(e, failure);
         }
+        if (checkpoints != null) {
+            try {
+                cleanupDiscardedCheckpointManifestCopiesBeforeDelegateShutdown(
+                        checkpoints, jobStatus);
+            } catch (Exception e) {
+                failure = ExceptionUtils.firstOrSuppressed(e, failure);
+            }
+        }
         try {
             delegate.shutdown(jobStatus, wrapCleaner(checkpointsCleaner));
         } catch (Exception e) {
@@ -154,6 +162,29 @@ final class CobbleCompletedCheckpointStore implements CompletedCheckpointStore {
             throws Exception {
         if (subsumedCheckpoint != null && subsumedCheckpoint.shouldBeDiscardedOnSubsume()) {
             cleanupCheckpointSnapshotFiles(subsumedCheckpoint);
+        }
+    }
+
+    private void cleanupDiscardedCheckpointManifestCopiesBeforeDelegateShutdown(
+            List<CompletedCheckpoint> checkpoints, JobStatus jobStatus) throws Exception {
+        Exception failure = null;
+        for (CompletedCheckpoint checkpoint : checkpoints) {
+            if (!checkpoint.shouldBeDiscardedOnShutdown(jobStatus)) {
+                continue;
+            }
+            try {
+                // Flink owns the checkpoint directory and may remove it during delegate.shutdown().
+                // Cobble only places a copied global-snapshot manifest inside that directory so
+                // restore can find JM-side metadata. Remove that copy first; otherwise Flink's
+                // storage-location discard can fail with "directory is not empty" before our
+                // normal Cobble snapshot cleanup gets a turn.
+                deleteCheckpointManifestCopies(checkpoint);
+            } catch (Exception e) {
+                failure = ExceptionUtils.firstOrSuppressed(e, failure);
+            }
+        }
+        if (failure != null) {
+            throw failure;
         }
     }
 
