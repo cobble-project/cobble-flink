@@ -1648,7 +1648,7 @@ class CobbleStateBackendTest {
 
         Configuration configuration = new Configuration();
         configuration.set(CobbleOptions.LOCAL_DIRECTORIES, configuredLocalDir.toString());
-        configuration.set(CobbleOptions.WRITE_BUFFER_RATIO, 0.25d);
+        configuration.set(CobbleOptions.MEMTABLE_BUFFER_RATIO, 0.25d);
         configuration.set(CobbleOptions.MEMTABLE_BUFFER_COUNT, 4);
         configuration.set(CobbleOptions.DIRECT_IO_BUFFER_SIZE, MemorySize.parse("8kb"));
         configuration.set(CobbleOptions.DIRECT_IO_BUFFER_POOL_MAX_SIZE, 128);

@@ -340,7 +340,7 @@ final class CobbleKeyedStateBackendBuilder<K> {
             int memtableBufferCount = memoryConfiguration.getMemtableBufferCount();
             long minimumWriteBudget = Math.min(totalMemoryBudget, memtableBufferCount);
             long desiredWriteBudget =
-                    Math.round(totalMemoryBudget * memoryConfiguration.getWriteBufferRatio());
+                    Math.round(totalMemoryBudget * memoryConfiguration.getMemtableBufferRatio());
             long writeBufferBudget =
                     Math.max(minimumWriteBudget, Math.min(totalMemoryBudget, desiredWriteBudget));
             long perMemtableCapacity = Math.max(1L, writeBufferBudget / memtableBufferCount);

@@ -44,13 +44,13 @@ public final class CobbleOptions {
                     .withDescription(
                             "The fixed total amount of memory shared by all Cobble instances per slot.");
 
-    /** Fraction of the total Cobble memory budget reserved for memtables/write buffers. */
-    public static final ConfigOption<Double> WRITE_BUFFER_RATIO =
-            ConfigOptions.key("state.backend.cobble.memory.write-buffer-ratio")
+    /** Fraction of the total Cobble memory budget reserved for memtable buffers. */
+    public static final ConfigOption<Double> MEMTABLE_BUFFER_RATIO =
+            ConfigOptions.key("state.backend.cobble.memory.memtable-buffer-ratio")
                     .doubleType()
                     .defaultValue(0.5d)
                     .withDescription(
-                            "The fraction of the total Cobble memory budget reserved for memtables/write buffers.");
+                            "The fraction of the total Cobble memory budget reserved for memtable buffers.");
 
     /** Number of memtable buffers kept in memory. */
     public static final ConfigOption<Integer> MEMTABLE_BUFFER_COUNT =

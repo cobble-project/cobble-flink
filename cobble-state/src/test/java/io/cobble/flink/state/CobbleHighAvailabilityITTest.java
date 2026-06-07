@@ -134,7 +134,7 @@ class CobbleHighAvailabilityITTest {
         jobConfiguration.set(
                 CheckpointingOptions.CHECKPOINTS_DIRECTORY, checkpointRoot.toUri().toString());
         jobConfiguration.set(CobbleOptions.LOCAL_DIRECTORIES, localStateRoot.toString());
-        jobConfiguration.set(CobbleOptions.WRITE_BUFFER_RATIO, 0.25d);
+        jobConfiguration.set(CobbleOptions.MEMTABLE_BUFFER_RATIO, 0.25d);
         jobConfiguration.set(CobbleOptions.MEMTABLE_BUFFER_COUNT, 4);
         jobConfiguration.set(CobbleOptions.DIRECT_IO_BUFFER_SIZE, MemorySize.parse("8kb"));
         jobConfiguration.set(CobbleOptions.DIRECT_IO_BUFFER_POOL_MAX_SIZE, 128);

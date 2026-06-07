@@ -17,7 +17,7 @@ final class CobbleMemoryConfiguration implements Serializable {
 
     @Nullable private Boolean useManagedMemory;
     @Nullable private MemorySize fixedMemoryPerSlot;
-    @Nullable private Double writeBufferRatio;
+    @Nullable private Double memtableBufferRatio;
     @Nullable private Integer memtableBufferCount;
 
     /** Returns whether Cobble should derive its budget from Flink managed memory. */
@@ -33,11 +33,11 @@ final class CobbleMemoryConfiguration implements Serializable {
         return fixedMemoryPerSlot;
     }
 
-    /** Returns the fraction of total Cobble memory reserved for write buffers. */
-    double getWriteBufferRatio() {
-        return writeBufferRatio != null
-                ? writeBufferRatio
-                : CobbleOptions.WRITE_BUFFER_RATIO.defaultValue();
+    /** Returns the fraction of total Cobble memory reserved for memtable buffers. */
+    double getMemtableBufferRatio() {
+        return memtableBufferRatio != null
+                ? memtableBufferRatio
+                : CobbleOptions.MEMTABLE_BUFFER_RATIO.defaultValue();
     }
 
     /** Returns how many memtable buffers Cobble should keep in memory. */
@@ -61,9 +61,9 @@ final class CobbleMemoryConfiguration implements Serializable {
     /** Validates the user-facing memory knobs before they reach Cobble config generation. */
     void validate() {
         Preconditions.checkArgument(
-                getWriteBufferRatio() > 0.0d && getWriteBufferRatio() < 1.0d,
-                "Cobble write buffer ratio must be in (0, 1), but was %s.",
-                getWriteBufferRatio());
+                getMemtableBufferRatio() > 0.0d && getMemtableBufferRatio() < 1.0d,
+                "Cobble memtable buffer ratio must be in (0, 1), but was %s.",
+                getMemtableBufferRatio());
         Preconditions.checkArgument(
                 getMemtableBufferCount() > 0,
                 "Cobble memtable buffer count must be > 0, but was %s.",
@@ -85,10 +85,10 @@ final class CobbleMemoryConfiguration implements Serializable {
                 other.fixedMemoryPerSlot != null
                         ? other.fixedMemoryPerSlot
                         : config.get(CobbleOptions.FIX_PER_SLOT_MEMORY_SIZE);
-        merged.writeBufferRatio =
-                other.writeBufferRatio != null
-                        ? other.writeBufferRatio
-                        : config.get(CobbleOptions.WRITE_BUFFER_RATIO);
+        merged.memtableBufferRatio =
+                other.memtableBufferRatio != null
+                        ? other.memtableBufferRatio
+                        : config.get(CobbleOptions.MEMTABLE_BUFFER_RATIO);
         merged.memtableBufferCount =
                 other.memtableBufferCount != null
                         ? other.memtableBufferCount
