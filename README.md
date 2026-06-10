@@ -1,43 +1,120 @@
+<p align="center"><img src="https://github.com/cobble-project/cobble/raw/main/logo.png" width="60%" alt="Cobble logo" /></p>
+
 Cobble-flink integrates [Cobble](https://github.com/cobble-project/cobble) with
-[Apache Flink®](https://flink.apache.org/), so you can run Flink workloads on Cobble state and
-storage semantics.
+[Apache Flink®](https://flink.apache.org/), so you can use Cobble as a Flink
+state backend, SQL source, and SQL sink.
 
-## Modules
+## Features
 
-- `cobble-flink-state`: Cobble Flink state backend and HA integration.
-- `cobble-flink-sink`: Cobble Flink SQL sink connector.
-- `cobble-flink-source`: Cobble Flink SQL source connector.
-- `cobble-flink-dist`: distribution jar that bundles `cobble-flink-state`, `cobble-flink-sink`, and `cobble-flink-source` for deployment.
-- `cobble-flink-state-bench`: benchmark module for Cobble state backend scenarios.
-- `cobble-flink-tests`: end-to-end integration tests for Cobble Flink connectors and runtime flows.
+Cobble Flink currently provides:
+
+- a **state backend** for stateful Flink jobs
+- a **SQL source** for reading Cobble data in Flink SQL
+- a **SQL sink** for writing Flink SQL results into Cobble
+- a bundled **runtime jar** for Flink cluster deployment
+
+For complete details, see the [documentation](https://cobble-project.github.io/cobble-flink/).
+
+## Download and Versioning
+
+You can get Cobble Flink artifacts from a Maven repository, or build them from
+source if needed.
+
+When choosing a version, make sure it matches both your Cobble version and your
+Flink minor version.
+
+The current version naming rule is:
+
+```text
+${cobble-version}-{patch-version}-flink-{flink-minor-version}
+```
+
+Example:
+
+```text
+0.2.0-1-flink-1.17
+```
 
 ## Setup
 
-1. Build jars:
-   ```bash
-   ./mvnw -DskipTests package
-   ```
-2. Copy one deployment jar into your Flink `lib/` directory. `cobble-flink-dist` contains the state backend, sink, and source connector:
-   ```bash
-   cp cobble-dist/target/cobble-flink-dist-*.jar $FLINK_HOME/lib/
-   ```
-3. Start the Flink cluster.
+For most users, the simplest setup is to download the runtime jar and put it
+into the Flink distribution.
+
+Job-side Maven dependency is an alternative packaging choice. You usually do
+not need both at the same time.
+
+### Option A: use the runtime jar (recommended)
+
+Download `cobble-flink-dist` from your Maven repository and copy it into Flink
+`lib/`:
+
+```bash
+cp cobble-flink-dist-<version>.jar "$FLINK_HOME/lib/"
+```
+
+If you are developing from source instead of downloading from Maven, you can
+build the distribution jar locally:
+
+```bash
+./mvnw -DskipTests package
+cp cobble-dist/target/cobble-flink-dist-*.jar "$FLINK_HOME/lib/"
+```
+
+### Option B: use job-side Maven dependencies
+
+When writing a Flink job, depend on the modules you actually use.
+
+```xml
+<properties>
+  <cobble.flink.version>${cobble-version}-{minor-version}-flink-{flink-minor-version}</cobble.flink.version>
+</properties>
+
+<dependencies>
+  <dependency>
+    <groupId>io.github.cobble-project</groupId>
+    <artifactId>cobble-flink-state</artifactId>
+    <version>${cobble.flink.version}</version>
+  </dependency>
+
+  <dependency>
+    <groupId>io.github.cobble-project</groupId>
+    <artifactId>cobble-flink-source</artifactId>
+    <version>${cobble.flink.version}</version>
+  </dependency>
+
+  <dependency>
+    <groupId>io.github.cobble-project</groupId>
+    <artifactId>cobble-flink-sink</artifactId>
+    <version>${cobble.flink.version}</version>
+  </dependency>
+</dependencies>
+```
+
+Typical choices:
+
+- stateful DataStream job: `cobble-flink-state`
+- SQL read job: `cobble-flink-source`
+- SQL write job: `cobble-flink-sink`
+
+### Configure Flink and run your job
+
+Make sure to configure Flink as described in the next section, then you can run your job as usual.
+Cobble will automatically be used for state management and SQL source/sink based on your configuration.
 
 ## Get Started
 
 ### Flink's State Backend
 
-For a minimal run, configure Cobble with the full factory class names:
+For stateful jobs, Cobble can be used as the Flink state backend. To use it, set the following in `flink-conf.yaml`:
 
 ```yaml
 state.backend.type: io.cobble.flink.state.CobbleStateBackendFactory
 high-availability.type: io.cobble.flink.state.CobbleHighAvailabilityServicesFactory
 ```
 
-Cobble HA replaces Flink's original HA factory with a wrapper. Move your original
-`high-availability.type` value into `cobble.ha.delegate.type`.
+If you originally used another HA mode, move it to `cobble.ha.delegate.type`.
 
-For example, if you originally used Kubernetes HA:
+Example:
 
 ```yaml
 state.backend.type: io.cobble.flink.state.CobbleStateBackendFactory
@@ -45,24 +122,17 @@ high-availability.type: io.cobble.flink.state.CobbleHighAvailabilityServicesFact
 cobble.ha.delegate.type: kubernetes
 ```
 
-If your original HA was a custom factory, set `cobble.ha.delegate.type` to that fully qualified
-factory class name instead.
-
-Cobble restore and rescale currently support only Flink's `CLAIM` restore mode because restored
-snapshot volumes are incorporated into the writable native DB lifecycle. `NO_CLAIM` and `LEGACY`
-restore modes are not supported.
+Cobble restore and rescale currently support only Flink `CLAIM` restore mode.
+`NO_CLAIM` and `LEGACY` are not supported.
 
 ### Flink's Sink
 
-For a minimal SQL sink table, configure:
+For SQL writes, use:
 
 - `connector='cobble'`
-- `path` (required; relative paths are normalized to `file://` absolute URIs)
-- `bucket` (required)
-- `sink.parallelism` (required)
-
-The sink uses primary-key upsert semantics. It materializes final state by `PRIMARY KEY`, applies
-`INSERT` / `UPDATE_AFTER`, handles `DELETE`, and ignores paired `UPDATE_BEFORE` records.
+- `path`
+- `bucket`
+- `sink.parallelism`
 
 Example:
 
@@ -73,7 +143,7 @@ CREATE TABLE sink_tbl (
   PRIMARY KEY (k) NOT ENFORCED
 ) WITH (
   'connector' = 'cobble',
-  'path' = 'file:///tmp/cobble-table',
+  'path' = 'hdfs:///tmp/cobble-table',
   'bucket' = '16',
   'sink.parallelism' = '4'
 );
@@ -81,18 +151,12 @@ CREATE TABLE sink_tbl (
 
 ### Flink's Source
 
-For a minimal SQL source table, configure:
+For SQL reads, use:
 
 - `connector='cobble'`
-- `path` (required; relative paths are normalized to `file://` absolute URIs)
-- `bucket` (optional; if omitted, the source infers total bucket count from the snapshot metadata)
-- `scan.checkpoint-id` (`latest` or a positive checkpoint id; default `latest`)
-- `scan.mode` (`batch` or `streaming`; default `batch`)
-- `scan.poll-interval-ms` (used by `latest + streaming`; default `1000`)
-
-The source requires a `PRIMARY KEY` and at least one non-primary-key column in the table schema.
-The same table can also be used as a lookup dimension table in Flink SQL. Lookup joins currently
-require equality conditions on the full `PRIMARY KEY`.
+- `path`
+- `scan.checkpoint-id`
+- `scan.mode`
 
 Example:
 
@@ -104,7 +168,7 @@ CREATE TABLE source_tbl (
   PRIMARY KEY (phase, id) NOT ENFORCED
 ) WITH (
   'connector' = 'cobble',
-  'path' = 'file:///tmp/cobble-table',
+  'path' = 'hdfs:///tmp/cobble-table',
   'scan.checkpoint-id' = 'latest',
   'scan.mode' = 'batch'
 );
@@ -119,16 +183,10 @@ LEFT JOIN source_tbl FOR SYSTEM_TIME AS OF o.pt AS d
 ON o.id = d.id;
 ```
 
-Current source semantics:
-
-- `latest + batch`: reads the current latest completed snapshot image once, then finishes.
-- `latest + streaming`: reads the current latest completed snapshot image, keeps polling for newer snapshots, and stays unbounded.
-- The current table changelog mode is `INSERT`-only. The source emits `RowKind.INSERT` records only; it does not yet emit `UPDATE_AFTER` / `DELETE`.
-
 ## License
 
 This project is licensed under the Apache-2.0 License. See the [LICENSE](LICENSE) file for details.
 
 ## Notice
 
-The [Apache Flink®](https://flink.apache.org/) is registered trademarks of The Apache Software Foundation in the United States and other countries. 
+The [Apache Flink®](https://flink.apache.org/) is registered trademarks of The Apache Software Foundation in the United States and other countries.
