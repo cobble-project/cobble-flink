@@ -1,0 +1,33 @@
+title: Cobble Flink Docs
+description: Documentation for using Cobble as a Flink state backend, SQL source, and SQL sink
+theme: just-the-docs
+logo: false
+docs_root_label: latest
+docs_commit_label: ""
+
+url: https://cobble-project.github.io/cobble-flink
+# CI overrides baseurl via --baseurl flag; keep empty for local dev
+baseurl: ""
+
+aux_links:
+  GitHub: https://github.com/cobble-project/cobble-flink
+
+aux_links_new_tab: true
+nav_enabled: true
+search_enabled: true
+color_scheme: light
+heading_anchors: true
+
+defaults:
+  - scope:
+      path: ""
+    values:
+      layout: "default"
+
+sass:
+  silence_deprecations:
+    - import
+    - global-builtin
+    - color-functions
+
+footer_content: "Copyright &copy; Cobble contributors. Distributed under the Apache-2.0 License."
