@@ -1,0 +1,268 @@
+{"0": {
+    "doc": "Introduction",
+    "title": "Introduction",
+    "content": "Cobble Flink lets you use Cobble inside Flink in three common ways: . | as a state backend for Flink jobs | as a source to read Cobble data in Flink SQL | as a sink to write Flink SQL results into Cobble | . ",
+    "url": "/cobble-flink/latest/introduction/",
+    
+    "relUrl": "/introduction/"
+  },"1": {
+    "doc": "Introduction",
+    "title": "The Supported Usage Pattern",
+    "content": "Using Cobble Flink usually means choosing one of these two packaging styles: . | Put the runtime jar into the Flink cluster | Add Maven dependencies in the user job | . For most users, the runtime jar in the Flink distribution is the simplest choice. Job-side Maven dependencies are an alternative when you prefer to carry the integration together with the job. In most cases, choosing one of the two is enough. When choosing artifacts from a Maven repository, make sure you pick the correct version. The current naming rule is: . ${cobble-version}-{minor-version}-flink-{flink-minor-version} . Example: . 0.2.0-1-flink-1.17 . ",
+    "url": "/cobble-flink/latest/introduction/#the-supported-usage-pattern",
+    
+    "relUrl": "/introduction/#the-supported-usage-pattern"
+  },"2": {
+    "doc": "Introduction",
+    "title": "When To Use Which Part",
+    "content": ". | Use State Backend when your Flink job keeps state and you want that state stored in Cobble. | Use Source when you already have data in Cobble and want to read it from Flink SQL. | Use Sink when you want Flink SQL to write results into a Cobble table. | . ",
+    "url": "/cobble-flink/latest/introduction/#when-to-use-which-part",
+    
+    "relUrl": "/introduction/#when-to-use-which-part"
+  },"3": {
+    "doc": "Introduction",
+    "title": "Current Scope",
+    "content": ". | Target Flink version: 1.17.0 and later | State backend: for stateful Flink jobs | Source: for reading Cobble tables in Flink SQL | Sink: for writing keyed Flink SQL tables into Cobble | . For concrete setup and examples, continue with Getting Started. ",
+    "url": "/cobble-flink/latest/introduction/#current-scope",
+    
+    "relUrl": "/introduction/#current-scope"
+  },"4": {
+    "doc": "Source",
+    "title": "Source",
+    "content": "Use the Cobble source when you want to read existing Cobble data from Flink SQL. ",
+    "url": "/cobble-flink/latest/source/",
+    
+    "relUrl": "/source/"
+  },"5": {
+    "doc": "Source",
+    "title": "Why Use Cobble Source",
+    "content": "Cobble source is useful when your data is already stored in Cobble and you want to consume it directly inside Flink. | Read Cobble data directly in Flink SQL You can define a Flink table on top of existing Cobble data and query it without adding a separate import step. | Support both batch-style reading and continuous follow-up You can read the latest snapshot once, or keep following new snapshots in streaming mode. | Convenient for lookup use cases The same table can also be used as a lookup table for dimension enrichment in Flink SQL. | . ",
+    "url": "/cobble-flink/latest/source/#why-use-cobble-source",
+    
+    "relUrl": "/source/#why-use-cobble-source"
+  },"6": {
+    "doc": "Source",
+    "title": "Installation and Setup",
+    "content": "For most users, the easiest setup is to download the runtime jar into the Flink distribution. Job-side Maven dependency is an alternative packaging choice. You usually do not need both at the same time. Option A: use the runtime jar (recommended) . Download the released cobble-flink-dist jar from a Maven repository and put it into Flink’s lib/ directory. Use the same version naming rule described in Getting Started: . cp cobble-flink-dist-&lt;version&gt;.jar \"$FLINK_HOME/lib/\" . Option B: use a job-side dependency . Add cobble-flink-source to your job if you prefer to package the connector with the job itself: . &lt;dependency&gt; &lt;groupId&gt;io.github.cobble-project&lt;/groupId&gt; &lt;artifactId&gt;cobble-flink-source&lt;/artifactId&gt; &lt;version&gt;${cobble.flink.version}&lt;/version&gt; &lt;/dependency&gt; . Most users do not need this if the runtime jar is already present in Flink lib/. Define the source table . The Cobble source uses: . | connector = 'cobble' | a required path | a required PRIMARY KEY | at least one non-primary-key column | . ",
+    "url": "/cobble-flink/latest/source/#installation-and-setup",
+    
+    "relUrl": "/source/#installation-and-setup"
+  },"7": {
+    "doc": "Source",
+    "title": "Minimal SQL Example",
+    "content": "CREATE TABLE cobble_source ( id BIGINT, name STRING, score INT, PRIMARY KEY (id) NOT ENFORCED ) WITH ( 'connector' = 'cobble', 'path' = 'file:///tmp/cobble-table', 'scan.checkpoint-id' = 'latest', 'scan.mode' = 'batch' ); . ",
+    "url": "/cobble-flink/latest/source/#minimal-sql-example",
+    
+    "relUrl": "/source/#minimal-sql-example"
+  },"8": {
+    "doc": "Source",
+    "title": "Lookup Join Example",
+    "content": "The same table can be used as a lookup dimension table: . SELECT o.order_id, o.id, d.name, d.score FROM orders AS o LEFT JOIN cobble_source FOR SYSTEM_TIME AS OF o.pt AS d ON o.id = d.id; . ",
+    "url": "/cobble-flink/latest/source/#lookup-join-example",
+    
+    "relUrl": "/source/#lookup-join-example"
+  },"9": {
+    "doc": "Source",
+    "title": "Complete Configuration Reference",
+    "content": "This section lists the main configuration keys for the Cobble source. Required Table Requirements . | Item | Requirement | . | connector | Must be cobble | . | path | Required | . | PRIMARY KEY | Required | . | Non-primary-key column | At least one is required | . Source Options . | Key | Default | Description | . | path | none | Cobble table root path or URI. Relative paths are normalized to absolute file:// URIs. | . | bucket | inferred from snapshot metadata | Total bucket count of the Cobble table. Usually optional. | . | scan.checkpoint-id | latest | Snapshot to read. Use latest or a positive numeric checkpoint id. | . | scan.mode | batch | Read mode. Supported values are batch and streaming. | . | scan.poll-interval-ms | 3000 | Poll interval used by latest + streaming. | . | source.block-cache-memory | 0 | Block-cache memory mainly used by lookup access. | . ",
+    "url": "/cobble-flink/latest/source/#complete-configuration-reference",
+    
+    "relUrl": "/source/#complete-configuration-reference"
+  },"10": {
+    "doc": "Source",
+    "title": "Usage Notes",
+    "content": ". | scan.mode = 'streaming' currently works only with scan.checkpoint-id = 'latest'. | The source currently returns INSERT rows only. | If bucket is specified, it must be greater than zero. | scan.poll-interval-ms must be greater than zero. | Lookup joins require equality conditions on the full PRIMARY KEY. | Lookup joins currently support only top-level key columns. | . ",
+    "url": "/cobble-flink/latest/source/#usage-notes",
+    
+    "relUrl": "/source/#usage-notes"
+  },"11": {
+    "doc": "Sink",
+    "title": "Sink",
+    "content": "Use the Cobble sink when you want Flink SQL results written into a Cobble table. ",
+    "url": "/cobble-flink/latest/sink/",
+    
+    "relUrl": "/sink/"
+  },"12": {
+    "doc": "Sink",
+    "title": "Why Use Cobble Sink",
+    "content": "Cobble sink is useful when you want a Flink SQL result table to be materialized directly into Cobble. | Write Flink SQL results directly into Cobble This is a straightforward way to persist keyed SQL results without adding a separate export step. | Natural fit for upsert-style result tables The sink writes by primary key, so it works well for materialized tables that are updated over time. | Easy to pair with Cobble source Data written by the sink can later be consumed again through Cobble source, including batch reading and lookup use cases. | . ",
+    "url": "/cobble-flink/latest/sink/#why-use-cobble-sink",
+    
+    "relUrl": "/sink/#why-use-cobble-sink"
+  },"13": {
+    "doc": "Sink",
+    "title": "Installation and Setup",
+    "content": "For most users, the easiest setup is to download the runtime jar into the Flink distribution. Job-side Maven dependency is an alternative packaging choice. You usually do not need both at the same time. Option A: use the runtime jar (recommended) . Download the released cobble-flink-dist jar from a Maven repository and put it into Flink’s lib/ directory. Use the same version naming rule described in Getting Started: . cp cobble-flink-dist-&lt;version&gt;.jar \"$FLINK_HOME/lib/\" . Option B: use a job-side dependency . Add cobble-flink-sink to your job if you prefer to package the connector with the job itself: . &lt;dependency&gt; &lt;groupId&gt;io.github.cobble-project&lt;/groupId&gt; &lt;artifactId&gt;cobble-flink-sink&lt;/artifactId&gt; &lt;version&gt;${cobble.flink.version}&lt;/version&gt; &lt;/dependency&gt; . Most users do not need this if the runtime jar is already present in Flink lib/. Define the sink table . The Cobble sink uses: . | connector = 'cobble' | a required path | a required bucket | a required sink.parallelism | a required PRIMARY KEY | at least one non-primary-key column | . ",
+    "url": "/cobble-flink/latest/sink/#installation-and-setup",
+    
+    "relUrl": "/sink/#installation-and-setup"
+  },"14": {
+    "doc": "Sink",
+    "title": "Minimal SQL Example",
+    "content": "CREATE TABLE cobble_sink ( id BIGINT, name STRING, score INT, PRIMARY KEY (id) NOT ENFORCED ) WITH ( 'connector' = 'cobble', 'path' = 'file:///tmp/cobble-table', 'bucket' = '16', 'sink.parallelism' = '4', 'snapshot.retention' = '2' ); . Then write into it: . INSERT INTO cobble_sink SELECT id, name, score FROM upstream_result; . ",
+    "url": "/cobble-flink/latest/sink/#minimal-sql-example",
+    
+    "relUrl": "/sink/#minimal-sql-example"
+  },"15": {
+    "doc": "Sink",
+    "title": "Complete Configuration Reference",
+    "content": "This section lists the main configuration keys for the Cobble sink. Required Table Requirements . | Item | Requirement | . | connector | Must be cobble | . | path | Required | . | bucket | Required | . | sink.parallelism | Required | . | PRIMARY KEY | Required | . | Non-primary-key column | At least one is required | . Sink Options . | Key | Default | Description | . | path | none | Cobble table root path or URI. Relative paths are normalized to absolute file:// URIs. | . | bucket | none | Total bucket count used for key routing. | . | sink.parallelism | none | Sink writer parallelism. | . | snapshot.retention | 1 | Number of committed snapshots to retain automatically. | . | sink.use-managed-memory-allocator | false | Whether the sink writer declares managed memory usage. | . | sink.writer-buffer-memory | 256mb | Write-buffer budget for one sink writer. | . ",
+    "url": "/cobble-flink/latest/sink/#complete-configuration-reference",
+    
+    "relUrl": "/sink/#complete-configuration-reference"
+  },"16": {
+    "doc": "Sink",
+    "title": "Usage Notes",
+    "content": ". | The sink writes by primary key. | INSERT and UPDATE_AFTER overwrite the current row for the key. | DELETE removes the current row for the key. | UPDATE_BEFORE is ignored. | bucket, sink.parallelism, and sink.writer-buffer-memory must all be greater than zero. | . ",
+    "url": "/cobble-flink/latest/sink/#usage-notes",
+    
+    "relUrl": "/sink/#usage-notes"
+  },"17": {
+    "doc": "Web Monitor",
+    "title": "Web Monitor",
+    "content": "Use the Cobble Flink web monitor when you want to inspect Cobble data that was produced by a Flink checkpoint or by a Cobble sink. The monitor is read-only. It starts a small Java HTTP server, opens a browser UI, and lets you choose a datasource, snapshot, and inspect mode without writing a separate Flink job. ",
+    "url": "/cobble-flink/latest/web-monitor/",
+    
+    "relUrl": "/web-monitor/"
+  },"18": {
+    "doc": "Web Monitor",
+    "title": "When To Use It",
+    "content": "The web monitor is useful when you want to answer questions such as: . | whether a checkpoint contains Cobble state for a specific operator | what state names are available inside a checkpoint | whether a sink path has committed snapshots | what keys and values are present in a selected bucket or prefix | whether a small set of keys keeps changing as newer snapshots appear | . It is intended for inspection and debugging. For normal production reads, use the Cobble source connector or your own application code. ",
+    "url": "/cobble-flink/latest/web-monitor/#when-to-use-it",
+    
+    "relUrl": "/web-monitor/#when-to-use-it"
+  },"19": {
+    "doc": "Web Monitor",
+    "title": "Build and Run",
+    "content": "Build the web monitor from the repository: ./mvnw -pl cobble-flink-monitor -am package -DskipTests . Start it with no initial datasource: . java -jar cobble-flink-monitor/target/cobble-flink-monitor-*.jar . Then open the UI and choose a path from the Datasource page. You can also provide an initial path: . java -jar cobble-flink-monitor/target/cobble-flink-monitor-*.jar \\ --checkpoint file:///path/to/checkpoints-or-cobble-table . The --checkpoint option accepts either a Flink checkpoint root or a normal Cobble datasource path. For a Flink checkpoint, you can point to the checkpoint root or directly to a concrete chk-* directory: . java -jar cobble-flink-monitor/target/cobble-flink-monitor-*.jar \\ --checkpoint file:///path/to/checkpoints/chk-42 . Useful options: . --bind 127.0.0.1 --port 8088 --checkpoint file:///path/to/checkpoints-or-cobble-table --flink-conf /path/to/flink/conf --total-buckets 32768 --inspect-default-limit 100 --inspect-max-limit 1000 . ",
+    "url": "/cobble-flink/latest/web-monitor/#build-and-run",
+    
+    "relUrl": "/web-monitor/#build-and-run"
+  },"20": {
+    "doc": "Web Monitor",
+    "title": "Remote Storage",
+    "content": "If the datasource is on a remote filesystem, pass --flink-conf so the monitor can load the same filesystem configuration used by Flink: . java -jar cobble-flink-monitor/target/cobble-flink-monitor-*.jar \\ --flink-conf \"$FLINK_HOME/conf\" \\ --checkpoint s3://bucket/path/to/checkpoints . This is the recommended way to inspect paths on S3-compatible storage, OSS, Azure, GCS, HDFS, or other Flink-supported filesystems. The web monitor initializes Flink filesystems before opening the datasource and passes the relevant storage options to Cobble when reading remote volumes. For S3-compatible storage, the Flink configuration usually includes settings such as: . s3.endpoint: https://s3.example.com s3.access-key: your-access-key s3.secret-key: your-secret-key s3.path.style.access: true s3.region: us-east-1 . ",
+    "url": "/cobble-flink/latest/web-monitor/#remote-storage",
+    
+    "relUrl": "/web-monitor/#remote-storage"
+  },"21": {
+    "doc": "Web Monitor",
+    "title": "Datasource Selection",
+    "content": "The Datasource page lists snapshots available under the current path. For a Flink checkpoint root, the monitor scans checkpoint directories such as chk-42, discovers Cobble operators, and lets you choose: . | latest, which follows the newest checkpoint after refresh | a concrete checkpoint | an operator, on the Inspect page | . For a normal Cobble datasource such as a sink path, the monitor scans snapshot/SNAPSHOT-* and lets you choose: . | latest, which follows the newest Cobble snapshot after refresh | a concrete snapshot | . Operator selection is only shown for checkpoint datasources. Sink and ordinary Cobble datasource paths expose a single sink inspect target. ",
+    "url": "/cobble-flink/latest/web-monitor/#datasource-selection",
+    
+    "relUrl": "/web-monitor/#datasource-selection"
+  },"22": {
+    "doc": "Web Monitor",
+    "title": "Inspect Data",
+    "content": "The Inspect page has two modes. Scan Mode . Use scan mode when you want to browse keys in one bucket or across all buckets. You can set: . | bucket, or all | key prefix | row limit | columns, for sink datasources | . State data exposes state names directly. It does not expose column families in the UI. Sink data exposes columns because sink rows are stored as multi-column records. When bytes can be decoded as UTF-8, the UI shows a UTF8: label next to the base64 representation. If bytes are not valid UTF-8, only the base64 value is shown. Lookup Mode . Use lookup mode when you want to keep watching specific keys. From scan results, choose Track in lookup from a row action menu. The lookup view can track multiple entries and refresh them together. Lookup mode is useful when the datasource is latest and you want to compare the same keys across newer snapshots. ",
+    "url": "/cobble-flink/latest/web-monitor/#inspect-data",
+    
+    "relUrl": "/web-monitor/#inspect-data"
+  },"23": {
+    "doc": "Web Monitor",
+    "title": "Notes",
+    "content": ". | The monitor is read-only. | latest is resolved from the current datasource list and can be refreshed. | Checkpoint datasources support operator discovery. | Sink datasources support column projection. | . ",
+    "url": "/cobble-flink/latest/web-monitor/#notes",
+    
+    "relUrl": "/web-monitor/#notes"
+  },"24": {
+    "doc": "Getting Started",
+    "title": "Getting Started",
+    "content": "This page gives the shortest path to start using Cobble Flink. ",
+    "url": "/cobble-flink/latest/getting-started/",
+    
+    "relUrl": "/getting-started/"
+  },"25": {
+    "doc": "Getting Started",
+    "title": "Version Selection",
+    "content": "Cobble Flink artifacts should be selected with the correct version naming rule: . ${cobble-version}-{patch-version}-flink-{flink-minor-version} . Example: . 0.2.0-1-flink-1.17 . Make sure the version matches: . | the Cobble version you want to use | the Flink minor version of your cluster | the artifact form you choose to use | . ",
+    "url": "/cobble-flink/latest/getting-started/#version-selection",
+    
+    "relUrl": "/getting-started/#version-selection"
+  },"26": {
+    "doc": "Getting Started",
+    "title": "Setup",
+    "content": "For most users, the recommended setup is to download the runtime jar into the Flink distribution. Job-side Maven dependency is an alternative packaging choice. You usually do not need both at the same time. Option A: use the runtime jar (recommended) . Download the released cobble-flink-dist-&lt;version&gt;.jar from a Maven repository and place it in the Flink distribution’s lib/ directory: . export FLINK_HOME=/path/to/flink-1.17.x cp cobble-flink-dist-&lt;version&gt;.jar \"$FLINK_HOME/lib/\" . If you are not using a released jar yet and want to build from source, you can build the distribution jar locally: ./mvnw --batch-mode --no-transfer-progress -DskipTests package cp cobble-dist/target/cobble-flink-dist-*.jar \"$FLINK_HOME/lib/\" . For normal users, the important point is simple: the Flink cluster should use the bundled dist jar. Option B: use job-side Maven dependencies . For your own job, depend on the modules you actually use instead of the bundled dist jar. Example pom.xml snippet: . &lt;properties&gt; &lt;cobble.flink.version&gt;${cobble-version}-{minor-version}-flink-{flink-minor-version}&lt;/cobble.flink.version&gt; &lt;/properties&gt; &lt;dependencies&gt; &lt;dependency&gt; &lt;groupId&gt;io.github.cobble-project&lt;/groupId&gt; &lt;artifactId&gt;cobble-flink-state&lt;/artifactId&gt; &lt;version&gt;${cobble.flink.version}&lt;/version&gt; &lt;/dependency&gt; &lt;dependency&gt; &lt;groupId&gt;io.github.cobble-project&lt;/groupId&gt; &lt;artifactId&gt;cobble-flink-source&lt;/artifactId&gt; &lt;version&gt;${cobble.flink.version}&lt;/version&gt; &lt;/dependency&gt; &lt;dependency&gt; &lt;groupId&gt;io.github.cobble-project&lt;/groupId&gt; &lt;artifactId&gt;cobble-flink-sink&lt;/artifactId&gt; &lt;version&gt;${cobble.flink.version}&lt;/version&gt; &lt;/dependency&gt; &lt;/dependencies&gt; . Common choices: . | stateful DataStream job: cobble-flink-state | SQL read job: cobble-flink-source | SQL write job: cobble-flink-sink | mixed usage: add multiple modules | . Configure Flink if you use the state backend . If you want to use Cobble as the Flink state backend, configure Flink like this: . state.backend.type: io.cobble.flink.state.CobbleStateBackendFactory state.backend.cobble.localdir: /tmp/flink-cobble/local state.backend.cobble.memory.managed: true state.checkpoints.dir: hdfs:///user/you/checkpoints # Cobble handles the outer HA integration high-availability.type: io.cobble.flink.state.CobbleHighAvailabilityServicesFactory # If you already had another HA type before, put it here cobble.ha.delegate.type: NONE . If your Flink daemons run on Java 11 or newer, also add: . env.java.opts.all: &gt;- --add-exports=java.base/sun.nio.ch=ALL-UNNAMED --add-opens=java.base/java.lang=ALL-UNNAMED --add-opens=java.base/java.util=ALL-UNNAMED . If multiple JDKs are installed, pin the runtime explicitly if needed: . env.java.home: /path/to/your/jdk . If your job only uses source or sink, you do not need this state-backend configuration. Start Flink and submit the job . | If you chose the runtime-jar setup, put the Cobble jar into $FLINK_HOME/lib | Update $FLINK_HOME/conf/flink-conf.yaml if you use the state backend | Start the cluster with $FLINK_HOME/bin/start-cluster.sh | Submit your job with $FLINK_HOME/bin/flink run ... | . ",
+    "url": "/cobble-flink/latest/getting-started/#setup",
+    
+    "relUrl": "/getting-started/#setup"
+  },"27": {
+    "doc": "Getting Started",
+    "title": "Where To Go Next",
+    "content": ". | State Backend if your job is stateful | Source if you want to read from Cobble | Sink if you want to write into Cobble | . ",
+    "url": "/cobble-flink/latest/getting-started/#where-to-go-next",
+    
+    "relUrl": "/getting-started/#where-to-go-next"
+  },"28": {
+    "doc": "State Backend",
+    "title": "State Backend",
+    "content": "Use the Cobble state backend when your Flink job is stateful and you want Flink state stored in Cobble. For more information about stateful stream processing, please refer to Flink’s documentation. ",
+    "url": "/cobble-flink/latest/state-backend/",
+    
+    "relUrl": "/state-backend/"
+  },"29": {
+    "doc": "State Backend",
+    "title": "Why Cobble Compared with RocksDB",
+    "content": "RocksDB is a familiar choice for Flink state, but Cobble is a better fit when you care about storage-compute separation and operational efficiency around checkpoint recovery. | A better fit for shared storage and large state Cobble is designed for storage-compute separation, so it works naturally when Flink compute runs on one side and state/checkpoint data lives on shared storage such as HDFS or object storage. Runtime files and checkpoint files work together more naturally, which reduces unnecessary data movement and makes Cobble a good fit for large-state workloads. | Faster recovery and rescale When restoring to the same key-group range, Cobble can resume from the existing snapshot source directly. During rescale, it can rebuild only the key-group ranges needed by the new tasks from one or more checkpoint manifests. This makes restart and rescale more efficient when state is large. | Easier to consume and inspect state data Once state data is in Cobble, it is easier to reuse Cobble’s source capabilities for batch consumption or point lookup. In some scenarios, you can also inspect data through Cobble’s web monitor. | Still easy to use locally Even in local deployment, Cobble can keep the experience close to RocksDB, so it can still work well as a default state backend rather than only as a specialized option for remote storage. | . ",
+    "url": "/cobble-flink/latest/state-backend/#why-cobble-compared-with-rocksdb",
+    
+    "relUrl": "/state-backend/#why-cobble-compared-with-rocksdb"
+  },"30": {
+    "doc": "State Backend",
+    "title": "Installation and Setup",
+    "content": "For most users, the easiest setup is to download the runtime jar into the Flink distribution. Job-side Maven dependency is an alternative packaging choice. You usually do not need both at the same time. Option A: use the runtime jar (recommended) . Download the released cobble-flink-dist jar from a Maven repository and put it into Flink’s lib/ directory. Use the same version naming rule described in Getting Started: . cp cobble-flink-dist-&lt;version&gt;.jar \"$FLINK_HOME/lib/\" . Option B: use a job-side dependency . Add cobble-flink-state to your job if you prefer to package the backend with the job itself: . &lt;dependency&gt; &lt;groupId&gt;io.github.cobble-project&lt;/groupId&gt; &lt;artifactId&gt;cobble-flink-state&lt;/artifactId&gt; &lt;version&gt;${cobble.flink.version}&lt;/version&gt; &lt;/dependency&gt; . Most users do not need this if the runtime jar is already present in Flink lib/. Configure flink-conf.yaml . Minimal example: . state.backend.type: io.cobble.flink.state.CobbleStateBackendFactory state.backend.cobble.localdir: /tmp/flink-cobble/local state.backend.cobble.memory.managed: true state.checkpoints.dir: hdfs:///user/you/checkpoints high-availability.type: io.cobble.flink.state.CobbleHighAvailabilityServicesFactory cobble.ha.delegate.type: NONE . If you were already using another Flink HA mode before enabling Cobble, keep Cobble as high-availability.type and move the old value into cobble.ha.delegate.type. Example: . high-availability.type: io.cobble.flink.state.CobbleHighAvailabilityServicesFactory cobble.ha.delegate.type: kubernetes . If Flink runs on Java 11 or newer, also add: . env.java.opts.all: &gt;- --add-exports=java.base/sun.nio.ch=ALL-UNNAMED --add-opens=java.base/java.lang=ALL-UNNAMED --add-opens=java.base/java.util=ALL-UNNAMED . If multiple JDKs are installed, you can also pin the runtime: . env.java.home: /path/to/your/jdk . Enable checkpointing in the job . The backend is configured in Flink, but the job still needs checkpointing: . StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment(); env.enableCheckpointing(10_000L); . ",
+    "url": "/cobble-flink/latest/state-backend/#installation-and-setup",
+    
+    "relUrl": "/state-backend/#installation-and-setup"
+  },"31": {
+    "doc": "State Backend",
+    "title": "Minimal DataStream Example",
+    "content": "DataStream&lt;String&gt; words = env.fromElements(\"cobble\", \"flink\", \"cobble\"); words.keyBy(word -&gt; word) .map(new RichMapFunction&lt;String, String&gt;() { private transient ValueState&lt;Long&gt; countState; @Override public void open(Configuration parameters) throws Exception { countState = getRuntimeContext() .getState(new ValueStateDescriptor&lt;&gt;(\"count\", Long.class)); } @Override public String map(String value) throws Exception { Long count = countState.value(); long next = count == null ? 1L : count + 1L; countState.update(next); return value + \":\" + next; } }); . ",
+    "url": "/cobble-flink/latest/state-backend/#minimal-datastream-example",
+    
+    "relUrl": "/state-backend/#minimal-datastream-example"
+  },"32": {
+    "doc": "State Backend",
+    "title": "Complete Configuration Reference",
+    "content": "This section lists the main configuration keys you can set for the Cobble state backend. Required Flink-side Settings . | Key | Default | Description | . | state.backend.type | none | Set this to io.cobble.flink.state.CobbleStateBackendFactory to enable Cobble as the Flink state backend. | . | state.checkpoints.dir | none | The checkpoint storage location. This should point to shared storage that all relevant restore flows can access. | . | high-availability.type | none | Set this to io.cobble.flink.state.CobbleHighAvailabilityServicesFactory when using the Cobble state backend. | . | env.java.opts.all | none | Required JVM flags when running Flink on Java 11 or newer. | . | env.java.home | none | Optional JDK path if you want to pin the Java runtime used by Flink. | . Cobble HA Wrapper Settings . | Key | Default | Description | . | cobble.ha.delegate.type | none | The original Flink HA mode or HA factory to delegate to, for example NONE, kubernetes, or a factory class name. | . | cobble.ha.delegate.none-mode | auto | How cobble.ha.delegate.type=NONE should be interpreted. Supported values are auto, standalone, and embedded. Most users can keep auto. | . Cobble Backend Settings . | Key | Default | Description | . | state.backend.cobble.localdir | TaskManager working directory | Local directory used by Cobble on each TaskManager. | . | state.backend.cobble.timer-service.factory | COBBLE | Timer storage implementation used by the backend. Most users should keep the default. | . | state.backend.cobble.memory.managed | true | Whether Cobble derives memory from Flink managed memory. | . | state.backend.cobble.memory.fixed-per-slot | none | Fixed memory budget per slot. Use this when you want to override managed-memory-based sizing. | . | state.backend.cobble.memory.memtable-buffer-ratio | 0.5 | Fraction of the Cobble memory budget reserved for memtable buffers. | . | state.backend.cobble.memory.memtable-buffer-count | 2 | Number of in-memory memtable buffers. | . | state.backend.cobble.memtable.type | hash | Memtable implementation. Supported values are hash, skiplist, and vec. | . | state.backend.cobble.compaction.policy | round_robin | Compaction policy. Supported values are round_robin, min_overlap, and score_priority. | . | state.backend.cobble.sst.bloom-filter.enabled | false | Whether SST bloom filters are enabled. | . | state.backend.cobble.sst.bloom-filter.bits-per-key | 10 | Bloom-filter density used when bloom filters are enabled. | . | state.backend.cobble.sst.partitioned-index.enabled | false | Whether partitioned SST index/filter blocks are enabled. | . | state.backend.cobble.value-separation.threshold | 1kb | Values larger than this threshold are separated into Cobble’s value log. | . | state.backend.cobble.direct-io.buffer-size | 2kb | Size of each pooled direct I/O buffer used by Cobble reads. | . | state.backend.cobble.direct-io.pool-max-size | 64 | Maximum number of pooled direct I/O buffers. | . | state.backend.cobble.log.max-file-size | 10mb | Maximum size of one Cobble log file before rolling. | . | state.backend.cobble.log.keep-files | 3 | Number of Cobble log files to retain. | . | state.backend.cobble.log.level | info | Cobble native log level. Supported values are trace, debug, info, warn, error, and off. | . | state.backend.cobble.snapshot.retention | none | Automatically expire older snapshots after this many newer snapshots have completed. | . | state.backend.cobble.localdir.primary-high-priority | false | Whether the local Cobble directory stays a high-priority primary volume even when checkpoint storage is configured. | . For a first deployment, most users can start with just these keys: . | state.backend.type | state.checkpoints.dir | high-availability.type | cobble.ha.delegate.type | state.backend.cobble.localdir | state.backend.cobble.memory.managed | . Then tune memory, SST, logging, and snapshot-retention settings only if you have a specific operational need. ",
+    "url": "/cobble-flink/latest/state-backend/#complete-configuration-reference",
+    
+    "relUrl": "/state-backend/#complete-configuration-reference"
+  },"33": {
+    "doc": "State Backend",
+    "title": "Usage Notes",
+    "content": ". | Cobble restore currently does not support Flink NO_CLAIM restore mode. | Use Flink CLAIM when restoring from checkpoints. | . ",
+    "url": "/cobble-flink/latest/state-backend/#usage-notes",
+    
+    "relUrl": "/state-backend/#usage-notes"
+  },"34": {
+    "doc": "Home",
+    "title": "Cobble Flink",
+    "content": "Cobble Flink integrates Cobble with Apache Flink so Cobble can be used as a Flink state backend, SQL source, and SQL sink. Cobble Flink provides a practical integration layer between Cobble and Apache Flink. It lets you use Cobble as Flink state storage, read Cobble data through Flink SQL source tables, and write Flink SQL results back into Cobble. The default deployment model is simple: most users only need to download the runtime jar from Maven and place it into the Flink distribution. Cobble Flink currently targets Flink 1.17.0 and later. Note: Cobble Flink is still evolving together with Cobble. We try to keep the documentation up to date, but for the latest behavior it is still worth checking the code and tests. ",
+    "url": "/cobble-flink/latest/#cobble-flink",
+    
+    "relUrl": "/#cobble-flink"
+  },"35": {
+    "doc": "Home",
+    "title": "Key Features",
+    "content": ". | Cobble state backend for stateful Flink jobs | Cobble SQL source for reading existing Cobble data in Flink SQL | Cobble SQL sink for writing Flink SQL results into Cobble | Shared-storage-friendly state usage through Cobble’s storage model | Compatibility with Cobble source capabilities for later consumption, lookup, and inspection workflows | . ",
+    "url": "/cobble-flink/latest/#key-features",
+    
+    "relUrl": "/#key-features"
+  },"36": {
+    "doc": "Home",
+    "title": "Documentation Structure",
+    "content": "| Chapter | Description | . | Introduction | What Cobble Flink provides and when to use each part | . | Getting Started | The fastest way to install and configure Cobble Flink | . | State Backend | How to use Cobble as Flink state storage | . | Source | How to read data from Cobble in Flink SQL | . | Sink | How to write Flink SQL results into Cobble | . | Web Monitor | How to inspect Cobble checkpoints and sink snapshots in a browser | . ",
+    "url": "/cobble-flink/latest/#documentation-structure",
+    
+    "relUrl": "/#documentation-structure"
+  },"37": {
+    "doc": "Home",
+    "title": "Home",
+    "content": " ",
+    "url": "/cobble-flink/latest/",
+    
+    "relUrl": "/"
+  }
+}
