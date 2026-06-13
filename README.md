@@ -12,6 +12,7 @@ Cobble Flink currently provides:
 - a **SQL source** for reading Cobble data in Flink SQL
 - a **SQL sink** for writing Flink SQL results into Cobble
 - a bundled **runtime jar** for Flink cluster deployment
+- a **web monitor** for inspecting checkpoint and sink snapshots
 
 For complete details, see the [documentation](https://cobble-project.github.io/cobble-flink/).
 
@@ -100,6 +101,34 @@ Typical choices:
 
 Make sure to configure Flink as described in the next section, then you can run your job as usual.
 Cobble will automatically be used for state management and SQL source/sink based on your configuration.
+
+## Web Monitor
+
+`cobble-flink-monitor` starts a read-only web UI for inspecting Cobble data in
+Flink checkpoints or normal Cobble sink/table snapshots. It can list available
+checkpoints/snapshots, select `latest` or a concrete snapshot, choose operators
+for checkpoint sources, scan key/value rows, and track selected rows in lookup
+mode.
+
+Build it with:
+
+```bash
+./mvnw -pl cobble-flink-monitor -am package -DskipTests
+```
+
+Start it with an optional initial source:
+
+```bash
+java -jar cobble-flink-monitor/target/cobble-flink-monitor-*.jar \
+  --checkpoint s3://bucket/path/to/checkpoints \
+  --flink-conf "$FLINK_HOME/conf" \
+  --port 18088
+```
+
+If `--checkpoint` is omitted, open the UI first and use the `Datasource` page to
+enter a checkpoint root, a concrete `chk-*` directory, or a Cobble sink/table
+path. `--flink-conf` is optional and is useful when checkpoint data lives on a
+remote filesystem configured through Flink.
 
 ## Get Started
 

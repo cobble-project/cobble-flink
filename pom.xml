@@ -19,6 +19,7 @@
         <module>cobble-sink</module>
         <module>cobble-source</module>
         <module>cobble-dist</module>
+        <module>cobble-flink-monitor</module>
         <module>cobble-state-bench</module>
         <module>cobble-tests</module>
     </modules>

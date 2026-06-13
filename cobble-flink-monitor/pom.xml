@@ -1,0 +1,123 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <parent>
+        <groupId>io.github.cobble-project</groupId>
+        <artifactId>cobble-flink</artifactId>
+        <version>0.2.0-1-flink-1.17-SNAPSHOT</version>
+        <relativePath>../pom.xml</relativePath>
+    </parent>
+
+    <artifactId>cobble-flink-monitor</artifactId>
+    <name>cobble-flink-monitor</name>
+    <description>Read-only web monitor for inspecting Cobble snapshots produced by Flink state backend.</description>
+
+    <dependencies>
+        <dependency>
+            <groupId>io.github.cobble-project</groupId>
+            <artifactId>cobble</artifactId>
+            <version>${cobble.java.version}</version>
+        </dependency>
+        <dependency>
+            <groupId>io.github.cobble-project</groupId>
+            <artifactId>cobble-flink-common</artifactId>
+            <version>${project.version}</version>
+        </dependency>
+        <dependency>
+            <groupId>org.apache.flink</groupId>
+            <artifactId>flink-core</artifactId>
+            <version>${flink.version}</version>
+        </dependency>
+        <dependency>
+            <groupId>org.apache.flink</groupId>
+            <artifactId>flink-hadoop-fs</artifactId>
+            <version>${flink.version}</version>
+            <scope>runtime</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.apache.flink</groupId>
+            <artifactId>flink-s3-fs-hadoop</artifactId>
+            <version>${flink.version}</version>
+            <scope>runtime</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.apache.flink</groupId>
+            <artifactId>flink-oss-fs-hadoop</artifactId>
+            <version>${flink.version}</version>
+            <scope>runtime</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.apache.flink</groupId>
+            <artifactId>flink-azure-fs-hadoop</artifactId>
+            <version>${flink.version}</version>
+            <scope>runtime</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.apache.flink</groupId>
+            <artifactId>flink-gs-fs-hadoop</artifactId>
+            <version>${flink.version}</version>
+            <scope>runtime</scope>
+        </dependency>
+        <dependency>
+            <groupId>com.google.code.gson</groupId>
+            <artifactId>gson</artifactId>
+            <version>2.11.0</version>
+        </dependency>
+    </dependencies>
+
+    <build>
+        <plugins>
+            <plugin>
+                <groupId>org.codehaus.mojo</groupId>
+                <artifactId>exec-maven-plugin</artifactId>
+                <configuration>
+                    <skip>false</skip>
+                    <mainClass>io.cobble.flink.monitor.CobbleFlinkMonitorServer</mainClass>
+                </configuration>
+            </plugin>
+            <plugin>
+                <artifactId>maven-jar-plugin</artifactId>
+                <version>3.4.2</version>
+                <configuration>
+                    <archive>
+                        <manifest>
+                            <mainClass>io.cobble.flink.monitor.CobbleFlinkMonitorServer</mainClass>
+                        </manifest>
+                        <manifestEntries>
+                            <Add-Exports>java.base/sun.nio.ch java.base/sun.net.util</Add-Exports>
+                            <Add-Opens>java.base/java.lang java.base/java.util</Add-Opens>
+                        </manifestEntries>
+                    </archive>
+                </configuration>
+            </plugin>
+            <plugin>
+                <artifactId>maven-shade-plugin</artifactId>
+                <version>3.6.0</version>
+                <executions>
+                    <execution>
+                        <phase>package</phase>
+                        <goals>
+                            <goal>shade</goal>
+                        </goals>
+                        <configuration>
+                            <createDependencyReducedPom>false</createDependencyReducedPom>
+                            <transformers>
+                                <transformer implementation="org.apache.maven.plugins.shade.resource.ServicesResourceTransformer" />
+                                <transformer implementation="org.apache.maven.plugins.shade.resource.ManifestResourceTransformer">
+                                    <mainClass>io.cobble.flink.monitor.CobbleFlinkMonitorServer</mainClass>
+                                    <manifestEntries>
+                                        <Add-Exports>java.base/sun.nio.ch java.base/sun.net.util</Add-Exports>
+                                        <Add-Opens>java.base/java.lang java.base/java.util</Add-Opens>
+                                    </manifestEntries>
+                                </transformer>
+                            </transformers>
+                        </configuration>
+                    </execution>
+                </executions>
+            </plugin>
+        </plugins>
+    </build>
+</project>

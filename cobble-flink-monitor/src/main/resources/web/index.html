@@ -1,0 +1,126 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Cobble Flink Web</title>
+    <link rel="stylesheet" href="/style.css" />
+  </head>
+  <body>
+    <div id="app">
+      <aside class="side-nav">
+        <div class="brand">
+          <div class="brand-mark">CF</div>
+          <div>
+            <h1>Cobble Flink</h1>
+            <p>Snapshot monitor</p>
+          </div>
+        </div>
+        <nav>
+          <button class="nav-button" data-view="datasource">Datasource</button>
+          <button class="nav-button active" data-view="inspect">Inspect</button>
+        </nav>
+      </aside>
+
+      <main>
+        <section class="toolbar">
+          <div>
+            <h2 id="page-title">Inspect</h2>
+            <p id="page-subtitle">Read raw key/value rows from a Cobble Flink snapshot.</p>
+          </div>
+        </section>
+
+        <section id="alert" class="alert hidden"></section>
+
+        <section id="inspect-view" class="view">
+          <div id="inspect-tabs" class="sub-tabs">
+            <button id="scan-tab" class="sub-tab active">Scan</button>
+            <button id="lookup-tab" class="sub-tab">Lookup</button>
+          </div>
+          <div id="inspect-controls" class="control-grid">
+            <label id="operator-control">
+              Operator
+              <select id="operator-select"></select>
+            </label>
+            <label>
+              <span id="bucket-label">Bucket</span>
+              <input id="bucket" placeholder="all" />
+            </label>
+            <label id="target-control">
+              Target
+              <select id="inspect-target"></select>
+            </label>
+            <label id="columns-control">
+              Columns
+              <input id="columns" placeholder="0 or 0,1" />
+            </label>
+          </div>
+          <div id="refresh-controls" class="refresh-row">
+            <label class="checkbox-label">
+              Auto refresh
+              <input id="auto-refresh-enabled" type="checkbox" />
+            </label>
+            <label class="inline-field">
+              Refresh seconds
+              <input id="auto-refresh-seconds" type="number" min="1" value="5" />
+            </label>
+            <div class="last-update">Last update <span id="current-last-update">-</span></div>
+          </div>
+
+          <div id="scan-controls" class="control-grid">
+            <label>
+              Prefix
+              <input id="prefix" placeholder="UTF-8 prefix" />
+            </label>
+            <label>
+              Limit
+              <input id="limit" type="number" min="1" value="50" />
+            </label>
+            <div class="button-row">
+              <button id="inspect-button" class="primary-button">Run</button>
+            </div>
+          </div>
+
+          <div id="lookup-controls" class="control-stack hidden">
+            <div class="lookup-actions">
+              <button id="lookup-button" class="primary-button">Refresh lookup</button>
+              <button id="clear-lookup-button">Clear tracked</button>
+            </div>
+          </div>
+
+          <div class="table-shell">
+            <table>
+              <thead id="result-head"></thead>
+              <tbody id="result-body"></tbody>
+            </table>
+          </div>
+          <div id="scan-pager" class="pager hidden">
+            <button id="prev-page-button">Previous</button>
+            <span id="page-indicator">Page 1</span>
+            <button id="next-page-button">Next</button>
+          </div>
+        </section>
+
+        <section id="datasource-view" class="view hidden">
+          <div class="datasource-actions">
+            <button id="refresh-button" class="primary-button">Refresh</button>
+          </div>
+          <div class="table-shell">
+            <table>
+              <thead id="datasource-head"></thead>
+              <tbody id="snapshots-body"></tbody>
+            </table>
+          </div>
+          <div class="datasource-footer">
+            <input
+              id="new-source-path"
+              placeholder="/path/to/checkpoints, file:///path, s3://bucket/path"
+            />
+            <button id="open-new-path-button" class="primary-button">Open new path</button>
+          </div>
+        </section>
+      </main>
+    </div>
+    <script src="/app.js?v=7"></script>
+  </body>
+</html>
