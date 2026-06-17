@@ -1,5 +1,7 @@
 package io.cobble.flink.state;
 
+import io.cobble.flink.common.inspect.StateRowKeyLayout;
+
 import org.apache.flink.api.common.typeutils.TypeSerializer;
 import org.apache.flink.core.memory.DataInputDeserializer;
 import org.apache.flink.core.memory.DataInputViewStreamWrapper;
@@ -396,31 +398,17 @@ final class CobbleStateKeySerializer {
         return serializer.getLength();
     }
 
-    // key+namespace has two parts; one length field is needed only when both are variable.
-    private static boolean shouldStoreKeyLengthForKeyNamespace(int keyLength, int namespaceLength) {
-        return keyLength < 0 && namespaceLength < 0;
+    static boolean shouldStoreKeyLengthForKeyNamespace(int keyLength, int namespaceLength) {
+        return StateRowKeyLayout.shouldStoreKeyLengthForKeyNamespace(keyLength, namespaceLength);
     }
 
-    // map key has three parts: key/namespace/userKey.
-    // We only need to persist (unknownParts - 1) lengths; this method decides whether key length
-    // is one of those persisted lengths.
     static boolean shouldStoreMapKeyLength(int keyLength, int namespaceLength, int userKeyLength) {
-        int unknownParts =
-                (keyLength < 0 ? 1 : 0)
-                        + (namespaceLength < 0 ? 1 : 0)
-                        + (userKeyLength < 0 ? 1 : 0);
-        return keyLength < 0 && unknownParts >= 2;
+        return StateRowKeyLayout.shouldStoreMapKeyLength(keyLength, namespaceLength, userKeyLength);
     }
 
-    // map key has three parts: key/namespace/userKey.
-    // We only need to persist (unknownParts - 1) lengths; this method decides whether namespace
-    // length is one of those persisted lengths.
     static boolean shouldStoreMapNamespaceLength(
             int keyLength, int namespaceLength, int userKeyLength) {
-        int unknownParts =
-                (keyLength < 0 ? 1 : 0)
-                        + (namespaceLength < 0 ? 1 : 0)
-                        + (userKeyLength < 0 ? 1 : 0);
-        return namespaceLength < 0 && unknownParts >= 2;
+        return StateRowKeyLayout.shouldStoreMapNamespaceLength(
+                keyLength, namespaceLength, userKeyLength);
     }
 }
