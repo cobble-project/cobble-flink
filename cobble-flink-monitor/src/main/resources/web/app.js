@@ -354,6 +354,9 @@ async function runLookup() {
         const tracked = group.items[index]
         tracked.keyUtf8 = result.key_utf8 ?? tracked.keyUtf8
         tracked.value = result.value
+        tracked.decodedKey = result.decoded_key || null
+        tracked.decodedValue = result.decoded_value ?? null
+        tracked.decodeError = result.decode_error || null
       })
     }
     state.lookupLastUpdate = new Date()
@@ -442,6 +445,9 @@ function trackScanItem(trackId) {
     columns: context.columns,
     allowsColumns: context.allowsColumns,
     value: item.columns || item.value || null,
+    decodedKey: item.decoded_key || null,
+    decodedValue: item.decoded_value ?? null,
+    decodeError: item.decode_error || null,
   })
   switchInspectMode('lookup')
   renderLookupResult()
@@ -488,8 +494,9 @@ function clearTrackedLookups() {
 }
 
 function renderTrackedValue(item) {
-  if (item.value == null) return '<span class="pill">missing</span>'
-  return item.allowsColumns ? renderColumns(item.value) : renderValue(item.value)
+  if (item.value == null) return `<span class="pill">missing</span>${renderDecodeError(item.decodeError)}`
+  if (item.allowsColumns) return renderColumns(item.value)
+  return renderStateValue(item.value, item.decodedValue, item.decodeError)
 }
 
 function scanItemByTrackId(trackId) {
@@ -643,8 +650,8 @@ function renderScanResult(data, context = activeScanContext()) {
     const trackId = trackIdentity(item.bucket, item.key_b64, context.targetId, context.columns)
     row.innerHTML = `
       <td>${item.bucket}</td>
-      <td>${renderKey(item.key_b64, item.key_utf8)}</td>
-      <td>${sink ? renderColumns(item.columns) : renderValue(item.value)}</td>
+      <td>${renderKey(item.key_b64, item.key_utf8, item.decoded_key)}</td>
+      <td>${sink ? renderColumns(item.columns) : renderStateValue(item.value, item.decoded_value, item.decode_error)}</td>
       <td>${renderActionMenu([
     { action: 'track', id: trackId, label: 'Track in lookup' },
     { action: 'copy-scan-key', id: trackId, label: 'Copy key' },
@@ -669,7 +676,7 @@ function renderLookupResult() {
     row.innerHTML = `
       <td>${escapeHtml(item.targetLabel)}</td>
       <td>${item.bucket}</td>
-      <td>${renderKey(item.keyB64, item.keyUtf8)}</td>
+      <td>${renderKey(item.keyB64, item.keyUtf8, item.decodedKey)}</td>
       <td>${renderTrackedValue(item)}</td>
       <td>${renderActionMenu([
     { action: 'remove-track', id: item.id, label: 'Remove' },
@@ -806,6 +813,10 @@ function renderValue(value) {
   return `${renderCode(value.b64)}${renderUtf8Pill(value.utf8)}`
 }
 
+function renderStateValue(value, decodedValue, decodeError) {
+  return `${renderValue(value)}${renderDecodedSection(decodedValue)}${renderDecodeError(decodeError)}`
+}
+
 function renderColumns(columns = []) {
   return columns.map((column, index) => {
     if (!column) return `<div><strong>${index}</strong>: null</div>`
@@ -813,8 +824,74 @@ function renderColumns(columns = []) {
   }).join('')
 }
 
-function renderKey(keyB64, keyUtf8) {
-  return `${renderCode(keyB64)}${renderUtf8Pill(keyUtf8)}`
+function renderKey(keyB64, keyUtf8, decodedKey = null) {
+  return `${renderCode(keyB64)}${renderUtf8Pill(keyUtf8)}${renderDecodedKey(decodedKey)}`
+}
+
+function renderDecodedKey(decodedKey) {
+  if (!decodedKey || typeof decodedKey !== 'object') return ''
+  const rows = []
+  for (const label of ['key', 'namespace', 'map_key']) {
+    if (Object.prototype.hasOwnProperty.call(decodedKey, label)) {
+      rows.push(renderDecodedPair(label, decodedKey[label]))
+    }
+  }
+  return renderDecodedBlock(rows)
+}
+
+function renderDecodedSection(value) {
+  if (value === undefined || value === null) return ''
+  if (Array.isArray(value)) {
+    const rows = value.map((item, index) => renderDecodedPair(String(index), item))
+    return renderDecodedBlock(rows)
+  }
+  if (typeof value === 'object' && !isRawBytesJson(value)) {
+    const rows = Object.entries(value).map(([key, item]) => renderDecodedPair(key, item))
+    return renderDecodedBlock(rows)
+  }
+  return renderDecodedBlock([renderDecodedValue(value)])
+}
+
+function renderDecodedBlock(rows) {
+  if (!rows.length) return ''
+  return `<div class="decoded-block">${rows.join('')}</div>`
+}
+
+function renderDecodedPair(label, value) {
+  return `
+    <div class="decoded-row">
+      <span class="decoded-label">${escapeHtml(label)}</span>
+      <div class="decoded-value">${renderDecodedValue(value)}</div>
+    </div>
+  `
+}
+
+function renderDecodedValue(value) {
+  if (value === null || value === undefined) return '<span class="muted-text">null</span>'
+  if (isRawBytesJson(value)) {
+    return `${renderCode(value.b64)}${renderUtf8Pill(value.utf8)}`
+  }
+  if (Array.isArray(value)) {
+    return renderDecodedBlock(value.map((item, index) => renderDecodedPair(String(index), item)))
+  }
+  if (typeof value === 'object') {
+    if (Object.prototype.hasOwnProperty.call(value, 'value')) {
+      return `${renderCode(value.value)}${value.type ? ` <span class="pill">${escapeHtml(truncateText(value.type, 80))}</span>` : ''}`
+    }
+    return renderCode(JSON.stringify(value))
+  }
+  return renderCode(value)
+}
+
+function renderDecodeError(error) {
+  return error ? `<div class="decode-error">${escapeHtml(truncateText(error))}</div>` : ''
+}
+
+function isRawBytesJson(value) {
+  return value
+    && typeof value === 'object'
+    && Object.prototype.hasOwnProperty.call(value, 'b64')
+    && Object.prototype.hasOwnProperty.call(value, 'utf8')
 }
 
 function renderUtf8Pill(value) {

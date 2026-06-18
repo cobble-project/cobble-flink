@@ -406,6 +406,46 @@ td:last-child {
   font-size: 12px;
 }
 
+.decoded-block {
+  display: grid;
+  gap: 4px;
+  margin-top: 6px;
+  padding-top: 6px;
+  border-top: 1px dashed #d6ded8;
+}
+
+.decoded-row {
+  display: grid;
+  grid-template-columns: max-content minmax(0, 1fr);
+  gap: 8px;
+  align-items: baseline;
+}
+
+.decoded-label {
+  color: var(--muted);
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.decoded-value {
+  min-width: 0;
+}
+
+.decode-error {
+  margin-top: 6px;
+  padding: 5px 7px;
+  border: 1px solid #f0c6c0;
+  border-radius: 6px;
+  background: var(--danger-bg);
+  color: var(--danger-text);
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
+.muted-text {
+  color: var(--muted);
+}
+
 .check-mark {
   display: inline-grid;
   place-items: center;
