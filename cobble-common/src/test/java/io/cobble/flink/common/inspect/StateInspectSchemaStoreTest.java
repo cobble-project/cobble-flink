@@ -343,8 +343,7 @@ class StateInspectSchemaStoreTest {
     void serializerInspectSchemaEqualsAndHashCodeRoundTrip() throws IOException {
         SerializerInspectSchema original =
                 SerializerInspectSchema.fromSerializer(IntSerializer.INSTANCE);
-        SerializerInspectSchema restored =
-                roundTripSerializerInspectSchema(original);
+        SerializerInspectSchema restored = roundTripSerializerInspectSchema(original);
         assertEquals(original, restored);
         assertEquals(original.hashCode(), restored.hashCode());
     }

@@ -129,6 +129,49 @@ final class CobblePathUtils {
     }
 
     /**
+     * Returns the root directory of the content-addressed inspect-schema registry for an operator.
+     * Schema blobs and checkpoint events live under this directory rather than inside individual
+     * checkpoint directories, so unchanged schemas are deduplicated across checkpoints.
+     */
+    static String cobbleOperatorInspectSchemaDirectory(
+            String checkpointExternalPointer, String operatorIdHex) {
+        return appendPath(
+                cobbleOperatorSnapshotDirectory(checkpointExternalPointer, operatorIdHex),
+                "inspect-schema");
+    }
+
+    static String cobbleInspectSchemaBlobDirectory(
+            String checkpointExternalPointer, String operatorIdHex) {
+        return appendPath(
+                cobbleOperatorInspectSchemaDirectory(checkpointExternalPointer, operatorIdHex),
+                "blobs");
+    }
+
+    static String cobbleInspectSchemaBlobPath(
+            String checkpointExternalPointer, String operatorIdHex, String schemaHash) {
+        return appendPath(
+                cobbleInspectSchemaBlobDirectory(checkpointExternalPointer, operatorIdHex),
+                schemaHash + ".csch");
+    }
+
+    static String cobbleInspectSchemaEventDirectory(
+            String checkpointExternalPointer, String operatorIdHex) {
+        return appendPath(
+                cobbleOperatorInspectSchemaDirectory(checkpointExternalPointer, operatorIdHex),
+                "events");
+    }
+
+    static String cobbleInspectSchemaEventPath(
+            String checkpointExternalPointer,
+            String operatorIdHex,
+            long checkpointId,
+            String schemaHash) {
+        return appendPath(
+                cobbleInspectSchemaEventDirectory(checkpointExternalPointer, operatorIdHex),
+                String.format(Locale.ROOT, "SCHEMA-%020d-%s.ref", checkpointId, schemaHash));
+    }
+
+    /**
      * Returns the volume root that contains a shard snapshot manifest.
      *
      * <p>A shard manifest lives at {@code <volume>/<db-id>/snapshot/SNAPSHOT-*}. During rescale the

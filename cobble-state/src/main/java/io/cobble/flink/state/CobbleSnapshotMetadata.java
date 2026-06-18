@@ -1,9 +1,13 @@
 package io.cobble.flink.state;
 
 import io.cobble.ShardSnapshot;
+import io.cobble.flink.common.inspect.StateInspectSchemaStore;
 
+import org.apache.flink.annotation.VisibleForTesting;
 import org.apache.flink.core.memory.DataInputView;
 import org.apache.flink.core.memory.DataOutputView;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import java.io.EOFException;
 import java.io.IOException;
@@ -13,22 +17,33 @@ import java.util.Map;
 /** Serialized shard-snapshot payload uploaded through Flink checkpoint state handles. */
 final class CobbleSnapshotMetadata {
 
+    private static final Logger LOG = LoggerFactory.getLogger(CobbleSnapshotMetadata.class);
+
     /** Identifies Cobble shard metadata inside Flink's generic checkpoint meta streams. */
     private static final int MAGIC = 0x43425348;
 
-    private static final int VERSION = 1;
+    @VisibleForTesting static final int VERSION = 1;
+
+    @VisibleForTesting static final int MAX_SCHEMA_BYTES = 16 * 1024 * 1024;
 
     private final ShardSnapshot shardSnapshot;
     private final boolean containsCobbleTimers;
+    private final StateInspectSchemaStore schemaStore;
 
-    private CobbleSnapshotMetadata(ShardSnapshot shardSnapshot, boolean containsCobbleTimers) {
+    private CobbleSnapshotMetadata(
+            ShardSnapshot shardSnapshot,
+            boolean containsCobbleTimers,
+            StateInspectSchemaStore schemaStore) {
         this.shardSnapshot = shardSnapshot;
         this.containsCobbleTimers = containsCobbleTimers;
+        this.schemaStore = schemaStore;
     }
 
     static CobbleSnapshotMetadata fromShardSnapshot(
-            ShardSnapshot shardSnapshot, boolean containsCobbleTimers) {
-        return new CobbleSnapshotMetadata(shardSnapshot, containsCobbleTimers);
+            ShardSnapshot shardSnapshot,
+            boolean containsCobbleTimers,
+            StateInspectSchemaStore schemaStore) {
+        return new CobbleSnapshotMetadata(shardSnapshot, containsCobbleTimers, schemaStore);
     }
 
     static CobbleSnapshotMetadata read(DataInputView input) throws IOException {
@@ -55,7 +70,12 @@ final class CobbleSnapshotMetadata {
     private static CobbleSnapshotMetadata readPayload(DataInputView input) throws IOException {
         int version = input.readInt();
         if (version != VERSION) {
-            throw new IOException("Unsupported Cobble snapshot metadata version: " + version);
+            throw new IOException(
+                    "Unsupported Cobble snapshot metadata version: "
+                            + version
+                            + " (expected "
+                            + VERSION
+                            + ")");
         }
 
         ShardSnapshot shardSnapshot = new ShardSnapshot();
@@ -82,7 +102,36 @@ final class CobbleSnapshotMetadata {
         shardSnapshot.columnFamilyIds = columnFamilyIds;
 
         boolean containsCobbleTimers = input.readBoolean();
-        return new CobbleSnapshotMetadata(shardSnapshot, containsCobbleTimers);
+
+        StateInspectSchemaStore schemaStore = readSchemaPayload(input);
+        return new CobbleSnapshotMetadata(shardSnapshot, containsCobbleTimers, schemaStore);
+    }
+
+    private static StateInspectSchemaStore readSchemaPayload(DataInputView input)
+            throws IOException {
+        int schemaBytesLength = input.readInt();
+        if (schemaBytesLength < 0 || schemaBytesLength > MAX_SCHEMA_BYTES) {
+            throw new IOException(
+                    "Cobble inspect schema bytes length "
+                            + schemaBytesLength
+                            + " is out of range [0, "
+                            + MAX_SCHEMA_BYTES
+                            + "].");
+        }
+        if (schemaBytesLength == 0) {
+            return StateInspectSchemaStore.empty();
+        }
+        byte[] schemaBytes = new byte[schemaBytesLength];
+        input.readFully(schemaBytes);
+        try {
+            return StateInspectSchemaStore.fromBytes(schemaBytes);
+        } catch (RuntimeException | IOException e) {
+            LOG.warn(
+                    "Failed to parse Cobble inspect schema from checkpoint metadata: {}."
+                            + " Falling back to empty schema store.",
+                    e.getMessage());
+            return StateInspectSchemaStore.empty();
+        }
     }
 
     void write(DataOutputView output) throws IOException {
@@ -107,6 +156,16 @@ final class CobbleSnapshotMetadata {
             output.writeInt(entry.getValue());
         }
         output.writeBoolean(containsCobbleTimers);
+
+        byte[] schemaBytes = schemaStore.toBytes();
+        if (schemaBytes.length > MAX_SCHEMA_BYTES) {
+            // Serialized schema exceeds size cap; write empty store so JM can proceed
+            // without rejecting the checkpoint. The large serializer payloads that
+            // cause this are already degraded to class-name-only in the monitor path.
+            schemaBytes = StateInspectSchemaStore.empty().toBytes();
+        }
+        output.writeInt(schemaBytes.length);
+        output.write(schemaBytes);
     }
 
     ShardSnapshot shardSnapshot() {
@@ -115,6 +174,10 @@ final class CobbleSnapshotMetadata {
 
     boolean containsCobbleTimers() {
         return containsCobbleTimers;
+    }
+
+    StateInspectSchemaStore schemaStore() {
+        return schemaStore;
     }
 
     private static String nullToEmpty(String value) {

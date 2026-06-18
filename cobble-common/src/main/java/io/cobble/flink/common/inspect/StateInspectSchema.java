@@ -179,15 +179,15 @@ public final class StateInspectSchema {
         this.columnFamily = columnFamily;
         this.ttlEnabled = ttlEnabled;
 
-        int keyLength = keySerializer.getLength();
-        int namespaceLength = namespaceSerializer.getLength();
+        int keyLength = safeLength(keySerializer);
+        int namespaceLength = safeLength(namespaceSerializer);
         this.keyFixedLength = keyLength >= 0;
         this.namespaceFixedLength = namespaceLength >= 0;
         this.keyLengthStored =
                 StateRowKeyLayout.shouldStoreKeyLengthForKeyNamespace(keyLength, namespaceLength);
 
         if (stateKind == StateKind.MAP && mapUserKeySerializer != null) {
-            int userKeyLength = mapUserKeySerializer.getLength();
+            int userKeyLength = safeLength(mapUserKeySerializer);
             this.mapUserKeyFixedLength = userKeyLength >= 0;
             this.mapKeyLengthStored =
                     StateRowKeyLayout.shouldStoreMapKeyLength(
@@ -427,5 +427,13 @@ public final class StateInspectSchema {
                 listElementSerializer,
                 mapUserKeySerializer,
                 mapUserValueSerializer);
+    }
+
+    private static int safeLength(TypeSerializer<?> serializer) {
+        try {
+            return serializer.getLength();
+        } catch (RuntimeException e) {
+            return -1;
+        }
     }
 }

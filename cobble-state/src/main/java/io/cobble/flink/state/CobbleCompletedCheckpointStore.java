@@ -4,6 +4,8 @@ import io.cobble.Config;
 import io.cobble.DbCoordinator;
 import io.cobble.GlobalSnapshot;
 import io.cobble.ShardSnapshot;
+import io.cobble.flink.common.inspect.StateInspectSchema;
+import io.cobble.flink.common.inspect.StateInspectSchemaStore;
 
 import org.apache.flink.api.common.JobStatus;
 import org.apache.flink.core.fs.FSDataInputStream;
@@ -58,8 +60,11 @@ final class CobbleCompletedCheckpointStore implements CompletedCheckpointStore {
         CheckpointsCleaner cobbleCleaner = wrapCleaner(checkpointsCleaner);
         CompletedCheckpoint subsumed =
                 delegate.addCheckpointAndSubsumeOldestOne(checkpoint, cobbleCleaner, postCleanup);
-        materializeGlobalSnapshot(checkpoint);
-        copyManifestIntoCheckpointDirectory(checkpoint);
+        Map<String, OperatorSnapshotData> snapshotDataByOperator =
+                collectCobbleShardSnapshotsByOperator(checkpoint);
+        materializeGlobalSnapshot(checkpoint, snapshotDataByOperator);
+        copyManifestIntoCheckpointDirectory(checkpoint, snapshotDataByOperator);
+        updateInspectSchemaRegistry(checkpoint, snapshotDataByOperator);
         cleanupSubsumedCheckpoint(subsumed);
         return subsumed;
     }
@@ -126,9 +131,10 @@ final class CobbleCompletedCheckpointStore implements CompletedCheckpointStore {
         return delegate.getSharedStateRegistry();
     }
 
-    private void materializeGlobalSnapshot(CompletedCheckpoint checkpoint) throws Exception {
-        Map<String, OperatorSnapshotData> snapshotDataByOperator =
-                collectCobbleShardSnapshotsByOperator(checkpoint);
+    private void materializeGlobalSnapshot(
+            CompletedCheckpoint checkpoint,
+            Map<String, OperatorSnapshotData> snapshotDataByOperator)
+            throws Exception {
         for (OperatorSnapshotData snapshotData : snapshotDataByOperator.values()) {
             OperatorCoordinatorHandle coordinatorHandle =
                     getOrCreateCoordinator(
@@ -143,10 +149,10 @@ final class CobbleCompletedCheckpointStore implements CompletedCheckpointStore {
         }
     }
 
-    private void copyManifestIntoCheckpointDirectory(CompletedCheckpoint checkpoint)
+    private void copyManifestIntoCheckpointDirectory(
+            CompletedCheckpoint checkpoint,
+            Map<String, OperatorSnapshotData> snapshotDataByOperator)
             throws Exception {
-        Map<String, OperatorSnapshotData> snapshotDataByOperator =
-                collectCobbleShardSnapshotsByOperator(checkpoint);
         for (OperatorSnapshotData snapshotData : snapshotDataByOperator.values()) {
             copyPath(
                     CobblePathUtils.cobbleGlobalSnapshotManifestPath(
@@ -292,10 +298,14 @@ final class CobbleCompletedCheckpointStore implements CompletedCheckpointStore {
         for (OperatorState operatorState : checkpoint.getOperatorStates().values()) {
             String operatorIdHex = operatorState.getOperatorID().toHexString();
             Map<String, ShardSnapshot> shardSnapshotsById = new LinkedHashMap<>();
+            List<StateInspectSchemaStore> subtaskSchemaStores = new ArrayList<>();
             for (OperatorSubtaskState subtaskState : operatorState.getStates()) {
                 collectCobbleShardSnapshots(
-                        subtaskState.getManagedKeyedState(), shardSnapshotsById);
-                collectCobbleShardSnapshots(subtaskState.getRawKeyedState(), shardSnapshotsById);
+                        subtaskState.getManagedKeyedState(),
+                        shardSnapshotsById,
+                        subtaskSchemaStores);
+                collectCobbleShardSnapshots(
+                        subtaskState.getRawKeyedState(), shardSnapshotsById, subtaskSchemaStores);
             }
             if (!shardSnapshotsById.isEmpty()) {
                 snapshotDataByOperator.put(
@@ -306,7 +316,8 @@ final class CobbleCompletedCheckpointStore implements CompletedCheckpointStore {
                                         operatorState.getMaxParallelism(),
                                         calculateTotalBuckets(
                                                 new ArrayList<>(shardSnapshotsById.values()))),
-                                new ArrayList<>(shardSnapshotsById.values())));
+                                new ArrayList<>(shardSnapshotsById.values()),
+                                subtaskSchemaStores));
             }
         }
         return snapshotDataByOperator;
@@ -314,7 +325,8 @@ final class CobbleCompletedCheckpointStore implements CompletedCheckpointStore {
 
     private void collectCobbleShardSnapshots(
             Iterable<KeyedStateHandle> keyedStateHandles,
-            Map<String, ShardSnapshot> shardSnapshotsById)
+            Map<String, ShardSnapshot> shardSnapshotsById,
+            List<StateInspectSchemaStore> subtaskSchemaStores)
             throws IOException {
         for (KeyedStateHandle keyedStateHandle : keyedStateHandles) {
             if (!(keyedStateHandle instanceof IncrementalRemoteKeyedStateHandle)) {
@@ -341,6 +353,11 @@ final class CobbleCompletedCheckpointStore implements CompletedCheckpointStore {
             ShardSnapshot shardSnapshot = metadata.shardSnapshot();
             shardSnapshotsById.put(
                     shardSnapshot.dbId + ':' + shardSnapshot.snapshotId, shardSnapshot);
+
+            StateInspectSchemaStore subtaskStore = metadata.schemaStore();
+            if (subtaskStore != null && !subtaskStore.isEmpty()) {
+                subtaskSchemaStores.add(subtaskStore);
+            }
         }
     }
 
@@ -389,7 +406,8 @@ final class CobbleCompletedCheckpointStore implements CompletedCheckpointStore {
                 DbCoordinator.open(
                         createCoordinatorConfig(checkpointExternalPointer, operatorIdHex));
         OperatorCoordinatorHandle coordinatorHandle =
-                new OperatorCoordinatorHandle(operatorIdHex, operatorDirectory, coordinator);
+                new OperatorCoordinatorHandle(
+                        operatorIdHex, operatorDirectory, coordinator, checkpointExternalPointer);
         coordinatorsByOperatorDirectory.put(operatorDirectory, coordinatorHandle);
         return coordinatorHandle;
     }
@@ -444,21 +462,74 @@ final class CobbleCompletedCheckpointStore implements CompletedCheckpointStore {
         }
     }
 
+    private void updateInspectSchemaRegistry(
+            CompletedCheckpoint checkpoint,
+            Map<String, OperatorSnapshotData> snapshotDataByOperator) {
+        for (OperatorSnapshotData snapshotData : snapshotDataByOperator.values()) {
+            StateInspectSchemaStore store = snapshotData.schemaStore;
+            if (store == null || store.isEmpty()) {
+                continue;
+            }
+            try {
+                OperatorCoordinatorHandle coordinatorHandle =
+                        getOrCreateCoordinator(
+                                checkpoint.getExternalPointer(), snapshotData.operatorIdHex);
+                coordinatorHandle.inspectSchemaRegistry.writeIfChanged(
+                        checkpoint.getCheckpointID(), store);
+            } catch (Exception e) {
+                LOG.warn(
+                        "Failed to update Cobble inspect schema registry for checkpoint {}"
+                                + " operator {}: {}",
+                        checkpoint.getCheckpointID(),
+                        snapshotData.operatorIdHex,
+                        e.getMessage());
+            }
+        }
+    }
+
     private static final class OperatorSnapshotData {
         private final String operatorIdHex;
         private final int totalBuckets;
         private final List<ShardSnapshot> shardSnapshots;
+        private final StateInspectSchemaStore schemaStore;
 
         private OperatorSnapshotData(
-                String operatorIdHex, int totalBuckets, List<ShardSnapshot> shardSnapshots) {
+                String operatorIdHex,
+                int totalBuckets,
+                List<ShardSnapshot> shardSnapshots,
+                List<StateInspectSchemaStore> subtaskSchemaStores) {
             this.operatorIdHex = operatorIdHex;
             this.totalBuckets = totalBuckets;
             this.shardSnapshots = shardSnapshots;
+            this.schemaStore = mergeSchemaStores(subtaskSchemaStores);
         }
 
         private String operatorDirectory(String checkpointExternalPointer) {
             return CobblePathUtils.cobbleOperatorSnapshotDirectory(
                     checkpointExternalPointer, operatorIdHex);
+        }
+
+        private static StateInspectSchemaStore mergeSchemaStores(
+                List<StateInspectSchemaStore> stores) {
+            if (stores.isEmpty()) {
+                return StateInspectSchemaStore.empty();
+            }
+            Map<String, StateInspectSchema> merged = new LinkedHashMap<>();
+            for (StateInspectSchemaStore store : stores) {
+                for (StateInspectSchema schema : store.schemas()) {
+                    StateInspectSchema existing = merged.putIfAbsent(schema.stateName(), schema);
+                    if (existing != null && !existing.equals(schema)) {
+                        LOG.warn(
+                                "Inspect schema mismatch for state '{}' across subtasks: "
+                                        + "keeping first registration, "
+                                        + "discarding divergent schema.",
+                                schema.stateName());
+                    }
+                }
+            }
+            return merged.isEmpty()
+                    ? StateInspectSchemaStore.empty()
+                    : new StateInspectSchemaStore(new ArrayList<>(merged.values()));
         }
     }
 
@@ -467,13 +538,19 @@ final class CobbleCompletedCheckpointStore implements CompletedCheckpointStore {
         private final String operatorDirectory;
         private final DbCoordinator coordinator;
         private final Set<Long> managedSnapshotIds;
+        private final CobbleInspectSchemaRegistry inspectSchemaRegistry;
 
         private OperatorCoordinatorHandle(
-                String operatorIdHex, String operatorDirectory, DbCoordinator coordinator) {
+                String operatorIdHex,
+                String operatorDirectory,
+                DbCoordinator coordinator,
+                String checkpointExternalPointer) {
             this.operatorIdHex = operatorIdHex;
             this.operatorDirectory = operatorDirectory;
             this.coordinator = coordinator;
             this.managedSnapshotIds = new TreeSet<>();
+            this.inspectSchemaRegistry =
+                    new CobbleInspectSchemaRegistry(checkpointExternalPointer, operatorIdHex);
         }
     }
 

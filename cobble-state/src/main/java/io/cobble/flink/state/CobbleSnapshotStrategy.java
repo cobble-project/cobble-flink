@@ -3,6 +3,7 @@ package io.cobble.flink.state;
 import io.cobble.CancelledError;
 import io.cobble.PendingSnapshot;
 import io.cobble.ShardSnapshot;
+import io.cobble.flink.common.inspect.StateInspectSchemaStore;
 import io.cobble.structured.Db;
 
 import org.apache.flink.core.fs.CloseableRegistry;
@@ -47,6 +48,7 @@ final class CobbleSnapshotStrategy
     private final KeyGroupRange keyGroupRange;
     private final Supplier<Boolean> hasRegisteredState;
     private final Supplier<Boolean> hasCobbleTimers;
+    private final Supplier<StateInspectSchemaStore> schemaStoreSupplier;
     private final UUID backendIdentifier;
     private final Map<Long, TrackedSnapshot> trackedSnapshots;
     private final Map<Long, CobbleSnapshotResources> pendingSnapshots;
@@ -55,11 +57,13 @@ final class CobbleSnapshotStrategy
             Db cobbleDb,
             KeyGroupRange keyGroupRange,
             Supplier<Boolean> hasRegisteredState,
-            Supplier<Boolean> hasCobbleTimers) {
+            Supplier<Boolean> hasCobbleTimers,
+            Supplier<StateInspectSchemaStore> schemaStoreSupplier) {
         this.cobbleDb = cobbleDb;
         this.keyGroupRange = keyGroupRange;
         this.hasRegisteredState = hasRegisteredState;
         this.hasCobbleTimers = hasCobbleTimers;
+        this.schemaStoreSupplier = schemaStoreSupplier;
         this.backendIdentifier = UUID.randomUUID();
         this.trackedSnapshots = new ConcurrentHashMap<>();
         this.pendingSnapshots = new ConcurrentHashMap<>();
@@ -163,7 +167,8 @@ final class CobbleSnapshotStrategy
         boolean success = false;
         try {
             ShardSnapshot shardSnapshot = snapshotResources.awaitSnapshot();
-            CobbleSnapshotMetadata.fromShardSnapshot(shardSnapshot, hasCobbleTimers.get())
+            CobbleSnapshotMetadata.fromShardSnapshot(
+                            shardSnapshot, hasCobbleTimers.get(), schemaStoreSupplier.get())
                     .write(
                             new DataOutputViewStreamWrapper(
                                     streamProvider.getCheckpointOutputStream()));

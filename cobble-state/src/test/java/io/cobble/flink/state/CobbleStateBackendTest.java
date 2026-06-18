@@ -13,6 +13,9 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import io.cobble.CancelledError;
 import io.cobble.Config;
 import io.cobble.ShardSnapshot;
+import io.cobble.flink.common.inspect.StateInspectSchema;
+import io.cobble.flink.common.inspect.StateInspectSchemaStore;
+import io.cobble.flink.common.inspect.StateKind;
 import io.cobble.structured.Schema;
 
 import org.apache.flink.api.common.state.ListState;
@@ -61,6 +64,7 @@ import org.junit.jupiter.api.io.TempDir;
 
 import java.io.File;
 import java.io.IOException;
+import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.Arrays;
 import java.util.Collection;
@@ -1542,6 +1546,482 @@ class CobbleStateBackendTest {
         assertEquals(
                 "http://tmp/cp",
                 CobbleKeyedStateBackendBuilder.normalizeCheckpointDirectory("http://tmp/cp"));
+    }
+
+    @Test
+    void schemaRegisteredForValueListAndMapStates(@TempDir Path tempDir) throws Exception {
+        TestBackendContext ctx =
+                createBackendContext(
+                        tempDir,
+                        true,
+                        "file:///tmp/checkpoints/chk-test",
+                        null,
+                        TtlTimeProvider.DEFAULT,
+                        false);
+        CobbleKeyedStateBackend<Integer> backend = ctx.cobbleBackend;
+        try {
+            backend.getPartitionedState(
+                    "val-ns",
+                    StringSerializer.INSTANCE,
+                    new ValueStateDescriptor<>("val-state", IntSerializer.INSTANCE));
+            backend.getPartitionedState(
+                    "list-ns",
+                    StringSerializer.INSTANCE,
+                    new ListStateDescriptor<>("list-state", IntSerializer.INSTANCE));
+            backend.getPartitionedState(
+                    "map-ns",
+                    StringSerializer.INSTANCE,
+                    new MapStateDescriptor<>(
+                            "map-state", IntSerializer.INSTANCE, StringSerializer.INSTANCE));
+
+            LinkedHashMap<String, StateInspectSchema> schemas = backend.getStateInspectSchemas();
+            assertEquals(3, schemas.size());
+
+            StateInspectSchema valSchema = schemas.get("val-state");
+            assertEquals(StateKind.VALUE, valSchema.stateKind());
+            assertEquals("val-state", valSchema.columnFamily());
+            assertFalse(valSchema.ttlEnabled());
+
+            StateInspectSchema listSchema = schemas.get("list-state");
+            assertEquals(StateKind.LIST, listSchema.stateKind());
+
+            StateInspectSchema mapSchema = schemas.get("map-state");
+            assertEquals(StateKind.MAP, mapSchema.stateKind());
+        } finally {
+            ctx.close();
+        }
+    }
+
+    @Test
+    void reRegisteringSameStateIsIdempotent(@TempDir Path tempDir) throws Exception {
+        TestBackendContext ctx =
+                createBackendContext(
+                        tempDir,
+                        true,
+                        "file:///tmp/checkpoints/chk-test",
+                        null,
+                        TtlTimeProvider.DEFAULT,
+                        false);
+        CobbleKeyedStateBackend<Integer> backend = ctx.cobbleBackend;
+        try {
+            backend.getPartitionedState(
+                    "ns",
+                    StringSerializer.INSTANCE,
+                    new ValueStateDescriptor<>("only-state", IntSerializer.INSTANCE));
+            backend.getPartitionedState(
+                    "ns",
+                    StringSerializer.INSTANCE,
+                    new ValueStateDescriptor<>("only-state", IntSerializer.INSTANCE));
+
+            assertEquals(1, backend.getStateInspectSchemas().size());
+        } finally {
+            ctx.close();
+        }
+    }
+
+    @Test
+    void schemaStoreEmbeddedInSnapshotMetadata(@TempDir Path tempDir) throws Exception {
+        TestBackendContext ctx =
+                createBackendContext(
+                        tempDir,
+                        true,
+                        "file:///tmp/checkpoints/chk-test",
+                        null,
+                        TtlTimeProvider.DEFAULT,
+                        false);
+        CobbleKeyedStateBackend<Integer> backend = ctx.cobbleBackend;
+        try {
+            backend.setCurrentKey(1);
+            ValueStateDescriptor<Integer> snapDescriptor =
+                    new ValueStateDescriptor<>("snap-state", IntSerializer.INSTANCE);
+            ValueState<Integer> valueState =
+                    backend.getPartitionedState(
+                            "void-state", StringSerializer.INSTANCE, snapDescriptor);
+            valueState.update(100);
+
+            MemCheckpointStreamFactory streamFactory =
+                    new MemCheckpointStreamFactory(4 * 1024 * 1024);
+            RunnableFuture<SnapshotResult<KeyedStateHandle>> future =
+                    backend.snapshot(
+                            1L,
+                            0L,
+                            streamFactory,
+                            CheckpointOptions.forCheckpointWithDefaultLocation());
+            future.run();
+            SnapshotResult<KeyedStateHandle> result = future.get();
+            KeyedStateHandle handle = result.getJobManagerOwnedSnapshot();
+            assertInstanceOf(IncrementalRemoteKeyedStateHandle.class, handle);
+            IncrementalRemoteKeyedStateHandle incrementalHandle =
+                    (IncrementalRemoteKeyedStateHandle) handle;
+            assertNotNull(incrementalHandle.getMetaStateHandle());
+
+            CobbleSnapshotMetadata metadata;
+            try (org.apache.flink.core.fs.FSDataInputStream stream =
+                    incrementalHandle.getMetaStateHandle().openInputStream()) {
+                metadata = CobbleSnapshotMetadata.read(new DataInputViewStreamWrapper(stream));
+            }
+            assertNotNull(metadata);
+            assertNotNull(metadata.schemaStore());
+            assertFalse(metadata.schemaStore().isEmpty());
+            assertEquals(1, metadata.schemaStore().schemas().size());
+            StateInspectSchema schema = metadata.schemaStore().schemas().get(0);
+            assertEquals("snap-state", schema.stateName());
+            assertEquals(StateKind.VALUE, schema.stateKind());
+        } finally {
+            ctx.close();
+        }
+    }
+
+    @Test
+    void inspectSchemaRegistryHashStableForSameSchema() throws Exception {
+        StateInspectSchemaStore store = StateInspectSchemaStore.fromBytes(new byte[] {});
+        // Empty store doesn't have any state, but we can compare empty stores.
+        // The key property: same bytes → same hash.
+        byte[] bytes1 = new byte[] {1, 2, 3, 4};
+        byte[] bytes2 = new byte[] {1, 2, 3, 4};
+        String hash1 = CobbleInspectSchemaRegistry.sha256(bytes1);
+        String hash2 = CobbleInspectSchemaRegistry.sha256(bytes2);
+        assertEquals(hash1, hash2);
+        // Different bytes → different hash (with overwhelming probability).
+        String hash3 = CobbleInspectSchemaRegistry.sha256(new byte[] {5, 6, 7, 8});
+        assertFalse(hash1.equals(hash3));
+    }
+
+    @Test
+    void parseEventFileNameParsesValidFormat() {
+        String fileName =
+                "SCHEMA-00000000000000000100-abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789.ref";
+        CobbleInspectSchemaRegistry.SchemaEvent event =
+                CobbleInspectSchemaRegistry.parseEventFileName(fileName);
+        assertNotNull(event);
+        assertEquals(100L, event.checkpointId);
+        assertEquals(
+                "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789", event.hash);
+    }
+
+    @Test
+    void parseEventFileNameRejectsMalformedNames() {
+        assertNull(CobbleInspectSchemaRegistry.parseEventFileName(null));
+        assertNull(CobbleInspectSchemaRegistry.parseEventFileName(""));
+        assertNull(CobbleInspectSchemaRegistry.parseEventFileName("scenario.txt"));
+        assertNull(
+                CobbleInspectSchemaRegistry.parseEventFileName(
+                        "SCHEMA-00000000000000000100-abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"));
+        // Missing hash.
+        assertNull(
+                CobbleInspectSchemaRegistry.parseEventFileName("SCHEMA-00000000000000000100-.ref"));
+        // Not enough digits.
+        assertNull(CobbleInspectSchemaRegistry.parseEventFileName("SCHEMA-100-abcdef.ref"));
+        // Non-numeric checkpoint id.
+        assertNull(
+                CobbleInspectSchemaRegistry.parseEventFileName(
+                        "SCHEMA-xxxxxxxxxxxxxxxxxxxx-abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789.ref"));
+        // Hash too short (63 chars instead of 64).
+        assertNull(
+                CobbleInspectSchemaRegistry.parseEventFileName(
+                        "SCHEMA-00000000000000000100-0abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789.ref"));
+        // Hash has invalid chars.
+        assertNull(
+                CobbleInspectSchemaRegistry.parseEventFileName(
+                        "SCHEMA-00000000000000000100-ZZZZf0123456789abcdef0123456789abcdef0123456789abcdef0123456789.ref"));
+    }
+
+    @Test
+    void sameSchemaAcrossTwoCheckpointsWritesOneBlobAndOneEvent(@TempDir Path tempDir)
+            throws Exception {
+        Path rootDir = tempDir.resolve("checkpoint-root");
+        Files.createDirectories(rootDir);
+        // Pass a path that includes a chk-N component, matching how production code
+        // receives checkpoint.getExternalPointer().
+        String checkpointPointer = rootDir.resolve("chk-100").toUri().toString();
+
+        // Build a non-empty schema store so the hash is meaningful.
+        StateInspectSchema schema =
+                StateInspectSchema.forValue(
+                        "value-state",
+                        "value-state",
+                        false,
+                        org.apache.flink.api.common.typeutils.base.IntSerializer.INSTANCE,
+                        org.apache.flink.api.common.typeutils.base.StringSerializer.INSTANCE,
+                        org.apache.flink.api.common.typeutils.base.StringSerializer.INSTANCE);
+        StateInspectSchemaStore store =
+                new StateInspectSchemaStore(Collections.singletonList(schema));
+
+        CobbleInspectSchemaRegistry registry =
+                new CobbleInspectSchemaRegistry(checkpointPointer, "abc123");
+
+        // First checkpoint → writes blob + event.
+        registry.writeIfChanged(100L, store);
+        assertTrue(
+                Files.exists(rootDir.resolve("cobble/abc123/inspect-schema/blobs")),
+                "Blob directory should exist");
+        assertTrue(
+                Files.exists(rootDir.resolve("cobble/abc123/inspect-schema/events")),
+                "Events directory should exist");
+
+        // Second checkpoint with same schema → skips write.
+        int fileCountBefore = countFiles(rootDir);
+        registry.writeIfChanged(101L, store);
+        int fileCountAfter = countFiles(rootDir);
+        assertEquals(
+                fileCountBefore,
+                fileCountAfter,
+                "Same schema should not create new files on second checkpoint");
+    }
+
+    @Test
+    void changedSchemaWritesSecondBlobAndSecondEvent(@TempDir Path tempDir) throws Exception {
+        Path rootDir = tempDir.resolve("checkpoint-root");
+        Files.createDirectories(rootDir);
+        String checkpointPointer = rootDir.resolve("chk-100").toUri().toString();
+
+        // Schema A: IntSerializer value.
+        StateInspectSchema schemaA =
+                StateInspectSchema.forValue(
+                        "val-a",
+                        "val-a",
+                        false,
+                        org.apache.flink.api.common.typeutils.base.IntSerializer.INSTANCE,
+                        org.apache.flink.api.common.typeutils.base.StringSerializer.INSTANCE,
+                        org.apache.flink.api.common.typeutils.base.IntSerializer.INSTANCE);
+        StateInspectSchemaStore storeA =
+                new StateInspectSchemaStore(Collections.singletonList(schemaA));
+
+        // Schema B: different state name → different serialized bytes → different hash.
+        StateInspectSchema schemaB =
+                StateInspectSchema.forValue(
+                        "val-b",
+                        "val-b",
+                        false,
+                        org.apache.flink.api.common.typeutils.base.IntSerializer.INSTANCE,
+                        org.apache.flink.api.common.typeutils.base.StringSerializer.INSTANCE,
+                        org.apache.flink.api.common.typeutils.base.IntSerializer.INSTANCE);
+        StateInspectSchemaStore storeB =
+                new StateInspectSchemaStore(Collections.singletonList(schemaB));
+
+        CobbleInspectSchemaRegistry registry =
+                new CobbleInspectSchemaRegistry(checkpointPointer, "abc123");
+
+        registry.writeIfChanged(100L, storeA);
+        int fileCountAfterA = countFiles(rootDir);
+
+        registry.writeIfChanged(200L, storeB);
+        int fileCountAfterB = countFiles(rootDir);
+
+        assertTrue(
+                fileCountAfterB > fileCountAfterA,
+                "Changed schema should create additional blob or event files");
+    }
+
+    @Test
+    void restartedRegistryRecoversLatestEvent(@TempDir Path tempDir) throws Exception {
+        Path rootDir = tempDir.resolve("checkpoint-root");
+        Files.createDirectories(rootDir);
+        String checkpointPointer = rootDir.resolve("chk-100").toUri().toString();
+
+        StateInspectSchema schema =
+                StateInspectSchema.forValue(
+                        "v1",
+                        "v1",
+                        false,
+                        org.apache.flink.api.common.typeutils.base.IntSerializer.INSTANCE,
+                        org.apache.flink.api.common.typeutils.base.StringSerializer.INSTANCE,
+                        org.apache.flink.api.common.typeutils.base.IntSerializer.INSTANCE);
+        StateInspectSchemaStore store =
+                new StateInspectSchemaStore(Collections.singletonList(schema));
+
+        // First registry writes checkpoint 100.
+        CobbleInspectSchemaRegistry registry1 =
+                new CobbleInspectSchemaRegistry(checkpointPointer, "abc123");
+        registry1.writeIfChanged(100L, store);
+
+        // "Restart": a fresh registry instance (using same checkpoint pointer) should recover
+        // the latest event and skip rewrite.
+        CobbleInspectSchemaRegistry registry2 =
+                new CobbleInspectSchemaRegistry(checkpointPointer, "abc123");
+        int fileCountBeforeRestart = countFiles(rootDir);
+        registry2.writeIfChanged(101L, store);
+        int fileCountAfterRestart = countFiles(rootDir);
+        assertEquals(
+                fileCountBeforeRestart,
+                fileCountAfterRestart,
+                "After restart, same schema should be recognized and not rewritten");
+    }
+
+    @Test
+    void resolveSchemaForCheckpointSelectsCorrectSchema(@TempDir Path tempDir) throws Exception {
+        Path rootDir = tempDir.resolve("checkpoint-root");
+        Files.createDirectories(rootDir);
+        String checkpointPointer = rootDir.resolve("chk-100").toUri().toString();
+
+        // Schema at checkpoint 100.
+        StateInspectSchema schema100 =
+                StateInspectSchema.forValue(
+                        "s100",
+                        "s100",
+                        false,
+                        org.apache.flink.api.common.typeutils.base.IntSerializer.INSTANCE,
+                        org.apache.flink.api.common.typeutils.base.StringSerializer.INSTANCE,
+                        org.apache.flink.api.common.typeutils.base.IntSerializer.INSTANCE);
+        StateInspectSchemaStore store100 =
+                new StateInspectSchemaStore(Collections.singletonList(schema100));
+
+        // Schema at checkpoint 200 (different state name).
+        StateInspectSchema schema200 =
+                StateInspectSchema.forValue(
+                        "s200",
+                        "s200",
+                        false,
+                        org.apache.flink.api.common.typeutils.base.IntSerializer.INSTANCE,
+                        org.apache.flink.api.common.typeutils.base.StringSerializer.INSTANCE,
+                        org.apache.flink.api.common.typeutils.base.IntSerializer.INSTANCE);
+        StateInspectSchemaStore store200 =
+                new StateInspectSchemaStore(Collections.singletonList(schema200));
+
+        CobbleInspectSchemaRegistry registry =
+                new CobbleInspectSchemaRegistry(checkpointPointer, "abc123");
+        registry.writeIfChanged(100L, store100);
+        registry.writeIfChanged(200L, store200);
+
+        // Checkpoint 150 → should resolve to schema from event 100.
+        StateInspectSchemaStore resolved150 = registry.resolveSchemaForCheckpoint(150L);
+        assertFalse(resolved150.isEmpty());
+        assertEquals("s100", resolved150.schemas().get(0).stateName());
+
+        // Checkpoint 100 → should resolve to same schema (event 100).
+        StateInspectSchemaStore resolved100 = registry.resolveSchemaForCheckpoint(100L);
+        assertEquals("s100", resolved100.schemas().get(0).stateName());
+
+        // Checkpoint 200 → should resolve to updated schema (event 200).
+        StateInspectSchemaStore resolved200 = registry.resolveSchemaForCheckpoint(200L);
+        assertEquals("s200", resolved200.schemas().get(0).stateName());
+
+        // Checkpoint 300 → should resolve to latest (event 200).
+        StateInspectSchemaStore resolved300 = registry.resolveSchemaForCheckpoint(300L);
+        assertEquals("s200", resolved300.schemas().get(0).stateName());
+    }
+
+    @Test
+    void resolveSchemaReturnsEmptyWhenNoEventExists(@TempDir Path tempDir) throws Exception {
+        Path rootDir = tempDir.resolve("checkpoint-root");
+        Files.createDirectories(rootDir);
+        String checkpointPointer = rootDir.resolve("chk-100").toUri().toString();
+        CobbleInspectSchemaRegistry registry =
+                new CobbleInspectSchemaRegistry(checkpointPointer, "abc123");
+        StateInspectSchemaStore result = registry.resolveSchemaForCheckpoint(100L);
+        assertTrue(result.isEmpty(), "Empty registry should return empty store");
+    }
+
+    @Test
+    void chkDirectoryDoesNotReceiveSchemaSidecarFiles(@TempDir Path tempDir) throws Exception {
+        // Verify that the registry writes into
+        // <root>/cobble/<opId>/inspect-schema/..., not into <root>/chk-N/COBBLE-SCHEMA-*.
+        Path rootDir = tempDir.resolve("checkpoint-root");
+        Files.createDirectories(rootDir);
+        String checkpointPointer = rootDir.resolve("chk-100").toUri().toString();
+
+        StateInspectSchema schema =
+                StateInspectSchema.forValue(
+                        "v1",
+                        "v1",
+                        false,
+                        org.apache.flink.api.common.typeutils.base.IntSerializer.INSTANCE,
+                        org.apache.flink.api.common.typeutils.base.StringSerializer.INSTANCE,
+                        org.apache.flink.api.common.typeutils.base.IntSerializer.INSTANCE);
+        StateInspectSchemaStore store =
+                new StateInspectSchemaStore(Collections.singletonList(schema));
+
+        CobbleInspectSchemaRegistry registry =
+                new CobbleInspectSchemaRegistry(checkpointPointer, "abc123");
+        registry.writeIfChanged(100L, store);
+
+        // Registry files must live under cobble/<opId>/inspect-schema/.
+        assertTrue(
+                Files.exists(rootDir.resolve("cobble/abc123/inspect-schema/blobs")),
+                "Schema blobs directory not found under cobble/inspect-schema/");
+        assertTrue(
+                Files.exists(rootDir.resolve("cobble/abc123/inspect-schema/events")),
+                "Schema events directory not found under cobble/inspect-schema/");
+
+        // No files should land directly inside a chk-* directory.
+        Path chkDir = rootDir.resolve("chk-100");
+        Files.createDirectories(chkDir);
+        java.io.File[] chkFiles =
+                chkDir.toFile().listFiles(f -> f.getName().startsWith("COBBLE-SCHEMA"));
+        assertTrue(
+                chkFiles == null || chkFiles.length == 0,
+                "chk-N directory should not contain COBBLE-SCHEMA-* files");
+    }
+
+    @Test
+    void registryEventFileNameIncludesSchemaHashIntegration(@TempDir Path tempDir)
+            throws Exception {
+        Path rootDir = tempDir.resolve("checkpoint-root");
+        Files.createDirectories(rootDir);
+        String checkpointPointer = rootDir.resolve("chk-42").toUri().toString();
+
+        StateInspectSchema schema =
+                StateInspectSchema.forValue(
+                        "sv",
+                        "sv",
+                        false,
+                        org.apache.flink.api.common.typeutils.base.IntSerializer.INSTANCE,
+                        org.apache.flink.api.common.typeutils.base.StringSerializer.INSTANCE,
+                        org.apache.flink.api.common.typeutils.base.IntSerializer.INSTANCE);
+        StateInspectSchemaStore store =
+                new StateInspectSchemaStore(Collections.singletonList(schema));
+        byte[] expectedBytes = store.toBytes();
+        String expectedHash = CobbleInspectSchemaRegistry.sha256(expectedBytes);
+
+        CobbleInspectSchemaRegistry registry =
+                new CobbleInspectSchemaRegistry(checkpointPointer, "abc123");
+        registry.writeIfChanged(42L, store);
+
+        // Verify blob file exists at the expected path.
+        Path blobPath =
+                rootDir.resolve("cobble/abc123/inspect-schema/blobs/" + expectedHash + ".csch");
+        assertTrue(Files.exists(blobPath), "Blob file should exist at " + blobPath);
+
+        // Verify event file references the correct hash.
+        Path eventsDir = rootDir.resolve("cobble/abc123/inspect-schema/events");
+        java.io.File[] eventFiles = eventsDir.toFile().listFiles();
+        assertNotNull(eventFiles);
+        assertTrue(eventFiles.length >= 1);
+        boolean found = false;
+        for (java.io.File f : eventFiles) {
+            if (f.getName().contains(expectedHash)) {
+                found = true;
+                break;
+            }
+        }
+        assertTrue(found, "One event file should reference the schema hash " + expectedHash);
+    }
+
+    private static int countFiles(Path root) throws IOException {
+        int count = 0;
+        java.io.File rootFile = root.toFile();
+        if (!rootFile.exists()) {
+            return 0;
+        }
+        java.util.concurrent.atomic.AtomicInteger counter =
+                new java.util.concurrent.atomic.AtomicInteger(0);
+        countRecursive(rootFile, counter);
+        return counter.get();
+    }
+
+    private static void countRecursive(
+            java.io.File dir, java.util.concurrent.atomic.AtomicInteger counter) {
+        java.io.File[] files = dir.listFiles();
+        if (files == null) {
+            return;
+        }
+        for (java.io.File f : files) {
+            if (f.isFile()) {
+                counter.incrementAndGet();
+            } else if (f.isDirectory()) {
+                countRecursive(f, counter);
+            }
+        }
     }
 
     private TestBackendContext createBackendContext(

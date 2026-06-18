@@ -64,6 +64,17 @@ public final class StateInspectSchemaStore {
         return schemas.isEmpty();
     }
 
+    /**
+     * Convenience for an empty store, equivalent to {@code new
+     * StateInspectSchemaStore(Collections.emptyList())} but avoids the allocation in hot paths.
+     */
+    public static StateInspectSchemaStore empty() {
+        return EMPTY;
+    }
+
+    private static final StateInspectSchemaStore EMPTY =
+            new StateInspectSchemaStore(Collections.emptyList());
+
     /** Serializes this store to a fresh byte array, suitable for writing to a sidecar file. */
     public byte[] toBytes() throws IOException {
         ByteArrayOutputStream byteStream = new ByteArrayOutputStream();

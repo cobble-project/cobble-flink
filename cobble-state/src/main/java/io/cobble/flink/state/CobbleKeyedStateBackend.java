@@ -2,6 +2,8 @@ package io.cobble.flink.state;
 
 import io.cobble.ColumnFamilyOptions;
 import io.cobble.Config;
+import io.cobble.flink.common.inspect.StateInspectSchema;
+import io.cobble.flink.common.inspect.StateInspectSchemaStore;
 import io.cobble.structured.Db;
 import io.cobble.structured.Schema;
 import io.cobble.structured.StructuredSchemaBuilder;
@@ -50,6 +52,7 @@ import java.io.UncheckedIOException;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.RunnableFuture;
@@ -68,6 +71,7 @@ final class CobbleKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
     private final Config cobbleConfig;
     private final Db cobbleDb;
     private final Map<String, StateDescriptor.Type> stateTypes;
+    private final LinkedHashMap<String, StateInspectSchema> stateInspectSchemas;
     private final PriorityQueueSetFactory priorityQueueFactory;
     private final HeapPriorityQueuesManager heapPriorityQueuesManager;
     private final List<AbstractCobbleState<?, ?, ?>> stateResources;
@@ -107,6 +111,7 @@ final class CobbleKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
         this.cobbleConfig = cobbleConfig;
         this.cobbleDb = cobbleDb;
         this.stateTypes = new HashMap<>();
+        this.stateInspectSchemas = new LinkedHashMap<>();
         this.priorityQueueFactory =
                 createPriorityQueueFactory(
                         cobbleDb,
@@ -127,7 +132,8 @@ final class CobbleKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
                         cobbleDb,
                         keyGroupRange,
                         () -> !stateTypes.isEmpty() || hasCobblePriorityQueues(),
-                        this::hasCobblePriorityQueues);
+                        this::hasCobblePriorityQueues,
+                        this::buildSchemaStore);
         this.resourcesClosed = new AtomicBoolean(false);
         this.manualTtlTimeProviderForTests = manualTtlTimeProviderForTests;
     }
@@ -185,10 +191,16 @@ final class CobbleKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
             throws Exception {
         ensureStateColumnFamily(stateDesc);
 
+        String stateName = stateDesc.getName();
+        boolean ttlEnabled =
+                stateDesc.getTtlConfig() != null && stateDesc.getTtlConfig().isEnabled();
+
         switch (stateDesc.getType()) {
             case VALUE:
                 ValueStateDescriptor<SV> valueStateDescriptor =
                         (ValueStateDescriptor<SV>) stateDesc;
+                registerValueSchema(
+                        stateName, ttlEnabled, namespaceSerializer, valueStateDescriptor);
                 CobbleValueState<K, N, SV> valueState =
                         new CobbleValueState<>(
                                 this,
@@ -204,11 +216,21 @@ final class CobbleKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
             case LIST:
                 IS listState =
                         createListState(namespaceSerializer, (ListStateDescriptor<?>) stateDesc);
+                registerListSchema(
+                        stateName,
+                        ttlEnabled,
+                        namespaceSerializer,
+                        (ListStateDescriptor<?>) stateDesc);
                 trackStateResource((AbstractCobbleState<?, ?, ?>) listState);
                 return listState;
             case MAP:
                 IS mapState =
                         createMapState(namespaceSerializer, (MapStateDescriptor<?, ?>) stateDesc);
+                registerMapSchema(
+                        stateName,
+                        ttlEnabled,
+                        namespaceSerializer,
+                        (MapStateDescriptor<?, ?>) stateDesc);
                 trackStateResource((AbstractCobbleState<?, ?, ?>) mapState);
                 return mapState;
             default:
@@ -332,6 +354,12 @@ final class CobbleKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
     /** Exposes the live Cobble DB handle for tests and internal helpers. */
     Db getCobbleDb() {
         return cobbleDb;
+    }
+
+    /** Exposes the registered inspect schemas for tests. */
+    @VisibleForTesting
+    LinkedHashMap<String, StateInspectSchema> getStateInspectSchemas() {
+        return stateInspectSchemas;
     }
 
     @VisibleForTesting
@@ -579,5 +607,64 @@ final class CobbleKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
     private static IllegalArgumentException unsupportedState(StateDescriptor<?, ?> stateDesc) {
         return new IllegalArgumentException(
                 "State " + stateDesc.getClass().getSimpleName() + " is not supported yet.");
+    }
+
+    private void registerValueSchema(
+            String stateName,
+            boolean ttlEnabled,
+            TypeSerializer<?> namespaceSerializer,
+            ValueStateDescriptor<?> valueDescriptor) {
+        stateInspectSchemas.putIfAbsent(
+                stateName,
+                StateInspectSchema.forValue(
+                        stateName,
+                        stateName,
+                        ttlEnabled,
+                        keySerializer,
+                        namespaceSerializer,
+                        valueDescriptor.getSerializer()));
+    }
+
+    private void registerListSchema(
+            String stateName,
+            boolean ttlEnabled,
+            TypeSerializer<?> namespaceSerializer,
+            ListStateDescriptor<?> listDescriptor) {
+        stateInspectSchemas.putIfAbsent(
+                stateName,
+                StateInspectSchema.forList(
+                        stateName,
+                        stateName,
+                        ttlEnabled,
+                        keySerializer,
+                        namespaceSerializer,
+                        listDescriptor.getElementSerializer()));
+    }
+
+    @SuppressWarnings("unchecked")
+    private void registerMapSchema(
+            String stateName,
+            boolean ttlEnabled,
+            TypeSerializer<?> namespaceSerializer,
+            MapStateDescriptor<?, ?> mapDescriptor) {
+        TypeSerializer<?> keySer = mapDescriptor.getKeySerializer();
+        TypeSerializer<?> valueSer = mapDescriptor.getValueSerializer();
+        stateInspectSchemas.putIfAbsent(
+                stateName,
+                StateInspectSchema.forMap(
+                        stateName,
+                        stateName,
+                        ttlEnabled,
+                        keySerializer,
+                        namespaceSerializer,
+                        keySer,
+                        valueSer));
+    }
+
+    private StateInspectSchemaStore buildSchemaStore() {
+        if (stateInspectSchemas.isEmpty()) {
+            return StateInspectSchemaStore.empty();
+        }
+        return new StateInspectSchemaStore(new ArrayList<>(stateInspectSchemas.values()));
     }
 }
