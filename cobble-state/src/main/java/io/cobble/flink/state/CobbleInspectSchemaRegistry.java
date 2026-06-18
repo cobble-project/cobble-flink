@@ -1,5 +1,6 @@
 package io.cobble.flink.state;
 
+import io.cobble.flink.common.inspect.InspectSchemaRegistryLayout;
 import io.cobble.flink.common.inspect.StateInspectSchemaStore;
 
 import org.apache.flink.core.fs.FSDataInputStream;
@@ -14,8 +15,6 @@ import java.io.ByteArrayOutputStream;
 import java.io.OutputStreamWriter;
 import java.io.Writer;
 import java.nio.charset.StandardCharsets;
-import java.security.MessageDigest;
-import java.security.NoSuchAlgorithmException;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.Comparator;
@@ -39,6 +38,10 @@ import java.util.List;
  *
  * <p>When the schema does not change across checkpoints, only one blob and one event are written. A
  * later checkpoint with a new schema hash writes a fresh blob (if absent) and a fresh event.
+ *
+ * <p>Event filename parsing and hash validation are delegated to {@link
+ * InspectSchemaRegistryLayout} so state and monitor share a single definition of the on-disk
+ * protocol.
  */
 final class CobbleInspectSchemaRegistry {
 
@@ -68,7 +71,7 @@ final class CobbleInspectSchemaRegistry {
         if (store == null || store.isEmpty()) {
             return;
         }
-        String hash = sha256(store.toBytes());
+        String hash = InspectSchemaRegistryLayout.sha256(store.toBytes());
         ensureRecovered();
 
         if (hash.equals(latestHash)) {
@@ -97,15 +100,15 @@ final class CobbleInspectSchemaRegistry {
      */
     StateInspectSchemaStore resolveSchemaForCheckpoint(long checkpointId) throws Exception {
         ensureRecovered();
-        List<SchemaEvent> events = listEvents();
+        List<InspectSchemaRegistryLayout.SchemaEvent> events = listEvents();
         if (events.isEmpty()) {
             return StateInspectSchemaStore.empty();
         }
 
-        SchemaEvent best = null;
-        for (SchemaEvent event : events) {
-            if (event.checkpointId <= checkpointId) {
-                if (best == null || event.checkpointId > best.checkpointId) {
+        InspectSchemaRegistryLayout.SchemaEvent best = null;
+        for (InspectSchemaRegistryLayout.SchemaEvent event : events) {
+            if (event.checkpointId() <= checkpointId) {
+                if (best == null || event.checkpointId() > best.checkpointId()) {
                     best = event;
                 }
             }
@@ -119,7 +122,7 @@ final class CobbleInspectSchemaRegistry {
             return StateInspectSchemaStore.empty();
         }
 
-        return readBlob(best.hash);
+        return readBlob(best.hash());
     }
 
     // ------------------------------------------------------------------------------------------
@@ -131,10 +134,10 @@ final class CobbleInspectSchemaRegistry {
             return;
         }
         recovered = true;
-        SchemaEvent latest = loadLatestEvent();
+        InspectSchemaRegistryLayout.SchemaEvent latest = loadLatestEvent();
         if (latest != null) {
-            latestHash = latest.hash;
-            latestCheckpointId = latest.checkpointId;
+            latestHash = latest.hash();
+            latestCheckpointId = latest.checkpointId();
             LOG.debug(
                     "Recovered inspect schema for operator {}: checkpoint {}, hash {}.",
                     operatorIdHex,
@@ -143,19 +146,19 @@ final class CobbleInspectSchemaRegistry {
         }
     }
 
-    private SchemaEvent loadLatestEvent() throws Exception {
-        List<SchemaEvent> events = listEvents();
+    private InspectSchemaRegistryLayout.SchemaEvent loadLatestEvent() throws Exception {
+        List<InspectSchemaRegistryLayout.SchemaEvent> events = listEvents();
         if (events.isEmpty()) {
             return null;
         }
-        return Collections.max(events, Comparator.comparingLong(e -> e.checkpointId));
+        return Collections.max(events, Comparator.comparingLong(e -> e.checkpointId()));
     }
 
     // ------------------------------------------------------------------------------------------
     //  Event listing & file-name parsing
     // ------------------------------------------------------------------------------------------
 
-    private List<SchemaEvent> listEvents() throws Exception {
+    private List<InspectSchemaRegistryLayout.SchemaEvent> listEvents() throws Exception {
         String eventDir =
                 CobblePathUtils.cobbleInspectSchemaEventDirectory(
                         checkpointExternalPointer, operatorIdHex);
@@ -170,66 +173,20 @@ final class CobbleInspectSchemaRegistry {
             return Collections.emptyList();
         }
 
-        List<SchemaEvent> events = new ArrayList<>();
+        List<InspectSchemaRegistryLayout.SchemaEvent> events = new ArrayList<>();
         for (FileStatus status : statuses) {
             String name = status.getPath().getName();
-            if (!name.startsWith("SCHEMA-") || !name.endsWith(".ref")) {
+            if (!name.startsWith(InspectSchemaRegistryLayout.EVENT_PREFIX)
+                    || !name.endsWith(InspectSchemaRegistryLayout.EVENT_SUFFIX)) {
                 continue;
             }
-            SchemaEvent event = parseEventFileName(name);
+            InspectSchemaRegistryLayout.SchemaEvent event =
+                    InspectSchemaRegistryLayout.parseEventFileName(name);
             if (event != null) {
                 events.add(event);
             }
         }
         return events;
-    }
-
-    // VisibleForTesting
-    static SchemaEvent parseEventFileName(String fileName) {
-        // Expected format: SCHEMA-<20-digit checkpointId>-<64-char-hex-hash>.ref
-        if (fileName == null || fileName.isEmpty() || !fileName.endsWith(".ref")) {
-            return null;
-        }
-        String stripped = fileName.substring(0, fileName.length() - 4);
-        if (!stripped.startsWith("SCHEMA-")) {
-            return null;
-        }
-        stripped = stripped.substring("SCHEMA-".length());
-
-        // After "SCHEMA-" we expect 20 digits, a '-', then the hash.
-        if (stripped.length() < 21) {
-            return null;
-        }
-        String checkpointIdStr = stripped.substring(0, 20);
-        long checkpointId;
-        try {
-            checkpointId = Long.parseLong(checkpointIdStr);
-        } catch (NumberFormatException e) {
-            return null;
-        }
-
-        if (stripped.charAt(20) != '-') {
-            return null;
-        }
-        String hash = stripped.substring(21);
-        if (!isValidHash(hash)) {
-            return null;
-        }
-
-        return new SchemaEvent(checkpointId, hash);
-    }
-
-    private static boolean isValidHash(String hash) {
-        if (hash.length() != 64) {
-            return false;
-        }
-        for (int i = 0; i < 64; i++) {
-            char c = hash.charAt(i);
-            if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F'))) {
-                return false;
-            }
-        }
-        return true;
     }
 
     // ------------------------------------------------------------------------------------------
@@ -296,38 +253,6 @@ final class CobbleInspectSchemaRegistry {
                     hash,
                     e.getMessage());
             return StateInspectSchemaStore.empty();
-        }
-    }
-
-    // ------------------------------------------------------------------------------------------
-    //  Hashing
-    // ------------------------------------------------------------------------------------------
-
-    static String sha256(byte[] data) {
-        try {
-            MessageDigest digest = MessageDigest.getInstance("SHA-256");
-            byte[] hash = digest.digest(data);
-            StringBuilder hex = new StringBuilder(hash.length * 2);
-            for (byte b : hash) {
-                hex.append(String.format("%02x", b));
-            }
-            return hex.toString();
-        } catch (NoSuchAlgorithmException e) {
-            throw new IllegalStateException("SHA-256 algorithm not available.", e);
-        }
-    }
-
-    // ------------------------------------------------------------------------------------------
-    //  Inner types
-    // ------------------------------------------------------------------------------------------
-
-    static final class SchemaEvent {
-        final long checkpointId;
-        final String hash;
-
-        SchemaEvent(long checkpointId, String hash) {
-            this.checkpointId = checkpointId;
-            this.hash = hash;
         }
     }
 }

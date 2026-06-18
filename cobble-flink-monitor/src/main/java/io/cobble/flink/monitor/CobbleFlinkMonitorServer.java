@@ -56,8 +56,6 @@ public final class CobbleFlinkMonitorServer {
     private static final String CHECKPOINT_PREFIX = "chk-";
     private static final String COBBLE_MANIFEST_PREFIX = "COBBLE-SNAPSHOT-";
     private static final String COBBLE_MANIFEST_SUFFIX = "-MANIFEST";
-    private static final String DEFAULT_COLUMN_FAMILY = "default";
-    private static final String TIMER_QUEUE_COLUMN_FAMILY_PREFIX = "__cobble_timer__";
     private static final long DEFAULT_LATEST_REFRESH_MILLIS = 5000L;
     private static final byte[] EMPTY_SCAN_KEY = new byte[0];
     private static final byte[] MAX_SCAN_KEY = maxScanKey();
@@ -206,6 +204,7 @@ public final class CobbleFlinkMonitorServer {
         private boolean selectedLatest;
         private CheckpointEntry selectedCheckpoint;
         private OperatorEntry selectedOperator;
+        private SchemaResolveResult selectedSchema;
         private Reader reader;
         private List<File> readerTemporaryDirectories;
 
@@ -221,6 +220,10 @@ public final class CobbleFlinkMonitorServer {
             this.selectedLatest = selectedLatest;
             this.selectedCheckpoint = selectedCheckpoint;
             this.selectedOperator = selectedOperator;
+            this.selectedSchema =
+                    selectedCheckpoint != null && selectedOperator != null
+                            ? resolveSchema(selectedCheckpoint, selectedOperator)
+                            : null;
             this.reader = readerHandle.reader;
             this.readerTemporaryDirectories = readerHandle.temporaryDirectories;
             this.startedAtMillis = System.currentTimeMillis();
@@ -373,8 +376,9 @@ public final class CobbleFlinkMonitorServer {
                     current == null || current.shardSnapshots == null
                             ? 0
                             : current.shardSnapshots.size());
-            output.put("inspect_kind", inspectKind(current));
-            output.put("inspect_targets", inspectTargets(current));
+            output.put("inspect_kind", inspectKind(current, selectedSchema));
+            output.put("inspect_targets", inspectTargets(current, selectedSchema));
+            output.put("schema", selectedSchema == null ? null : selectedSchema.toJson());
             output.put("catalog", catalog == null ? null : catalog.toJson());
             output.put("inspect_default_limit", config.inspectDefaultLimit);
             output.put("inspect_max_limit", config.inspectMaxLimit);
@@ -438,6 +442,7 @@ public final class CobbleFlinkMonitorServer {
             selectedCheckpoint = checkpoint;
             selectedOperator = operator;
             selectedLatest = checkpointId == null;
+            selectedSchema = resolveSchema(checkpoint, operator);
 
             Map<String, Object> output = new LinkedHashMap<>();
             output.put("read_mode", reader.readMode());
@@ -447,6 +452,7 @@ public final class CobbleFlinkMonitorServer {
             output.put("selected_checkpoint", selectedLatest ? "latest" : selectedCheckpoint.id);
             output.put("selected_checkpoint_id", selectedCheckpoint.id);
             output.put("selected_operator_id", selectedOperator.operatorId);
+            output.put("schema", selectedSchema.toJson());
             return output;
         }
 
@@ -498,6 +504,7 @@ public final class CobbleFlinkMonitorServer {
             output.put("selected_checkpoint_id", selectedCheckpoint.id);
             output.put("selected_operator_id", selectedOperator.operatorId);
             output.put("inspect_target", target.toJson());
+            output.put("schema", selectedSchema == null ? null : selectedSchema.toJson());
             output.put("lookup", items);
             return output;
         }
@@ -594,6 +601,7 @@ public final class CobbleFlinkMonitorServer {
             output.put("selected_checkpoint_id", selectedCheckpoint.id);
             output.put("selected_operator_id", selectedOperator.operatorId);
             output.put("inspect_target", target.toJson());
+            output.put("schema", selectedSchema == null ? null : selectedSchema.toJson());
             output.put("scan", scan);
             return output;
         }
@@ -645,7 +653,7 @@ public final class CobbleFlinkMonitorServer {
 
         private InspectTarget selectedInspectTarget(Map<String, List<String>> params) {
             GlobalSnapshot snapshot = reader.currentGlobalSnapshot();
-            List<InspectTarget> targets = inspectTargetObjects(snapshot);
+            List<InspectTarget> targets = StateInspectTargetBuilder.build(snapshot, selectedSchema);
             String requested = first(params, "target", first(params, "state", null));
             if (requested == null || requested.trim().isEmpty()) {
                 return targets.isEmpty() ? InspectTarget.sink("sink") : targets.get(0);
@@ -673,6 +681,7 @@ public final class CobbleFlinkMonitorServer {
                 replaceReader(openReader(config, latest, operator));
                 selectedCheckpoint = latest;
                 selectedOperator = operator;
+                selectedSchema = resolveSchema(latest, operator);
             }
         }
 
@@ -715,6 +724,16 @@ public final class CobbleFlinkMonitorServer {
             }
             deleteTemporaryDirectories(readerTemporaryDirectories);
             readerTemporaryDirectories = Collections.emptyList();
+        }
+
+        private static SchemaResolveResult resolveSchema(
+                CheckpointEntry checkpoint, OperatorEntry operator) {
+            try {
+                return MonitorInspectSchemaResolver.resolve(checkpoint, operator);
+            } catch (Exception e) {
+                return SchemaResolveResult.unavailable(
+                        "Failed to resolve schema registry: " + e.getMessage());
+            }
         }
     }
 
@@ -1808,8 +1827,8 @@ public final class CobbleFlinkMonitorServer {
         return value;
     }
 
-    private static String inspectKind(GlobalSnapshot snapshot) {
-        List<InspectTarget> targets = inspectTargetObjects(snapshot);
+    private static String inspectKind(GlobalSnapshot snapshot, SchemaResolveResult schema) {
+        List<InspectTarget> targets = StateInspectTargetBuilder.build(snapshot, schema);
         if (targets.isEmpty()) {
             return "empty";
         }
@@ -1819,48 +1838,14 @@ public final class CobbleFlinkMonitorServer {
         return "state";
     }
 
-    private static List<Map<String, Object>> inspectTargets(GlobalSnapshot snapshot) {
-        List<InspectTarget> targets = inspectTargetObjects(snapshot);
+    private static List<Map<String, Object>> inspectTargets(
+            GlobalSnapshot snapshot, SchemaResolveResult schema) {
+        List<InspectTarget> targets = StateInspectTargetBuilder.build(snapshot, schema);
         List<Map<String, Object>> output = new ArrayList<>(targets.size());
         for (InspectTarget target : targets) {
             output.add(target.toJson());
         }
         return output;
-    }
-
-    private static List<InspectTarget> inspectTargetObjects(GlobalSnapshot snapshot) {
-        if (snapshot == null
-                || snapshot.columnFamilyIds == null
-                || snapshot.columnFamilyIds.isEmpty()) {
-            return Collections.emptyList();
-        }
-        List<Map.Entry<String, Integer>> entries =
-                new ArrayList<>(snapshot.columnFamilyIds.entrySet());
-        entries.sort(Comparator.comparing(Map.Entry::getValue));
-
-        List<InspectTarget> states = new ArrayList<>();
-        boolean hasUserState = false;
-        for (Map.Entry<String, Integer> entry : entries) {
-            String columnFamily = entry.getKey();
-            if (DEFAULT_COLUMN_FAMILY.equals(columnFamily)) {
-                continue;
-            }
-            if (columnFamily.startsWith(TIMER_QUEUE_COLUMN_FAMILY_PREFIX)) {
-                String stateName =
-                        columnFamily.substring(TIMER_QUEUE_COLUMN_FAMILY_PREFIX.length());
-                if (stateName.isEmpty()) {
-                    stateName = columnFamily;
-                }
-                states.add(InspectTarget.timer(stateName, columnFamily));
-            } else {
-                hasUserState = true;
-                states.add(InspectTarget.state(columnFamily, columnFamily));
-            }
-        }
-        if (!states.isEmpty() || hasUserState) {
-            return states;
-        }
-        return Collections.singletonList(InspectTarget.sink("sink"));
     }
 
     private static List<Map<String, Object>> columnFamilies(GlobalSnapshot snapshot) {

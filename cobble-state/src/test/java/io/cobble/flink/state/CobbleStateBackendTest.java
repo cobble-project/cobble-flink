@@ -13,6 +13,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import io.cobble.CancelledError;
 import io.cobble.Config;
 import io.cobble.ShardSnapshot;
+import io.cobble.flink.common.inspect.InspectSchemaRegistryLayout;
 import io.cobble.flink.common.inspect.StateInspectSchema;
 import io.cobble.flink.common.inspect.StateInspectSchemaStore;
 import io.cobble.flink.common.inspect.StateKind;
@@ -1679,11 +1680,11 @@ class CobbleStateBackendTest {
         // The key property: same bytes → same hash.
         byte[] bytes1 = new byte[] {1, 2, 3, 4};
         byte[] bytes2 = new byte[] {1, 2, 3, 4};
-        String hash1 = CobbleInspectSchemaRegistry.sha256(bytes1);
-        String hash2 = CobbleInspectSchemaRegistry.sha256(bytes2);
+        String hash1 = InspectSchemaRegistryLayout.sha256(bytes1);
+        String hash2 = InspectSchemaRegistryLayout.sha256(bytes2);
         assertEquals(hash1, hash2);
         // Different bytes → different hash (with overwhelming probability).
-        String hash3 = CobbleInspectSchemaRegistry.sha256(new byte[] {5, 6, 7, 8});
+        String hash3 = InspectSchemaRegistryLayout.sha256(new byte[] {5, 6, 7, 8});
         assertFalse(hash1.equals(hash3));
     }
 
@@ -1691,38 +1692,43 @@ class CobbleStateBackendTest {
     void parseEventFileNameParsesValidFormat() {
         String fileName =
                 "SCHEMA-00000000000000000100-abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789.ref";
-        CobbleInspectSchemaRegistry.SchemaEvent event =
-                CobbleInspectSchemaRegistry.parseEventFileName(fileName);
+        InspectSchemaRegistryLayout.SchemaEvent event =
+                InspectSchemaRegistryLayout.parseEventFileName(fileName);
         assertNotNull(event);
-        assertEquals(100L, event.checkpointId);
+        assertEquals(100L, event.checkpointId());
         assertEquals(
-                "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789", event.hash);
+                "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789", event.hash());
     }
 
     @Test
     void parseEventFileNameRejectsMalformedNames() {
-        assertNull(CobbleInspectSchemaRegistry.parseEventFileName(null));
-        assertNull(CobbleInspectSchemaRegistry.parseEventFileName(""));
-        assertNull(CobbleInspectSchemaRegistry.parseEventFileName("scenario.txt"));
+        assertNull(InspectSchemaRegistryLayout.parseEventFileName(null));
+        assertNull(InspectSchemaRegistryLayout.parseEventFileName(""));
+        assertNull(InspectSchemaRegistryLayout.parseEventFileName("scenario.txt"));
+        // Missing required .ref suffix.
         assertNull(
-                CobbleInspectSchemaRegistry.parseEventFileName(
+                InspectSchemaRegistryLayout.parseEventFileName(
                         "SCHEMA-00000000000000000100-abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"));
-        // Missing hash.
+        // Non-hex hash after SCHEMA- prefix.
         assertNull(
-                CobbleInspectSchemaRegistry.parseEventFileName("SCHEMA-00000000000000000100-.ref"));
+                InspectSchemaRegistryLayout.parseEventFileName(
+                        "SCHEMA-00000000000000000100-gggg0123456789abcdef0123456789abcdef0123456789abcdef0123456789.ref"));
+        // Missing hash (only separator and ref suffix).
+        assertNull(
+                InspectSchemaRegistryLayout.parseEventFileName("SCHEMA-00000000000000000100-.ref"));
         // Not enough digits.
-        assertNull(CobbleInspectSchemaRegistry.parseEventFileName("SCHEMA-100-abcdef.ref"));
+        assertNull(InspectSchemaRegistryLayout.parseEventFileName("SCHEMA-100-abcdef.ref"));
         // Non-numeric checkpoint id.
         assertNull(
-                CobbleInspectSchemaRegistry.parseEventFileName(
+                InspectSchemaRegistryLayout.parseEventFileName(
                         "SCHEMA-xxxxxxxxxxxxxxxxxxxx-abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789.ref"));
         // Hash too short (63 chars instead of 64).
         assertNull(
-                CobbleInspectSchemaRegistry.parseEventFileName(
+                InspectSchemaRegistryLayout.parseEventFileName(
                         "SCHEMA-00000000000000000100-0abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789.ref"));
         // Hash has invalid chars.
         assertNull(
-                CobbleInspectSchemaRegistry.parseEventFileName(
+                InspectSchemaRegistryLayout.parseEventFileName(
                         "SCHEMA-00000000000000000100-ZZZZf0123456789abcdef0123456789abcdef0123456789abcdef0123456789.ref"));
     }
 
@@ -1971,7 +1977,7 @@ class CobbleStateBackendTest {
         StateInspectSchemaStore store =
                 new StateInspectSchemaStore(Collections.singletonList(schema));
         byte[] expectedBytes = store.toBytes();
-        String expectedHash = CobbleInspectSchemaRegistry.sha256(expectedBytes);
+        String expectedHash = InspectSchemaRegistryLayout.sha256(expectedBytes);
 
         CobbleInspectSchemaRegistry registry =
                 new CobbleInspectSchemaRegistry(checkpointPointer, "abc123");
