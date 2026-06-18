@@ -20,6 +20,9 @@ import java.util.Map;
 final class StateInspectDecoder {
 
     private static final byte LIST_DELIMITER = ',';
+    private static final String VOID_NAMESPACE_SERIALIZER_CLASS =
+            "org.apache.flink.runtime.state.VoidNamespaceSerializer";
+    private static final String VOID_NAMESPACE_LABEL = "VoidNamespace";
 
     private StateInspectDecoder() {}
 
@@ -53,8 +56,7 @@ final class StateInspectDecoder {
 
         Map<String, Object> output = new LinkedHashMap<>();
         output.put("key", render(deserialize(schema.keySerializer(), slices.key)));
-        output.put(
-                "namespace", render(deserialize(schema.namespaceSerializer(), slices.namespace)));
+        output.put("namespace", renderNamespace(schema.namespaceSerializer(), slices.namespace));
         if (schema.stateKind() == StateKind.MAP) {
             output.put(
                     "map_key", render(deserialize(schema.mapUserKeySerializer(), slices.mapKey)));
@@ -228,6 +230,14 @@ final class StateInspectDecoder {
                 new DataInputViewStreamWrapper(new ByteArrayInputStream(bytes)));
     }
 
+    private static Object renderNamespace(
+            SerializerInspectSchema serializerSchema, byte[] namespaceBytes) throws IOException {
+        if (isVoidNamespaceSerializer(serializerSchema)) {
+            return VOID_NAMESPACE_LABEL;
+        }
+        return render(deserialize(serializerSchema, namespaceBytes));
+    }
+
     @SuppressWarnings("unchecked")
     private static TypeSerializer<Object> restore(SerializerInspectSchema serializerSchema)
             throws IOException {
@@ -245,6 +255,11 @@ final class StateInspectDecoder {
                     "Failed to restore serializer " + serializerSchema.serializerClassName());
         }
         return serializer;
+    }
+
+    private static boolean isVoidNamespaceSerializer(SerializerInspectSchema serializerSchema) {
+        return serializerSchema != null
+                && VOID_NAMESPACE_SERIALIZER_CLASS.equals(serializerSchema.serializerClassName());
     }
 
     private static Object render(Object value) {

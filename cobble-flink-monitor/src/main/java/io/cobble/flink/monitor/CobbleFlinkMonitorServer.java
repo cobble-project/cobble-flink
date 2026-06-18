@@ -240,10 +240,38 @@ public final class CobbleFlinkMonitorServer {
                         new ReaderHandle(null, Collections.emptyList()));
             }
             CheckpointCatalog catalog = CheckpointCatalog.discover(config.checkpointRoot);
-            CheckpointEntry checkpoint = catalog.defaultCheckpoint();
-            OperatorEntry operator = checkpoint.defaultOperator();
-            ReaderHandle readerHandle = openReader(config, checkpoint, operator);
-            return new MonitorState(config, catalog, true, checkpoint, operator, readerHandle);
+            ReaderSelection selection = openLatestReadable(config, catalog, null);
+            return new MonitorState(
+                    config,
+                    catalog,
+                    true,
+                    selection.checkpoint,
+                    selection.operator,
+                    selection.readerHandle);
+        }
+
+        private static ReaderSelection openLatestReadable(
+                ServerConfig config, CheckpointCatalog catalog, String preferredOperatorId) {
+            RuntimeException firstFailure = null;
+            for (CheckpointEntry checkpoint : catalog.checkpoints) {
+                OperatorEntry operator =
+                        preferredOperatorId == null
+                                ? checkpoint.defaultOperator()
+                                : checkpoint.findOperatorOrDefault(preferredOperatorId);
+                try {
+                    return new ReaderSelection(
+                            checkpoint, operator, openReader(config, checkpoint, operator));
+                } catch (RuntimeException e) {
+                    if (firstFailure == null) {
+                        firstFailure = e;
+                    }
+                }
+            }
+            if (firstFailure != null) {
+                throw firstFailure;
+            }
+            throw new InputException(
+                    "No readable checkpoints found under " + catalog.rootDirectory);
         }
 
         private static ReaderHandle openReader(
@@ -433,12 +461,23 @@ public final class CobbleFlinkMonitorServer {
                             : parseLong(checkpointSelection, "checkpoint_id");
             String operatorId = blankToNull(stringField(body, "operator_id", null));
             catalog = nextCatalog.refresh();
-            CheckpointEntry checkpoint = catalog.findCheckpoint(checkpointId);
-            OperatorEntry operator =
-                    operatorId == null
-                            ? checkpoint.defaultOperator()
-                            : checkpoint.findOperator(operatorId);
-            replaceReader(openReader(config, checkpoint, operator));
+            CheckpointEntry checkpoint;
+            OperatorEntry operator;
+            ReaderHandle readerHandle;
+            if (checkpointId == null) {
+                ReaderSelection selection = openLatestReadable(config, catalog, operatorId);
+                checkpoint = selection.checkpoint;
+                operator = selection.operator;
+                readerHandle = selection.readerHandle;
+            } else {
+                checkpoint = catalog.findCheckpoint(checkpointId);
+                operator =
+                        operatorId == null
+                                ? checkpoint.defaultOperator()
+                                : checkpoint.findOperator(operatorId);
+                readerHandle = openReader(config, checkpoint, operator);
+            }
+            replaceReader(readerHandle);
             selectedCheckpoint = checkpoint;
             selectedOperator = operator;
             selectedLatest = checkpointId == null;
@@ -678,13 +717,50 @@ public final class CobbleFlinkMonitorServer {
             CheckpointEntry latest = refreshed.defaultCheckpoint();
             OperatorEntry operator = latest.findOperatorOrDefault(selectedOperator.operatorId);
             catalog = refreshed;
-            if (latest.id != selectedCheckpoint.id
-                    || !operator.operatorId.equals(selectedOperator.operatorId)) {
-                replaceReader(openReader(config, latest, operator));
-                selectedCheckpoint = latest;
-                selectedOperator = operator;
-                selectedSchema = resolveSchema(latest, operator);
+            if (latest.id == selectedCheckpoint.id
+                    && operator.operatorId.equals(selectedOperator.operatorId)) {
+                return;
             }
+
+            ReaderSelection selection =
+                    openLatestReadableOrCurrent(refreshed, selectedOperator.operatorId);
+            if (selection.readerHandle != null) {
+                replaceReader(selection.readerHandle);
+            }
+            selectedCheckpoint = selection.checkpoint;
+            selectedOperator = selection.operator;
+            selectedSchema = resolveSchema(selection.checkpoint, selection.operator);
+        }
+
+        private ReaderSelection openLatestReadableOrCurrent(
+                CheckpointCatalog refreshed, String preferredOperatorId) {
+            RuntimeException firstFailure = null;
+            for (CheckpointEntry checkpoint : refreshed.checkpoints) {
+                OperatorEntry operator = checkpoint.findOperatorOrDefault(preferredOperatorId);
+                if (selectedCheckpoint != null
+                        && selectedOperator != null
+                        && checkpoint.id == selectedCheckpoint.id
+                        && operator.operatorId.equals(selectedOperator.operatorId)
+                        && reader != null) {
+                    return new ReaderSelection(checkpoint, operator, null);
+                }
+                try {
+                    return new ReaderSelection(
+                            checkpoint, operator, openReader(config, checkpoint, operator));
+                } catch (RuntimeException e) {
+                    if (firstFailure == null) {
+                        firstFailure = e;
+                    }
+                }
+            }
+            if (reader != null && selectedCheckpoint != null && selectedOperator != null) {
+                return new ReaderSelection(selectedCheckpoint, selectedOperator, null);
+            }
+            if (firstFailure != null) {
+                throw firstFailure;
+            }
+            throw new InputException(
+                    "No readable checkpoints found under " + refreshed.rootDirectory);
         }
 
         private void refreshCatalogForListing() {
@@ -755,19 +831,52 @@ public final class CobbleFlinkMonitorServer {
                         "Failed to resolve schema registry: " + e.getMessage());
             }
         }
+
+        private static final class ReaderSelection {
+            private final CheckpointEntry checkpoint;
+            private final OperatorEntry operator;
+            private final ReaderHandle readerHandle;
+
+            private ReaderSelection(
+                    CheckpointEntry checkpoint, OperatorEntry operator, ReaderHandle readerHandle) {
+                this.checkpoint = checkpoint;
+                this.operator = operator;
+                this.readerHandle = readerHandle;
+            }
+        }
     }
 
     private static void copyGlobalManifest(
             OperatorEntry operator, long checkpointId, File unifiedVolume) throws IOException {
         java.nio.file.Path target =
                 unifiedVolume.toPath().resolve("snapshot").resolve("SNAPSHOT-" + checkpointId);
+        Path fallback = operatorSnapshotManifest(operator.operatorSnapshotDirectory, checkpointId);
         Path source =
-                operator.manifestCopyPath == null
-                        ? new Path(
-                                new Path(operator.operatorSnapshotDirectory, "snapshot"),
-                                "SNAPSHOT-" + checkpointId)
-                        : new Path(operator.manifestCopyPath);
-        copyFile(source, target);
+                operator.manifestCopyPath == null ? fallback : new Path(operator.manifestCopyPath);
+        try {
+            copyFile(source, target);
+        } catch (IOException primaryError) {
+            if (pathToStorageString(source).equals(pathToStorageString(fallback))) {
+                throw primaryError;
+            }
+            try {
+                copyFile(fallback, target);
+            } catch (IOException fallbackError) {
+                throw new IOException(
+                        primaryError.getMessage()
+                                + "; fallback "
+                                + fallback
+                                + " also failed: "
+                                + fallbackError.getMessage(),
+                        primaryError);
+            }
+        }
+    }
+
+    private static Path operatorSnapshotManifest(
+            String operatorSnapshotDirectory, long checkpointId) {
+        return new Path(
+                new Path(operatorSnapshotDirectory, "snapshot"), "SNAPSHOT-" + checkpointId);
     }
 
     private static String copyShardMetadata(ShardSnapshot shardSnapshot, File unifiedVolume)
@@ -1147,11 +1256,17 @@ public final class CobbleFlinkMonitorServer {
                 String operatorId = operatorIdFromManifestCopy(fileName);
                 String operatorDirectory =
                         operatorSnapshotDirectory(checkpointRoot, checkpointDirectory, operatorId);
+                String manifestCopyPath =
+                        preferStableManifestPath(
+                                fileSystem,
+                                checkpointId,
+                                pathToStorageString(fileStatus.getPath()),
+                                operatorDirectory);
                 operators.put(
                         operatorId,
                         new OperatorEntry(
                                 operatorId,
-                                pathToStorageString(fileStatus.getPath()),
+                                manifestCopyPath,
                                 operatorDirectory,
                                 readerVolumeDirectories(
                                         fileSystem,
@@ -1223,6 +1338,23 @@ public final class CobbleFlinkMonitorServer {
         List<OperatorEntry> output = new ArrayList<>(operators.values());
         output.sort(Comparator.comparing(operator -> operator.operatorId));
         return output;
+    }
+
+    private static String preferStableManifestPath(
+            FileSystem fileSystem,
+            long checkpointId,
+            String manifestCopyPath,
+            String operatorDirectory) {
+        Path stableManifest = operatorSnapshotManifest(operatorDirectory, checkpointId);
+        try {
+            if (fileSystem.exists(stableManifest)
+                    && !fileSystem.getFileStatus(stableManifest).isDir()) {
+                return pathToStorageString(stableManifest);
+            }
+        } catch (IOException ignored) {
+            // Keep the checkpoint-local manifest copy as a fallback candidate.
+        }
+        return manifestCopyPath;
     }
 
     private static void discoverSharedOperators(
