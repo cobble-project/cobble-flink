@@ -1,5 +1,7 @@
 package io.cobble.flink.monitor;
 
+import io.cobble.flink.common.inspect.StateInspectSchema;
+
 import java.util.LinkedHashMap;
 import java.util.Map;
 
@@ -11,6 +13,7 @@ final class InspectTarget {
     final boolean allowsColumns;
     final String stateKind;
     final Map<String, String> serializerClasses;
+    final StateInspectSchema schema;
 
     InspectTarget(
             String id,
@@ -19,7 +22,8 @@ final class InspectTarget {
             String columnFamily,
             boolean allowsColumns,
             String stateKind,
-            Map<String, String> serializerClasses) {
+            Map<String, String> serializerClasses,
+            StateInspectSchema schema) {
         this.id = id;
         this.name = name;
         this.kind = kind;
@@ -27,19 +31,21 @@ final class InspectTarget {
         this.allowsColumns = allowsColumns;
         this.stateKind = stateKind;
         this.serializerClasses = serializerClasses;
+        this.schema = schema;
     }
 
     static InspectTarget sink(String name) {
-        return new InspectTarget("sink", name, "sink", null, true, null, null);
+        return new InspectTarget("sink", name, "sink", null, true, null, null, null);
     }
 
     static InspectTarget state(String stateName, String columnFamily) {
-        return new InspectTarget(stateName, stateName, "state", columnFamily, false, null, null);
+        return new InspectTarget(
+                stateName, stateName, "state", columnFamily, false, null, null, null);
     }
 
     static InspectTarget timer(String stateName, String columnFamily) {
         return new InspectTarget(
-                "timer:" + stateName, stateName, "timer", columnFamily, false, null, null);
+                "timer:" + stateName, stateName, "timer", columnFamily, false, null, null, null);
     }
 
     Map<String, Object> toJson() {

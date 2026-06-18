@@ -492,6 +492,7 @@ public final class CobbleFlinkMonitorServer {
                             columnsValue == null
                                     ? null
                                     : valueToJson(columnsValue, target.allowsColumns));
+                    decorateDecodedStateRow(output, target, item.key, columnsValue);
                     items.add(output);
                 }
             }
@@ -637,6 +638,7 @@ public final class CobbleFlinkMonitorServer {
                     } else {
                         item.put("value", firstColumnToJson(entry.columns));
                     }
+                    decorateDecodedStateRow(item, target, entry.key, entry.columns);
                     items.add(item);
                     entry = cursor.nextEntry();
                 }
@@ -713,6 +715,24 @@ public final class CobbleFlinkMonitorServer {
                     || selectedCheckpoint == null
                     || selectedOperator == null) {
                 throw new InputException("open a checkpoint root or Cobble data source first");
+            }
+        }
+
+        private static void decorateDecodedStateRow(
+                Map<String, Object> item, InspectTarget target, byte[] key, byte[][] columns) {
+            StateInspectDecoder.DecodedRow decoded =
+                    StateInspectDecoder.decode(target, key, columns);
+            if (!decoded.hasOutput()) {
+                return;
+            }
+            if (decoded.decodedKey != null) {
+                item.put("decoded_key", decoded.decodedKey);
+            }
+            if (decoded.decodedValue != null) {
+                item.put("decoded_value", decoded.decodedValue);
+            }
+            if (decoded.decodeError != null) {
+                item.put("decode_error", decoded.decodeError);
             }
         }
 
@@ -1821,9 +1841,13 @@ public final class CobbleFlinkMonitorServer {
         if (columns == null || columns.length == 0 || columns[0] == null) {
             return null;
         }
+        return bytesJson(columns[0]);
+    }
+
+    static Map<String, Object> bytesJson(byte[] bytes) {
         Map<String, Object> value = new LinkedHashMap<>();
-        value.put("b64", b64(columns[0]));
-        value.put("utf8", utf8(columns[0]));
+        value.put("b64", b64(bytes));
+        value.put("utf8", utf8(bytes));
         return value;
     }
 

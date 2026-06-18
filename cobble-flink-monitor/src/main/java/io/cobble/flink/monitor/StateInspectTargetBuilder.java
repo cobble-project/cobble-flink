@@ -99,7 +99,8 @@ final class StateInspectTargetBuilder {
                 schema.columnFamily(),
                 false,
                 schema.stateKind().name(),
-                serializerClasses);
+                serializerClasses,
+                schema);
     }
 
     private static boolean alreadyAddedAsState(List<InspectTarget> targets, String columnFamily) {
