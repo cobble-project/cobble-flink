@@ -332,6 +332,8 @@ final class CobbleSqlSink
     }
 
     static final class Global implements Committer<CobbleShardCommittable> {
+        private static final Logger LOG = LoggerFactory.getLogger(Global.class);
+
         private final CobbleDynamicTableSink.SerializableConfig config;
         private final DbCoordinator coordinator;
 
@@ -414,6 +416,7 @@ final class CobbleSqlSink
             storeWriterPathIndex(writerPathByDbId);
             long globalSnapshotId = latest == null ? 1L : latest.id + 1L;
             coordinator.materializeGlobalSnapshot(totalBuckets, globalSnapshotId, shardSnapshots);
+            writeInspectSchema(globalSnapshotId);
             expireOlderSnapshots(globalSnapshotId, writerPathByDbId);
         }
 
@@ -559,6 +562,7 @@ final class CobbleSqlSink
                 }
                 storeWriterPathIndex(writerPathByDbId);
                 coordinator.materializeGlobalSnapshot(config.bucketCount, 1L, initial);
+                writeInspectSchema(1L);
                 expireOlderSnapshots(1L, writerPathByDbId);
                 return;
             }
@@ -571,7 +575,19 @@ final class CobbleSqlSink
             }
             long globalSnapshotId = latest.id + 1L;
             coordinator.materializeGlobalSnapshot(latest.totalBuckets, globalSnapshotId, refreshed);
+            writeInspectSchema(globalSnapshotId);
             expireOlderSnapshots(globalSnapshotId, writerPathByDbId);
+        }
+
+        private void writeInspectSchema(long snapshotId) {
+            try {
+                CobbleSinkInspectSchemaRegistry.writeForSnapshot(config, snapshotId);
+            } catch (Exception e) {
+                LOG.warn(
+                        "Failed to write Cobble sink inspect schema for snapshot {}.",
+                        Long.valueOf(snapshotId),
+                        e);
+            }
         }
 
         private List<ShardSnapshot> collectEndOfInputLatestShards(
