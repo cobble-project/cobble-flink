@@ -107,8 +107,10 @@ Cobble will automatically be used for state management and SQL source/sink based
 `cobble-flink-monitor` starts a read-only web UI for inspecting Cobble data in
 Flink checkpoints or normal Cobble sink/table snapshots. It can list available
 checkpoints/snapshots, select `latest` or a concrete snapshot, choose operators
-for checkpoint sources, scan key/value rows, and track selected rows in lookup
-mode.
+for checkpoint sources, scan key/value rows, and track selected rows. For
+Cobble state backend checkpoints, it can display schema-aware state and timer
+parts such as state key, map key, list elements, timer timestamp, timer key, and
+decoded values when metadata is available.
 
 Build it with:
 

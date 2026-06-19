@@ -4,6 +4,8 @@
 Cobble Flink state backend. It uses the JDK built-in HTTP server and serves both the API and
 the static UI from one Java process.
 
+For usage, please refer to the [Web Monitor](https://cobble-project.github.io/cobble-flink/latest/web-monitor/).
+
 ## Build
 
 ```bash
