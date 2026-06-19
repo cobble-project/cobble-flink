@@ -67,29 +67,41 @@
             <div class="last-update">Last update <span id="current-last-update">-</span></div>
           </div>
 
-          <div id="scan-controls" class="control-grid">
-            <label id="state-key-control" class="hidden">
-              <span id="state-key-label">State key</span>
-              <input id="state-key" />
-            </label>
-            <label id="namespace-control" class="hidden">
-              <span id="namespace-label">Namespace</span>
-              <input id="namespace" placeholder="namespace" />
-            </label>
-            <label id="map-key-control" class="hidden">
-              <span id="map-key-label">Map key</span>
-              <input id="map-key" />
-            </label>
-            <label id="prefix-control">
-              Prefix
-              <input id="prefix" placeholder="UTF-8 prefix" />
-            </label>
-            <label>
-              Limit
-              <input id="limit" type="number" min="1" value="50" />
-            </label>
-            <div class="button-row">
-              <button id="inspect-button" class="primary-button">Run</button>
+          <div id="scan-controls">
+            <div class="control-grid scan-filter-controls">
+              <label id="state-key-control" class="hidden">
+                <span id="state-key-label">State key</span>
+                <input id="state-key" />
+              </label>
+              <label id="namespace-control" class="hidden">
+                <span id="namespace-label">Namespace</span>
+                <input id="namespace" placeholder="namespace" />
+              </label>
+              <label id="map-key-control" class="hidden">
+                <span id="map-key-label">Map key</span>
+                <input id="map-key" />
+              </label>
+              <label id="prefix-control">
+                Prefix
+                <input id="prefix" placeholder="UTF-8 prefix" />
+              </label>
+            </div>
+            <div id="sink-key-control" class="sink-key-filter hidden">
+              <div class="sink-key-filter-header">
+                <span>Key prefix (enter in key order)</span>
+                <button id="sink-key-help-button" class="help-icon" type="button" aria-label="Key prefix help" aria-expanded="false">?</button>
+                <div id="sink-key-help-tooltip" class="help-tooltip" role="tooltip">Enter key fields in order. Every key before the last must be complete; the last key matches by prefix.</div>
+              </div>
+              <div id="sink-key-inputs" class="sink-key-inputs"></div>
+            </div>
+            <div class="control-grid scan-run-row">
+              <label>
+                Limit
+                <input id="limit" type="number" min="1" value="50" />
+              </label>
+              <div class="button-row">
+                <button id="inspect-button" class="primary-button">Run</button>
+              </div>
             </div>
           </div>
 

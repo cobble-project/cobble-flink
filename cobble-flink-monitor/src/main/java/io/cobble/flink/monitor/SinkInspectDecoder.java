@@ -5,12 +5,22 @@ import io.cobble.flink.common.inspect.SinkInspectSchema;
 
 import org.apache.flink.api.common.typeutils.TypeSerializer;
 import org.apache.flink.core.memory.DataInputDeserializer;
+import org.apache.flink.core.memory.DataOutputSerializer;
+import org.apache.flink.table.data.DecimalData;
 import org.apache.flink.table.data.StringData;
+import org.apache.flink.table.data.TimestampData;
 import org.apache.flink.table.runtime.typeutils.InternalSerializers;
+import org.apache.flink.table.types.logical.DecimalType;
 import org.apache.flink.table.types.logical.LogicalType;
+import org.apache.flink.table.types.logical.LogicalTypeRoot;
 import org.apache.flink.table.types.logical.utils.LogicalTypeParser;
 
 import java.io.IOException;
+import java.math.BigDecimal;
+import java.time.Instant;
+import java.time.LocalDate;
+import java.time.LocalDateTime;
+import java.time.LocalTime;
 import java.util.ArrayList;
 import java.util.Base64;
 import java.util.LinkedHashMap;
@@ -21,6 +31,29 @@ import java.util.Map;
 final class SinkInspectDecoder {
 
     private SinkInspectDecoder() {}
+
+    /** Encodes a leading subset of the ordered sink primary key for prefix scans. */
+    static byte[] encodeKeyPrefix(InspectTarget target, List<String> values) throws IOException {
+        if (target == null || target.sinkSchema == null) {
+            throw new IOException("Sink schema is not available for key filtering");
+        }
+        List<SinkInspectField> fields = target.sinkSchema.keyFields();
+        if (values == null || values.isEmpty()) {
+            return new byte[0];
+        }
+        if (values.size() > fields.size()) {
+            throw new IOException(
+                    "Too many sink key values (expected at most " + fields.size() + ")");
+        }
+        DataOutputSerializer output = new DataOutputSerializer(128);
+        for (int index = 0; index < values.size(); index++) {
+            SinkInspectField field = fields.get(index);
+            byte[] bytes = encodeField(field, values.get(index));
+            output.writeInt(bytes.length);
+            output.write(bytes);
+        }
+        return output.getCopyOfBuffer();
+    }
 
     static DecodedRow decode(InspectTarget target, byte[] key, byte[][] columns, int[] projection) {
         if (target == null || target.sinkSchema == null) {
@@ -145,6 +178,83 @@ final class SinkInspectDecoder {
                             + "): "
                             + message(e),
                     e);
+        }
+    }
+
+    private static byte[] encodeField(SinkInspectField field, String text) throws IOException {
+        try {
+            LogicalType logicalType = LogicalTypeParser.parse(field.logicalType());
+            @SuppressWarnings("unchecked")
+            TypeSerializer<Object> serializer =
+                    (TypeSerializer<Object>) InternalSerializers.create(logicalType);
+            DataOutputSerializer output = new DataOutputSerializer(64);
+            serializer.serialize(parseFieldInput(logicalType, text), output);
+            return output.getCopyOfBuffer();
+        } catch (Exception e) {
+            throw new IOException(
+                    "Failed to encode sink key field "
+                            + field.name()
+                            + " ("
+                            + field.logicalType()
+                            + "): "
+                            + message(e),
+                    e);
+        }
+    }
+
+    private static Object parseFieldInput(LogicalType logicalType, String text) throws IOException {
+        String value = text == null ? "" : text;
+        try {
+            LogicalTypeRoot root = logicalType.getTypeRoot();
+            switch (root) {
+                case CHAR:
+                case VARCHAR:
+                    return StringData.fromString(value);
+                case BOOLEAN:
+                    if (!"true".equalsIgnoreCase(value) && !"false".equalsIgnoreCase(value)) {
+                        throw new IllegalArgumentException("expected true or false");
+                    }
+                    return Boolean.valueOf(value);
+                case TINYINT:
+                    return Byte.valueOf(value);
+                case SMALLINT:
+                    return Short.valueOf(value);
+                case INTEGER:
+                    return Integer.valueOf(value);
+                case BIGINT:
+                    return Long.valueOf(value);
+                case FLOAT:
+                    return Float.valueOf(value);
+                case DOUBLE:
+                    return Double.valueOf(value);
+                case DECIMAL:
+                    DecimalType decimalType = (DecimalType) logicalType;
+                    DecimalData decimal =
+                            DecimalData.fromBigDecimal(
+                                    new BigDecimal(value),
+                                    decimalType.getPrecision(),
+                                    decimalType.getScale());
+                    if (decimal == null) {
+                        throw new IllegalArgumentException(
+                                "value is outside the declared precision");
+                    }
+                    return decimal;
+                case BINARY:
+                case VARBINARY:
+                    return Base64.getDecoder().decode(value);
+                case DATE:
+                    return Math.toIntExact(LocalDate.parse(value).toEpochDay());
+                case TIME_WITHOUT_TIME_ZONE:
+                    return Math.toIntExact(LocalTime.parse(value).toNanoOfDay() / 1_000_000L);
+                case TIMESTAMP_WITHOUT_TIME_ZONE:
+                    return TimestampData.fromLocalDateTime(LocalDateTime.parse(value));
+                case TIMESTAMP_WITH_LOCAL_TIME_ZONE:
+                    return TimestampData.fromInstant(Instant.parse(value));
+                default:
+                    throw new IllegalArgumentException("unsupported key input type " + logicalType);
+            }
+        } catch (RuntimeException e) {
+            throw new IOException(message(e), e);
         }
     }
 

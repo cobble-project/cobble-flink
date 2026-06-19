@@ -20,6 +20,10 @@ const state = {
   inspectAutoRefreshSeconds: 5,
   errorSource: null,
   listDisplayLimits: {},
+  sinkKeyTargetId: null,
+  sinkKeyFieldsSignature: null,
+  sinkKeyValues: [],
+  sinkKeyInvalidIndexes: new Set(),
 }
 
 const MAX_VALUE_DISPLAY_LENGTH = 300
@@ -60,6 +64,9 @@ function setLoading(loading) {
   $('state-key').disabled = loading
   $('namespace').disabled = loading
   $('map-key').disabled = loading
+  document.querySelectorAll('[data-sink-key-input]').forEach((element) => {
+    element.disabled = loading
+  })
   $('prev-page-button').disabled = loading || state.previousPageCursors.length === 0
   $('next-page-button').disabled = loading || !state.nextPageCursor
 }
@@ -170,10 +177,13 @@ function renderStateFilterControls() {
   const schemaState = isSchemaStateTarget(target)
   const mapState = schemaState && target.state_kind === 'MAP'
   const voidNamespace = schemaState && isVoidNamespaceTarget(target)
+  const sinkKeyFilter = isSinkKeyFilterTarget(target)
   $('state-key-control').classList.toggle('hidden', !schemaState)
   $('namespace-control').classList.toggle('hidden', !schemaState || voidNamespace)
   $('map-key-control').classList.toggle('hidden', !mapState)
-  $('prefix-control').classList.toggle('hidden', schemaState)
+  $('sink-key-control').classList.toggle('hidden', !sinkKeyFilter)
+  $('prefix-control').classList.toggle('hidden', schemaState || sinkKeyFilter)
+  if (sinkKeyFilter) renderSinkKeyInputs(target)
   if (schemaState) {
     $('state-key-label').textContent = `State key (${serializerLabel(target.serializer_classes?.key)})`
     $('state-key').removeAttribute('placeholder')
@@ -182,6 +192,60 @@ function renderStateFilterControls() {
     $('map-key-label').textContent = `Map key prefix (${serializerLabel(target.serializer_classes?.map_key)})`
     $('map-key').removeAttribute('placeholder')
   }
+}
+
+function isSinkKeyFilterTarget(target) {
+  return isSinkTarget(target) && Array.isArray(target?.key_fields) && target.key_fields.length > 0
+}
+
+function renderSinkKeyInputs(target) {
+  const fields = target.key_fields
+  const signature = fields.map((field) => `${field.name}:${field.logical_type}`).join('|')
+  if (state.sinkKeyTargetId !== target.id || state.sinkKeyFieldsSignature !== signature) {
+    state.sinkKeyTargetId = target.id
+    state.sinkKeyFieldsSignature = signature
+    state.sinkKeyValues = fields.map(() => '')
+    state.sinkKeyInvalidIndexes.clear()
+  }
+  state.sinkKeyValues = fields.map((field, index) => state.sinkKeyValues[index] || '')
+  const inputs = $('sink-key-inputs')
+  inputs.innerHTML = fields.map((field, index) => `
+    <div class="sink-key-row">
+      <div class="sink-key-title">${escapeHtml(field.name)} <span class="sink-key-title-separator" aria-hidden="true">|</span> <small>${escapeHtml(field.logical_type || '')}</small></div>
+      <input class="${state.sinkKeyInvalidIndexes.has(index) ? 'input-invalid' : ''}" data-sink-key-input="${index}" value="${escapeHtml(state.sinkKeyValues[index] || '')}" aria-invalid="${state.sinkKeyInvalidIndexes.has(index)}" aria-label="${escapeHtml(field.name)} ${escapeHtml(field.logical_type || '')}" />
+    </div>
+  `).join('')
+  inputs.querySelectorAll('[data-sink-key-input]').forEach((input) => {
+    input.addEventListener('input', () => {
+      const index = Number(input.dataset.sinkKeyInput)
+      state.sinkKeyValues[index] = input.value
+      state.sinkKeyInvalidIndexes.delete(index)
+      input.classList.remove('input-invalid')
+      input.setAttribute('aria-invalid', 'false')
+      invalidatePagination()
+    })
+  })
+}
+
+function activeSinkKeyValues(target) {
+  const values = []
+  let missingIndex = null
+  for (let index = 0; index < state.sinkKeyValues.length; index += 1) {
+    const value = state.sinkKeyValues[index]
+    if (value === '') {
+      missingIndex = index
+      continue
+    }
+    if (missingIndex !== null) {
+      const required = target.key_fields[missingIndex]?.name || `key ${missingIndex + 1}`
+      const current = target.key_fields[index]?.name || `key ${index + 1}`
+      state.sinkKeyInvalidIndexes.add(missingIndex)
+      renderSinkKeyInputs(target)
+      throw new Error(`Enter \`${required}\` before \`${current}\``)
+    }
+    values.push(value)
+  }
+  return values
 }
 
 function renderSnapshots() {
@@ -308,6 +372,8 @@ function activeScanContext() {
     targetKind: target?.kind || null,
     stateKind: target?.state_kind || null,
     serializerClasses: target?.serializer_classes || {},
+    keyFields: target?.key_fields || [],
+    valueFields: target?.value_fields || [],
   }
 }
 
@@ -338,6 +404,8 @@ async function runScan(direction = 'reset') {
       if (stateKey) query.set('state_key', stateKey)
       if (namespace) query.set('namespace', namespace)
       if (mapKey) query.set('map_key', mapKey)
+    } else if (isSinkKeyFilterTarget(target)) {
+      activeSinkKeyValues(target).forEach((value) => query.append('sink_key', value))
     } else {
       query.set('prefix', $('prefix').value || '')
     }
@@ -394,6 +462,7 @@ async function runLookup() {
         tracked.keyUtf8 = result.key_utf8 ?? tracked.keyUtf8
         tracked.value = result.value
         tracked.decodedKey = result.decoded_key || null
+        tracked.decodedColumns = result.decoded_columns || null
         tracked.decodedValue = result.decoded_value ?? null
         tracked.decodeError = result.decode_error || null
       })
@@ -486,8 +555,11 @@ function trackScanItem(trackId) {
     targetKind: context.targetKind,
     stateKind: context.stateKind,
     serializerClasses: context.serializerClasses,
+    keyFields: context.keyFields,
+    valueFields: context.valueFields,
     value: item.columns || item.value || null,
     decodedKey: item.decoded_key || null,
+    decodedColumns: item.decoded_columns || null,
     decodedValue: item.decoded_value ?? null,
     decodeError: item.decode_error || null,
   })
@@ -537,6 +609,9 @@ function clearTrackedLookups() {
 
 function renderTrackedValue(item) {
   if (item.value == null) return `<span class="pill">missing</span>${renderDecodeError(item.decodeError)}`
+  if (isSinkTarget(trackedTarget(item))) {
+    return renderSinkColumns(item.value, item.decodedColumns, item.decodeError)
+  }
   if (item.allowsColumns) return renderColumns(item.value)
   return renderStateValue(
     item.value,
@@ -679,8 +754,13 @@ function renderScanResult(data, context = activeScanContext()) {
   const target = data.inspect_target || activeTarget()
   const sink = target?.allows_columns
   const timer = isTimerTarget(target)
+  const sinkExpanded = isSinkExpandedTable(target)
+  const sinkTable = sinkExpanded ? sinkTableLayout(target, context, items) : null
+  setResultTableExpanded(sinkExpanded)
   $('result-head').innerHTML = timer
     ? '<tr><th>Bucket</th><th>Timer key</th><th>Timestamp</th><th></th></tr>'
+    : sinkExpanded
+    ? renderSinkScanHeader(sinkTable)
     : sink
     ? '<tr><th>Bucket</th><th>Key</th><th>Columns</th><th></th></tr>'
     : '<tr><th>Bucket</th><th>Key</th><th>Value</th><th></th></tr>'
@@ -696,18 +776,20 @@ function renderScanResult(data, context = activeScanContext()) {
         <td>${renderTimerTimestamp(item.decoded_key, item.decode_error)}</td>
         <td>${renderActionMenu(scanRowActions(item, target, context, trackId))}</td>
       `
+    } else if (sinkExpanded) {
+      row.innerHTML = renderSinkScanRow(item, target, context, trackId, sinkTable)
     } else {
       row.innerHTML = `
         <td>${item.bucket}</td>
         <td>${renderKey(item.key_b64, item.key_utf8, item.decoded_key, target)}</td>
-        <td>${sink ? renderColumns(item.columns) : renderStateValue(item.value, item.decoded_value, item.decode_error, target, `scan:${trackId}:value`)}</td>
+        <td>${sink ? renderSinkColumns(item.columns, item.decoded_columns, item.decode_error) : renderStateValue(item.value, item.decoded_value, item.decode_error, target, `scan:${trackId}:value`)}</td>
         <td>${renderActionMenu(scanRowActions(item, target, context, trackId))}</td>
       `
     }
     body.appendChild(row)
   }
   if (items.length === 0) {
-    body.innerHTML = '<tr><td colspan="4">No rows.</td></tr>'
+    body.innerHTML = `<tr><td colspan="${sinkExpanded ? sinkTable.scanColspan : 4}">No rows.</td></tr>`
   }
   wireRowActionButtons(body)
   wireListMoreButtons(body)
@@ -716,8 +798,13 @@ function renderScanResult(data, context = activeScanContext()) {
 function renderLookupResult() {
   const items = state.trackedLookups
   const timerOnly = items.length > 0 && items.every((item) => isTimerTarget(trackedTarget(item)))
+  const sinkExpanded = !timerOnly && isSinkExpandedLookup(items)
+  const sinkTable = sinkExpanded ? sinkTableLayout(trackedTarget(items[0]), items[0], items) : null
+  setResultTableExpanded(sinkExpanded)
   $('result-head').innerHTML = timerOnly
     ? '<tr><th>Target</th><th>Bucket</th><th>Timer key</th><th>Timestamp</th><th></th></tr>'
+    : sinkExpanded
+    ? renderSinkLookupHeader(sinkTable)
     : '<tr><th>Target</th><th>Bucket</th><th>Key</th><th>Value</th><th></th></tr>'
   const body = $('result-body')
   body.innerHTML = ''
@@ -732,6 +819,8 @@ function renderLookupResult() {
         <td>${renderTimerTimestamp(item.decodedKey, item.decodeError)}</td>
         <td>${renderActionMenu(trackedRowActions(item, target))}</td>
       `
+    } else if (sinkExpanded) {
+      row.innerHTML = renderSinkLookupRow(item, target, sinkTable)
     } else {
       row.innerHTML = `
         <td>${escapeHtml(item.targetLabel)}</td>
@@ -744,6 +833,7 @@ function renderLookupResult() {
     body.appendChild(row)
   }
   if (items.length === 0) {
+    setResultTableExpanded(false)
     body.innerHTML = '<tr><td colspan="5">No tracked entries.</td></tr>'
   }
   wireRowActionButtons(body)
@@ -919,7 +1009,208 @@ function renderColumns(columns = []) {
   }).join('')
 }
 
+function renderSinkColumns(columns = [], decodedColumns = null, decodeError = null) {
+  if (Array.isArray(decodedColumns) && decodedColumns.length > 0) {
+    return `${renderSinkFields(decodedColumns)}${renderDecodeError(decodeError)}`
+  }
+  return `${renderColumns(columns)}${renderDecodeError(decodeError)}`
+}
+
+function isSinkExpandedTable(target) {
+  return isSinkTarget(target)
+    && Array.isArray(target?.key_fields)
+    && target.key_fields.length > 0
+    && Array.isArray(target?.value_fields)
+    && target.value_fields.length > 0
+}
+
+function isSinkExpandedLookup(items) {
+  return items.length > 0 && items.every((item) => (
+    isSinkTarget(trackedTarget(item))
+      && Array.isArray(item.keyFields)
+      && item.keyFields.length > 0
+      && Array.isArray(item.valueFields)
+      && item.valueFields.length > 0
+  ))
+}
+
+function setResultTableExpanded(expanded) {
+  $('result-head').closest('table')?.classList.toggle('sink-expanded-table', expanded)
+}
+
+function sinkTableLayout(target, context = {}, items = []) {
+  const keyFields = target?.key_fields || context.keyFields || []
+  const valueFields = projectedSinkValueFields(
+    target?.value_fields || context.valueFields || [],
+    context.columns,
+    items,
+  )
+  return {
+    keyFields,
+    valueFields,
+    keyColspan: Math.max(1, keyFields.length),
+    valueColspan: Math.max(1, valueFields.length),
+    scanColspan: 1 + Math.max(1, keyFields.length) + Math.max(1, valueFields.length) + 1,
+    lookupColspan: 2 + Math.max(1, keyFields.length) + Math.max(1, valueFields.length) + 1,
+  }
+}
+
+function projectedSinkValueFields(valueFields, columns, items) {
+  const projected = parseColumnProjection(columns)
+  if (projected.size === 0) return valueFields
+  const filtered = valueFields.filter((field) => projected.has(Number(field.structured_column_index)))
+  if (filtered.length > 0) return filtered
+  const decodedColumns = firstDecodedSinkColumns(items)
+  return decodedColumns.filter((field) => projected.has(Number(field.index)))
+}
+
+function parseColumnProjection(columns) {
+  const projected = new Set()
+  String(columns || '')
+    .split(',')
+    .map((part) => part.trim())
+    .filter(Boolean)
+    .forEach((part) => {
+      const value = Number(part)
+      if (Number.isInteger(value) && value >= 0) projected.add(value)
+    })
+  return projected
+}
+
+function firstDecodedSinkColumns(items = []) {
+  for (const item of items) {
+    const columns = item.decoded_columns || item.decodedColumns
+    if (Array.isArray(columns) && columns.length > 0) return columns
+  }
+  return []
+}
+
+function renderSinkScanHeader(layout) {
+  return `
+    <tr>
+      <th rowspan="2">Bucket</th>
+      <th class="sink-group-header" colspan="${layout.keyColspan}">Key</th>
+      <th class="sink-group-header" colspan="${layout.valueColspan}">Columns</th>
+      <th rowspan="2"></th>
+    </tr>
+    <tr>
+      ${renderSinkFieldHeaders(layout.keyFields, 'key')}
+      ${renderSinkFieldHeaders(layout.valueFields, 'column')}
+    </tr>
+  `
+}
+
+function renderSinkLookupHeader(layout) {
+  return `
+    <tr>
+      <th rowspan="2">Target</th>
+      <th rowspan="2">Bucket</th>
+      <th class="sink-group-header" colspan="${layout.keyColspan}">Key</th>
+      <th class="sink-group-header" colspan="${layout.valueColspan}">Columns</th>
+      <th rowspan="2"></th>
+    </tr>
+    <tr>
+      ${renderSinkFieldHeaders(layout.keyFields, 'key')}
+      ${renderSinkFieldHeaders(layout.valueFields, 'column')}
+    </tr>
+  `
+}
+
+function renderSinkFieldHeaders(fields, fallbackLabel) {
+  if (!fields.length) return `<th class="sink-field-header sink-group-start sink-group-end">${escapeHtml(fallbackLabel)}</th>`
+  return fields.map((field, index) => {
+    const name = field?.name ?? String(field?.index ?? fallbackLabel)
+    const type = field?.logical_type || ''
+    const className = sinkGroupBoundaryClass(index, fields.length)
+    return `
+      <th class="sink-field-header ${className}">
+        <span>${escapeHtml(name)}</span>
+        ${type ? `<small>${escapeHtml(truncateText(type, 80))}</small>` : ''}
+      </th>
+    `
+  }).join('')
+}
+
+function renderSinkScanRow(item, target, context, trackId, layout) {
+  return `
+    <td>${item.bucket}</td>
+    ${renderSinkExpandedCells(layout.keyFields, item.decoded_key, 'key')}
+    ${renderSinkExpandedCells(layout.valueFields, item.decoded_columns, 'column')}
+    <td class="action-cell">${renderDecodeError(item.decode_error)}${renderActionMenu(scanRowActions(item, target, context, trackId))}</td>
+  `
+}
+
+function renderSinkLookupRow(item, target, layout) {
+  return `
+    <td>${escapeHtml(item.targetLabel)}</td>
+    <td>${item.bucket}</td>
+    ${renderSinkExpandedCells(layout.keyFields, item.decodedKey, 'key')}
+    ${renderSinkExpandedCells(layout.valueFields, item.decodedColumns, 'column')}
+    <td class="action-cell">${renderDecodeError(item.decodeError)}${renderActionMenu(trackedRowActions(item, target))}</td>
+  `
+}
+
+function renderSinkExpandedCells(fields, decodedFields = [], fallbackLabel = '') {
+  if (!fields.length) {
+    return `<td class="sink-field-cell sink-group-start sink-group-end"><span class="muted-text">no ${escapeHtml(fallbackLabel)}</span></td>`
+  }
+  return fields.map((field, index) => (
+    `<td class="sink-field-cell ${sinkGroupBoundaryClass(index, fields.length)}">${renderSinkExpandedValue(sinkDecodedField(decodedFields, field, index))}</td>`
+  )).join('')
+}
+
+function sinkGroupBoundaryClass(index, total) {
+  const classes = []
+  if (index === 0) classes.push('sink-group-start')
+  if (index === total - 1) classes.push('sink-group-end')
+  return classes.join(' ')
+}
+
+function sinkDecodedField(decodedFields = [], field, index) {
+  if (!Array.isArray(decodedFields)) return null
+  if (field && Object.prototype.hasOwnProperty.call(field, 'structured_column_index')) {
+    const columnIndex = Number(field.structured_column_index)
+    const byIndex = decodedFields.find((decoded) => Number(decoded?.index) === columnIndex)
+    if (byIndex) return byIndex
+  }
+  if (field?.name) {
+    const byName = decodedFields.find((decoded) => decoded?.name === field.name)
+    if (byName) return byName
+  }
+  return decodedFields[index] || null
+}
+
+function renderSinkExpandedValue(decodedField) {
+  if (!decodedField || !Object.prototype.hasOwnProperty.call(decodedField, 'value')) {
+    return '<span class="muted-text">null</span>'
+  }
+  return renderDecodedValue(decodedField.value)
+}
+
+function renderSinkFields(fields = []) {
+  if (!Array.isArray(fields) || fields.length === 0) return ''
+  return renderDecodedBlock(fields.map((field) => renderSinkField(field)))
+}
+
+function renderSinkField(field) {
+  const label = field?.name ?? String(field?.index ?? '')
+  const type = field?.logical_type || ''
+  const value = Object.prototype.hasOwnProperty.call(field || {}, 'value') ? field.value : null
+  return `
+    <div class="decoded-row">
+      <span class="decoded-label">${escapeHtml(label)}</span>
+      <div class="decoded-value">
+        ${renderDecodedValue(value)}
+        ${type ? ` <span class="decoded-type">${escapeHtml(truncateText(type, 80))}</span>` : ''}
+      </div>
+    </div>
+  `
+}
+
 function renderKey(keyB64, keyUtf8, decodedKey = null, target = null) {
+  if (isSinkTarget(target) && Array.isArray(decodedKey) && decodedKey.length > 0) {
+    return renderSinkFields(decodedKey)
+  }
   if (isDecodedTarget(target) && decodedKey && typeof decodedKey === 'object') {
     const decoded = renderDecodedKey(decodedKey, target)
     if (decoded) return decoded
@@ -1056,6 +1347,8 @@ function trackedTarget(item) {
     kind: item.targetKind || (item.stateKind ? 'state' : null),
     state_kind: item.stateKind,
     serializer_classes: item.serializerClasses || {},
+    key_fields: item.keyFields || [],
+    value_fields: item.valueFields || [],
   }
 }
 
@@ -1071,6 +1364,10 @@ function isDecodedTarget(target) {
 
 function isTimerTarget(target) {
   return target?.kind === 'timer'
+}
+
+function isSinkTarget(target) {
+  return target?.kind === 'sink'
 }
 
 function isVoidNamespaceTarget(target) {
@@ -1159,6 +1456,19 @@ function showView(view) {
     : 'Choose latest or a concrete checkpoint/snapshot.'
 }
 
+function toggleSinkKeyHelp() {
+  const tooltip = $('sink-key-help-tooltip')
+  const visible = !tooltip.classList.contains('visible')
+  tooltip.classList.toggle('visible', visible)
+  $('sink-key-help-button').setAttribute('aria-expanded', String(visible))
+}
+
+function closeSinkKeyHelp(event) {
+  if (event.target.closest('.sink-key-filter-header')) return
+  $('sink-key-help-tooltip').classList.remove('visible')
+  $('sink-key-help-button').setAttribute('aria-expanded', 'false')
+}
+
 document.querySelectorAll('.nav-button').forEach((button) => {
   button.addEventListener('click', () => showView(button.dataset.view))
 })
@@ -1166,6 +1476,7 @@ $('refresh-button').addEventListener('click', refresh)
 $('open-new-path-button').addEventListener('click', openNewPath)
 $('operator-select').addEventListener('change', switchOperator)
 $('inspect-target').addEventListener('change', refreshTargetControls)
+$('sink-key-help-button').addEventListener('click', toggleSinkKeyHelp)
 $('inspect-button').addEventListener('click', () => runInspect())
 $('lookup-button').addEventListener('click', () => runLookup())
 $('clear-lookup-button').addEventListener('click', () => {
@@ -1180,6 +1491,7 @@ $('lookup-tab').addEventListener('click', () => switchInspectMode('lookup'))
 $('auto-refresh-enabled').addEventListener('change', updateInspectAutoRefresh)
 $('auto-refresh-seconds').addEventListener('change', updateInspectAutoRefresh)
 document.addEventListener('click', closeRowActionPopover)
+document.addEventListener('click', closeSinkKeyHelp)
 window.addEventListener('resize', closeRowActionPopover)
 window.addEventListener('scroll', closeRowActionPopover, true)
 $('new-source-path').addEventListener('keydown', (event) => {

@@ -569,6 +569,13 @@ public final class CobbleFlinkMonitorServer {
             byte[] prefix =
                     decodeOptionalBytes(
                             first(params, "prefix", null), first(params, "prefix_b64", null));
+            SinkKeyRowFilter sinkKeyFilter = sinkKeyFilter(params, target);
+            if (sinkKeyFilter != null) {
+                if (prefix != null && prefix.length > 0) {
+                    throw new InputException("`prefix` cannot be combined with `sink_key`");
+                }
+                prefix = sinkKeyFilter.prefix;
+            }
             TimerRowFilter timerFilter = timerRowFilter(params, target);
             if (timerFilter != null) {
                 prefix = null;
@@ -631,6 +638,7 @@ public final class CobbleFlinkMonitorServer {
                             target,
                             columns,
                             stateFilter,
+                            sinkKeyFilter,
                             timerFilter,
                             maxItems,
                             items);
@@ -644,6 +652,7 @@ public final class CobbleFlinkMonitorServer {
                         target,
                         columns,
                         stateFilter,
+                        sinkKeyFilter,
                         timerFilter,
                         maxItems,
                         items);
@@ -692,12 +701,13 @@ public final class CobbleFlinkMonitorServer {
                 InspectTarget target,
                 int[] columns,
                 StateRowFilter stateFilter,
+                SinkKeyRowFilter sinkKeyFilter,
                 TimerRowFilter timerFilter,
                 int limit,
                 List<Map<String, Object>> items) {
             boolean skippedStartAfter = startAfter == null;
             int rawLimit =
-                    timerFilter == null && !hasPostScanFilter(stateFilter)
+                    timerFilter == null && !hasPostScanFilter(stateFilter, sinkKeyFilter)
                             ? limit + 1
                             : Math.max(limit + 1, config.inspectMaxLimit);
             try (ScanOptions options = scanOptions(target.columnFamily, columns, rawLimit);
@@ -726,6 +736,10 @@ public final class CobbleFlinkMonitorServer {
                         entry = cursor.nextEntry();
                         continue;
                     }
+                    if (sinkKeyFilter != null && !sinkKeyFilter.matches(item)) {
+                        entry = cursor.nextEntry();
+                        continue;
+                    }
                     if (timerFilter != null && !timerFilter.matches(item)) {
                         entry = cursor.nextEntry();
                         continue;
@@ -736,9 +750,12 @@ public final class CobbleFlinkMonitorServer {
             }
         }
 
-        private static boolean hasPostScanFilter(StateRowFilter stateFilter) {
-            return stateFilter != null
-                    && (stateFilter.mapKeyPrefix != null || stateFilter.mapKeyBytesPrefix != null);
+        private static boolean hasPostScanFilter(
+                StateRowFilter stateFilter, SinkKeyRowFilter sinkKeyFilter) {
+            return sinkKeyFilter != null
+                    || (stateFilter != null
+                            && (stateFilter.mapKeyPrefix != null
+                                    || stateFilter.mapKeyBytesPrefix != null));
         }
 
         private int currentTotalBuckets() {
@@ -924,6 +941,50 @@ public final class CobbleFlinkMonitorServer {
             }
         }
 
+        private static SinkKeyRowFilter sinkKeyFilter(
+                Map<String, List<String>> params, InspectTarget target) {
+            if (target == null || target.sinkSchema == null) {
+                return null;
+            }
+            List<String> rawValues = params.get("sink_key");
+            if (rawValues == null || rawValues.isEmpty()) {
+                return null;
+            }
+            List<String> values = new ArrayList<>();
+            boolean foundGap = false;
+            for (String value : rawValues) {
+                if (value == null || value.isEmpty()) {
+                    foundGap = true;
+                    continue;
+                }
+                if (foundGap) {
+                    throw new InputException(
+                            "Sink key fields must be supplied in order without gaps");
+                }
+                values.add(value);
+            }
+            if (values.isEmpty()) {
+                return null;
+            }
+            if (values.size() > target.sinkSchema.keyFields().size()) {
+                throw new InputException(
+                        "Too many sink key values (expected at most "
+                                + target.sinkSchema.keyFields().size()
+                                + ")");
+            }
+            try {
+                int lastIndex = values.size() - 1;
+                byte[] prefix =
+                        SinkInspectDecoder.encodeKeyPrefix(target, values.subList(0, lastIndex));
+                return new SinkKeyRowFilter(
+                        prefix,
+                        target.sinkSchema.keyFields().get(lastIndex).name(),
+                        values.get(lastIndex));
+            } catch (IOException e) {
+                throw new InputException(e.getMessage());
+            }
+        }
+
         private static TimerRowFilter timerRowFilter(
                 Map<String, List<String>> params, InspectTarget target) {
             if (target == null || !"timer".equals(target.kind)) {
@@ -1063,6 +1124,54 @@ public final class CobbleFlinkMonitorServer {
                     return b64 != null && String.valueOf(b64).startsWith(mapKeyPrefix);
                 }
                 return String.valueOf(value).startsWith(mapKeyPrefix);
+            }
+        }
+
+        private static final class SinkKeyRowFilter {
+            private final byte[] prefix;
+            private final String fieldName;
+            private final String valuePrefix;
+
+            private SinkKeyRowFilter(byte[] prefix, String fieldName, String valuePrefix) {
+                this.prefix = prefix == null ? new byte[0] : prefix;
+                this.fieldName = fieldName;
+                this.valuePrefix = valuePrefix;
+            }
+
+            @SuppressWarnings("unchecked")
+            private boolean matches(Map<String, Object> item) {
+                Object decoded = item.get("decoded_key");
+                if (!(decoded instanceof List)) {
+                    return false;
+                }
+                for (Object field : (List<?>) decoded) {
+                    if (!(field instanceof Map)) {
+                        continue;
+                    }
+                    Map<String, Object> decodedField = (Map<String, Object>) field;
+                    if (!fieldName.equals(decodedField.get("name"))) {
+                        continue;
+                    }
+                    return displayValueStartsWith(decodedField.get("value"), valuePrefix);
+                }
+                return false;
+            }
+
+            @SuppressWarnings("unchecked")
+            private static boolean displayValueStartsWith(Object value, String prefix) {
+                if (value == null) {
+                    return false;
+                }
+                if (value instanceof Map) {
+                    Map<String, Object> bytes = (Map<String, Object>) value;
+                    Object utf8 = bytes.get("utf8");
+                    if (utf8 != null) {
+                        return String.valueOf(utf8).startsWith(prefix);
+                    }
+                    Object b64 = bytes.get("b64");
+                    return b64 != null && String.valueOf(b64).startsWith(prefix);
+                }
+                return String.valueOf(value).startsWith(prefix);
             }
         }
 

@@ -17,6 +17,7 @@ import org.apache.flink.table.types.logical.utils.LogicalTypeParser;
 import org.junit.jupiter.api.Test;
 
 import java.util.Arrays;
+import java.util.Base64;
 import java.util.Collections;
 
 class SinkInspectDecoderTest {
@@ -114,6 +115,35 @@ class SinkInspectDecoderTest {
         assertEquals(
                 CobbleFlinkMonitorServer.bytesJson(new byte[] {1}),
                 row.decodedColumns.get(0).get("value"));
+    }
+
+    @Test
+    void encodesLeadingCompositeKeyFieldsForPrefixScan() throws Exception {
+        SinkInspectSchema schema =
+                new SinkInspectSchema(
+                        Arrays.asList(
+                                SinkInspectField.key("id", "BIGINT", 0, -1),
+                                SinkInspectField.key("tenant", "VARCHAR(2147483647)", 1, -1)),
+                        Collections.singletonList(
+                                SinkInspectField.value("value", "VARCHAR(2147483647)", 2, 0)));
+        InspectTarget target = InspectTarget.sink("sink", schema);
+
+        assertEquals(
+                Base64.getEncoder().encodeToString(key(field("BIGINT", Long.valueOf(42L)))),
+                Base64.getEncoder()
+                        .encodeToString(
+                                SinkInspectDecoder.encodeKeyPrefix(
+                                        target, Collections.singletonList("42"))));
+        assertEquals(
+                Base64.getEncoder()
+                        .encodeToString(
+                                key(
+                                        field("BIGINT", Long.valueOf(42L)),
+                                        field("VARCHAR(2147483647)", "acme"))),
+                Base64.getEncoder()
+                        .encodeToString(
+                                SinkInspectDecoder.encodeKeyPrefix(
+                                        target, Arrays.asList("42", "acme"))));
     }
 
     private static byte[] key(byte[]... fields) throws Exception {
