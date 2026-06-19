@@ -6,6 +6,7 @@ import io.cobble.flink.common.inspect.StateKind;
 
 import org.apache.flink.api.common.typeutils.TypeSerializer;
 import org.apache.flink.core.memory.DataInputViewStreamWrapper;
+import org.apache.flink.core.memory.DataOutputSerializer;
 import org.apache.flink.util.MathUtils;
 
 import java.io.ByteArrayInputStream;
@@ -51,6 +52,46 @@ final class StateInspectDecoder {
         return new DecodedRow(decodedKey, decodedValue, decodeError);
     }
 
+    static byte[] encodeStateKeyPrefix(
+            InspectTarget target,
+            String key,
+            byte[] keyBytes,
+            String namespace,
+            byte[] namespaceBytes,
+            String mapKey,
+            byte[] mapKeyBytes)
+            throws IOException {
+        if (target == null || target.schema == null) {
+            throw new IOException("Logical state-key filters require state schema metadata");
+        }
+        StateInspectSchema schema = target.schema;
+        boolean hasKey = hasText(key) || keyBytes != null;
+        boolean hasNamespace = hasText(namespace) || namespaceBytes != null;
+        boolean hasMapKey = hasText(mapKey) || mapKeyBytes != null;
+        if (!hasKey && (hasNamespace || hasMapKey)) {
+            throw new IOException("State key is required when namespace or map key is set");
+        }
+        if (!hasKey) {
+            return null;
+        }
+
+        byte[] encodedKey = encodeComponent(schema.keySerializer(), key, keyBytes, "key");
+        byte[] encodedNamespace =
+                encodeNamespace(schema.namespaceSerializer(), namespace, namespaceBytes);
+        if (schema.stateKind() == StateKind.MAP) {
+            byte[] encodedMapKey =
+                    hasMapKey
+                            ? encodeComponent(
+                                    schema.mapUserKeySerializer(), mapKey, mapKeyBytes, "map key")
+                            : null;
+            return encodeMapStateKeyPrefix(schema, encodedKey, encodedNamespace, encodedMapKey);
+        }
+        if (hasMapKey) {
+            throw new IOException("Map key filter is only valid for MapState");
+        }
+        return encodeKeyAndNamespace(schema, encodedKey, encodedNamespace);
+    }
+
     private static Map<String, Object> decodeKey(StateInspectSchema schema, byte[] rowKey)
             throws IOException {
         if (schema.stateKind() == StateKind.TIMER) {
@@ -62,11 +103,10 @@ final class StateInspectDecoder {
                         : splitKeyAndNamespace(schema, rowKey);
 
         Map<String, Object> output = new LinkedHashMap<>();
-        output.put("key", render(deserialize(schema.keySerializer(), slices.key)));
+        output.put("key", decodeDisplay(schema.keySerializer(), slices.key));
         output.put("namespace", renderNamespace(schema.namespaceSerializer(), slices.namespace));
         if (schema.stateKind() == StateKind.MAP) {
-            output.put(
-                    "map_key", render(deserialize(schema.mapUserKeySerializer(), slices.mapKey)));
+            output.put("map_key", decodeDisplay(schema.mapUserKeySerializer(), slices.mapKey));
         }
         return output;
     }
@@ -77,27 +117,82 @@ final class StateInspectDecoder {
         ByteArrayInputStream bytes = new ByteArrayInputStream(rowKey);
         DataInputViewStreamWrapper input = new DataInputViewStreamWrapper(bytes);
         long timestamp = MathUtils.flipSignBit(input.readLong());
+        int keyStart = rowKey.length - bytes.available();
         Object key = restore(schema.keySerializer()).deserialize(input);
+        int namespaceStart = rowKey.length - bytes.available();
         Object namespace;
         if (isVoidNamespaceSerializer(schema.namespaceSerializer())) {
-            if (bytes.available() < 1) {
-                throw new IOException("Row key too short for timer namespace");
-            }
+            requireLength(
+                    slice(rowKey, namespaceStart, rowKey.length - namespaceStart),
+                    1,
+                    "timer namespace");
             input.readByte();
             namespace = VOID_NAMESPACE_LABEL;
         } else {
             namespace = restore(schema.namespaceSerializer()).deserialize(input);
         }
+        int end = rowKey.length - bytes.available();
 
         Map<String, Object> output = new LinkedHashMap<>();
         output.put("timestamp", timestamp);
-        output.put("key", render(key));
+        output.put("key", render(key, slice(rowKey, keyStart, namespaceStart - keyStart), null));
         output.put(
                 "namespace",
                 isVoidNamespaceSerializer(schema.namespaceSerializer())
                         ? VOID_NAMESPACE_LABEL
-                        : render(namespace));
+                        : render(
+                                namespace,
+                                slice(rowKey, namespaceStart, end - namespaceStart),
+                                null));
         return output;
+    }
+
+    static boolean mapKeyBytesStartsWith(InspectTarget target, byte[] rowKey, byte[] prefix)
+            throws IOException {
+        if (target == null
+                || target.schema == null
+                || target.schema.stateKind() != StateKind.MAP
+                || prefix == null) {
+            return false;
+        }
+        return startsWith(splitMapKey(target.schema, rowKey).mapKey, prefix);
+    }
+
+    private static byte[] encodeKeyAndNamespace(
+            StateInspectSchema schema, byte[] keyBytes, byte[] namespaceBytes) throws IOException {
+        DataOutputSerializer output =
+                new DataOutputSerializer(keyBytes.length + namespaceBytes.length + Integer.BYTES);
+        output.write(keyBytes);
+        output.write(namespaceBytes);
+        if (schema.keyLengthStored()) {
+            output.writeInt(keyBytes.length);
+        }
+        return output.getCopyOfBuffer();
+    }
+
+    private static byte[] encodeMapStateKeyPrefix(
+            StateInspectSchema schema, byte[] keyBytes, byte[] namespaceBytes, byte[] mapKeyBytes)
+            throws IOException {
+        int capacity =
+                keyBytes.length
+                        + namespaceBytes.length
+                        + 1
+                        + (mapKeyBytes == null ? 0 : mapKeyBytes.length)
+                        + Integer.BYTES * 2;
+        DataOutputSerializer output = new DataOutputSerializer(capacity);
+        output.write(keyBytes);
+        output.write(namespaceBytes);
+        output.writeByte(0);
+        if (mapKeyBytes != null) {
+            output.write(mapKeyBytes);
+            if (schema.mapKeyLengthStored()) {
+                output.writeInt(keyBytes.length);
+            }
+            if (schema.mapNamespaceLengthStored()) {
+                output.writeInt(namespaceBytes.length);
+            }
+        }
+        return output.getCopyOfBuffer();
     }
 
     private static Object decodeValue(StateInspectSchema schema, byte[] valueBytes)
@@ -106,7 +201,7 @@ final class StateInspectDecoder {
             return null;
         }
         if (schema.stateKind() == StateKind.VALUE) {
-            return render(deserialize(schema.valueSerializer(), valueBytes));
+            return decodeDisplay(schema.valueSerializer(), valueBytes);
         }
         if (schema.stateKind() == StateKind.LIST) {
             TypeSerializer<Object> serializer = restore(schema.listElementSerializer());
@@ -120,7 +215,7 @@ final class StateInspectDecoder {
                     break;
                 }
                 input.unread(first);
-                values.add(render(serializer.deserialize(inputView)));
+                values.add(render(serializer.deserialize(inputView), null, serializer));
                 int delimiter = input.read();
                 if (delimiter < 0) {
                     break;
@@ -133,8 +228,7 @@ final class StateInspectDecoder {
         }
         if (schema.stateKind() == StateKind.MAP) {
             Map<String, Object> output = new LinkedHashMap<>();
-            output.put(
-                    "map_value", render(deserialize(schema.mapUserValueSerializer(), valueBytes)));
+            output.put("map_value", decodeDisplay(schema.mapUserValueSerializer(), valueBytes));
             return output;
         }
         throw new IOException("Unsupported state kind: " + schema.stateKind());
@@ -266,12 +360,91 @@ final class StateInspectDecoder {
                 new DataInputViewStreamWrapper(new ByteArrayInputStream(bytes)));
     }
 
+    private static Object decodeDisplay(SerializerInspectSchema serializerSchema, byte[] bytes)
+            throws IOException {
+        return render(deserialize(serializerSchema, bytes), bytes, null);
+    }
+
+    private static byte[] encodeComponent(
+            SerializerInspectSchema serializerSchema, String value, byte[] bytes, String label)
+            throws IOException {
+        if (bytes != null) {
+            return bytes;
+        }
+        TypeSerializer<Object> serializer = restore(serializerSchema);
+        Object parsed = parseTextValue(serializerSchema, value, label);
+        DataOutputSerializer output = new DataOutputSerializer(64);
+        serializer.serialize(parsed, output);
+        return output.getCopyOfBuffer();
+    }
+
+    private static byte[] encodeNamespace(
+            SerializerInspectSchema serializerSchema, String namespace, byte[] namespaceBytes)
+            throws IOException {
+        if (isVoidNamespaceSerializer(serializerSchema)) {
+            if (hasText(namespace) || namespaceBytes != null) {
+                throw new IOException("VoidNamespace does not accept a namespace value");
+            }
+            return new byte[] {0};
+        }
+        if (!hasText(namespace) && namespaceBytes == null) {
+            throw new IOException("Namespace is required for this state");
+        }
+        return encodeComponent(serializerSchema, namespace, namespaceBytes, "namespace");
+    }
+
+    private static Object parseTextValue(
+            SerializerInspectSchema serializerSchema, String value, String label)
+            throws IOException {
+        String className = serializerSchema.serializerClassName();
+        try {
+            if (isSerializer(className, "StringSerializer")) {
+                return value;
+            }
+            if (isSerializer(className, "IntSerializer")) {
+                return Integer.parseInt(value);
+            }
+            if (isSerializer(className, "LongSerializer")) {
+                return Long.parseLong(value);
+            }
+            if (isSerializer(className, "ShortSerializer")) {
+                return Short.parseShort(value);
+            }
+            if (isSerializer(className, "ByteSerializer")) {
+                return Byte.parseByte(value);
+            }
+            if (isSerializer(className, "BooleanSerializer")) {
+                return Boolean.parseBoolean(value);
+            }
+            if (isSerializer(className, "FloatSerializer")) {
+                return Float.parseFloat(value);
+            }
+            if (isSerializer(className, "DoubleSerializer")) {
+                return Double.parseDouble(value);
+            }
+        } catch (NumberFormatException e) {
+            throw new IOException(
+                    "Invalid "
+                            + label
+                            + " value for "
+                            + simpleSerializerName(className)
+                            + ": "
+                            + value);
+        }
+        throw new IOException(
+                "Text input for "
+                        + label
+                        + " is not supported by "
+                        + className
+                        + "; use the *_b64 field with serialized bytes");
+    }
+
     private static Object renderNamespace(
             SerializerInspectSchema serializerSchema, byte[] namespaceBytes) throws IOException {
         if (isVoidNamespaceSerializer(serializerSchema)) {
             return VOID_NAMESPACE_LABEL;
         }
-        return render(deserialize(serializerSchema, namespaceBytes));
+        return decodeDisplay(serializerSchema, namespaceBytes);
     }
 
     @SuppressWarnings("unchecked")
@@ -293,12 +466,32 @@ final class StateInspectDecoder {
         return serializer;
     }
 
+    private static boolean hasText(String value) {
+        return value != null && !value.trim().isEmpty();
+    }
+
+    private static boolean isSerializer(String className, String simpleName) {
+        return className != null && className.endsWith("." + simpleName);
+    }
+
+    static String simpleSerializerName(String className) {
+        if (className == null || className.isEmpty()) {
+            return "unknown";
+        }
+        int lastDot = className.lastIndexOf('.');
+        String simple = lastDot < 0 ? className : className.substring(lastDot + 1);
+        return simple.endsWith("Serializer")
+                ? simple.substring(0, simple.length() - "Serializer".length())
+                : simple;
+    }
+
     private static boolean isVoidNamespaceSerializer(SerializerInspectSchema serializerSchema) {
         return serializerSchema != null
                 && VOID_NAMESPACE_SERIALIZER_CLASS.equals(serializerSchema.serializerClassName());
     }
 
-    private static Object render(Object value) {
+    private static Object render(Object value, byte[] rawBytes, TypeSerializer<Object> serializer)
+            throws IOException {
         if (value == null
                 || value instanceof String
                 || value instanceof Number
@@ -308,10 +501,33 @@ final class StateInspectDecoder {
         if (value instanceof byte[]) {
             return CobbleFlinkMonitorServer.bytesJson((byte[]) value);
         }
-        Map<String, Object> output = new LinkedHashMap<>();
-        output.put("type", value.getClass().getName());
-        output.put("value", String.valueOf(value));
-        return output;
+        byte[] fallbackBytes = rawBytes == null ? serializeFallback(serializer, value) : rawBytes;
+        if (fallbackBytes != null) {
+            return CobbleFlinkMonitorServer.bytesJson(fallbackBytes);
+        }
+        throw new IOException("Decoded value is not displayable: " + value.getClass().getName());
+    }
+
+    private static byte[] serializeFallback(TypeSerializer<Object> serializer, Object value)
+            throws IOException {
+        if (serializer == null || value == null) {
+            return null;
+        }
+        DataOutputSerializer output = new DataOutputSerializer(64);
+        serializer.serialize(value, output);
+        return output.getCopyOfBuffer();
+    }
+
+    private static boolean startsWith(byte[] value, byte[] prefix) {
+        if (value == null || prefix == null || prefix.length > value.length) {
+            return false;
+        }
+        for (int index = 0; index < prefix.length; index++) {
+            if (value[index] != prefix[index]) {
+                return false;
+            }
+        }
+        return true;
     }
 
     private static String appendError(String existing, String next) {
@@ -326,6 +542,9 @@ final class StateInspectDecoder {
     }
 
     private static Integer fixedLength(SerializerInspectSchema serializerSchema) {
+        if (isVoidNamespaceSerializer(serializerSchema)) {
+            return 1;
+        }
         if (serializerSchema == null || serializerSchema.lengthTag() < 0) {
             return null;
         }

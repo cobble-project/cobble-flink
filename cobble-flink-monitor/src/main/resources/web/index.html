@@ -35,7 +35,7 @@
         <section id="inspect-view" class="view">
           <div id="inspect-tabs" class="sub-tabs">
             <button id="scan-tab" class="sub-tab active">Scan</button>
-            <button id="lookup-tab" class="sub-tab">Lookup</button>
+            <button id="lookup-tab" class="sub-tab">Track</button>
           </div>
           <div id="inspect-controls" class="control-grid">
             <label id="operator-control">
@@ -68,7 +68,19 @@
           </div>
 
           <div id="scan-controls" class="control-grid">
-            <label>
+            <label id="state-key-control" class="hidden">
+              <span id="state-key-label">State key</span>
+              <input id="state-key" />
+            </label>
+            <label id="namespace-control" class="hidden">
+              <span id="namespace-label">Namespace</span>
+              <input id="namespace" placeholder="namespace" />
+            </label>
+            <label id="map-key-control" class="hidden">
+              <span id="map-key-label">Map key</span>
+              <input id="map-key" />
+            </label>
+            <label id="prefix-control">
               Prefix
               <input id="prefix" placeholder="UTF-8 prefix" />
             </label>
@@ -83,7 +95,7 @@
 
           <div id="lookup-controls" class="control-stack hidden">
             <div class="lookup-actions">
-              <button id="lookup-button" class="primary-button">Refresh lookup</button>
+              <button id="lookup-button" class="primary-button">Refresh track</button>
               <button id="clear-lookup-button">Clear tracked</button>
             </div>
           </div>
@@ -121,6 +133,6 @@
         </section>
       </main>
     </div>
-    <script src="/app.js?v=7"></script>
+    <script src="/app.js?v=9"></script>
   </body>
 </html>

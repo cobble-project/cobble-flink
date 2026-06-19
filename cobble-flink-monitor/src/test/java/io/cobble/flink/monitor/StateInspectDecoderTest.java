@@ -1,5 +1,6 @@
 package io.cobble.flink.monitor;
 
+import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -9,7 +10,9 @@ import io.cobble.flink.common.inspect.StateInspectSchema;
 
 import org.apache.flink.api.common.typeutils.TypeSerializer;
 import org.apache.flink.api.common.typeutils.base.IntSerializer;
+import org.apache.flink.api.common.typeutils.base.LongSerializer;
 import org.apache.flink.api.common.typeutils.base.StringSerializer;
+import org.apache.flink.api.common.typeutils.base.array.BytePrimitiveArraySerializer;
 import org.apache.flink.core.memory.DataOutputSerializer;
 import org.apache.flink.util.MathUtils;
 import org.junit.jupiter.api.Test;
@@ -18,6 +21,7 @@ import java.io.ByteArrayOutputStream;
 import java.lang.reflect.Constructor;
 import java.lang.reflect.Field;
 import java.util.Arrays;
+import java.util.Map;
 
 class StateInspectDecoderTest {
 
@@ -89,6 +93,29 @@ class StateInspectDecoderTest {
         assertEquals("ns", row.decodedKey.get("namespace"));
         assertEquals("field-a", row.decodedKey.get("map_key"));
         assertEquals("value-a", ((java.util.Map<?, ?>) row.decodedValue).get("map_value"));
+    }
+
+    @Test
+    void decodesByteArrayValueAsRawBytesJson() throws Exception {
+        StateInspectSchema schema =
+                StateInspectSchema.forValue(
+                        "value-state",
+                        "cf-value",
+                        false,
+                        StringSerializer.INSTANCE,
+                        StringSerializer.INSTANCE,
+                        BytePrimitiveArraySerializer.INSTANCE);
+        InspectTarget target = target(schema);
+        byte[] rowKey = keyAndNamespace("user-1", "window-a");
+        byte[][] columns =
+                new byte[][] {
+                    serialize(BytePrimitiveArraySerializer.INSTANCE, new byte[] {1, 2, 3})
+                };
+
+        StateInspectDecoder.DecodedRow row = StateInspectDecoder.decode(target, rowKey, columns);
+
+        assertNull(row.decodeError);
+        assertEquals(CobbleFlinkMonitorServer.bytesJson(new byte[] {1, 2, 3}), row.decodedValue);
     }
 
     @Test
@@ -221,6 +248,89 @@ class StateInspectDecoderTest {
         assertNull(row.decodedValue);
     }
 
+    @Test
+    void encodesTypedValueStateKeyPrefix() throws Exception {
+        StateInspectSchema schema =
+                withVoidNamespace(
+                        StateInspectSchema.forValue(
+                                "value-state",
+                                "cf-value",
+                                false,
+                                IntSerializer.INSTANCE,
+                                StringSerializer.INSTANCE,
+                                LongSerializer.INSTANCE));
+        InspectTarget target = target(schema);
+
+        byte[] encoded =
+                StateInspectDecoder.encodeStateKeyPrefix(
+                        target, "42", null, null, null, null, null);
+
+        DataOutputSerializer expected = new DataOutputSerializer(8);
+        expected.write(serialize(IntSerializer.INSTANCE, 42));
+        expected.writeByte(0);
+        assertArrayEquals(expected.getCopyOfBuffer(), encoded);
+        StateInspectDecoder.DecodedRow row =
+                StateInspectDecoder.decode(
+                        target, encoded, new byte[][] {serialize(LongSerializer.INSTANCE, 123L)});
+        assertNull(row.decodeError);
+        assertEquals(42, row.decodedKey.get("key"));
+        assertEquals(123L, row.decodedValue);
+    }
+
+    @Test
+    void encodesMapStateKeyPrefixAndExactUserKey() throws Exception {
+        StateInspectSchema schema =
+                withVoidNamespace(
+                        StateInspectSchema.forMap(
+                                "map-state",
+                                "cf-map",
+                                false,
+                                StringSerializer.INSTANCE,
+                                StringSerializer.INSTANCE,
+                                StringSerializer.INSTANCE,
+                                IntSerializer.INSTANCE));
+        InspectTarget target = target(schema);
+
+        byte[] keyPrefix =
+                StateInspectDecoder.encodeStateKeyPrefix(
+                        target, "user-1", null, null, null, null, null);
+        byte[] expectedPrefix = keyAndVoidNamespaceMapPrefix("user-1");
+        assertArrayEquals(expectedPrefix, keyPrefix);
+
+        byte[] exactKey =
+                StateInspectDecoder.encodeStateKeyPrefix(
+                        target, "user-1", null, null, null, "field-a", null);
+        assertArrayEquals(mapKeyWithVoidNamespace("user-1", "field-a"), exactKey);
+    }
+
+    @Test
+    void matchesRawMapKeyBytesPrefix() throws Exception {
+        StateInspectSchema schema =
+                StateInspectSchema.forMap(
+                        "map-state",
+                        "cf-map",
+                        false,
+                        StringSerializer.INSTANCE,
+                        StringSerializer.INSTANCE,
+                        BytePrimitiveArraySerializer.INSTANCE,
+                        IntSerializer.INSTANCE);
+        InspectTarget target = target(schema);
+        byte[] mapKeyBytes = serialize(BytePrimitiveArraySerializer.INSTANCE, new byte[] {1, 2, 3});
+        byte[] rowKey = mapKey("user-1", "ns", mapKeyBytes);
+
+        assertTrue(
+                StateInspectDecoder.mapKeyBytesStartsWith(
+                        target, rowKey, Arrays.copyOf(mapKeyBytes, mapKeyBytes.length - 1)));
+
+        StateInspectDecoder.DecodedRow row =
+                StateInspectDecoder.decode(
+                        target, rowKey, new byte[][] {serialize(IntSerializer.INSTANCE, 7)});
+        assertNull(row.decodeError);
+        assertEquals(
+                CobbleFlinkMonitorServer.bytesJson(new byte[] {1, 2, 3}),
+                ((Map<?, ?>) row.decodedKey).get("map_key"));
+    }
+
     private static InspectTarget target(StateInspectSchema schema) {
         return new InspectTarget(
                 schema.stateName(),
@@ -266,14 +376,18 @@ class StateInspectDecoderTest {
         byte[] keyBytes = serialize(StringSerializer.INSTANCE, key);
         DataOutputSerializer output = new DataOutputSerializer(64);
         output.write(keyBytes);
-        output.writeInt(keyBytes.length);
+        output.writeByte(0);
         return output.getCopyOfBuffer();
     }
 
     private static byte[] mapKey(String key, String namespace, String mapKey) throws Exception {
+        return mapKey(key, namespace, serialize(StringSerializer.INSTANCE, mapKey));
+    }
+
+    private static byte[] mapKey(String key, String namespace, byte[] mapKeyBytes)
+            throws Exception {
         byte[] keyBytes = serialize(StringSerializer.INSTANCE, key);
         byte[] namespaceBytes = serialize(StringSerializer.INSTANCE, namespace);
-        byte[] mapKeyBytes = serialize(StringSerializer.INSTANCE, mapKey);
         DataOutputSerializer output = new DataOutputSerializer(64);
         output.write(keyBytes);
         output.write(namespaceBytes);
@@ -290,9 +404,18 @@ class StateInspectDecoderTest {
         DataOutputSerializer output = new DataOutputSerializer(64);
         output.write(keyBytes);
         output.writeByte(0);
+        output.writeByte(0);
         output.write(mapKeyBytes);
         output.writeInt(keyBytes.length);
-        output.writeInt(0);
+        return output.getCopyOfBuffer();
+    }
+
+    private static byte[] keyAndVoidNamespaceMapPrefix(String key) throws Exception {
+        byte[] keyBytes = serialize(StringSerializer.INSTANCE, key);
+        DataOutputSerializer output = new DataOutputSerializer(64);
+        output.write(keyBytes);
+        output.writeByte(0);
+        output.writeByte(0);
         return output.getCopyOfBuffer();
     }
 
@@ -313,10 +436,23 @@ class StateInspectDecoderTest {
 
     private static StateInspectSchema withVoidNamespace(StateInspectSchema schema)
             throws Exception {
-        Field field = StateInspectSchema.class.getDeclaredField("namespaceSerializer");
-        field.setAccessible(true);
-        field.set(schema, serializerSchema(VOID_NAMESPACE_SERIALIZER_CLASS, 0));
+        setField(
+                schema,
+                "namespaceSerializer",
+                serializerSchema(VOID_NAMESPACE_SERIALIZER_CLASS, 1));
+        setField(schema, "namespaceFixedLength", true);
+        setField(schema, "keyLengthStored", false);
+        if ("MAP".equals(schema.stateKind().name())) {
+            setField(schema, "mapKeyLengthStored", true);
+            setField(schema, "mapNamespaceLengthStored", false);
+        }
         return schema;
+    }
+
+    private static void setField(Object target, String name, Object value) throws Exception {
+        Field field = target.getClass().getDeclaredField(name);
+        field.setAccessible(true);
+        field.set(target, value);
     }
 
     private static SerializerInspectSchema serializerSchema(String className, int lengthTag)

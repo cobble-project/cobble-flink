@@ -19,9 +19,11 @@ const state = {
   inspectAutoRefreshEnabled: false,
   inspectAutoRefreshSeconds: 5,
   errorSource: null,
+  listDisplayLimits: {},
 }
 
 const MAX_VALUE_DISPLAY_LENGTH = 300
+const LIST_VALUE_PAGE_SIZE = 100
 
 const $ = (id) => document.getElementById(id)
 
@@ -55,6 +57,9 @@ function setLoading(loading) {
   $('inspect-button').disabled = loading
   $('lookup-button').disabled = loading
   $('clear-lookup-button').disabled = loading || state.trackedLookups.length === 0
+  $('state-key').disabled = loading
+  $('namespace').disabled = loading
+  $('map-key').disabled = loading
   $('prev-page-button').disabled = loading || state.previousPageCursors.length === 0
   $('next-page-button').disabled = loading || !state.nextPageCursor
 }
@@ -91,6 +96,7 @@ function renderMeta() {
   document.querySelector('#inspect-view .table-shell').classList.toggle('hidden', !sourceOpen)
   renderOperatorOptions()
   renderInspectTargets()
+  renderStateFilterControls()
   renderActiveResult()
   renderPager()
 }
@@ -156,6 +162,26 @@ function renderInspectTargets() {
     targets.length === 0 || (targets.length <= 1 && active?.kind === 'sink'),
   )
   $('columns-control').classList.toggle('hidden', !active?.allows_columns)
+  renderStateFilterControls()
+}
+
+function renderStateFilterControls() {
+  const target = activeTarget()
+  const schemaState = isSchemaStateTarget(target)
+  const mapState = schemaState && target.state_kind === 'MAP'
+  const voidNamespace = schemaState && isVoidNamespaceTarget(target)
+  $('state-key-control').classList.toggle('hidden', !schemaState)
+  $('namespace-control').classList.toggle('hidden', !schemaState || voidNamespace)
+  $('map-key-control').classList.toggle('hidden', !mapState)
+  $('prefix-control').classList.toggle('hidden', schemaState)
+  if (schemaState) {
+    $('state-key-label').textContent = `State key (${serializerLabel(target.serializer_classes?.key)})`
+    $('state-key').removeAttribute('placeholder')
+    $('namespace-label').textContent = `Namespace (${serializerLabel(target.serializer_classes?.namespace)})`
+    $('namespace').placeholder = serializerPlaceholder(target.serializer_classes?.namespace)
+    $('map-key-label').textContent = `Map key prefix (${serializerLabel(target.serializer_classes?.map_key)})`
+    $('map-key').removeAttribute('placeholder')
+  }
 }
 
 function renderSnapshots() {
@@ -279,6 +305,9 @@ function activeScanContext() {
     targetLabel: !target ? '' : target.kind === 'sink' ? 'sink' : `${target.name} (${target.kind})`,
     columns: activeColumns(),
     allowsColumns: Boolean(target?.allows_columns),
+    targetKind: target?.kind || null,
+    stateKind: target?.state_kind || null,
+    serializerClasses: target?.serializer_classes || {},
   }
 }
 
@@ -301,7 +330,17 @@ async function runScan(direction = 'reset') {
     query.set('mode', 'scan')
     const bucket = $('bucket').value.trim()
     if (bucket && bucket.toLowerCase() !== 'all') query.set('bucket', bucket)
-    query.set('prefix', $('prefix').value || '')
+    const target = activeTarget()
+    if (isSchemaStateTarget(target)) {
+      const stateKey = $('state-key').value.trim()
+      const namespace = $('namespace').value.trim()
+      const mapKey = $('map-key').value.trim()
+      if (stateKey) query.set('state_key', stateKey)
+      if (namespace) query.set('namespace', namespace)
+      if (mapKey) query.set('map_key', mapKey)
+    } else {
+      query.set('prefix', $('prefix').value || '')
+    }
     query.set('limit', $('limit').value || '50')
     if (activeTargetId()) query.set('target', activeTargetId())
     if (activeColumns()) query.set('columns', activeColumns())
@@ -444,6 +483,9 @@ function trackScanItem(trackId) {
     targetLabel: context.targetLabel,
     columns: context.columns,
     allowsColumns: context.allowsColumns,
+    targetKind: context.targetKind,
+    stateKind: context.stateKind,
+    serializerClasses: context.serializerClasses,
     value: item.columns || item.value || null,
     decodedKey: item.decoded_key || null,
     decodedValue: item.decoded_value ?? null,
@@ -496,19 +538,13 @@ function clearTrackedLookups() {
 function renderTrackedValue(item) {
   if (item.value == null) return `<span class="pill">missing</span>${renderDecodeError(item.decodeError)}`
   if (item.allowsColumns) return renderColumns(item.value)
-  return renderStateValue(item.value, item.decodedValue, item.decodeError)
-}
-
-function scanItemByTrackId(trackId) {
-  const context = state.lastScanContext
-  if (!context) return null
-  return scanItems().find((item) => (
-    trackIdentity(item.bucket, item.key_b64, context.targetId, context.columns) === trackId
-  ))
-}
-
-function trackedLookupById(trackId) {
-  return state.trackedLookups.find((item) => item.id === trackId)
+  return renderStateValue(
+    item.value,
+    item.decodedValue,
+    item.decodeError,
+    trackedTarget(item),
+    `track:${item.id}:value`,
+  )
 }
 
 function snapshotPagination() {
@@ -542,6 +578,7 @@ function resetScanState() {
   state.lastScanData = null
   state.lastScanContext = null
   state.scanLastUpdate = null
+  state.listDisplayLimits = {}
 }
 
 function applyPageMove(direction) {
@@ -639,8 +676,12 @@ function updateInspectAutoRefresh() {
 
 function renderScanResult(data, context = activeScanContext()) {
   const items = data.scan?.items || []
-  const sink = data.inspect_target?.allows_columns
-  $('result-head').innerHTML = sink
+  const target = data.inspect_target || activeTarget()
+  const sink = target?.allows_columns
+  const timer = isTimerTarget(target)
+  $('result-head').innerHTML = timer
+    ? '<tr><th>Bucket</th><th>Timer key</th><th>Timestamp</th><th></th></tr>'
+    : sink
     ? '<tr><th>Bucket</th><th>Key</th><th>Columns</th><th></th></tr>'
     : '<tr><th>Bucket</th><th>Key</th><th>Value</th><th></th></tr>'
   const body = $('result-body')
@@ -648,48 +689,90 @@ function renderScanResult(data, context = activeScanContext()) {
   for (const item of items) {
     const row = document.createElement('tr')
     const trackId = trackIdentity(item.bucket, item.key_b64, context.targetId, context.columns)
-    row.innerHTML = `
-      <td>${item.bucket}</td>
-      <td>${renderKey(item.key_b64, item.key_utf8, item.decoded_key)}</td>
-      <td>${sink ? renderColumns(item.columns) : renderStateValue(item.value, item.decoded_value, item.decode_error)}</td>
-      <td>${renderActionMenu([
-    { action: 'track', id: trackId, label: 'Track in lookup' },
-    { action: 'copy-scan-key', id: trackId, label: 'Copy key' },
-    { action: 'copy-scan-value', id: trackId, label: 'Copy value' },
-  ])}</td>
-    `
+    if (timer) {
+      row.innerHTML = `
+        <td>${item.bucket}</td>
+        <td>${renderTimerKey(item.key_b64, item.key_utf8, item.decoded_key, target)}</td>
+        <td>${renderTimerTimestamp(item.decoded_key, item.decode_error)}</td>
+        <td>${renderActionMenu(scanRowActions(item, target, context, trackId))}</td>
+      `
+    } else {
+      row.innerHTML = `
+        <td>${item.bucket}</td>
+        <td>${renderKey(item.key_b64, item.key_utf8, item.decoded_key, target)}</td>
+        <td>${sink ? renderColumns(item.columns) : renderStateValue(item.value, item.decoded_value, item.decode_error, target, `scan:${trackId}:value`)}</td>
+        <td>${renderActionMenu(scanRowActions(item, target, context, trackId))}</td>
+      `
+    }
     body.appendChild(row)
   }
   if (items.length === 0) {
     body.innerHTML = '<tr><td colspan="4">No rows.</td></tr>'
   }
   wireRowActionButtons(body)
+  wireListMoreButtons(body)
 }
 
 function renderLookupResult() {
   const items = state.trackedLookups
-  $('result-head').innerHTML = '<tr><th>Target</th><th>Bucket</th><th>Key</th><th>Value</th><th></th></tr>'
+  const timerOnly = items.length > 0 && items.every((item) => isTimerTarget(trackedTarget(item)))
+  $('result-head').innerHTML = timerOnly
+    ? '<tr><th>Target</th><th>Bucket</th><th>Timer key</th><th>Timestamp</th><th></th></tr>'
+    : '<tr><th>Target</th><th>Bucket</th><th>Key</th><th>Value</th><th></th></tr>'
   const body = $('result-body')
   body.innerHTML = ''
   for (const item of items) {
     const row = document.createElement('tr')
-    row.innerHTML = `
-      <td>${escapeHtml(item.targetLabel)}</td>
-      <td>${item.bucket}</td>
-      <td>${renderKey(item.keyB64, item.keyUtf8, item.decodedKey)}</td>
-      <td>${renderTrackedValue(item)}</td>
-      <td>${renderActionMenu([
-    { action: 'remove-track', id: item.id, label: 'Remove' },
-    { action: 'copy-lookup-key', id: item.id, label: 'Copy key' },
-    { action: 'copy-lookup-value', id: item.id, label: 'Copy value' },
-  ])}</td>
-    `
+    const target = trackedTarget(item)
+    if (timerOnly) {
+      row.innerHTML = `
+        <td>${escapeHtml(item.targetLabel)}</td>
+        <td>${item.bucket}</td>
+        <td>${renderTimerKey(item.keyB64, item.keyUtf8, item.decodedKey, target)}</td>
+        <td>${renderTimerTimestamp(item.decodedKey, item.decodeError)}</td>
+        <td>${renderActionMenu(trackedRowActions(item, target))}</td>
+      `
+    } else {
+      row.innerHTML = `
+        <td>${escapeHtml(item.targetLabel)}</td>
+        <td>${item.bucket}</td>
+        <td>${renderKey(item.keyB64, item.keyUtf8, item.decodedKey, target)}</td>
+        <td>${isTimerTarget(target) ? renderTimerTimestamp(item.decodedKey, item.decodeError) : renderTrackedValue(item)}</td>
+        <td>${renderActionMenu(trackedRowActions(item, target))}</td>
+      `
+    }
     body.appendChild(row)
   }
   if (items.length === 0) {
     body.innerHTML = '<tr><td colspan="5">No tracked entries.</td></tr>'
   }
   wireRowActionButtons(body)
+  wireListMoreButtons(body)
+}
+
+function scanRowActions(item, target, context, trackId) {
+  return [
+    { action: 'track', id: trackId, label: 'Track' },
+    ...rawCopyActions(item.key_b64, context?.allowsColumns ? item.columns : item.value),
+  ]
+}
+
+function trackedRowActions(item, target) {
+  return [
+    { action: 'remove-track', id: item.id, label: 'Remove' },
+    ...rawCopyActions(item.keyB64, item.value),
+  ]
+}
+
+function rawCopyActions(rawKeyB64, rawValue) {
+  const actions = []
+  if (rawKeyB64 != null) {
+    actions.push({ action: 'copy-text', label: 'Copy raw key', value: rawKeyB64 })
+  }
+  if (rawValue !== undefined && rawValue !== null) {
+    actions.push({ action: 'copy-text', label: 'Copy raw value', value: rawCopyValue(rawValue) })
+  }
+  return actions
 }
 
 function renderActionMenu(actions) {
@@ -721,7 +804,7 @@ function openRowActionPopover(trigger) {
     button.addEventListener('click', async (event) => {
       event.stopPropagation()
       closeRowActionPopover()
-      await handleRowAction(item.action, item.id)
+      await handleRowAction(item)
     })
     menu.appendChild(button)
   }
@@ -748,7 +831,9 @@ function closeRowActionPopover() {
   document.querySelector('#row-action-popover')?.remove()
 }
 
-async function handleRowAction(action, rowId) {
+async function handleRowAction(item) {
+  const action = item.action
+  const rowId = item.id
   if (action === 'track') {
     trackScanItem(rowId)
     return
@@ -757,26 +842,20 @@ async function handleRowAction(action, rowId) {
     removeTrackedLookup(rowId)
     return
   }
-  if (action === 'copy-scan-key') {
-    const item = scanItemByTrackId(rowId)
-    if (item) await copyText(item.key_b64)
-    return
+  if (action === 'copy-text') {
+    await copyText(item.value)
   }
-  if (action === 'copy-scan-value') {
-    const item = scanItemByTrackId(rowId)
-    const context = state.lastScanContext
-    if (item) await copyText(copyableValue(context?.allowsColumns ? item.columns : item.value))
-    return
-  }
-  if (action === 'copy-lookup-key') {
-    const item = trackedLookupById(rowId)
-    if (item) await copyText(item.keyB64)
-    return
-  }
-  if (action === 'copy-lookup-value') {
-    const item = trackedLookupById(rowId)
-    if (item) await copyText(copyableValue(item.value))
-  }
+}
+
+function wireListMoreButtons(root) {
+  root.querySelectorAll('button[data-list-display-id]').forEach((button) => {
+    button.addEventListener('click', (event) => {
+      event.stopPropagation()
+      const id = button.dataset.listDisplayId
+      state.listDisplayLimits[id] = Number(button.dataset.nextLimit || LIST_VALUE_PAGE_SIZE)
+      renderActiveResult()
+    })
+  })
 }
 
 async function copyText(text) {
@@ -800,12 +879,22 @@ async function copyText(text) {
   textarea.remove()
 }
 
-function copyableValue(value) {
+function rawCopyValue(value) {
   if (value == null) return ''
   if (Array.isArray(value)) {
-    return JSON.stringify(value)
+    return JSON.stringify(value.map((item) => {
+      if (!item) return null
+      if (isRawBytesJson(item)) return item.b64 ?? ''
+      return item
+    }))
   }
-  return value.utf8 ?? value.b64 ?? JSON.stringify(value)
+  if (isRawBytesJson(value)) {
+    return value.b64 ?? ''
+  }
+  if (typeof value === 'object') {
+    return value.b64 ?? JSON.stringify(value)
+  }
+  return String(value)
 }
 
 function renderValue(value) {
@@ -813,8 +902,14 @@ function renderValue(value) {
   return `${renderCode(value.b64)}${renderUtf8Pill(value.utf8)}`
 }
 
-function renderStateValue(value, decodedValue, decodeError) {
-  return `${renderValue(value)}${renderDecodedSection(decodedValue)}${renderDecodeError(decodeError)}`
+function renderStateValue(value, decodedValue, decodeError, target = null, displayId = '') {
+  if (isDecodedTarget(target) && target?.kind === 'timer') {
+    return `<span class="muted-text">timer entry</span>${renderDecodeError(decodeError)}`
+  }
+  if (isDecodedTarget(target) && decodedValue !== undefined && decodedValue !== null) {
+    return `${renderDecodedSection(decodedValue, target, displayId)}${renderDecodeError(decodeError)}`
+  }
+  return `${renderValue(value)}${renderDecodeError(decodeError)}`
 }
 
 function renderColumns(columns = []) {
@@ -824,23 +919,75 @@ function renderColumns(columns = []) {
   }).join('')
 }
 
-function renderKey(keyB64, keyUtf8, decodedKey = null) {
-  return `${renderCode(keyB64)}${renderUtf8Pill(keyUtf8)}${renderDecodedKey(decodedKey)}`
+function renderKey(keyB64, keyUtf8, decodedKey = null, target = null) {
+  if (isDecodedTarget(target) && decodedKey && typeof decodedKey === 'object') {
+    const decoded = renderDecodedKey(decodedKey, target)
+    if (decoded) return decoded
+  }
+  return `${renderCode(keyB64)}${renderUtf8Pill(keyUtf8)}${renderDecodedKey(decodedKey, target)}`
 }
 
-function renderDecodedKey(decodedKey) {
+function renderTimerKey(keyB64, keyUtf8, decodedKey = null, target = null) {
+  if (decodedKey && typeof decodedKey === 'object' && Object.prototype.hasOwnProperty.call(decodedKey, 'key')) {
+    return renderDecodedValue(decodedKey.key, target?.serializer_classes?.key)
+  }
+  return `${renderCode(keyB64)}${renderUtf8Pill(keyUtf8)}`
+}
+
+function renderTimerTimestamp(decodedKey = null, decodeError = null) {
+  if (decodedKey && typeof decodedKey === 'object' && Object.prototype.hasOwnProperty.call(decodedKey, 'timestamp')) {
+    return `${renderDecodedValue(decodedKey.timestamp, 'org.apache.flink.api.common.typeutils.base.LongSerializer')}${renderDecodeError(decodeError)}`
+  }
+  return `<span class="muted-text">unknown</span>${renderDecodeError(decodeError)}`
+}
+
+function renderDecodedKey(decodedKey, target = null) {
   if (!decodedKey || typeof decodedKey !== 'object') return ''
   const rows = []
-  for (const label of ['key', 'namespace', 'map_key']) {
+  const typeByLabel = {
+    timestamp: null,
+    key: target?.serializer_classes?.key,
+    namespace: isVoidSerializerClass(target?.serializer_classes?.namespace)
+      ? null
+      : target?.serializer_classes?.namespace,
+    map_key: target?.serializer_classes?.map_key,
+  }
+  const displayLabelByLabel = {
+    timestamp: 'timestamp',
+    key: target?.kind === 'timer' ? 'timer key' : 'state key',
+    namespace: 'namespace',
+    map_key: 'map key',
+  }
+  for (const label of ['timestamp', 'key', 'namespace', 'map_key']) {
+    if (label === 'namespace' && isVoidSerializerClass(target?.serializer_classes?.namespace)) {
+      continue
+    }
     if (Object.prototype.hasOwnProperty.call(decodedKey, label)) {
-      rows.push(renderDecodedPair(label, decodedKey[label]))
+      rows.push(renderDecodedPair(displayLabelByLabel[label], decodedKey[label], typeByLabel[label]))
     }
   }
   return renderDecodedBlock(rows)
 }
 
-function renderDecodedSection(value) {
+function renderDecodedSection(value, target = null, displayId = '') {
   if (value === undefined || value === null) return ''
+  if (target?.state_kind === 'LIST' && Array.isArray(value)) {
+    const type = target.serializer_classes?.element
+    const visible = visibleListLimit(displayId, value.length)
+    const rows = value
+      .slice(0, visible)
+      .map((item, index) => renderDecodedPair(`#${index}`, item, type))
+    if (visible < value.length) {
+      rows.push(renderListMoreButton(displayId, visible, value.length))
+    }
+    return renderDecodedBlock(rows, 'decoded-list')
+  }
+  if (target?.state_kind === 'MAP' && typeof value === 'object' && !Array.isArray(value)) {
+    const mapValue = Object.prototype.hasOwnProperty.call(value, 'map_value')
+      ? value.map_value
+      : value
+    return renderDecodedBlock([renderDecodedValue(mapValue, target.serializer_classes?.map_value)])
+  }
   if (Array.isArray(value)) {
     const rows = value.map((item, index) => renderDecodedPair(String(index), item))
     return renderDecodedBlock(rows)
@@ -852,21 +999,40 @@ function renderDecodedSection(value) {
   return renderDecodedBlock([renderDecodedValue(value)])
 }
 
-function renderDecodedBlock(rows) {
-  if (!rows.length) return ''
-  return `<div class="decoded-block">${rows.join('')}</div>`
+function visibleListLimit(displayId, total) {
+  if (!displayId) return Math.min(total, LIST_VALUE_PAGE_SIZE)
+  return Math.min(total, Number(state.listDisplayLimits[displayId] || LIST_VALUE_PAGE_SIZE))
 }
 
-function renderDecodedPair(label, value) {
+function renderListMoreButton(displayId, visible, total) {
+  if (!displayId) return ''
+  const nextLimit = Math.min(total, visible + LIST_VALUE_PAGE_SIZE)
   return `
-    <div class="decoded-row">
-      <span class="decoded-label">${escapeHtml(label)}</span>
-      <div class="decoded-value">${renderDecodedValue(value)}</div>
+    <div class="decoded-list-more">
+      <button type="button" data-list-display-id="${escapeHtml(displayId)}" data-next-limit="${nextLimit}">
+        Show next ${Math.min(LIST_VALUE_PAGE_SIZE, total - visible)}
+      </button>
+      <span>${visible}/${total}</span>
     </div>
   `
 }
 
-function renderDecodedValue(value) {
+function renderDecodedBlock(rows, extraClass = '') {
+  if (!rows.length) return ''
+  return `<div class="decoded-block ${escapeHtml(extraClass)}">${rows.join('')}</div>`
+}
+
+function renderDecodedPair(label, value, serializerClass = null) {
+  const typeLabel = serializerClass ? serializerLabel(serializerClass) : ''
+  return `
+    <div class="decoded-row">
+      <span class="decoded-label">${escapeHtml(label)}</span>
+      <div class="decoded-value">${renderDecodedValue(value, serializerClass)}${typeLabel ? ` <span class="decoded-type">${escapeHtml(typeLabel)}</span>` : ''}</div>
+    </div>
+  `
+}
+
+function renderDecodedValue(value, serializerClass = null) {
   if (value === null || value === undefined) return '<span class="muted-text">null</span>'
   if (isRawBytesJson(value)) {
     return `${renderCode(value.b64)}${renderUtf8Pill(value.utf8)}`
@@ -880,7 +1046,68 @@ function renderDecodedValue(value) {
     }
     return renderCode(JSON.stringify(value))
   }
-  return renderCode(value)
+  const className = serializerClass || ''
+  const numeric = typeof value === 'number' || /(?:Int|Long|Short|Byte|Float|Double)Serializer$/.test(className)
+  return `<code class="truncated-code ${numeric ? 'decoded-number' : ''}" title="${escapeHtml(value)}">${escapeHtml(truncateText(value))}</code>`
+}
+
+function trackedTarget(item) {
+  return {
+    kind: item.targetKind || (item.stateKind ? 'state' : null),
+    state_kind: item.stateKind,
+    serializer_classes: item.serializerClasses || {},
+  }
+}
+
+function isSchemaStateTarget(target) {
+  return target?.kind === 'state' && Boolean(target?.state_kind) && Boolean(target?.serializer_classes)
+}
+
+function isDecodedTarget(target) {
+  return (target?.kind === 'state' || target?.kind === 'timer')
+    && Boolean(target?.state_kind)
+    && Boolean(target?.serializer_classes)
+}
+
+function isTimerTarget(target) {
+  return target?.kind === 'timer'
+}
+
+function isVoidNamespaceTarget(target) {
+  return isVoidSerializerClass(target?.serializer_classes?.namespace)
+}
+
+function isVoidSerializerClass(className) {
+  return className === 'org.apache.flink.runtime.state.VoidNamespaceSerializer'
+}
+
+function serializerLabel(className) {
+  const simple = simpleSerializerName(className)
+  const labels = {
+    String: 'string',
+    Int: 'int',
+    Long: 'long',
+    Short: 'short',
+    Byte: 'byte',
+    Boolean: 'boolean',
+    Float: 'float',
+    Double: 'double',
+  }
+  return labels[simple] || simple || 'raw'
+}
+
+function serializerPlaceholder(className) {
+  const label = serializerLabel(className)
+  if (label === 'int' || label === 'long' || label === 'short' || label === 'byte') return '42'
+  if (label === 'float' || label === 'double') return '3.14'
+  if (label === 'boolean') return 'true'
+  if (label === 'string') return 'user-1'
+  return 'use serialized bytes via API *_b64'
+}
+
+function simpleSerializerName(className = '') {
+  const simple = String(className).split('.').pop() || ''
+  return simple.endsWith('Serializer') ? simple.slice(0, -'Serializer'.length) : simple
 }
 
 function renderDecodeError(error) {
@@ -958,7 +1185,7 @@ window.addEventListener('scroll', closeRowActionPopover, true)
 $('new-source-path').addEventListener('keydown', (event) => {
   if (event.key === 'Enter') openNewPath()
 })
-;['bucket', 'prefix', 'limit', 'columns', 'inspect-target'].forEach((id) => {
+;['bucket', 'prefix', 'state-key', 'namespace', 'map-key', 'limit', 'columns', 'inspect-target'].forEach((id) => {
   $(id).addEventListener('change', invalidatePagination)
 })
 

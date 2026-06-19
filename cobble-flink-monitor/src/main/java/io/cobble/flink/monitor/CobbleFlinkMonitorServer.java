@@ -557,6 +557,17 @@ public final class CobbleFlinkMonitorServer {
             byte[] prefix =
                     decodeOptionalBytes(
                             first(params, "prefix", null), first(params, "prefix_b64", null));
+            TimerRowFilter timerFilter = timerRowFilter(params, target);
+            if (timerFilter != null) {
+                prefix = null;
+            }
+            StateRowFilter stateFilter = stateRowFilter(params, target);
+            if (prefix != null && prefix.length > 0 && stateFilter != null) {
+                throw new InputException("`prefix` cannot be combined with state key filters");
+            }
+            if (stateFilter != null) {
+                prefix = stateFilter.prefix;
+            }
             if (prefix == null) {
                 prefix = new byte[0];
             }
@@ -607,11 +618,23 @@ public final class CobbleFlinkMonitorServer {
                             bucketStartAfter,
                             target,
                             columns,
+                            stateFilter,
+                            timerFilter,
                             maxItems,
                             items);
                 }
             } else {
-                collectScanItems(bucket, start, end, startAfter, target, columns, maxItems, items);
+                collectScanItems(
+                        bucket,
+                        start,
+                        end,
+                        startAfter,
+                        target,
+                        columns,
+                        stateFilter,
+                        timerFilter,
+                        maxItems,
+                        items);
             }
             boolean hasMore = items.size() > limit;
             if (hasMore) {
@@ -621,6 +644,7 @@ public final class CobbleFlinkMonitorServer {
             Map<String, Object> scan = new LinkedHashMap<>();
             scan.put("bucket", bucket == null ? "all" : bucket);
             scan.put("prefix_b64", b64(prefix));
+            scan.put("state_filter", stateFilterToJson(params, target));
             scan.put("start_after_b64", startAfter == null ? null : b64(startAfter));
             scan.put("limit", limit);
             scan.put("items", items);
@@ -653,10 +677,16 @@ public final class CobbleFlinkMonitorServer {
                 byte[] startAfter,
                 InspectTarget target,
                 int[] columns,
+                StateRowFilter stateFilter,
+                TimerRowFilter timerFilter,
                 int limit,
                 List<Map<String, Object>> items) {
             boolean skippedStartAfter = startAfter == null;
-            try (ScanOptions options = scanOptions(target.columnFamily, columns, limit + 1);
+            int rawLimit =
+                    timerFilter == null && !hasPostScanFilter(stateFilter)
+                            ? limit + 1
+                            : Math.max(limit + 1, config.inspectMaxLimit);
+            try (ScanOptions options = scanOptions(target.columnFamily, columns, rawLimit);
                     ScanCursor cursor = reader.scanWithOptions(bucket, start, end, options)) {
                 ScanCursor.Entry entry = cursor.nextEntry();
                 while (entry != null && items.size() < limit) {
@@ -678,10 +708,23 @@ public final class CobbleFlinkMonitorServer {
                         item.put("value", firstColumnToJson(entry.columns));
                     }
                     decorateDecodedStateRow(item, target, entry.key, entry.columns);
+                    if (stateFilter != null && !stateFilter.matches(item, target, entry.key)) {
+                        entry = cursor.nextEntry();
+                        continue;
+                    }
+                    if (timerFilter != null && !timerFilter.matches(item)) {
+                        entry = cursor.nextEntry();
+                        continue;
+                    }
                     items.add(item);
                     entry = cursor.nextEntry();
                 }
             }
+        }
+
+        private static boolean hasPostScanFilter(StateRowFilter stateFilter) {
+            return stateFilter != null
+                    && (stateFilter.mapKeyPrefix != null || stateFilter.mapKeyBytesPrefix != null);
         }
 
         private int currentTotalBuckets() {
@@ -812,6 +855,78 @@ public final class CobbleFlinkMonitorServer {
             }
         }
 
+        private static StateRowFilter stateRowFilter(
+                Map<String, List<String>> params, InspectTarget target) {
+            String key = blankToNull(first(params, "state_key", null));
+            String namespace = blankToNull(first(params, "namespace", null));
+            String mapKey = blankToNull(first(params, "map_key", null));
+            byte[] keyBytes =
+                    decodeOptionalB64(first(params, "state_key_b64", null), "state_key_b64");
+            byte[] namespaceBytes =
+                    decodeOptionalB64(first(params, "namespace_b64", null), "namespace_b64");
+            byte[] mapKeyBytes =
+                    decodeOptionalB64(first(params, "map_key_b64", null), "map_key_b64");
+            if (key == null
+                    && namespace == null
+                    && mapKey == null
+                    && keyBytes == null
+                    && namespaceBytes == null
+                    && mapKeyBytes == null) {
+                return null;
+            }
+            if (!"MAP".equals(target.stateKind) && (mapKey != null || mapKeyBytes != null)) {
+                throw new InputException("Map key filter is only valid for MapState");
+            }
+            try {
+                byte[] prefix =
+                        StateInspectDecoder.encodeStateKeyPrefix(
+                                target, key, keyBytes, namespace, namespaceBytes, null, null);
+                return new StateRowFilter(prefix, mapKey, mapKeyBytes);
+            } catch (IOException e) {
+                throw new InputException(e.getMessage());
+            }
+        }
+
+        private static TimerRowFilter timerRowFilter(
+                Map<String, List<String>> params, InspectTarget target) {
+            if (target == null || !"timer".equals(target.kind)) {
+                return null;
+            }
+            String prefix = blankToNull(first(params, "prefix", null));
+            String prefixB64 = blankToNull(first(params, "prefix_b64", null));
+            if (prefixB64 != null) {
+                throw new InputException("`prefix_b64` is not supported for decoded timer filters");
+            }
+            return prefix == null ? null : new TimerRowFilter(prefix);
+        }
+
+        private static Map<String, Object> stateFilterToJson(
+                Map<String, List<String>> params, InspectTarget target) {
+            Map<String, Object> output = new LinkedHashMap<>();
+            String key = blankToNull(first(params, "state_key", null));
+            String namespace = blankToNull(first(params, "namespace", null));
+            String mapKey = blankToNull(first(params, "map_key", null));
+            String keyB64 = blankToNull(first(params, "state_key_b64", null));
+            String namespaceB64 = blankToNull(first(params, "namespace_b64", null));
+            String mapKeyB64 = blankToNull(first(params, "map_key_b64", null));
+            if (key == null
+                    && namespace == null
+                    && mapKey == null
+                    && keyB64 == null
+                    && namespaceB64 == null
+                    && mapKeyB64 == null) {
+                return output;
+            }
+            output.put("state_kind", target.stateKind);
+            putIfPresent(output, "state_key", key);
+            putIfPresent(output, "namespace", namespace);
+            putIfPresent(output, "map_key", mapKey);
+            putIfPresent(output, "state_key_b64", keyB64);
+            putIfPresent(output, "namespace_b64", namespaceB64);
+            putIfPresent(output, "map_key_b64", mapKeyB64);
+            return output;
+        }
+
         @Override
         public synchronized void close() {
             if (reader != null) {
@@ -842,6 +957,97 @@ public final class CobbleFlinkMonitorServer {
                 this.checkpoint = checkpoint;
                 this.operator = operator;
                 this.readerHandle = readerHandle;
+            }
+        }
+
+        private static final class StateRowFilter {
+            private final byte[] prefix;
+            private final String mapKeyPrefix;
+            private final byte[] mapKeyBytesPrefix;
+
+            private StateRowFilter(byte[] prefix, String mapKeyPrefix, byte[] mapKeyBytesPrefix) {
+                this.prefix = prefix == null ? new byte[0] : prefix;
+                this.mapKeyPrefix = mapKeyPrefix;
+                this.mapKeyBytesPrefix = mapKeyBytesPrefix;
+            }
+
+            private boolean matches(Map<String, Object> item, InspectTarget target, byte[] rowKey) {
+                if (mapKeyPrefix == null && mapKeyBytesPrefix == null) {
+                    return true;
+                }
+                if (mapKeyPrefix != null && !decodedMapKeyStartsWith(item, mapKeyPrefix)) {
+                    return false;
+                }
+                if (mapKeyBytesPrefix != null) {
+                    try {
+                        return StateInspectDecoder.mapKeyBytesStartsWith(
+                                target, rowKey, mapKeyBytesPrefix);
+                    } catch (IOException e) {
+                        return false;
+                    }
+                }
+                return true;
+            }
+
+            @SuppressWarnings("unchecked")
+            private static boolean decodedMapKeyStartsWith(
+                    Map<String, Object> item, String mapKeyPrefix) {
+                Object decoded = item.get("decoded_key");
+                if (!(decoded instanceof Map)) {
+                    return false;
+                }
+                Object value = ((Map<String, Object>) decoded).get("map_key");
+                if (value == null) {
+                    return false;
+                }
+                if (value instanceof Map) {
+                    Object utf8 = ((Map<String, Object>) value).get("utf8");
+                    if (utf8 != null && String.valueOf(utf8).startsWith(mapKeyPrefix)) {
+                        return true;
+                    }
+                    Object b64 = ((Map<String, Object>) value).get("b64");
+                    return b64 != null && String.valueOf(b64).startsWith(mapKeyPrefix);
+                }
+                return String.valueOf(value).startsWith(mapKeyPrefix);
+            }
+        }
+
+        private static final class TimerRowFilter {
+            private final String decodedPrefix;
+
+            private TimerRowFilter(String decodedPrefix) {
+                this.decodedPrefix = decodedPrefix;
+            }
+
+            @SuppressWarnings("unchecked")
+            private boolean matches(Map<String, Object> item) {
+                Object decoded = item.get("decoded_key");
+                if (!(decoded instanceof Map)) {
+                    return false;
+                }
+                Map<String, Object> decodedKey = (Map<String, Object>) decoded;
+                return decodedValueStartsWith(decodedKey.get("key"), decodedPrefix)
+                        || decodedValueStartsWith(decodedKey.get("timestamp"), decodedPrefix);
+            }
+
+            @SuppressWarnings("unchecked")
+            private static boolean decodedValueStartsWith(Object value, String prefix) {
+                if (value == null) {
+                    return false;
+                }
+                if (value instanceof Map) {
+                    Object utf8 = ((Map<String, Object>) value).get("utf8");
+                    if (utf8 != null && String.valueOf(utf8).startsWith(prefix)) {
+                        return true;
+                    }
+                    Object rawValue = ((Map<String, Object>) value).get("value");
+                    if (rawValue != null && String.valueOf(rawValue).startsWith(prefix)) {
+                        return true;
+                    }
+                    Object b64 = ((Map<String, Object>) value).get("b64");
+                    return b64 != null && String.valueOf(b64).startsWith(prefix);
+                }
+                return String.valueOf(value).startsWith(prefix);
             }
         }
     }
@@ -2067,6 +2273,10 @@ public final class CobbleFlinkMonitorServer {
         return plainValue.getBytes(StandardCharsets.UTF_8);
     }
 
+    private static byte[] decodeOptionalB64(String value, String fieldName) {
+        return value == null || value.trim().isEmpty() ? null : decodeB64(value, fieldName);
+    }
+
     private static byte[] decodeB64(String value, String fieldName) {
         try {
             return Base64.getDecoder().decode(value);
@@ -2077,6 +2287,12 @@ public final class CobbleFlinkMonitorServer {
 
     private static String b64(byte[] value) {
         return Base64.getEncoder().encodeToString(value);
+    }
+
+    private static void putIfPresent(Map<String, Object> output, String key, String value) {
+        if (value != null) {
+            output.put(key, value);
+        }
     }
 
     private static String utf8(byte[] value) {

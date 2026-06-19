@@ -370,6 +370,8 @@ td:last-child {
   display: grid;
   gap: 2px;
   min-width: 150px;
+  max-height: min(420px, calc(100vh - 12px));
+  overflow-y: auto;
   padding: 4px;
   border: 1px solid var(--line);
   border-radius: 8px;
@@ -409,9 +411,14 @@ td:last-child {
 .decoded-block {
   display: grid;
   gap: 4px;
-  margin-top: 6px;
-  padding-top: 6px;
-  border-top: 1px dashed #d6ded8;
+  margin-top: 0;
+}
+
+.decoded-list {
+  padding: 7px 8px;
+  border: 1px solid #dce4de;
+  border-radius: 6px;
+  background: #fafbf9;
 }
 
 .decoded-row {
@@ -431,6 +438,24 @@ td:last-child {
   min-width: 0;
 }
 
+.decoded-number {
+  color: #164a46;
+  font-variant-numeric: tabular-nums;
+  font-weight: 650;
+}
+
+.decoded-type {
+  display: inline-flex;
+  align-items: center;
+  min-height: 18px;
+  padding: 1px 6px;
+  border: 1px solid #c9d6d0;
+  border-radius: 999px;
+  color: var(--muted);
+  font-size: 11px;
+  vertical-align: middle;
+}
+
 .decode-error {
   margin-top: 6px;
   padding: 5px 7px;
@@ -444,6 +469,20 @@ td:last-child {
 
 .muted-text {
   color: var(--muted);
+}
+
+.decoded-list-more {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding-top: 4px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.decoded-list-more button {
+  min-height: 28px;
+  padding: 4px 8px;
 }
 
 .check-mark {
