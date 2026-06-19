@@ -135,7 +135,8 @@ class StateInspectDecoderTest {
                         false,
                         schema.stateKind().name(),
                         java.util.Collections.emptyMap(),
-                        schema);
+                        schema,
+                        null);
         byte[] rowKey = timerKey(1234L, "user-1", 7);
 
         StateInspectDecoder.DecodedRow row =
@@ -166,7 +167,8 @@ class StateInspectDecoderTest {
                         false,
                         schema.stateKind().name(),
                         java.util.Collections.emptyMap(),
-                        schema);
+                        schema,
+                        null);
         byte[] rowKey = timerKeyWithVoidNamespace(1234L, "user-1");
 
         StateInspectDecoder.DecodedRow row =
@@ -340,7 +342,8 @@ class StateInspectDecoderTest {
                 false,
                 schema.stateKind().name(),
                 java.util.Collections.emptyMap(),
-                schema);
+                schema,
+                null);
     }
 
     private static byte[] keyAndNamespace(String key, String namespace) throws Exception {

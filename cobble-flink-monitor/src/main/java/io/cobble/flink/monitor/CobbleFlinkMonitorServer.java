@@ -205,6 +205,7 @@ public final class CobbleFlinkMonitorServer {
         private CheckpointEntry selectedCheckpoint;
         private OperatorEntry selectedOperator;
         private SchemaResolveResult selectedSchema;
+        private SinkSchemaResolveResult selectedSinkSchema;
         private Reader reader;
         private List<File> readerTemporaryDirectories;
 
@@ -223,6 +224,10 @@ public final class CobbleFlinkMonitorServer {
             this.selectedSchema =
                     selectedCheckpoint != null && selectedOperator != null
                             ? resolveSchema(selectedCheckpoint, selectedOperator)
+                            : null;
+            this.selectedSinkSchema =
+                    catalog != null && selectedCheckpoint != null
+                            ? resolveSinkSchema(catalog, selectedCheckpoint)
                             : null;
             this.reader = readerHandle.reader;
             this.readerTemporaryDirectories = readerHandle.temporaryDirectories;
@@ -404,9 +409,12 @@ public final class CobbleFlinkMonitorServer {
                     current == null || current.shardSnapshots == null
                             ? 0
                             : current.shardSnapshots.size());
-            output.put("inspect_kind", inspectKind(current, selectedSchema));
-            output.put("inspect_targets", inspectTargets(current, selectedSchema));
+            output.put("inspect_kind", inspectKind(current, selectedSchema, selectedSinkSchema));
+            output.put(
+                    "inspect_targets", inspectTargets(current, selectedSchema, selectedSinkSchema));
             output.put("schema", selectedSchema == null ? null : selectedSchema.toJson());
+            output.put(
+                    "sink_schema", selectedSinkSchema == null ? null : selectedSinkSchema.toJson());
             output.put("catalog", catalog == null ? null : catalog.toJson());
             output.put("inspect_default_limit", config.inspectDefaultLimit);
             output.put("inspect_max_limit", config.inspectMaxLimit);
@@ -482,6 +490,7 @@ public final class CobbleFlinkMonitorServer {
             selectedOperator = operator;
             selectedLatest = checkpointId == null;
             selectedSchema = resolveSchema(checkpoint, operator);
+            selectedSinkSchema = resolveSinkSchema(catalog, checkpoint);
 
             Map<String, Object> output = new LinkedHashMap<>();
             output.put("read_mode", reader.readMode());
@@ -492,6 +501,7 @@ public final class CobbleFlinkMonitorServer {
             output.put("selected_checkpoint_id", selectedCheckpoint.id);
             output.put("selected_operator_id", selectedOperator.operatorId);
             output.put("schema", selectedSchema.toJson());
+            output.put("sink_schema", selectedSinkSchema.toJson());
             return output;
         }
 
@@ -531,7 +541,7 @@ public final class CobbleFlinkMonitorServer {
                             columnsValue == null
                                     ? null
                                     : valueToJson(columnsValue, target.allowsColumns));
-                    decorateDecodedStateRow(output, target, item.key, columnsValue);
+                    decorateDecodedRow(output, target, item.key, columnsValue, columns);
                     items.add(output);
                 }
             }
@@ -545,6 +555,8 @@ public final class CobbleFlinkMonitorServer {
             output.put("selected_operator_id", selectedOperator.operatorId);
             output.put("inspect_target", target.toJson());
             output.put("schema", selectedSchema == null ? null : selectedSchema.toJson());
+            output.put(
+                    "sink_schema", selectedSinkSchema == null ? null : selectedSinkSchema.toJson());
             output.put("lookup", items);
             return output;
         }
@@ -666,6 +678,8 @@ public final class CobbleFlinkMonitorServer {
             output.put("selected_operator_id", selectedOperator.operatorId);
             output.put("inspect_target", target.toJson());
             output.put("schema", selectedSchema == null ? null : selectedSchema.toJson());
+            output.put(
+                    "sink_schema", selectedSinkSchema == null ? null : selectedSinkSchema.toJson());
             output.put("scan", scan);
             return output;
         }
@@ -707,7 +721,7 @@ public final class CobbleFlinkMonitorServer {
                     } else {
                         item.put("value", firstColumnToJson(entry.columns));
                     }
-                    decorateDecodedStateRow(item, target, entry.key, entry.columns);
+                    decorateDecodedRow(item, target, entry.key, entry.columns, columns);
                     if (stateFilter != null && !stateFilter.matches(item, target, entry.key)) {
                         entry = cursor.nextEntry();
                         continue;
@@ -737,7 +751,8 @@ public final class CobbleFlinkMonitorServer {
 
         private InspectTarget selectedInspectTarget(Map<String, List<String>> params) {
             GlobalSnapshot snapshot = reader.currentGlobalSnapshot();
-            List<InspectTarget> targets = StateInspectTargetBuilder.build(snapshot, selectedSchema);
+            List<InspectTarget> targets =
+                    StateInspectTargetBuilder.build(snapshot, selectedSchema, selectedSinkSchema);
             String requested = first(params, "target", first(params, "state", null));
             if (requested == null || requested.trim().isEmpty()) {
                 return targets.isEmpty() ? InspectTarget.sink("sink") : targets.get(0);
@@ -773,6 +788,7 @@ public final class CobbleFlinkMonitorServer {
             selectedCheckpoint = selection.checkpoint;
             selectedOperator = selection.operator;
             selectedSchema = resolveSchema(selection.checkpoint, selection.operator);
+            selectedSinkSchema = resolveSinkSchema(catalog, selection.checkpoint);
         }
 
         private ReaderSelection openLatestReadableOrCurrent(
@@ -837,8 +853,29 @@ public final class CobbleFlinkMonitorServer {
             }
         }
 
-        private static void decorateDecodedStateRow(
-                Map<String, Object> item, InspectTarget target, byte[] key, byte[][] columns) {
+        private static void decorateDecodedRow(
+                Map<String, Object> item,
+                InspectTarget target,
+                byte[] key,
+                byte[][] columns,
+                int[] projection) {
+            if (target != null && target.sinkSchema != null) {
+                SinkInspectDecoder.DecodedRow decoded =
+                        SinkInspectDecoder.decode(target, key, columns, projection);
+                if (!decoded.hasOutput()) {
+                    return;
+                }
+                if (decoded.decodedKey != null) {
+                    item.put("decoded_key", decoded.decodedKey);
+                }
+                if (decoded.decodedColumns != null) {
+                    item.put("decoded_columns", decoded.decodedColumns);
+                }
+                if (decoded.decodeError != null) {
+                    item.put("decode_error", decoded.decodeError);
+                }
+                return;
+            }
             StateInspectDecoder.DecodedRow decoded =
                     StateInspectDecoder.decode(target, key, columns);
             if (!decoded.hasOutput()) {
@@ -944,6 +981,23 @@ public final class CobbleFlinkMonitorServer {
             } catch (Exception e) {
                 return SchemaResolveResult.unavailable(
                         "Failed to resolve schema registry: " + e.getMessage());
+            }
+        }
+
+        private static SinkSchemaResolveResult resolveSinkSchema(
+                CheckpointCatalog catalog, CheckpointEntry checkpoint) {
+            if (catalog == null || checkpoint == null) {
+                return SinkSchemaResolveResult.unsupported("No data source is selected.");
+            }
+            if (!"data_source".equals(catalog.sourceKind)) {
+                return SinkSchemaResolveResult.unsupported(
+                        "Sink schema registry resolution is only available for data sources.");
+            }
+            try {
+                return SinkInspectSchemaResolver.resolve(catalog.rootDirectory, checkpoint.id);
+            } catch (Exception e) {
+                return SinkSchemaResolveResult.unavailable(
+                        "Failed to resolve sink schema registry: " + e.getMessage());
             }
         }
 
@@ -2189,8 +2243,11 @@ public final class CobbleFlinkMonitorServer {
         return value;
     }
 
-    private static String inspectKind(GlobalSnapshot snapshot, SchemaResolveResult schema) {
-        List<InspectTarget> targets = StateInspectTargetBuilder.build(snapshot, schema);
+    private static String inspectKind(
+            GlobalSnapshot snapshot,
+            SchemaResolveResult schema,
+            SinkSchemaResolveResult sinkSchema) {
+        List<InspectTarget> targets = StateInspectTargetBuilder.build(snapshot, schema, sinkSchema);
         if (targets.isEmpty()) {
             return "empty";
         }
@@ -2201,8 +2258,10 @@ public final class CobbleFlinkMonitorServer {
     }
 
     private static List<Map<String, Object>> inspectTargets(
-            GlobalSnapshot snapshot, SchemaResolveResult schema) {
-        List<InspectTarget> targets = StateInspectTargetBuilder.build(snapshot, schema);
+            GlobalSnapshot snapshot,
+            SchemaResolveResult schema,
+            SinkSchemaResolveResult sinkSchema) {
+        List<InspectTarget> targets = StateInspectTargetBuilder.build(snapshot, schema, sinkSchema);
         List<Map<String, Object>> output = new ArrayList<>(targets.size());
         for (InspectTarget target : targets) {
             output.add(target.toJson());

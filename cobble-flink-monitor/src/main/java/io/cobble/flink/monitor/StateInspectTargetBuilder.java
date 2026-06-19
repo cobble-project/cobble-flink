@@ -26,6 +26,17 @@ final class StateInspectTargetBuilder {
     private StateInspectTargetBuilder() {}
 
     static List<InspectTarget> build(GlobalSnapshot snapshot, SchemaResolveResult schemaResult) {
+        return build(snapshot, schemaResult, null);
+    }
+
+    static List<InspectTarget> build(
+            GlobalSnapshot snapshot,
+            SchemaResolveResult schemaResult,
+            SinkSchemaResolveResult sinkSchemaResult) {
+        if (sinkSchemaResult != null && sinkSchemaResult.hasSchema()) {
+            return Collections.singletonList(
+                    InspectTarget.sink("sink", sinkSchemaResult.store.schema()));
+        }
         if (schemaResult != null
                 && schemaResult.hasSchema()
                 && !schemaResult.store.isEmpty()
@@ -101,7 +112,8 @@ final class StateInspectTargetBuilder {
                     false,
                     schema.stateKind().name(),
                     serializerClasses,
-                    schema);
+                    schema,
+                    null);
         }
         return new InspectTarget(
                 schema.stateName(),
@@ -111,7 +123,8 @@ final class StateInspectTargetBuilder {
                 false,
                 schema.stateKind().name(),
                 serializerClasses,
-                schema);
+                schema,
+                null);
     }
 
     private static boolean alreadyAddedAsState(List<InspectTarget> targets, String columnFamily) {
