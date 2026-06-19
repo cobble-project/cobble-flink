@@ -18,6 +18,7 @@ import org.apache.flink.util.StateMigrationException;
 import java.io.IOException;
 import java.util.HashMap;
 import java.util.Map;
+import java.util.function.BiConsumer;
 
 /**
  * Creates Cobble timer queues using the same partitioning boundary as Flink's RocksDB backend.
@@ -35,6 +36,7 @@ final class CobblePriorityQueueSetFactory implements PriorityQueueSetFactory {
     private final KeyGroupRange keyGroupRange;
     private final int totalKeyGroups;
     private final boolean restoredNativeQueuesMayContainEntries;
+    private final BiConsumer<String, TypeSerializer<?>> schemaRegistration;
     private final Map<String, RegisteredPriorityQueueStateBackendMetaInfo<?>> metaInfos;
     private final Map<String, CobbleTimerPriorityQueue<?>> queues;
 
@@ -42,11 +44,13 @@ final class CobblePriorityQueueSetFactory implements PriorityQueueSetFactory {
             Db cobbleDb,
             KeyGroupRange keyGroupRange,
             int totalKeyGroups,
-            boolean restoredNativeQueuesMayContainEntries) {
+            boolean restoredNativeQueuesMayContainEntries,
+            BiConsumer<String, TypeSerializer<?>> schemaRegistration) {
         this.cobbleDb = cobbleDb;
         this.keyGroupRange = keyGroupRange;
         this.totalKeyGroups = totalKeyGroups;
         this.restoredNativeQueuesMayContainEntries = restoredNativeQueuesMayContainEntries;
+        this.schemaRegistration = schemaRegistration;
         this.metaInfos = new HashMap<>();
         this.queues = new HashMap<>();
     }
@@ -82,6 +86,7 @@ final class CobblePriorityQueueSetFactory implements PriorityQueueSetFactory {
                             ? compatibility.getReconfiguredSerializer()
                             : existingMetaInfo.getElementSerializer();
             existingQueue.updateSerializer(effectiveSerializer);
+            registerSchema(stateName, effectiveSerializer);
             return existingQueue;
         }
 
@@ -105,7 +110,14 @@ final class CobblePriorityQueueSetFactory implements PriorityQueueSetFactory {
                         restoredNativeQueuesMayContainEntries);
         metaInfos.put(stateName, metaInfo);
         queues.put(stateName, queue);
+        registerSchema(stateName, metaInfo.getElementSerializer());
         return queue;
+    }
+
+    private void registerSchema(String stateName, TypeSerializer<?> timerSerializer) {
+        if (schemaRegistration != null) {
+            schemaRegistration.accept(stateName, timerSerializer);
+        }
     }
 
     static String timerQueueColumnFamilyName(String stateName) {

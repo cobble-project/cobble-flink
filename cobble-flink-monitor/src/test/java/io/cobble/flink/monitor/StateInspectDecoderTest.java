@@ -11,6 +11,7 @@ import org.apache.flink.api.common.typeutils.TypeSerializer;
 import org.apache.flink.api.common.typeutils.base.IntSerializer;
 import org.apache.flink.api.common.typeutils.base.StringSerializer;
 import org.apache.flink.core.memory.DataOutputSerializer;
+import org.apache.flink.util.MathUtils;
 import org.junit.jupiter.api.Test;
 
 import java.io.ByteArrayOutputStream;
@@ -88,6 +89,67 @@ class StateInspectDecoderTest {
         assertEquals("ns", row.decodedKey.get("namespace"));
         assertEquals("field-a", row.decodedKey.get("map_key"));
         assertEquals("value-a", ((java.util.Map<?, ?>) row.decodedValue).get("map_value"));
+    }
+
+    @Test
+    void decodesTimerKeyParts() throws Exception {
+        StateInspectSchema schema =
+                StateInspectSchema.forTimer(
+                        "event-time-timers",
+                        "__cobble_timer__event-time-timers",
+                        StringSerializer.INSTANCE,
+                        IntSerializer.INSTANCE);
+        InspectTarget target =
+                new InspectTarget(
+                        "timer:event-time-timers",
+                        "event-time-timers",
+                        "timer",
+                        "__cobble_timer__event-time-timers",
+                        false,
+                        schema.stateKind().name(),
+                        java.util.Collections.emptyMap(),
+                        schema);
+        byte[] rowKey = timerKey(1234L, "user-1", 7);
+
+        StateInspectDecoder.DecodedRow row =
+                StateInspectDecoder.decode(target, rowKey, new byte[][] {new byte[0]});
+
+        assertNull(row.decodeError);
+        assertEquals(1234L, row.decodedKey.get("timestamp"));
+        assertEquals("user-1", row.decodedKey.get("key"));
+        assertEquals(7, row.decodedKey.get("namespace"));
+        assertNull(row.decodedValue);
+    }
+
+    @Test
+    void decodesTimerKeyWithVoidNamespace() throws Exception {
+        StateInspectSchema schema =
+                withVoidNamespace(
+                        StateInspectSchema.forTimer(
+                                "_timer_state/processing_user-timers",
+                                "__cobble_timer___timer_state/processing_user-timers",
+                                StringSerializer.INSTANCE,
+                                StringSerializer.INSTANCE));
+        InspectTarget target =
+                new InspectTarget(
+                        "timer:_timer_state/processing_user-timers",
+                        "_timer_state/processing_user-timers",
+                        "timer",
+                        "__cobble_timer___timer_state/processing_user-timers",
+                        false,
+                        schema.stateKind().name(),
+                        java.util.Collections.emptyMap(),
+                        schema);
+        byte[] rowKey = timerKeyWithVoidNamespace(1234L, "user-1");
+
+        StateInspectDecoder.DecodedRow row =
+                StateInspectDecoder.decode(target, rowKey, new byte[][] {new byte[0]});
+
+        assertNull(row.decodeError);
+        assertEquals(1234L, row.decodedKey.get("timestamp"));
+        assertEquals("user-1", row.decodedKey.get("key"));
+        assertEquals("VoidNamespace", row.decodedKey.get("namespace"));
+        assertNull(row.decodedValue);
     }
 
     @Test
@@ -178,6 +240,25 @@ class StateInspectDecoderTest {
         output.write(keyBytes);
         output.write(namespaceBytes);
         output.writeInt(keyBytes.length);
+        return output.getCopyOfBuffer();
+    }
+
+    private static byte[] timerKey(long timestamp, String key, int namespace) throws Exception {
+        byte[] keyBytes = serialize(StringSerializer.INSTANCE, key);
+        byte[] namespaceBytes = serialize(IntSerializer.INSTANCE, namespace);
+        DataOutputSerializer output = new DataOutputSerializer(64);
+        output.writeLong(MathUtils.flipSignBit(timestamp));
+        output.write(keyBytes);
+        output.write(namespaceBytes);
+        return output.getCopyOfBuffer();
+    }
+
+    private static byte[] timerKeyWithVoidNamespace(long timestamp, String key) throws Exception {
+        byte[] keyBytes = serialize(StringSerializer.INSTANCE, key);
+        DataOutputSerializer output = new DataOutputSerializer(64);
+        output.writeLong(MathUtils.flipSignBit(timestamp));
+        output.write(keyBytes);
+        output.writeByte(0);
         return output.getCopyOfBuffer();
     }
 

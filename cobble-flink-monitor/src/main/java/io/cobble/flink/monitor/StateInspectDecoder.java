@@ -6,6 +6,7 @@ import io.cobble.flink.common.inspect.StateKind;
 
 import org.apache.flink.api.common.typeutils.TypeSerializer;
 import org.apache.flink.core.memory.DataInputViewStreamWrapper;
+import org.apache.flink.util.MathUtils;
 
 import java.io.ByteArrayInputStream;
 import java.io.IOException;
@@ -40,7 +41,10 @@ final class StateInspectDecoder {
             decodeError = message(e);
         }
         try {
-            decodedValue = decodeValue(schema, firstColumn(columns));
+            decodedValue =
+                    schema.stateKind() == StateKind.TIMER
+                            ? null
+                            : decodeValue(schema, firstColumn(columns));
         } catch (Exception e) {
             decodeError = appendError(decodeError, message(e));
         }
@@ -49,6 +53,9 @@ final class StateInspectDecoder {
 
     private static Map<String, Object> decodeKey(StateInspectSchema schema, byte[] rowKey)
             throws IOException {
+        if (schema.stateKind() == StateKind.TIMER) {
+            return decodeTimerKey(schema, rowKey);
+        }
         KeySlices slices =
                 schema.stateKind() == StateKind.MAP
                         ? splitMapKey(schema, rowKey)
@@ -61,6 +68,35 @@ final class StateInspectDecoder {
             output.put(
                     "map_key", render(deserialize(schema.mapUserKeySerializer(), slices.mapKey)));
         }
+        return output;
+    }
+
+    private static Map<String, Object> decodeTimerKey(StateInspectSchema schema, byte[] rowKey)
+            throws IOException {
+        requireLength(rowKey, Long.BYTES, "timer timestamp");
+        ByteArrayInputStream bytes = new ByteArrayInputStream(rowKey);
+        DataInputViewStreamWrapper input = new DataInputViewStreamWrapper(bytes);
+        long timestamp = MathUtils.flipSignBit(input.readLong());
+        Object key = restore(schema.keySerializer()).deserialize(input);
+        Object namespace;
+        if (isVoidNamespaceSerializer(schema.namespaceSerializer())) {
+            if (bytes.available() < 1) {
+                throw new IOException("Row key too short for timer namespace");
+            }
+            input.readByte();
+            namespace = VOID_NAMESPACE_LABEL;
+        } else {
+            namespace = restore(schema.namespaceSerializer()).deserialize(input);
+        }
+
+        Map<String, Object> output = new LinkedHashMap<>();
+        output.put("timestamp", timestamp);
+        output.put("key", render(key));
+        output.put(
+                "namespace",
+                isVoidNamespaceSerializer(schema.namespaceSerializer())
+                        ? VOID_NAMESPACE_LABEL
+                        : render(namespace));
         return output;
     }
 

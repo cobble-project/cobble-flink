@@ -199,6 +199,29 @@ class StateInspectSchemaStoreTest {
     }
 
     @Test
+    void timerStateSchemaRoundTrips() throws IOException {
+        StateInspectSchema schema =
+                StateInspectSchema.forTimer(
+                        "event-time-timers",
+                        "__cobble_timer__event-time-timers",
+                        StringSerializer.INSTANCE,
+                        IntSerializer.INSTANCE);
+        StateInspectSchemaStore restored =
+                roundTrip(new StateInspectSchemaStore(Arrays.asList(schema)));
+
+        StateInspectSchema out = restored.schemas().get(0);
+        assertEquals(StateKind.TIMER, out.stateKind());
+        assertEquals("event-time-timers", out.stateName());
+        assertEquals("__cobble_timer__event-time-timers", out.columnFamily());
+        assertNotNull(out.keySerializer());
+        assertNotNull(out.namespaceSerializer());
+        assertNull(out.valueSerializer());
+        assertNull(out.listElementSerializer());
+        assertNull(out.mapUserKeySerializer());
+        assertNull(out.mapUserValueSerializer());
+    }
+
+    @Test
     void mapStateMixedLengthsStoreKeyLength() throws IOException {
         // key=Int(fixed), namespace=String(var), userKey=String(var): 2 variable parts -> exactly
         // one

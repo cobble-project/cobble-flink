@@ -517,12 +517,13 @@ final class CobbleCompletedCheckpointStore implements CompletedCheckpointStore {
             Map<String, StateInspectSchema> merged = new LinkedHashMap<>();
             for (StateInspectSchemaStore store : stores) {
                 for (StateInspectSchema schema : store.schemas()) {
-                    StateInspectSchema existing = merged.putIfAbsent(schema.stateName(), schema);
+                    StateInspectSchema existing = merged.putIfAbsent(schemaKey(schema), schema);
                     if (existing != null && !existing.equals(schema)) {
                         LOG.warn(
-                                "Inspect schema mismatch for state '{}' across subtasks: "
+                                "Inspect schema mismatch for {} '{}' across subtasks: "
                                         + "keeping first registration, "
                                         + "discarding divergent schema.",
+                                schema.stateKind(),
                                 schema.stateName());
                     }
                 }
@@ -530,6 +531,10 @@ final class CobbleCompletedCheckpointStore implements CompletedCheckpointStore {
             return merged.isEmpty()
                     ? StateInspectSchemaStore.empty()
                     : new StateInspectSchemaStore(new ArrayList<>(merged.values()));
+        }
+
+        private static String schemaKey(StateInspectSchema schema) {
+            return schema.stateKind().name() + ":" + schema.stateName();
         }
     }
 

@@ -42,6 +42,7 @@ import org.apache.flink.runtime.state.heap.HeapPriorityQueueSnapshotRestoreWrapp
 import org.apache.flink.runtime.state.heap.InternalKeyContext;
 import org.apache.flink.runtime.state.metrics.LatencyTrackingStateConfig;
 import org.apache.flink.runtime.state.ttl.TtlTimeProvider;
+import org.apache.flink.streaming.api.operators.TimerSerializer;
 import org.apache.flink.util.FileUtils;
 
 import javax.annotation.Nonnull;
@@ -257,6 +258,7 @@ final class CobbleKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
             return heapPriorityQueuesManager.createOrUpdate(
                     stateName, byteOrderedElementSerializer, allowFutureMetadataUpdates);
         }
+        registerTimerSchema(stateName, byteOrderedElementSerializer);
         return priorityQueueFactory.create(
                 stateName, byteOrderedElementSerializer, allowFutureMetadataUpdates);
     }
@@ -539,7 +541,7 @@ final class CobbleKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
                 && ((CobblePriorityQueueSetFactory) priorityQueueFactory).hasQueues();
     }
 
-    private static PriorityQueueSetFactory createPriorityQueueFactory(
+    private PriorityQueueSetFactory createPriorityQueueFactory(
             Db cobbleDb,
             InternalKeyContext<?> keyContext,
             boolean restoredNativeQueuesMayContainEntries,
@@ -553,7 +555,8 @@ final class CobbleKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
                         cobbleDb,
                         keyContext.getKeyGroupRange(),
                         keyContext.getNumberOfKeyGroups(),
-                        restoredNativeQueuesMayContainEntries);
+                        restoredNativeQueuesMayContainEntries,
+                        this::registerTimerSchema);
             default:
                 throw new IllegalArgumentException(
                         "Unknown Cobble priority queue state type: " + priorityQueueStateType);
@@ -659,6 +662,20 @@ final class CobbleKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
                         namespaceSerializer,
                         keySer,
                         valueSer));
+    }
+
+    private void registerTimerSchema(String stateName, TypeSerializer<?> timerSerializer) {
+        if (!(timerSerializer instanceof TimerSerializer)) {
+            return;
+        }
+        TimerSerializer<?, ?> serializer = (TimerSerializer<?, ?>) timerSerializer;
+        stateInspectSchemas.putIfAbsent(
+                "timer:" + stateName,
+                StateInspectSchema.forTimer(
+                        stateName,
+                        CobblePriorityQueueSetFactory.timerQueueColumnFamilyName(stateName),
+                        serializer.getKeySerializer(),
+                        serializer.getNamespaceSerializer()));
     }
 
     private StateInspectSchemaStore buildSchemaStore() {

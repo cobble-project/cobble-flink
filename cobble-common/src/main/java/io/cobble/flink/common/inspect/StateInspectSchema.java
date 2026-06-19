@@ -163,6 +163,25 @@ public final class StateInspectSchema {
                 mapUserValueSerializer);
     }
 
+    /** Captures a Cobble-backed Flink timer queue schema. */
+    public static <K, N> StateInspectSchema forTimer(
+            String stateName,
+            String columnFamily,
+            TypeSerializer<K> keySerializer,
+            TypeSerializer<N> namespaceSerializer) {
+        return new StateInspectSchema(
+                stateName,
+                StateKind.TIMER,
+                columnFamily,
+                false,
+                keySerializer,
+                namespaceSerializer,
+                null,
+                null,
+                null,
+                null);
+    }
+
     private StateInspectSchema(
             String stateName,
             StateKind stateKind,
@@ -214,13 +233,18 @@ public final class StateInspectSchema {
                     SerializerInspectSchema.fromSerializer(listElementSerializer);
             this.mapUserKeySerializer = null;
             this.mapUserValueSerializer = null;
-        } else {
+        } else if (stateKind == StateKind.MAP) {
             this.valueSerializer = null;
             this.listElementSerializer = null;
             this.mapUserKeySerializer =
                     SerializerInspectSchema.fromSerializer(mapUserKeySerializer);
             this.mapUserValueSerializer =
                     SerializerInspectSchema.fromSerializer(mapUserValueSerializer);
+        } else {
+            this.valueSerializer = null;
+            this.listElementSerializer = null;
+            this.mapUserKeySerializer = null;
+            this.mapUserValueSerializer = null;
         }
     }
 
@@ -304,6 +328,8 @@ public final class StateInspectSchema {
                 names.put("map_user_key", className(mapUserKeySerializer));
                 names.put("map_user_value", className(mapUserValueSerializer));
                 break;
+            case TIMER:
+                break;
         }
         return Collections.unmodifiableMap(names);
     }
@@ -378,6 +404,8 @@ public final class StateInspectSchema {
                 mapUserKeySerializer.write(output);
                 mapUserValueSerializer.write(output);
                 break;
+            case TIMER:
+                break;
         }
     }
 
@@ -408,6 +436,8 @@ public final class StateInspectSchema {
             case MAP:
                 mapUserKeySerializer = SerializerInspectSchema.read(input);
                 mapUserValueSerializer = SerializerInspectSchema.read(input);
+                break;
+            case TIMER:
                 break;
         }
         return new StateInspectSchema(

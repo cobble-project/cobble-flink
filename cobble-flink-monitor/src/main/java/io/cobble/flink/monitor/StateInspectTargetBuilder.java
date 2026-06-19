@@ -92,6 +92,17 @@ final class StateInspectTargetBuilder {
             serializerClasses.put(
                     "map_value", schema.mapUserValueSerializer().serializerClassName());
         }
+        if ("TIMER".equals(schema.stateKind().name())) {
+            return new InspectTarget(
+                    "timer:" + schema.stateName(),
+                    schema.stateName(),
+                    "timer",
+                    schema.columnFamily(),
+                    false,
+                    schema.stateKind().name(),
+                    serializerClasses,
+                    schema);
+        }
         return new InspectTarget(
                 schema.stateName(),
                 schema.stateName(),

@@ -11,7 +11,8 @@ import java.util.Locale;
 public enum StateKind {
     VALUE,
     LIST,
-    MAP;
+    MAP,
+    TIMER;
 
     private static final StateKind[] VALUES = values();
 

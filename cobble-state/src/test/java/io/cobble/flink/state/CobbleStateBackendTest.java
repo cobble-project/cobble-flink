@@ -54,12 +54,14 @@ import org.apache.flink.runtime.state.KeyedStateHandle;
 import org.apache.flink.runtime.state.PriorityComparable;
 import org.apache.flink.runtime.state.SnapshotResult;
 import org.apache.flink.runtime.state.TestTaskStateManagerBuilder;
+import org.apache.flink.runtime.state.VoidNamespaceSerializer;
 import org.apache.flink.runtime.state.heap.HeapPriorityQueueElement;
 import org.apache.flink.runtime.state.internal.InternalKvState;
 import org.apache.flink.runtime.state.memory.MemCheckpointStreamFactory;
 import org.apache.flink.runtime.state.ttl.MockTtlTimeProvider;
 import org.apache.flink.runtime.state.ttl.TtlTimeProvider;
 import org.apache.flink.runtime.util.TestingTaskManagerRuntimeInfo;
+import org.apache.flink.streaming.api.operators.TimerSerializer;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
@@ -433,6 +435,30 @@ class CobbleStateBackendTest {
             backend.setCurrentKey(1);
             assertEquals(later, queue.poll());
             assertTrue(queue.isEmpty());
+        }
+    }
+
+    @Test
+    void timerStateRegistersInspectSchemaForFlinkTimerSerializer(@TempDir Path tempDir)
+            throws Exception {
+        try (TestBackendContext context = createBackendContext(tempDir, false, null)) {
+            CobbleKeyedStateBackend<Integer> backend = context.cobbleBackend;
+            backend.create(
+                    "event-time-timers",
+                    new TimerSerializer<>(
+                            StringSerializer.INSTANCE, VoidNamespaceSerializer.INSTANCE));
+
+            StateInspectSchema schema =
+                    backend.getStateInspectSchemas().get("timer:event-time-timers");
+            assertNotNull(schema);
+            assertEquals(StateKind.TIMER, schema.stateKind());
+            assertEquals("event-time-timers", schema.stateName());
+            assertEquals("__cobble_timer__event-time-timers", schema.columnFamily());
+            assertEquals(
+                    StringSerializer.class.getName(), schema.keySerializer().serializerClassName());
+            assertEquals(
+                    VoidNamespaceSerializer.class.getName(),
+                    schema.namespaceSerializer().serializerClassName());
         }
     }
 
