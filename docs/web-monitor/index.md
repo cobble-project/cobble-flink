@@ -1,6 +1,7 @@
 ---
 title: Web Monitor
 nav_order: 8
+has_children: true
 ---
 
 # Web Monitor
@@ -21,7 +22,7 @@ The web monitor is useful when you want to:
 - follow `latest` while a job is still producing checkpoints
 - keep a small set of rows tracked while newer snapshots appear
 - inspect Cobble state by state name, verify decoded state keys, MapState keys, ListState values, and timer entries
-- inspect Cobble sink rows and selected columns
+- inspect Cobble sink rows, primary keys, and value columns
 
 For production reads, use the Cobble source connector or your own application
 code. The monitor is meant for debugging, validation, and ad-hoc inspection.
@@ -113,61 +114,15 @@ are removed from the list on refresh.
 
 ![Datasource page](../assets/images/web-monitor-datasource.png)
 
-## Inspect Page
+## Inspect Datasources
 
-The `Inspect` page has two modes: `Scan` and `Track`.
+After selecting a datasource, open `Inspect` and choose the matching guide:
 
-### Scan
+- [State Inspect](state/): inspect schema-aware ValueState, ListState, MapState, and timer state from a Flink checkpoint.
+- [Sink Inspect](sink/): inspect a Cobble sink snapshot by primary key and typed value columns.
 
-Use `Scan` when you want to browse rows.
-
-For sink datasources, set a bucket, key prefix, row limit, and optional column
-projection.
-
-For state datasources with schema metadata, the target list shows state names.
-The UI hides column families and displays decoded parts when possible:
-
-#### ValueState
-
-ValueState shows the decoded state key, namespace when it is meaningful, and
-the decoded value.
-
-![ValueState inspect](../assets/images/web-monitor-inspect-value-state.png)
-
-#### ListState
-
-ListState shows the decoded state key and list elements. Values can be large,
-so the UI shows the first 100 elements by default and provides a button to show
-the next 100 elements at a time.
-
-![ListState inspect](../assets/images/web-monitor-inspect-list-state.png)
-
-#### MapState
-
-MapState shows the decoded state key, map key, and map value. You can scan by
-state key alone, or provide a map-key prefix to narrow the rows.
-
-![MapState inspect](../assets/images/web-monitor-inspect-map-state.png)
-
-#### Timer State
-
-Timer targets show decoded timestamp and timer key. If the namespace is
-`VoidNamespace`, it is hidden because it does not carry user data.
-
-![Timer state inspect](../assets/images/web-monitor-inspect-timer-state.png)
-
-If a key or value part cannot be decoded into a displayable value, that part
-falls back to encoded bytes.
-
-### Track
-
-Use `Track` when you want to keep watching selected rows. From a scan result,
-open the row action menu and choose `Track`. The tracked rows can be refreshed
-together.
-
-Track uses the same decoded rendering as Scan. When all parts are decoded, raw
-base64 and UTF-8 bytes are hidden. If decoding fails for a row or for a specific
-part, the UI keeps enough raw bytes visible to continue inspection.
+Both pages use `Scan` to browse rows and `Track` to keep selected rows visible
+while a snapshot changes. The monitor never writes to the datasource.
 
 ## API
 
@@ -187,6 +142,5 @@ for debugging the monitor itself.
 - The monitor never writes to the selected datasource.
 - `latest` is resolved from the current datasource list and can be refreshed.
 - Checkpoint datasources support operator discovery.
-- Sink datasources support column projection.
-- Schema-aware decoding depends on metadata written by the Cobble state
-  backend. Older or raw datasources still fall back to bytes.
+- Schema-aware inspection depends on metadata written with the checkpoint or
+  sink snapshot. Older or raw datasources still fall back to bytes.
