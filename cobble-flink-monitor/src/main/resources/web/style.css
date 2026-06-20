@@ -257,6 +257,34 @@ label {
   width: auto;
 }
 
+.field-table-control {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  align-self: end;
+  gap: 6px;
+  min-height: 38px;
+}
+
+.field-table-control label {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.field-table-control input {
+  width: auto;
+}
+
+.field-table-control .help-tooltip {
+  top: calc(100% + 6px);
+  left: 0;
+  width: min(320px, calc(100vw - 48px));
+}
+
 input,
 select,
 textarea {
@@ -283,6 +311,19 @@ textarea {
 .sink-key-filter {
   min-width: 0;
   margin-bottom: 12px;
+}
+
+.state-semantic-key-filter {
+  display: grid;
+  gap: 8px;
+  min-width: 0;
+  margin-bottom: 12px;
+}
+
+.state-semantic-key-header {
+  color: var(--muted);
+  font-size: 13px;
+  font-weight: 600;
 }
 
 .sink-key-filter-header {
@@ -333,6 +374,8 @@ textarea {
 
 .help-icon:hover + .help-tooltip,
 .help-icon:focus + .help-tooltip,
+.field-table-control:hover .help-tooltip,
+.field-table-control:focus-within .help-tooltip,
 .help-tooltip.visible {
   opacity: 1;
   pointer-events: auto;
@@ -349,7 +392,20 @@ textarea {
   gap: 8px;
 }
 
+.state-semantic-key-inputs {
+  display: grid;
+  gap: 8px;
+}
+
 .sink-key-row {
+  display: grid;
+  grid-template-columns: minmax(150px, 220px) minmax(0, 1fr);
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+}
+
+.state-semantic-key-row {
   display: grid;
   grid-template-columns: minmax(150px, 220px) minmax(0, 1fr);
   align-items: center;
@@ -363,6 +419,18 @@ textarea {
   overflow-wrap: anywhere;
 }
 
+.state-semantic-key-title {
+  color: var(--muted);
+  font-size: 13px;
+  overflow-wrap: anywhere;
+}
+
+.state-semantic-key-title small {
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 500;
+}
+
 .sink-key-title small {
   color: var(--muted);
   font-size: 11px;
@@ -370,6 +438,11 @@ textarea {
 }
 
 .sink-key-title-separator {
+  color: var(--line);
+  padding: 0 4px;
+}
+
+.state-semantic-key-title-separator {
   color: var(--line);
   padding: 0 4px;
 }
@@ -422,7 +495,8 @@ table {
   font-size: 13px;
 }
 
-.sink-expanded-table {
+.sink-expanded-table,
+.state-expanded-table {
   width: max-content;
   min-width: 100%;
 }

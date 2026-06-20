@@ -24,6 +24,11 @@ const state = {
   sinkKeyFieldsSignature: null,
   sinkKeyValues: [],
   sinkKeyInvalidIndexes: new Set(),
+  semanticKeyTargetId: null,
+  semanticKeySignature: null,
+  semanticKeyValues: {},
+  semanticKeyInvalidIndexes: new Map(),
+  stateFieldTableEnabled: true,
 }
 
 const MAX_VALUE_DISPLAY_LENGTH = 300
@@ -64,7 +69,11 @@ function setLoading(loading) {
   $('state-key').disabled = loading
   $('namespace').disabled = loading
   $('map-key').disabled = loading
+  $('state-field-table').disabled = loading
   document.querySelectorAll('[data-sink-key-input]').forEach((element) => {
+    element.disabled = loading
+  })
+  document.querySelectorAll('[data-semantic-key-input]').forEach((element) => {
     element.disabled = loading
   })
   $('prev-page-button').disabled = loading || state.previousPageCursors.length === 0
@@ -178,11 +187,19 @@ function renderStateFilterControls() {
   const mapState = schemaState && target.state_kind === 'MAP'
   const voidNamespace = schemaState && isVoidNamespaceTarget(target)
   const sinkKeyFilter = isSinkKeyFilterTarget(target)
-  $('state-key-control').classList.toggle('hidden', !schemaState)
-  $('namespace-control').classList.toggle('hidden', !schemaState || voidNamespace)
-  $('map-key-control').classList.toggle('hidden', !mapState)
+  const semanticKeyFilter = isSemanticStateKeyFilterTarget(target)
+  $('state-key-control').classList.toggle('hidden', !schemaState || semanticKeyFilter)
+  $('namespace-control').classList.toggle('hidden', !schemaState || voidNamespace || semanticKeyFilter)
+  $('map-key-control').classList.toggle('hidden', !mapState || semanticKeyFilter)
+  $('state-semantic-key-control').classList.toggle('hidden', !semanticKeyFilter)
   $('sink-key-control').classList.toggle('hidden', !sinkKeyFilter)
   $('prefix-control').classList.toggle('hidden', schemaState || sinkKeyFilter)
+  $('state-field-table-control').classList.toggle(
+    'hidden',
+    !isSemanticStateTableTarget(target),
+  )
+  $('state-field-table').checked = state.stateFieldTableEnabled
+  if (semanticKeyFilter) renderSemanticStateKeyInputs(target)
   if (sinkKeyFilter) renderSinkKeyInputs(target)
   if (schemaState) {
     $('state-key-label').textContent = `State key (${serializerLabel(target.serializer_classes?.key)})`
@@ -192,6 +209,10 @@ function renderStateFilterControls() {
     $('map-key-label').textContent = `Map key prefix (${serializerLabel(target.serializer_classes?.map_key)})`
     $('map-key').removeAttribute('placeholder')
   }
+}
+
+function isSemanticStateKeyFilterTarget(target) {
+  return state.stateFieldTableEnabled && isSemanticStateTableTarget(target)
 }
 
 function isSinkKeyFilterTarget(target) {
@@ -246,6 +267,96 @@ function activeSinkKeyValues(target) {
     values.push(value)
   }
   return values
+}
+
+function semanticKeyFilterGroups(target) {
+  const parts = target?.semantic_parts || target?.semanticParts || {}
+  const groups = [
+    { id: 'state_key', label: 'State key prefix', type: parts.state_key },
+    { id: 'namespace', label: 'Namespace prefix', type: parts.namespace },
+    { id: 'map_key', label: 'Map key prefix', type: parts.map_key },
+  ]
+  return groups
+    .filter((group) => group.type && group.type.kind !== 'UNKNOWN')
+    .filter((group) => group.id !== 'namespace' || !isVoidNamespaceTarget(target))
+    .filter((group) => group.id !== 'map_key' || target?.state_kind === 'MAP')
+    .map((group) => ({ ...group, fields: semanticTableFields(group.type) }))
+    .filter((group) => group.fields.length > 0)
+}
+
+function renderSemanticStateKeyInputs(target) {
+  const groups = semanticKeyFilterGroups(target)
+  const fields = semanticKeyFilterFields(target)
+  const signature = fields
+    .map((entry) => `${entry.group.id}:${entry.index}:${entry.field.name}:${entry.field.logical_type}`)
+    .join('|')
+  if (state.semanticKeyTargetId !== target.id || state.semanticKeySignature !== signature) {
+    state.semanticKeyTargetId = target.id
+    state.semanticKeySignature = signature
+    state.semanticKeyValues = Object.fromEntries(groups.map((group) => [group.id, group.fields.map(() => '')]))
+    state.semanticKeyInvalidIndexes.clear()
+  }
+  const control = $('state-semantic-key-control')
+  control.innerHTML = `
+    <div class="state-semantic-key-header">Key prefix (enter in field order)</div>
+    <div class="state-semantic-key-inputs">
+      ${fields.map(({ group, field, index }) => {
+        const values = state.semanticKeyValues[group.id] || []
+        const invalid = state.semanticKeyInvalidIndexes.get(group.id) || new Set()
+        state.semanticKeyValues[group.id] = group.fields.map((item, itemIndex) => values[itemIndex] || '')
+        return `
+          <div class="state-semantic-key-row">
+            <div class="state-semantic-key-title">${escapeHtml(field.name)} <span class="state-semantic-key-title-separator" aria-hidden="true">|</span> <small>${escapeHtml(field.logical_type || '')}</small></div>
+            <input class="${invalid.has(index) ? 'input-invalid' : ''}" data-semantic-key-input="${group.id}:${index}" value="${escapeHtml(state.semanticKeyValues[group.id][index])}" aria-invalid="${invalid.has(index)}" aria-label="Key prefix ${escapeHtml(field.name)} ${escapeHtml(field.logical_type || '')}" />
+          </div>
+        `
+      }).join('')}
+    </div>
+  `
+  control.querySelectorAll('[data-semantic-key-input]').forEach((input) => {
+    input.addEventListener('input', () => {
+      const [group, indexText] = input.dataset.semanticKeyInput.split(':')
+      const index = Number(indexText)
+      state.semanticKeyValues[group][index] = input.value
+      const invalid = state.semanticKeyInvalidIndexes.get(group)
+      invalid?.delete(index)
+      input.classList.remove('input-invalid')
+      input.setAttribute('aria-invalid', 'false')
+      invalidatePagination()
+    })
+  })
+}
+
+function semanticKeyFilterFields(target) {
+  return semanticKeyFilterGroups(target).flatMap((group) => (
+    group.fields.map((field, index) => ({ group, field, index }))
+  ))
+}
+
+function activeSemanticStateKeyFilters(target) {
+  const filters = {}
+  let missing = null
+  for (const { group, field, index } of semanticKeyFilterFields(target)) {
+    const value = state.semanticKeyValues[group.id]?.[index] || ''
+    if (value === '') {
+      if (missing === null) {
+        missing = { group, field, index }
+      }
+      continue
+    }
+    if (missing !== null) {
+      const invalid = state.semanticKeyInvalidIndexes.get(missing.group.id) || new Set()
+      invalid.add(missing.index)
+      state.semanticKeyInvalidIndexes.set(missing.group.id, invalid)
+      renderSemanticStateKeyInputs(target)
+      throw new Error(`Enter \`${missing.field.name}\` before \`${field.name}\``)
+    }
+    if (!filters[group.id]) {
+      filters[group.id] = []
+    }
+    filters[group.id].push(value)
+  }
+  return filters
 }
 
 function renderSnapshots() {
@@ -374,6 +485,7 @@ function activeScanContext() {
     serializerClasses: target?.serializer_classes || {},
     keyFields: target?.key_fields || [],
     valueFields: target?.value_fields || [],
+    semanticParts: target?.semantic_parts || {},
   }
 }
 
@@ -398,12 +510,19 @@ async function runScan(direction = 'reset') {
     if (bucket && bucket.toLowerCase() !== 'all') query.set('bucket', bucket)
     const target = activeTarget()
     if (isSchemaStateTarget(target)) {
-      const stateKey = $('state-key').value.trim()
-      const namespace = $('namespace').value.trim()
-      const mapKey = $('map-key').value.trim()
-      if (stateKey) query.set('state_key', stateKey)
-      if (namespace) query.set('namespace', namespace)
-      if (mapKey) query.set('map_key', mapKey)
+      if (isSemanticStateKeyFilterTarget(target)) {
+        const filters = activeSemanticStateKeyFilters(target)
+        Object.entries(filters).forEach(([part, values]) => {
+          values.forEach((value) => query.append(`${part}_field`, value))
+        })
+      } else {
+        const stateKey = $('state-key').value.trim()
+        const namespace = $('namespace').value.trim()
+        const mapKey = $('map-key').value.trim()
+        if (stateKey) query.set('state_key', stateKey)
+        if (namespace) query.set('namespace', namespace)
+        if (mapKey) query.set('map_key', mapKey)
+      }
     } else if (isSinkKeyFilterTarget(target)) {
       activeSinkKeyValues(target).forEach((value) => query.append('sink_key', value))
     } else {
@@ -464,6 +583,7 @@ async function runLookup() {
         tracked.decodedKey = result.decoded_key || null
         tracked.decodedColumns = result.decoded_columns || null
         tracked.decodedValue = result.decoded_value ?? null
+        tracked.decodedParts = result.decoded_parts || null
         tracked.decodeError = result.decode_error || null
       })
     }
@@ -557,10 +677,12 @@ function trackScanItem(trackId) {
     serializerClasses: context.serializerClasses,
     keyFields: context.keyFields,
     valueFields: context.valueFields,
+    semanticParts: context.semanticParts,
     value: item.columns || item.value || null,
     decodedKey: item.decoded_key || null,
     decodedColumns: item.decoded_columns || null,
     decodedValue: item.decoded_value ?? null,
+    decodedParts: item.decoded_parts || null,
     decodeError: item.decode_error || null,
   })
   switchInspectMode('lookup')
@@ -755,12 +877,16 @@ function renderScanResult(data, context = activeScanContext()) {
   const sink = target?.allows_columns
   const timer = isTimerTarget(target)
   const sinkExpanded = isSinkExpandedTable(target)
+  const stateExpanded = !sinkExpanded && isStateExpandedTable(target)
   const sinkTable = sinkExpanded ? sinkTableLayout(target, context, items) : null
-  setResultTableExpanded(sinkExpanded)
+  const stateTable = stateExpanded ? stateTableLayout(target) : null
+  setResultTableExpanded(sinkExpanded || stateExpanded, sinkExpanded ? 'sink' : 'state')
   $('result-head').innerHTML = timer
     ? '<tr><th>Bucket</th><th>Timer key</th><th>Timestamp</th><th></th></tr>'
     : sinkExpanded
     ? renderSinkScanHeader(sinkTable)
+    : stateExpanded
+    ? renderStateScanHeader(stateTable)
     : sink
     ? '<tr><th>Bucket</th><th>Key</th><th>Columns</th><th></th></tr>'
     : '<tr><th>Bucket</th><th>Key</th><th>Value</th><th></th></tr>'
@@ -778,6 +904,8 @@ function renderScanResult(data, context = activeScanContext()) {
       `
     } else if (sinkExpanded) {
       row.innerHTML = renderSinkScanRow(item, target, context, trackId, sinkTable)
+    } else if (stateExpanded) {
+      row.innerHTML = renderStateScanRow(item, target, context, trackId, stateTable)
     } else {
       row.innerHTML = `
         <td>${item.bucket}</td>
@@ -789,7 +917,12 @@ function renderScanResult(data, context = activeScanContext()) {
     body.appendChild(row)
   }
   if (items.length === 0) {
-    body.innerHTML = `<tr><td colspan="${sinkExpanded ? sinkTable.scanColspan : 4}">No rows.</td></tr>`
+    const colspan = sinkExpanded
+      ? sinkTable.scanColspan
+      : stateExpanded
+      ? stateTable.scanColspan
+      : 4
+    body.innerHTML = `<tr><td colspan="${colspan}">No rows.</td></tr>`
   }
   wireRowActionButtons(body)
   wireListMoreButtons(body)
@@ -799,12 +932,16 @@ function renderLookupResult() {
   const items = state.trackedLookups
   const timerOnly = items.length > 0 && items.every((item) => isTimerTarget(trackedTarget(item)))
   const sinkExpanded = !timerOnly && isSinkExpandedLookup(items)
+  const stateExpanded = !timerOnly && !sinkExpanded && isStateExpandedLookup(items)
   const sinkTable = sinkExpanded ? sinkTableLayout(trackedTarget(items[0]), items[0], items) : null
-  setResultTableExpanded(sinkExpanded)
+  const stateTable = stateExpanded ? stateTableLayout(trackedTarget(items[0])) : null
+  setResultTableExpanded(sinkExpanded || stateExpanded, sinkExpanded ? 'sink' : 'state')
   $('result-head').innerHTML = timerOnly
     ? '<tr><th>Target</th><th>Bucket</th><th>Timer key</th><th>Timestamp</th><th></th></tr>'
     : sinkExpanded
     ? renderSinkLookupHeader(sinkTable)
+    : stateExpanded
+    ? renderStateLookupHeader(stateTable)
     : '<tr><th>Target</th><th>Bucket</th><th>Key</th><th>Value</th><th></th></tr>'
   const body = $('result-body')
   body.innerHTML = ''
@@ -821,6 +958,8 @@ function renderLookupResult() {
       `
     } else if (sinkExpanded) {
       row.innerHTML = renderSinkLookupRow(item, target, sinkTable)
+    } else if (stateExpanded) {
+      row.innerHTML = renderStateLookupRow(item, target, stateTable)
     } else {
       row.innerHTML = `
         <td>${escapeHtml(item.targetLabel)}</td>
@@ -1016,6 +1155,166 @@ function renderSinkColumns(columns = [], decodedColumns = null, decodeError = nu
   return `${renderColumns(columns)}${renderDecodeError(decodeError)}`
 }
 
+function isSemanticStateTableTarget(target) {
+  return target?.kind === 'state' && semanticTableGroups(target).length > 0
+}
+
+function isStateExpandedTable(target) {
+  return state.stateFieldTableEnabled && isSemanticStateTableTarget(target)
+}
+
+function isStateExpandedLookup(items) {
+  if (!state.stateFieldTableEnabled || items.length === 0) return false
+  const signature = semanticTableSignature(trackedTarget(items[0]))
+  return Boolean(signature) && items.every((item) => (
+    semanticTableSignature(trackedTarget(item)) === signature
+  ))
+}
+
+function semanticTableSignature(target) {
+  if (!isSemanticStateTableTarget(target)) return ''
+  return semanticTableGroups(target)
+    .map((group) => `${group.id}:${group.fields.map((field) => `${field.name}:${field.logical_type}`).join(',')}`)
+    .join('|')
+}
+
+function semanticTableGroups(target) {
+  const parts = target?.semantic_parts || target?.semanticParts || {}
+  const candidates = [
+    { id: 'state_key', label: 'State key', type: parts.state_key },
+    { id: 'namespace', label: 'Namespace', type: parts.namespace },
+    { id: 'map_key', label: 'Map key', type: parts.map_key },
+    { id: 'value', label: 'Value', type: parts.value || parts.list_element || parts.map_value },
+  ]
+  return candidates
+    .map((group) => ({ ...group, fields: semanticTableFields(group.type) }))
+    .filter((group) => group.fields.length > 0)
+}
+
+function semanticTableFields(type) {
+  if (!type || type.kind === 'UNKNOWN') return []
+  if (Array.isArray(type.fields) && type.fields.length > 0) {
+    return type.fields.map((field, index) => ({
+      name: field?.name || `f${index}`,
+      logical_type: field?.type?.logical_type || '',
+      index,
+    }))
+  }
+  return [{ name: 'value', logical_type: type.logical_type || '', index: 0 }]
+}
+
+function stateTableLayout(target) {
+  const groups = semanticTableGroups(target)
+  const fieldCount = groups.reduce((total, group) => total + group.fields.length, 0)
+  return {
+    groups,
+    scanColspan: fieldCount + 2,
+    lookupColspan: fieldCount + 3,
+  }
+}
+
+function renderStateScanHeader(layout) {
+  return `
+    <tr>
+      <th rowspan="2">Bucket</th>
+      ${renderStateGroupHeaders(layout.groups)}
+      <th rowspan="2"></th>
+    </tr>
+    <tr>${renderStateFieldHeaders(layout.groups)}</tr>
+  `
+}
+
+function renderStateLookupHeader(layout) {
+  return `
+    <tr>
+      <th rowspan="2">Target</th>
+      <th rowspan="2">Bucket</th>
+      ${renderStateGroupHeaders(layout.groups)}
+      <th rowspan="2"></th>
+    </tr>
+    <tr>${renderStateFieldHeaders(layout.groups)}</tr>
+  `
+}
+
+function renderStateGroupHeaders(groups) {
+  return groups.map((group) => (
+    `<th class="sink-group-header" colspan="${group.fields.length}">${escapeHtml(group.label)}</th>`
+  )).join('')
+}
+
+function renderStateFieldHeaders(groups) {
+  return groups.map((group) => renderSinkFieldHeaders(group.fields, 'value')).join('')
+}
+
+function renderStateScanRow(item, target, context, trackId, layout) {
+  return `
+    <td>${item.bucket}</td>
+    ${renderStateExpandedCells(layout.groups, item.decoded_parts, item, target, `scan:${trackId}`)}
+    <td class="action-cell">${renderDecodeError(item.decode_error)}${renderActionMenu(scanRowActions(item, target, context, trackId))}</td>
+  `
+}
+
+function renderStateLookupRow(item, target, layout) {
+  return `
+    <td>${escapeHtml(item.targetLabel)}</td>
+    <td>${item.bucket}</td>
+    ${renderStateExpandedCells(layout.groups, item.decodedParts, item, target, `track:${item.id}`)}
+    <td class="action-cell">${renderDecodeError(item.decodeError)}${renderActionMenu(trackedRowActions(item, target))}</td>
+  `
+}
+
+function renderStateExpandedCells(groups, decodedParts, item, target, displayId) {
+  return groups.map((group) => {
+    const decodedPart = decodedParts?.[group.id]
+    return group.fields.map((field, index) => {
+      const boundary = sinkGroupBoundaryClass(index, group.fields.length)
+      const value = semanticTableValue(decodedPart, field, index)
+      return `<td class="sink-field-cell ${boundary}">${value === undefined
+        ? renderStateRawFallback(group, index, item, target, displayId)
+        : renderSemanticTableValue(value, `${displayId}:${group.id}:${field.name}`)}</td>`
+    }).join('')
+  }).join('')
+}
+
+function semanticTableValue(part, field, index) {
+  if (!part || typeof part !== 'object') return undefined
+  if (Array.isArray(part.fields)) {
+    return part.fields.find((candidate) => candidate?.name === field.name) || part.fields[index]
+  }
+  return index === 0 ? part : undefined
+}
+
+function renderSemanticTableValue(value, displayId) {
+  if (!value || typeof value !== 'object') return '<span class="muted-text">null</span>'
+  if (Object.prototype.hasOwnProperty.call(value, 'value')) {
+    return renderDecodedValue(value.value)
+  }
+  if (Array.isArray(value.values)) {
+    return renderDecodedSection(value.values, { state_kind: 'LIST' }, displayId)
+  }
+  if (Array.isArray(value.fields)) {
+    return renderDecodedBlock(value.fields.map((field) => renderDecodedPair(field.name, field.value)))
+  }
+  return renderDecodedValue(value)
+}
+
+function renderStateRawFallback(group, index, item, target, displayId) {
+  if (index !== 0) return '<span class="muted-text">-</span>'
+  if (group.id === 'state_key') {
+    return renderValue({ b64: item.key_b64 || item.keyB64, utf8: item.key_utf8 || item.keyUtf8 })
+  }
+  if (group.id === 'value') {
+    return renderStateValue(
+      item.value,
+      item.decoded_value ?? item.decodedValue,
+      null,
+      target,
+      `${displayId}:raw-value`,
+    )
+  }
+  return '<span class="muted-text">raw key above</span>'
+}
+
 function isSinkExpandedTable(target) {
   return isSinkTarget(target)
     && Array.isArray(target?.key_fields)
@@ -1034,8 +1333,10 @@ function isSinkExpandedLookup(items) {
   ))
 }
 
-function setResultTableExpanded(expanded) {
-  $('result-head').closest('table')?.classList.toggle('sink-expanded-table', expanded)
+function setResultTableExpanded(expanded, kind = '') {
+  const table = $('result-head').closest('table')
+  table?.classList.toggle('sink-expanded-table', expanded && kind === 'sink')
+  table?.classList.toggle('state-expanded-table', expanded && kind === 'state')
 }
 
 function sinkTableLayout(target, context = {}, items = []) {
@@ -1349,6 +1650,7 @@ function trackedTarget(item) {
     serializer_classes: item.serializerClasses || {},
     key_fields: item.keyFields || [],
     value_fields: item.valueFields || [],
+    semantic_parts: item.semanticParts || {},
   }
 }
 
@@ -1490,6 +1792,12 @@ $('scan-tab').addEventListener('click', () => switchInspectMode('scan'))
 $('lookup-tab').addEventListener('click', () => switchInspectMode('lookup'))
 $('auto-refresh-enabled').addEventListener('change', updateInspectAutoRefresh)
 $('auto-refresh-seconds').addEventListener('change', updateInspectAutoRefresh)
+$('state-field-table').addEventListener('change', () => {
+  state.stateFieldTableEnabled = $('state-field-table').checked
+  renderStateFilterControls()
+  invalidatePagination()
+  renderActiveResult()
+})
 document.addEventListener('click', closeRowActionPopover)
 document.addEventListener('click', closeSinkKeyHelp)
 window.addEventListener('resize', closeRowActionPopover)

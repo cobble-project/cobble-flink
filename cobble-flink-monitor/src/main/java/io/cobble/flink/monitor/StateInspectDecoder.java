@@ -1,12 +1,23 @@
 package io.cobble.flink.monitor;
 
 import io.cobble.flink.common.inspect.SerializerInspectSchema;
+import io.cobble.flink.common.inspect.StateInspectField;
 import io.cobble.flink.common.inspect.StateInspectSchema;
+import io.cobble.flink.common.inspect.StateInspectSemanticSchema;
+import io.cobble.flink.common.inspect.StateInspectType;
+import io.cobble.flink.common.inspect.StateInspectTypeKind;
 import io.cobble.flink.common.inspect.StateKind;
 
 import org.apache.flink.api.common.typeutils.TypeSerializer;
+import org.apache.flink.api.java.tuple.Tuple;
 import org.apache.flink.core.memory.DataInputViewStreamWrapper;
 import org.apache.flink.core.memory.DataOutputSerializer;
+import org.apache.flink.table.data.DecimalData;
+import org.apache.flink.table.data.RowData;
+import org.apache.flink.table.data.StringData;
+import org.apache.flink.table.data.TimestampData;
+import org.apache.flink.table.types.logical.LogicalType;
+import org.apache.flink.table.types.logical.utils.LogicalTypeParser;
 import org.apache.flink.util.MathUtils;
 
 import java.io.ByteArrayInputStream;
@@ -35,6 +46,7 @@ final class StateInspectDecoder {
         StateInspectSchema schema = target.schema;
         Map<String, Object> decodedKey = null;
         Object decodedValue = null;
+        Map<String, Object> decodedParts = null;
         String decodeError = null;
         try {
             decodedKey = decodeKey(schema, rowKey);
@@ -49,7 +61,12 @@ final class StateInspectDecoder {
         } catch (Exception e) {
             decodeError = appendError(decodeError, message(e));
         }
-        return new DecodedRow(decodedKey, decodedValue, decodeError);
+        try {
+            decodedParts = decodeSemanticParts(target, rowKey, columns);
+        } catch (Exception e) {
+            decodeError = appendError(decodeError, message(e));
+        }
+        return new DecodedRow(decodedKey, decodedValue, decodedParts, decodeError);
     }
 
     static byte[] encodeStateKeyPrefix(
@@ -205,26 +222,12 @@ final class StateInspectDecoder {
         }
         if (schema.stateKind() == StateKind.LIST) {
             TypeSerializer<Object> serializer = restore(schema.listElementSerializer());
-            List<Object> values = new ArrayList<>();
-            PushbackInputStream input =
-                    new PushbackInputStream(new ByteArrayInputStream(valueBytes), 1);
-            DataInputViewStreamWrapper inputView = new DataInputViewStreamWrapper(input);
-            while (true) {
-                int first = input.read();
-                if (first < 0) {
-                    break;
-                }
-                input.unread(first);
-                values.add(render(serializer.deserialize(inputView), null, serializer));
-                int delimiter = input.read();
-                if (delimiter < 0) {
-                    break;
-                }
-                if ((byte) delimiter != LIST_DELIMITER) {
-                    throw new IOException("Invalid Cobble list delimiter: " + delimiter);
-                }
+            List<Object> values = deserializeListElements(serializer, valueBytes);
+            List<Object> rendered = new ArrayList<>(values.size());
+            for (Object value : values) {
+                rendered.add(render(value, null, serializer));
             }
-            return values;
+            return rendered;
         }
         if (schema.stateKind() == StateKind.MAP) {
             Map<String, Object> output = new LinkedHashMap<>();
@@ -232,6 +235,377 @@ final class StateInspectDecoder {
             return output;
         }
         throw new IOException("Unsupported state kind: " + schema.stateKind());
+    }
+
+    private static List<Object> deserializeListElements(
+            TypeSerializer<Object> serializer, byte[] valueBytes) throws IOException {
+        List<Object> values = new ArrayList<>();
+        PushbackInputStream input =
+                new PushbackInputStream(new ByteArrayInputStream(valueBytes), 1);
+        DataInputViewStreamWrapper inputView = new DataInputViewStreamWrapper(input);
+        while (true) {
+            int first = input.read();
+            if (first < 0) {
+                break;
+            }
+            input.unread(first);
+            values.add(serializer.deserialize(inputView));
+            int delimiter = input.read();
+            if (delimiter < 0) {
+                break;
+            }
+            if ((byte) delimiter != LIST_DELIMITER) {
+                throw new IOException("Invalid Cobble list delimiter: " + delimiter);
+            }
+        }
+        return values;
+    }
+
+    private static Map<String, Object> decodeSemanticParts(
+            InspectTarget target, byte[] rowKey, byte[][] columns) throws IOException {
+        if (target == null
+                || target.schema == null
+                || target.semanticSchema == null
+                || target.semanticSchema.isEmpty()
+                || target.schema.stateKind() == StateKind.TIMER) {
+            return null;
+        }
+        StateInspectSchema schema = target.schema;
+        StateInspectSemanticSchema semanticSchema = target.semanticSchema;
+        KeySlices slices =
+                schema.stateKind() == StateKind.MAP
+                        ? splitMapKey(schema, rowKey)
+                        : splitKeyAndNamespace(schema, rowKey);
+        Map<String, Object> output = new LinkedHashMap<>();
+        String decodeError = null;
+        decodeError =
+                addSemanticPart(
+                        output,
+                        decodeError,
+                        "state_key",
+                        semanticSchema.stateKey(),
+                        schema.keySerializer(),
+                        slices.key);
+        if (!isVoidNamespaceSerializer(schema.namespaceSerializer())) {
+            decodeError =
+                    addSemanticPart(
+                            output,
+                            decodeError,
+                            "namespace",
+                            semanticSchema.namespace(),
+                            schema.namespaceSerializer(),
+                            slices.namespace);
+        }
+        if (schema.stateKind() == StateKind.MAP) {
+            decodeError =
+                    addSemanticPart(
+                            output,
+                            decodeError,
+                            "map_key",
+                            semanticSchema.mapUserKey(),
+                            schema.mapUserKeySerializer(),
+                            slices.mapKey);
+            decodeError =
+                    addSemanticPart(
+                            output,
+                            decodeError,
+                            "map_value",
+                            semanticSchema.mapUserValue(),
+                            schema.mapUserValueSerializer(),
+                            firstColumn(columns));
+        } else if (schema.stateKind() == StateKind.VALUE) {
+            decodeError =
+                    addSemanticPart(
+                            output,
+                            decodeError,
+                            "value",
+                            semanticSchema.value(),
+                            schema.valueSerializer(),
+                            firstColumn(columns));
+        } else if (schema.stateKind() == StateKind.LIST) {
+            decodeError =
+                    addSemanticListPart(
+                            output,
+                            decodeError,
+                            semanticSchema.listElement(),
+                            schema.listElementSerializer(),
+                            firstColumn(columns));
+        }
+        if (decodeError != null) {
+            throw new IOException(decodeError);
+        }
+        return output.isEmpty() ? null : output;
+    }
+
+    private static String addSemanticPart(
+            Map<String, Object> output,
+            String decodeError,
+            String partName,
+            StateInspectType type,
+            SerializerInspectSchema serializer,
+            byte[] bytes) {
+        if (!isKnownSemanticType(type)) {
+            return decodeError;
+        }
+        try {
+            if (bytes == null) {
+                output.put(partName, semanticValueToJson(type, null));
+            } else {
+                output.put(partName, semanticValueToJson(type, deserialize(serializer, bytes)));
+            }
+        } catch (Exception e) {
+            return appendError(decodeError, partName + ": " + message(e));
+        }
+        return decodeError;
+    }
+
+    private static String addSemanticListPart(
+            Map<String, Object> output,
+            String decodeError,
+            StateInspectType elementType,
+            SerializerInspectSchema serializer,
+            byte[] bytes) {
+        if (!isKnownSemanticType(elementType)) {
+            return decodeError;
+        }
+        try {
+            List<Object> values =
+                    bytes == null
+                            ? new ArrayList<>()
+                            : deserializeListElements(restore(serializer), bytes);
+            List<Object> decoded = new ArrayList<>(values.size());
+            for (Object value : values) {
+                decoded.add(semanticValueToJson(elementType, value));
+            }
+            Map<String, Object> list = new LinkedHashMap<>();
+            list.put("kind", StateInspectTypeKind.LIST.name());
+            list.put("values", decoded);
+            output.put("value", list);
+        } catch (Exception e) {
+            return appendError(decodeError, "value: " + message(e));
+        }
+        return decodeError;
+    }
+
+    private static boolean isKnownSemanticType(StateInspectType type) {
+        return type != null && type.kind() != StateInspectTypeKind.UNKNOWN;
+    }
+
+    static void validateSemanticPartFilter(
+            StateInspectType type, List<String> values, String partLabel) throws IOException {
+        List<StateInspectType> fields = semanticFilterFieldTypes(type, partLabel);
+        if (values == null || values.isEmpty()) {
+            throw new IOException(partLabel + " fields must not be empty");
+        }
+        if (values.size() > fields.size()) {
+            throw new IOException(
+                    "Too many " + partLabel + " fields (expected at most " + fields.size() + ")");
+        }
+        for (int index = 0; index < values.size(); index++) {
+            if (values.get(index) == null || values.get(index).isEmpty()) {
+                throw new IOException(partLabel + " fields must be supplied in order without gaps");
+            }
+        }
+    }
+
+    @SuppressWarnings("unchecked")
+    static boolean matchesSemanticPartFilter(
+            Map<String, Object> decodedParts,
+            String partName,
+            StateInspectType type,
+            List<String> values) {
+        if (decodedParts == null || values == null || values.isEmpty()) {
+            return false;
+        }
+        Object part = decodedParts.get(partName);
+        if (!(part instanceof Map)) {
+            return false;
+        }
+        List<StateInspectType> fieldTypes;
+        try {
+            fieldTypes = semanticFilterFieldTypes(type, partName);
+        } catch (IOException e) {
+            return false;
+        }
+        if (values.size() > fieldTypes.size()) {
+            return false;
+        }
+        List<Object> fieldValues = new ArrayList<>(fieldTypes.size());
+        if (type.kind() == StateInspectTypeKind.SCALAR) {
+            fieldValues.add(((Map<String, Object>) part).get("value"));
+        } else {
+            Object fields = ((Map<String, Object>) part).get("fields");
+            if (!(fields instanceof List)) {
+                return false;
+            }
+            for (Object field : (List<?>) fields) {
+                if (!(field instanceof Map)) {
+                    return false;
+                }
+                fieldValues.add(((Map<String, Object>) field).get("value"));
+            }
+        }
+        if (fieldValues.size() < values.size()) {
+            return false;
+        }
+        for (int index = 0; index < values.size(); index++) {
+            if (!semanticValueMatches(
+                    fieldValues.get(index), values.get(index), index == values.size() - 1)) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    private static List<StateInspectType> semanticFilterFieldTypes(
+            StateInspectType type, String partLabel) throws IOException {
+        if (!isKnownSemanticType(type)) {
+            throw new IOException("Missing semantic metadata for " + partLabel);
+        }
+        if (type.kind() == StateInspectTypeKind.SCALAR) {
+            return Arrays.asList(type);
+        }
+        if (type.kind() != StateInspectTypeKind.ROW && type.kind() != StateInspectTypeKind.TUPLE) {
+            throw new IOException("Field filtering is not supported for " + partLabel);
+        }
+        List<StateInspectType> fields = new ArrayList<>(type.fields().size());
+        for (StateInspectField field : type.fields()) {
+            if (field.type().kind() != StateInspectTypeKind.SCALAR) {
+                throw new IOException(
+                        "Field filtering only supports scalar "
+                                + partLabel
+                                + " fields ("
+                                + field.name()
+                                + ")");
+            }
+            fields.add(field.type());
+        }
+        return fields;
+    }
+
+    @SuppressWarnings("unchecked")
+    private static boolean semanticValueMatches(Object value, String input, boolean prefix) {
+        if (value == null || input == null) {
+            return false;
+        }
+        String candidate;
+        if (value instanceof Map) {
+            Object b64 = ((Map<String, Object>) value).get("b64");
+            if (b64 == null) {
+                return false;
+            }
+            candidate = String.valueOf(b64);
+        } else {
+            candidate = String.valueOf(value);
+        }
+        if (value instanceof Boolean) {
+            return prefix
+                    ? candidate.regionMatches(true, 0, input, 0, input.length())
+                    : candidate.equalsIgnoreCase(input);
+        }
+        return prefix ? candidate.startsWith(input) : candidate.equals(input);
+    }
+
+    private static Map<String, Object> semanticValueToJson(StateInspectType type, Object value)
+            throws IOException {
+        Map<String, Object> output = new LinkedHashMap<>();
+        output.put("kind", type.kind().name());
+        if (type.logicalType() != null) {
+            output.put("logical_type", type.logicalType());
+        }
+        switch (type.kind()) {
+            case SCALAR:
+                output.put("value", renderSemanticScalar(value));
+                return output;
+            case ROW:
+                if (value != null && !(value instanceof RowData)) {
+                    throw new IOException(
+                            "Expected RowData but found " + value.getClass().getName());
+                }
+                output.put("fields", decodeRowFields(type, (RowData) value));
+                return output;
+            case TUPLE:
+                if (value != null && !(value instanceof Tuple)) {
+                    throw new IOException(
+                            "Expected Flink Tuple but found " + value.getClass().getName());
+                }
+                output.put("fields", decodeTupleFields(type, (Tuple) value));
+                return output;
+            case LIST:
+                if (value != null && !(value instanceof List)) {
+                    throw new IOException("Expected List but found " + value.getClass().getName());
+                }
+                output.put("values", decodeListValues(type.elementType(), (List<?>) value));
+                return output;
+            case UNKNOWN:
+                throw new IOException("Unknown semantic type");
+            default:
+                throw new IOException("Unsupported semantic type " + type.kind());
+        }
+    }
+
+    private static List<Map<String, Object>> decodeRowFields(StateInspectType type, RowData row)
+            throws IOException {
+        List<Map<String, Object>> output = new ArrayList<>(type.fields().size());
+        for (int index = 0; index < type.fields().size(); index++) {
+            StateInspectField field = type.fields().get(index);
+            Object value = null;
+            if (row != null) {
+                LogicalType logicalType = LogicalTypeParser.parse(field.type().logicalType());
+                value = RowData.createFieldGetter(logicalType, index).getFieldOrNull(row);
+            }
+            output.add(semanticFieldToJson(field, value));
+        }
+        return output;
+    }
+
+    private static List<Map<String, Object>> decodeTupleFields(StateInspectType type, Tuple tuple)
+            throws IOException {
+        List<Map<String, Object>> output = new ArrayList<>(type.fields().size());
+        for (int index = 0; index < type.fields().size(); index++) {
+            output.add(
+                    semanticFieldToJson(
+                            type.fields().get(index),
+                            tuple == null ? null : tuple.getField(index)));
+        }
+        return output;
+    }
+
+    private static List<Object> decodeListValues(StateInspectType elementType, List<?> values)
+            throws IOException {
+        List<Object> output = new ArrayList<>();
+        if (values == null) {
+            return output;
+        }
+        for (Object value : values) {
+            output.add(semanticValueToJson(elementType, value));
+        }
+        return output;
+    }
+
+    private static Map<String, Object> semanticFieldToJson(StateInspectField field, Object value)
+            throws IOException {
+        Map<String, Object> output = semanticValueToJson(field.type(), value);
+        output.put("name", field.name());
+        return output;
+    }
+
+    private static Object renderSemanticScalar(Object value) throws IOException {
+        if (value == null
+                || value instanceof String
+                || value instanceof Number
+                || value instanceof Boolean) {
+            return value;
+        }
+        if (value instanceof StringData
+                || value instanceof DecimalData
+                || value instanceof TimestampData) {
+            return value.toString();
+        }
+        if (value instanceof byte[]) {
+            return CobbleFlinkMonitorServer.bytesJson((byte[]) value);
+        }
+        throw new IOException("Semantic scalar is not displayable: " + value.getClass().getName());
     }
 
     private static KeySlices splitKeyAndNamespace(StateInspectSchema schema, byte[] rowKey)
@@ -587,21 +961,29 @@ final class StateInspectDecoder {
     static final class DecodedRow {
         final Map<String, Object> decodedKey;
         final Object decodedValue;
+        final Map<String, Object> decodedParts;
         final String decodeError;
 
         private DecodedRow(
-                Map<String, Object> decodedKey, Object decodedValue, String decodeError) {
+                Map<String, Object> decodedKey,
+                Object decodedValue,
+                Map<String, Object> decodedParts,
+                String decodeError) {
             this.decodedKey = decodedKey;
             this.decodedValue = decodedValue;
+            this.decodedParts = decodedParts;
             this.decodeError = decodeError;
         }
 
         static DecodedRow empty() {
-            return new DecodedRow(null, null, null);
+            return new DecodedRow(null, null, null, null);
         }
 
         boolean hasOutput() {
-            return decodedKey != null || decodedValue != null || decodeError != null;
+            return decodedKey != null
+                    || decodedValue != null
+                    || decodedParts != null
+                    || decodeError != null;
         }
     }
 

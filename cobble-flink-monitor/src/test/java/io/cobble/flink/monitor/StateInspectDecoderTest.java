@@ -2,25 +2,45 @@ package io.cobble.flink.monitor;
 
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import io.cobble.flink.common.inspect.SerializerInspectSchema;
+import io.cobble.flink.common.inspect.StateInspectField;
 import io.cobble.flink.common.inspect.StateInspectSchema;
+import io.cobble.flink.common.inspect.StateInspectSemanticSchema;
+import io.cobble.flink.common.inspect.StateInspectType;
 
+import org.apache.flink.api.common.ExecutionConfig;
+import org.apache.flink.api.common.typeinfo.Types;
 import org.apache.flink.api.common.typeutils.TypeSerializer;
 import org.apache.flink.api.common.typeutils.base.IntSerializer;
 import org.apache.flink.api.common.typeutils.base.LongSerializer;
 import org.apache.flink.api.common.typeutils.base.StringSerializer;
 import org.apache.flink.api.common.typeutils.base.array.BytePrimitiveArraySerializer;
+import org.apache.flink.api.java.tuple.Tuple2;
+import org.apache.flink.api.java.typeutils.TupleTypeInfo;
 import org.apache.flink.core.memory.DataOutputSerializer;
+import org.apache.flink.runtime.state.VoidNamespaceSerializer;
+import org.apache.flink.table.data.GenericRowData;
+import org.apache.flink.table.data.RowData;
+import org.apache.flink.table.data.StringData;
+import org.apache.flink.table.runtime.typeutils.InternalTypeInfo;
+import org.apache.flink.table.runtime.typeutils.RowDataSerializer;
+import org.apache.flink.table.types.logical.BigIntType;
+import org.apache.flink.table.types.logical.LogicalType;
+import org.apache.flink.table.types.logical.RowType;
+import org.apache.flink.table.types.logical.VarCharType;
 import org.apache.flink.util.MathUtils;
 import org.junit.jupiter.api.Test;
 
 import java.io.ByteArrayOutputStream;
 import java.lang.reflect.Constructor;
 import java.lang.reflect.Field;
+import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.List;
 import java.util.Map;
 
 class StateInspectDecoderTest {
@@ -93,6 +113,191 @@ class StateInspectDecoderTest {
         assertEquals("ns", row.decodedKey.get("namespace"));
         assertEquals("field-a", row.decodedKey.get("map_key"));
         assertEquals("value-a", ((java.util.Map<?, ?>) row.decodedValue).get("map_value"));
+    }
+
+    @Test
+    void decodesSemanticInnerJoinMapParts() throws Exception {
+        RowDataSerializer stateKeySerializer = new RowDataSerializer(new BigIntType(false));
+        RowDataSerializer recordSerializer =
+                new RowDataSerializer(new BigIntType(false), VarCharType.STRING_TYPE);
+        StateInspectSchema schema =
+                StateInspectSchema.forMap(
+                        "left-records",
+                        "left-records",
+                        false,
+                        stateKeySerializer,
+                        VoidNamespaceSerializer.INSTANCE,
+                        recordSerializer,
+                        IntSerializer.INSTANCE);
+        InspectTarget target =
+                semanticTarget(
+                        schema,
+                        StateInspectSemanticSchema.forMap(
+                                rowType("f0"),
+                                StateInspectType.unknown(),
+                                rowType("order_id", "region"),
+                                StateInspectType.scalar("INT")));
+        byte[] stateKey = serialize(stateKeySerializer, GenericRowData.of(7L));
+        byte[] mapKey =
+                serialize(recordSerializer, GenericRowData.of(100L, StringData.fromString("apac")));
+
+        StateInspectDecoder.DecodedRow row =
+                StateInspectDecoder.decode(
+                        target,
+                        mapKeyWithVoidNamespace(schema, stateKey, mapKey),
+                        new byte[][] {serialize(IntSerializer.INSTANCE, 3)});
+
+        assertNull(row.decodeError);
+        assertEquals(7L, semanticFieldValue(row.decodedParts, "state_key", 0));
+        assertEquals(100L, semanticFieldValue(row.decodedParts, "map_key", 0));
+        assertEquals("apac", semanticFieldValue(row.decodedParts, "map_key", 1));
+        assertEquals(3, ((Map<?, ?>) row.decodedParts.get("map_value")).get("value"));
+    }
+
+    @Test
+    void matchesSemanticStateAndMapKeyFieldPrefixes() throws Exception {
+        RowDataSerializer stateKeySerializer = new RowDataSerializer(new BigIntType(false));
+        RowDataSerializer recordSerializer =
+                new RowDataSerializer(new BigIntType(false), VarCharType.STRING_TYPE);
+        StateInspectSchema schema =
+                StateInspectSchema.forMap(
+                        "left-records",
+                        "left-records",
+                        false,
+                        stateKeySerializer,
+                        VoidNamespaceSerializer.INSTANCE,
+                        recordSerializer,
+                        IntSerializer.INSTANCE);
+        StateInspectType stateKeyType = rowType("f0");
+        StateInspectType mapKeyType = rowType("order_id", "region");
+        InspectTarget target =
+                semanticTarget(
+                        schema,
+                        StateInspectSemanticSchema.forMap(
+                                stateKeyType,
+                                StateInspectType.unknown(),
+                                mapKeyType,
+                                StateInspectType.scalar("INT")));
+        byte[] stateKey = serialize(stateKeySerializer, GenericRowData.of(7L));
+        byte[] mapKey =
+                serialize(recordSerializer, GenericRowData.of(100L, StringData.fromString("apac")));
+        StateInspectDecoder.DecodedRow row =
+                StateInspectDecoder.decode(
+                        target,
+                        mapKeyWithVoidNamespace(schema, stateKey, mapKey),
+                        new byte[][] {serialize(IntSerializer.INSTANCE, 3)});
+
+        assertTrue(
+                StateInspectDecoder.matchesSemanticPartFilter(
+                        row.decodedParts, "state_key", stateKeyType, Arrays.asList("7")));
+        assertTrue(
+                StateInspectDecoder.matchesSemanticPartFilter(
+                        row.decodedParts, "map_key", mapKeyType, Arrays.asList("100", "ap")));
+        assertFalse(
+                StateInspectDecoder.matchesSemanticPartFilter(
+                        row.decodedParts, "map_key", mapKeyType, Arrays.asList("101")));
+    }
+
+    @Test
+    void decodesSemanticPrimaryKeyJoinValue() throws Exception {
+        RowDataSerializer stateKeySerializer = new RowDataSerializer(new BigIntType(false));
+        RowDataSerializer recordSerializer =
+                new RowDataSerializer(new BigIntType(false), VarCharType.STRING_TYPE);
+        StateInspectSchema schema =
+                StateInspectSchema.forValue(
+                        "right-records",
+                        "right-records",
+                        false,
+                        stateKeySerializer,
+                        VoidNamespaceSerializer.INSTANCE,
+                        recordSerializer);
+        InspectTarget target =
+                semanticTarget(
+                        schema,
+                        StateInspectSemanticSchema.forValue(
+                                rowType("f0"),
+                                StateInspectType.unknown(),
+                                rowType("user_id", "tier")));
+        byte[] stateKey = serialize(stateKeySerializer, GenericRowData.of(7L));
+
+        StateInspectDecoder.DecodedRow row =
+                StateInspectDecoder.decode(
+                        target,
+                        keyWithVoidNamespace(stateKey),
+                        new byte[][] {
+                            serialize(
+                                    recordSerializer,
+                                    GenericRowData.of(7L, StringData.fromString("gold")))
+                        });
+
+        assertNull(row.decodeError);
+        assertEquals(7L, semanticFieldValue(row.decodedParts, "state_key", 0));
+        assertEquals(7L, semanticFieldValue(row.decodedParts, "value", 0));
+        assertEquals("gold", semanticFieldValue(row.decodedParts, "value", 1));
+    }
+
+    @Test
+    void decodesSemanticOuterJoinTupleValue() throws Exception {
+        RowDataSerializer stateKeySerializer = new RowDataSerializer(new BigIntType(false));
+        RowDataSerializer recordSerializer =
+                new RowDataSerializer(new BigIntType(false), VarCharType.STRING_TYPE);
+        InternalTypeInfo<RowData> recordType =
+                InternalTypeInfo.of(
+                        RowType.of(
+                                new LogicalType[] {new BigIntType(false), VarCharType.STRING_TYPE},
+                                new String[] {"order_id", "region"}));
+        @SuppressWarnings("unchecked")
+        TypeSerializer<Tuple2<RowData, Integer>> tupleSerializer =
+                (TypeSerializer<Tuple2<RowData, Integer>>)
+                        (TypeSerializer<?>)
+                                new TupleTypeInfo<>(recordType, Types.INT)
+                                        .createSerializer(new ExecutionConfig());
+        StateInspectSchema schema =
+                StateInspectSchema.forMap(
+                        "left-records",
+                        "left-records",
+                        false,
+                        stateKeySerializer,
+                        VoidNamespaceSerializer.INSTANCE,
+                        recordSerializer,
+                        tupleSerializer);
+        StateInspectType tupleType =
+                StateInspectType.tuple(
+                        Arrays.asList(
+                                new StateInspectField("f0", rowType("order_id", "region")),
+                                new StateInspectField("f1", StateInspectType.scalar("INT"))));
+        InspectTarget target =
+                semanticTarget(
+                        schema,
+                        StateInspectSemanticSchema.forMap(
+                                rowType("f0"),
+                                StateInspectType.unknown(),
+                                rowType("order_id", "region"),
+                                tupleType));
+        byte[] stateKey = serialize(stateKeySerializer, GenericRowData.of(7L));
+        byte[] mapKey =
+                serialize(recordSerializer, GenericRowData.of(100L, StringData.fromString("apac")));
+
+        StateInspectDecoder.DecodedRow row =
+                StateInspectDecoder.decode(
+                        target,
+                        mapKeyWithVoidNamespace(schema, stateKey, mapKey),
+                        new byte[][] {
+                            serialize(
+                                    tupleSerializer,
+                                    Tuple2.of(
+                                            GenericRowData.of(100L, StringData.fromString("apac")),
+                                            2))
+                        });
+
+        assertNull(row.decodeError);
+        Map<?, ?> tuple = (Map<?, ?>) row.decodedParts.get("map_value");
+        List<?> tupleFields = (List<?>) tuple.get("fields");
+        Map<?, ?> recordField = (Map<?, ?>) tupleFields.get(0);
+        List<?> recordFields = (List<?>) recordField.get("fields");
+        assertEquals(100L, ((Map<?, ?>) recordFields.get(0)).get("value"));
+        assertEquals("apac", ((Map<?, ?>) recordFields.get(1)).get("value"));
+        assertEquals(2, ((Map<?, ?>) tupleFields.get(1)).get("value"));
     }
 
     @Test
@@ -346,6 +551,40 @@ class StateInspectDecoderTest {
                 null);
     }
 
+    private static InspectTarget semanticTarget(
+            StateInspectSchema schema, StateInspectSemanticSchema semanticSchema) {
+        return new InspectTarget(
+                schema.stateName(),
+                schema.stateName(),
+                "state",
+                schema.columnFamily(),
+                false,
+                schema.stateKind().name(),
+                java.util.Collections.emptyMap(),
+                schema,
+                semanticSchema,
+                null);
+    }
+
+    private static StateInspectType rowType(String... fieldNames) {
+        List<StateInspectField> fields = new ArrayList<>(fieldNames.length);
+        for (String fieldName : fieldNames) {
+            String logicalType =
+                    "region".equals(fieldName) || "tier".equals(fieldName)
+                            ? "VARCHAR(2147483647)"
+                            : "BIGINT NOT NULL";
+            fields.add(new StateInspectField(fieldName, StateInspectType.scalar(logicalType)));
+        }
+        return StateInspectType.row(fields);
+    }
+
+    private static Object semanticFieldValue(
+            Map<String, Object> decodedParts, String partName, int fieldIndex) {
+        Map<?, ?> part = (Map<?, ?>) decodedParts.get(partName);
+        List<?> fields = (List<?>) part.get("fields");
+        return ((Map<?, ?>) fields.get(fieldIndex)).get("value");
+    }
+
     private static byte[] keyAndNamespace(String key, String namespace) throws Exception {
         byte[] keyBytes = serialize(StringSerializer.INSTANCE, key);
         byte[] namespaceBytes = serialize(StringSerializer.INSTANCE, namespace);
@@ -383,6 +622,13 @@ class StateInspectDecoderTest {
         return output.getCopyOfBuffer();
     }
 
+    private static byte[] keyWithVoidNamespace(byte[] keyBytes) throws Exception {
+        DataOutputSerializer output = new DataOutputSerializer(keyBytes.length + 1);
+        output.write(keyBytes);
+        output.writeByte(0);
+        return output.getCopyOfBuffer();
+    }
+
     private static byte[] mapKey(String key, String namespace, String mapKey) throws Exception {
         return mapKey(key, namespace, serialize(StringSerializer.INSTANCE, mapKey));
     }
@@ -410,6 +656,22 @@ class StateInspectDecoderTest {
         output.writeByte(0);
         output.write(mapKeyBytes);
         output.writeInt(keyBytes.length);
+        return output.getCopyOfBuffer();
+    }
+
+    private static byte[] mapKeyWithVoidNamespace(
+            StateInspectSchema schema, byte[] stateKeyBytes, byte[] mapKeyBytes) throws Exception {
+        DataOutputSerializer output = new DataOutputSerializer(128);
+        output.write(stateKeyBytes);
+        output.writeByte(0);
+        output.writeByte(0);
+        output.write(mapKeyBytes);
+        if (schema.mapKeyLengthStored()) {
+            output.writeInt(stateKeyBytes.length);
+        }
+        if (schema.mapNamespaceLengthStored()) {
+            output.writeInt(1);
+        }
         return output.getCopyOfBuffer();
     }
 

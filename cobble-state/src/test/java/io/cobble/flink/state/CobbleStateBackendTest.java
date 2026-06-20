@@ -17,6 +17,7 @@ import io.cobble.flink.common.inspect.InspectSchemaRegistryLayout;
 import io.cobble.flink.common.inspect.StateInspectSchema;
 import io.cobble.flink.common.inspect.StateInspectSchemaStore;
 import io.cobble.flink.common.inspect.StateInspectSemanticSchema;
+import io.cobble.flink.common.inspect.StateInspectType;
 import io.cobble.flink.common.inspect.StateKind;
 import io.cobble.structured.Schema;
 
@@ -1720,6 +1721,34 @@ class CobbleStateBackendTest {
         // Different bytes → different hash (with overwhelming probability).
         String hash3 = InspectSchemaRegistryLayout.sha256(new byte[] {5, 6, 7, 8});
         assertFalse(hash1.equals(hash3));
+    }
+
+    @Test
+    void mergingSubtaskSchemasKeepsSemanticMetadata() {
+        StateInspectSchema schema =
+                StateInspectSchema.forValue(
+                        "join-state",
+                        "join-state",
+                        false,
+                        IntSerializer.INSTANCE,
+                        StringSerializer.INSTANCE,
+                        StringSerializer.INSTANCE);
+        StateInspectSemanticSchema semanticSchema =
+                StateInspectSemanticSchema.forValue(
+                        StateInspectType.scalar("INT"),
+                        StateInspectType.scalar("VARCHAR"),
+                        StateInspectType.scalar("VARCHAR"));
+        Map<String, StateInspectSemanticSchema> semanticSchemas = new LinkedHashMap<>();
+        semanticSchemas.put("join-state", semanticSchema);
+
+        StateInspectSchemaStore merged =
+                CobbleCompletedCheckpointStore.mergeSchemaStores(
+                        Collections.singletonList(
+                                new StateInspectSchemaStore(
+                                        Collections.singletonList(schema), semanticSchemas)));
+
+        assertEquals(1, merged.schemas().size());
+        assertEquals(semanticSchema, merged.semanticSchema("join-state"));
     }
 
     @Test

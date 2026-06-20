@@ -54,6 +54,14 @@
               Columns
               <input id="columns" placeholder="0 or 0,1" />
             </label>
+            <div id="state-field-table-control" class="field-table-control hidden">
+              <label for="state-field-table">
+                <span>Field table</span>
+                <input id="state-field-table" type="checkbox" checked />
+              </label>
+              <button id="state-field-table-help-button" class="help-icon" type="button" aria-label="Field table help" aria-describedby="state-field-table-help-tooltip" title="Expand state key, namespace, map key, and value into schema-defined columns when metadata is available.">?</button>
+              <div id="state-field-table-help-tooltip" class="help-tooltip" role="tooltip">Expand state key, namespace, map key, and value into schema-defined columns when metadata is available.</div>
+            </div>
           </div>
           <div id="refresh-controls" class="refresh-row">
             <label class="checkbox-label">
@@ -86,6 +94,7 @@
                 <input id="prefix" placeholder="UTF-8 prefix" />
               </label>
             </div>
+            <div id="state-semantic-key-control" class="state-semantic-key-filter hidden"></div>
             <div id="sink-key-control" class="sink-key-filter hidden">
               <div class="sink-key-filter-header">
                 <span>Key prefix (enter in key order)</span>
@@ -145,6 +154,6 @@
         </section>
       </main>
     </div>
-    <script src="/app.js?v=9"></script>
+    <script src="/app.js?v=15"></script>
   </body>
 </html>

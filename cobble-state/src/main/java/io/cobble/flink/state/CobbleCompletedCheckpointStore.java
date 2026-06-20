@@ -6,6 +6,7 @@ import io.cobble.GlobalSnapshot;
 import io.cobble.ShardSnapshot;
 import io.cobble.flink.common.inspect.StateInspectSchema;
 import io.cobble.flink.common.inspect.StateInspectSchemaStore;
+import io.cobble.flink.common.inspect.StateInspectSemanticSchema;
 
 import org.apache.flink.api.common.JobStatus;
 import org.apache.flink.core.fs.FSDataInputStream;
@@ -375,6 +376,46 @@ final class CobbleCompletedCheckpointStore implements CompletedCheckpointStore {
         return totalBuckets;
     }
 
+    static StateInspectSchemaStore mergeSchemaStores(List<StateInspectSchemaStore> stores) {
+        if (stores.isEmpty()) {
+            return StateInspectSchemaStore.empty();
+        }
+        Map<String, StateInspectSchema> merged = new LinkedHashMap<>();
+        Map<String, StateInspectSemanticSchema> mergedSemanticSchemas = new LinkedHashMap<>();
+        for (StateInspectSchemaStore store : stores) {
+            for (StateInspectSchema schema : store.schemas()) {
+                StateInspectSchema existing = merged.putIfAbsent(schemaKey(schema), schema);
+                if (existing != null && !existing.equals(schema)) {
+                    LOG.warn(
+                            "Inspect schema mismatch for {} '{}' across subtasks: "
+                                    + "keeping first registration, discarding divergent schema.",
+                            schema.stateKind(),
+                            schema.stateName());
+                }
+            }
+            for (Map.Entry<String, StateInspectSemanticSchema> semanticSchema :
+                    store.semanticSchemas().entrySet()) {
+                StateInspectSemanticSchema existing =
+                        mergedSemanticSchemas.putIfAbsent(
+                                semanticSchema.getKey(), semanticSchema.getValue());
+                if (existing != null && !existing.equals(semanticSchema.getValue())) {
+                    LOG.warn(
+                            "Inspect semantic schema mismatch for state '{}' across subtasks: "
+                                    + "keeping first registration, discarding divergent schema.",
+                            semanticSchema.getKey());
+                }
+            }
+        }
+        return merged.isEmpty()
+                ? StateInspectSchemaStore.empty()
+                : new StateInspectSchemaStore(
+                        new ArrayList<>(merged.values()), mergedSemanticSchemas);
+    }
+
+    private static String schemaKey(StateInspectSchema schema) {
+        return schema.stateKind().name() + ":" + schema.stateName();
+    }
+
     private Config createCoordinatorConfig(String checkpointExternalPointer, String operatorIdHex) {
         String externalPointer = checkpointExternalPointer;
         if (externalPointer == null || externalPointer.trim().isEmpty()) {
@@ -511,30 +552,7 @@ final class CobbleCompletedCheckpointStore implements CompletedCheckpointStore {
 
         private static StateInspectSchemaStore mergeSchemaStores(
                 List<StateInspectSchemaStore> stores) {
-            if (stores.isEmpty()) {
-                return StateInspectSchemaStore.empty();
-            }
-            Map<String, StateInspectSchema> merged = new LinkedHashMap<>();
-            for (StateInspectSchemaStore store : stores) {
-                for (StateInspectSchema schema : store.schemas()) {
-                    StateInspectSchema existing = merged.putIfAbsent(schemaKey(schema), schema);
-                    if (existing != null && !existing.equals(schema)) {
-                        LOG.warn(
-                                "Inspect schema mismatch for {} '{}' across subtasks: "
-                                        + "keeping first registration, "
-                                        + "discarding divergent schema.",
-                                schema.stateKind(),
-                                schema.stateName());
-                    }
-                }
-            }
-            return merged.isEmpty()
-                    ? StateInspectSchemaStore.empty()
-                    : new StateInspectSchemaStore(new ArrayList<>(merged.values()));
-        }
-
-        private static String schemaKey(StateInspectSchema schema) {
-            return schema.stateKind().name() + ":" + schema.stateName();
+            return CobbleCompletedCheckpointStore.mergeSchemaStores(stores);
         }
     }
 

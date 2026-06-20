@@ -7,6 +7,8 @@ import io.cobble.Reader;
 import io.cobble.ScanCursor;
 import io.cobble.ScanOptions;
 import io.cobble.ShardSnapshot;
+import io.cobble.flink.common.inspect.StateInspectSemanticSchema;
+import io.cobble.flink.common.inspect.StateInspectType;
 
 import com.google.gson.FieldNamingPolicy;
 import com.google.gson.Gson;
@@ -755,7 +757,8 @@ public final class CobbleFlinkMonitorServer {
             return sinkKeyFilter != null
                     || (stateFilter != null
                             && (stateFilter.mapKeyPrefix != null
-                                    || stateFilter.mapKeyBytesPrefix != null));
+                                    || stateFilter.mapKeyBytesPrefix != null
+                                    || stateFilter.hasSemanticPartFilters()));
         }
 
         private int currentTotalBuckets() {
@@ -904,6 +907,9 @@ public final class CobbleFlinkMonitorServer {
             if (decoded.decodedValue != null) {
                 item.put("decoded_value", decoded.decodedValue);
             }
+            if (decoded.decodedParts != null) {
+                item.put("decoded_parts", decoded.decodedParts);
+            }
             if (decoded.decodeError != null) {
                 item.put("decode_error", decoded.decodeError);
             }
@@ -920,13 +926,44 @@ public final class CobbleFlinkMonitorServer {
                     decodeOptionalB64(first(params, "namespace_b64", null), "namespace_b64");
             byte[] mapKeyBytes =
                     decodeOptionalB64(first(params, "map_key_b64", null), "map_key_b64");
+            SemanticPartFilter stateKeyFields =
+                    semanticPartFilter(params, "state_key_field", "state key", target, "state_key");
+            SemanticPartFilter namespaceFields =
+                    semanticPartFilter(params, "namespace_field", "namespace", target, "namespace");
+            SemanticPartFilter mapKeyFields =
+                    semanticPartFilter(params, "map_key_field", "map key", target, "map_key");
+            boolean hasRawFilter =
+                    key != null
+                            || namespace != null
+                            || mapKey != null
+                            || keyBytes != null
+                            || namespaceBytes != null
+                            || mapKeyBytes != null;
+            boolean hasSemanticFilter =
+                    stateKeyFields != null || namespaceFields != null || mapKeyFields != null;
+            if (hasRawFilter && hasSemanticFilter) {
+                throw new InputException(
+                        "Raw state key filters cannot be combined with field table filters");
+            }
             if (key == null
                     && namespace == null
                     && mapKey == null
                     && keyBytes == null
                     && namespaceBytes == null
-                    && mapKeyBytes == null) {
+                    && mapKeyBytes == null
+                    && !hasSemanticFilter) {
                 return null;
+            }
+            if (hasSemanticFilter) {
+                if ((namespaceFields != null || mapKeyFields != null) && stateKeyFields == null) {
+                    throw new InputException(
+                            "State key fields are required before namespace or map key fields");
+                }
+                if (!"MAP".equals(target.stateKind) && mapKeyFields != null) {
+                    throw new InputException("Map key fields are only valid for MapState");
+                }
+                return new StateRowFilter(
+                        null, null, null, stateKeyFields, namespaceFields, mapKeyFields);
             }
             if (!"MAP".equals(target.stateKind) && (mapKey != null || mapKeyBytes != null)) {
                 throw new InputException("Map key filter is only valid for MapState");
@@ -935,9 +972,45 @@ public final class CobbleFlinkMonitorServer {
                 byte[] prefix =
                         StateInspectDecoder.encodeStateKeyPrefix(
                                 target, key, keyBytes, namespace, namespaceBytes, null, null);
-                return new StateRowFilter(prefix, mapKey, mapKeyBytes);
+                return new StateRowFilter(prefix, mapKey, mapKeyBytes, null, null, null);
             } catch (IOException e) {
                 throw new InputException(e.getMessage());
+            }
+        }
+
+        private static SemanticPartFilter semanticPartFilter(
+                Map<String, List<String>> params,
+                String parameter,
+                String label,
+                InspectTarget target,
+                String partName) {
+            List<String> values = params.get(parameter);
+            if (values == null || values.isEmpty()) {
+                return null;
+            }
+            StateInspectType type = semanticPartType(target, partName);
+            try {
+                StateInspectDecoder.validateSemanticPartFilter(type, values, label);
+                return new SemanticPartFilter(partName, type, values);
+            } catch (IOException e) {
+                throw new InputException(e.getMessage());
+            }
+        }
+
+        private static StateInspectType semanticPartType(InspectTarget target, String partName) {
+            StateInspectSemanticSchema schema = target == null ? null : target.semanticSchema;
+            if (schema == null) {
+                return null;
+            }
+            switch (partName) {
+                case "state_key":
+                    return schema.stateKey();
+                case "namespace":
+                    return schema.namespace();
+                case "map_key":
+                    return schema.mapUserKey();
+                default:
+                    return null;
             }
         }
 
@@ -1007,12 +1080,18 @@ public final class CobbleFlinkMonitorServer {
             String keyB64 = blankToNull(first(params, "state_key_b64", null));
             String namespaceB64 = blankToNull(first(params, "namespace_b64", null));
             String mapKeyB64 = blankToNull(first(params, "map_key_b64", null));
+            List<String> stateKeyFields = params.get("state_key_field");
+            List<String> namespaceFields = params.get("namespace_field");
+            List<String> mapKeyFields = params.get("map_key_field");
             if (key == null
                     && namespace == null
                     && mapKey == null
                     && keyB64 == null
                     && namespaceB64 == null
-                    && mapKeyB64 == null) {
+                    && mapKeyB64 == null
+                    && (stateKeyFields == null || stateKeyFields.isEmpty())
+                    && (namespaceFields == null || namespaceFields.isEmpty())
+                    && (mapKeyFields == null || mapKeyFields.isEmpty())) {
                 return output;
             }
             output.put("state_kind", target.stateKind);
@@ -1022,6 +1101,15 @@ public final class CobbleFlinkMonitorServer {
             putIfPresent(output, "state_key_b64", keyB64);
             putIfPresent(output, "namespace_b64", namespaceB64);
             putIfPresent(output, "map_key_b64", mapKeyB64);
+            if (stateKeyFields != null && !stateKeyFields.isEmpty()) {
+                output.put("state_key_field", stateKeyFields);
+            }
+            if (namespaceFields != null && !namespaceFields.isEmpty()) {
+                output.put("namespace_field", namespaceFields);
+            }
+            if (mapKeyFields != null && !mapKeyFields.isEmpty()) {
+                output.put("map_key_field", mapKeyFields);
+            }
             return output;
         }
 
@@ -1079,29 +1167,62 @@ public final class CobbleFlinkMonitorServer {
             private final byte[] prefix;
             private final String mapKeyPrefix;
             private final byte[] mapKeyBytesPrefix;
+            private final SemanticPartFilter stateKeyFields;
+            private final SemanticPartFilter namespaceFields;
+            private final SemanticPartFilter mapKeyFields;
 
-            private StateRowFilter(byte[] prefix, String mapKeyPrefix, byte[] mapKeyBytesPrefix) {
+            private StateRowFilter(
+                    byte[] prefix,
+                    String mapKeyPrefix,
+                    byte[] mapKeyBytesPrefix,
+                    SemanticPartFilter stateKeyFields,
+                    SemanticPartFilter namespaceFields,
+                    SemanticPartFilter mapKeyFields) {
                 this.prefix = prefix == null ? new byte[0] : prefix;
                 this.mapKeyPrefix = mapKeyPrefix;
                 this.mapKeyBytesPrefix = mapKeyBytesPrefix;
+                this.stateKeyFields = stateKeyFields;
+                this.namespaceFields = namespaceFields;
+                this.mapKeyFields = mapKeyFields;
             }
 
             private boolean matches(Map<String, Object> item, InspectTarget target, byte[] rowKey) {
-                if (mapKeyPrefix == null && mapKeyBytesPrefix == null) {
-                    return true;
-                }
                 if (mapKeyPrefix != null && !decodedMapKeyStartsWith(item, mapKeyPrefix)) {
                     return false;
                 }
                 if (mapKeyBytesPrefix != null) {
                     try {
-                        return StateInspectDecoder.mapKeyBytesStartsWith(
-                                target, rowKey, mapKeyBytesPrefix);
+                        if (!StateInspectDecoder.mapKeyBytesStartsWith(
+                                target, rowKey, mapKeyBytesPrefix)) {
+                            return false;
+                        }
                     } catch (IOException e) {
                         return false;
                     }
                 }
-                return true;
+                if (!hasSemanticPartFilters()) {
+                    return true;
+                }
+                Object decoded = item.get("decoded_parts");
+                if (!(decoded instanceof Map)) {
+                    return false;
+                }
+                @SuppressWarnings("unchecked")
+                Map<String, Object> decodedParts = (Map<String, Object>) decoded;
+                return matches(decodedParts, stateKeyFields)
+                        && matches(decodedParts, namespaceFields)
+                        && matches(decodedParts, mapKeyFields);
+            }
+
+            private boolean hasSemanticPartFilters() {
+                return stateKeyFields != null || namespaceFields != null || mapKeyFields != null;
+            }
+
+            private static boolean matches(
+                    Map<String, Object> decodedParts, SemanticPartFilter filter) {
+                return filter == null
+                        || StateInspectDecoder.matchesSemanticPartFilter(
+                                decodedParts, filter.partName, filter.type, filter.values);
             }
 
             @SuppressWarnings("unchecked")
@@ -1124,6 +1245,19 @@ public final class CobbleFlinkMonitorServer {
                     return b64 != null && String.valueOf(b64).startsWith(mapKeyPrefix);
                 }
                 return String.valueOf(value).startsWith(mapKeyPrefix);
+            }
+        }
+
+        private static final class SemanticPartFilter {
+            private final String partName;
+            private final StateInspectType type;
+            private final List<String> values;
+
+            private SemanticPartFilter(
+                    String partName, StateInspectType type, List<String> values) {
+                this.partName = partName;
+                this.type = type;
+                this.values = Collections.unmodifiableList(new ArrayList<>(values));
             }
         }
 
