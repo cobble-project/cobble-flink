@@ -16,6 +16,7 @@ import io.cobble.ShardSnapshot;
 import io.cobble.flink.common.inspect.InspectSchemaRegistryLayout;
 import io.cobble.flink.common.inspect.StateInspectSchema;
 import io.cobble.flink.common.inspect.StateInspectSchemaStore;
+import io.cobble.flink.common.inspect.StateInspectSemanticSchema;
 import io.cobble.flink.common.inspect.StateKind;
 import io.cobble.structured.Schema;
 
@@ -1603,6 +1604,13 @@ class CobbleStateBackendTest {
 
             LinkedHashMap<String, StateInspectSchema> schemas = backend.getStateInspectSchemas();
             assertEquals(3, schemas.size());
+            LinkedHashMap<String, StateInspectSemanticSchema> semanticSchemas =
+                    backend.getStateInspectSemanticSchemas();
+            assertEquals(3, semanticSchemas.size());
+            assertEquals("INT", semanticSchemas.get("val-state").value().logicalType());
+            assertEquals("INT", semanticSchemas.get("list-state").listElement().logicalType());
+            assertEquals("INT", semanticSchemas.get("map-state").mapUserKey().logicalType());
+            assertEquals("VARCHAR", semanticSchemas.get("map-state").mapUserValue().logicalType());
 
             StateInspectSchema valSchema = schemas.get("val-state");
             assertEquals(StateKind.VALUE, valSchema.stateKind());

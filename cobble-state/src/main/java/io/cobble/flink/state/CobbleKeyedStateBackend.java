@@ -4,6 +4,7 @@ import io.cobble.ColumnFamilyOptions;
 import io.cobble.Config;
 import io.cobble.flink.common.inspect.StateInspectSchema;
 import io.cobble.flink.common.inspect.StateInspectSchemaStore;
+import io.cobble.flink.common.inspect.StateInspectSemanticSchema;
 import io.cobble.structured.Db;
 import io.cobble.structured.Schema;
 import io.cobble.structured.StructuredSchemaBuilder;
@@ -73,6 +74,7 @@ final class CobbleKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
     private final Db cobbleDb;
     private final Map<String, StateDescriptor.Type> stateTypes;
     private final LinkedHashMap<String, StateInspectSchema> stateInspectSchemas;
+    private final LinkedHashMap<String, StateInspectSemanticSchema> stateInspectSemanticSchemas;
     private final PriorityQueueSetFactory priorityQueueFactory;
     private final HeapPriorityQueuesManager heapPriorityQueuesManager;
     private final List<AbstractCobbleState<?, ?, ?>> stateResources;
@@ -113,6 +115,7 @@ final class CobbleKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
         this.cobbleDb = cobbleDb;
         this.stateTypes = new HashMap<>();
         this.stateInspectSchemas = new LinkedHashMap<>();
+        this.stateInspectSemanticSchemas = new LinkedHashMap<>();
         this.priorityQueueFactory =
                 createPriorityQueueFactory(
                         cobbleDb,
@@ -362,6 +365,14 @@ final class CobbleKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
     @VisibleForTesting
     LinkedHashMap<String, StateInspectSchema> getStateInspectSchemas() {
         return stateInspectSchemas;
+    }
+
+    /**
+     * Exposes the in-memory SQL semantic schemas for tests. Persistence follows in a later step.
+     */
+    @VisibleForTesting
+    LinkedHashMap<String, StateInspectSemanticSchema> getStateInspectSemanticSchemas() {
+        return stateInspectSemanticSchemas;
     }
 
     @VisibleForTesting
@@ -626,6 +637,10 @@ final class CobbleKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
                         keySerializer,
                         namespaceSerializer,
                         valueDescriptor.getSerializer()));
+        stateInspectSemanticSchemas.putIfAbsent(
+                stateName,
+                StateInspectSemanticSchemaExtractor.forValue(
+                        keySerializer, namespaceSerializer, valueDescriptor));
     }
 
     private void registerListSchema(
@@ -642,6 +657,10 @@ final class CobbleKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
                         keySerializer,
                         namespaceSerializer,
                         listDescriptor.getElementSerializer()));
+        stateInspectSemanticSchemas.putIfAbsent(
+                stateName,
+                StateInspectSemanticSchemaExtractor.forList(
+                        keySerializer, namespaceSerializer, listDescriptor));
     }
 
     @SuppressWarnings("unchecked")
@@ -662,6 +681,10 @@ final class CobbleKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
                         namespaceSerializer,
                         keySer,
                         valueSer));
+        stateInspectSemanticSchemas.putIfAbsent(
+                stateName,
+                StateInspectSemanticSchemaExtractor.forMap(
+                        keySerializer, namespaceSerializer, mapDescriptor));
     }
 
     private void registerTimerSchema(String stateName, TypeSerializer<?> timerSerializer) {
