@@ -2,6 +2,7 @@ package io.cobble.flink.monitor;
 
 import io.cobble.GlobalSnapshot;
 import io.cobble.flink.common.inspect.StateInspectSchema;
+import io.cobble.flink.common.inspect.StateInspectSemanticSchema;
 
 import java.util.ArrayList;
 import java.util.Collections;
@@ -50,7 +51,9 @@ final class StateInspectTargetBuilder {
             // State targets from schema entries that match a column family.
             for (StateInspectSchema schema : schemaResult.store.schemas()) {
                 if (columnFamilyIds.containsKey(schema.columnFamily())) {
-                    targets.add(schemaTarget(schema));
+                    targets.add(
+                            schemaTarget(
+                                    schema, schemaResult.store.semanticSchema(schema.stateName())));
                 }
             }
 
@@ -86,7 +89,8 @@ final class StateInspectTargetBuilder {
         return rawTargets(snapshot);
     }
 
-    private static InspectTarget schemaTarget(StateInspectSchema schema) {
+    private static InspectTarget schemaTarget(
+            StateInspectSchema schema, StateInspectSemanticSchema semanticSchema) {
         Map<String, String> serializerClasses = new LinkedHashMap<>();
         serializerClasses.put("key", schema.keySerializer().serializerClassName());
         serializerClasses.put("namespace", schema.namespaceSerializer().serializerClassName());
@@ -113,6 +117,7 @@ final class StateInspectTargetBuilder {
                     schema.stateKind().name(),
                     serializerClasses,
                     schema,
+                    semanticSchema,
                     null);
         }
         return new InspectTarget(
@@ -124,6 +129,7 @@ final class StateInspectTargetBuilder {
                 schema.stateKind().name(),
                 serializerClasses,
                 schema,
+                semanticSchema,
                 null);
     }
 

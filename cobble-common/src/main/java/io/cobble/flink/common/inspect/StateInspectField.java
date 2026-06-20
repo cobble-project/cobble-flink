@@ -1,5 +1,9 @@
 package io.cobble.flink.common.inspect;
 
+import org.apache.flink.core.memory.DataInputView;
+import org.apache.flink.core.memory.DataOutputView;
+
+import java.io.IOException;
 import java.util.Objects;
 
 /** A named child of a structured {@link StateInspectType}. */
@@ -22,6 +26,15 @@ public final class StateInspectField {
 
     public StateInspectType type() {
         return type;
+    }
+
+    void write(DataOutputView output) throws IOException {
+        output.writeUTF(name);
+        type.write(output);
+    }
+
+    static StateInspectField read(DataInputView input) throws IOException {
+        return new StateInspectField(input.readUTF(), StateInspectType.read(input));
     }
 
     @Override

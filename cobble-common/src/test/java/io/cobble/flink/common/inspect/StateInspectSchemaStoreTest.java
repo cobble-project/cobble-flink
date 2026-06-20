@@ -28,6 +28,8 @@ import java.io.IOException;
 import java.nio.file.Path;
 import java.util.Arrays;
 import java.util.Collections;
+import java.util.LinkedHashMap;
+import java.util.Map;
 
 /** Round-trip and restore tests for the inspect schema model and store. */
 class StateInspectSchemaStoreTest {
@@ -141,6 +143,43 @@ class StateInspectSchemaStoreTest {
                 out.valueSerializer().restoreSerializer(getClass().getClassLoader());
         assertNotNull(valueSerializer);
         assertEquals("hello", roundTripString(valueSerializer, "hello"));
+    }
+
+    @Test
+    void semanticSchemasRoundTripByStateName() throws IOException {
+        StateInspectSchema schema =
+                StateInspectSchema.forValue(
+                        "left-records",
+                        "left-records",
+                        false,
+                        IntSerializer.INSTANCE,
+                        StringSerializer.INSTANCE,
+                        StringSerializer.INSTANCE);
+        StateInspectSemanticSchema semanticSchema =
+                StateInspectSemanticSchema.forValue(
+                        StateInspectType.row(
+                                Arrays.asList(
+                                        new StateInspectField(
+                                                "f0", StateInspectType.scalar("BIGINT")))),
+                        StateInspectType.unknown(),
+                        StateInspectType.row(
+                                Arrays.asList(
+                                        new StateInspectField(
+                                                "order_id", StateInspectType.scalar("BIGINT")),
+                                        new StateInspectField(
+                                                "region", StateInspectType.scalar("VARCHAR")))));
+        Map<String, StateInspectSemanticSchema> semanticSchemas = new LinkedHashMap<>();
+        semanticSchemas.put("left-records", semanticSchema);
+
+        StateInspectSchemaStore restored =
+                roundTrip(
+                        new StateInspectSchemaStore(
+                                Collections.singletonList(schema), semanticSchemas));
+
+        StateInspectSemanticSchema restoredSemanticSchema = restored.semanticSchema("left-records");
+        assertEquals(semanticSchema, restoredSemanticSchema);
+        assertEquals("order_id", restoredSemanticSchema.value().fields().get(0).name());
+        assertTrue(restored.semanticSchemas().containsKey("left-records"));
     }
 
     @Test

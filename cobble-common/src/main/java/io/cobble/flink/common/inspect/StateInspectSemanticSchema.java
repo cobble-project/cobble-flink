@@ -1,5 +1,9 @@
 package io.cobble.flink.common.inspect;
 
+import org.apache.flink.core.memory.DataInputView;
+import org.apache.flink.core.memory.DataOutputView;
+
+import java.io.IOException;
 import java.util.Objects;
 
 /** Optional semantic shapes for the logical parts of one keyed state. */
@@ -81,6 +85,37 @@ public final class StateInspectSemanticSchema {
                 && listElement == null
                 && mapUserKey == null
                 && mapUserValue == null;
+    }
+
+    void write(DataOutputView output) throws IOException {
+        writeNullableType(output, stateKey);
+        writeNullableType(output, namespace);
+        writeNullableType(output, value);
+        writeNullableType(output, listElement);
+        writeNullableType(output, mapUserKey);
+        writeNullableType(output, mapUserValue);
+    }
+
+    static StateInspectSemanticSchema read(DataInputView input) throws IOException {
+        return new StateInspectSemanticSchema(
+                readNullableType(input),
+                readNullableType(input),
+                readNullableType(input),
+                readNullableType(input),
+                readNullableType(input),
+                readNullableType(input));
+    }
+
+    private static void writeNullableType(DataOutputView output, StateInspectType type)
+            throws IOException {
+        output.writeBoolean(type != null);
+        if (type != null) {
+            type.write(output);
+        }
+    }
+
+    private static StateInspectType readNullableType(DataInputView input) throws IOException {
+        return input.readBoolean() ? StateInspectType.read(input) : null;
     }
 
     @Override

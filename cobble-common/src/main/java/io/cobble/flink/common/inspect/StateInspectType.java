@@ -1,5 +1,9 @@
 package io.cobble.flink.common.inspect;
 
+import org.apache.flink.core.memory.DataInputView;
+import org.apache.flink.core.memory.DataOutputView;
+
+import java.io.IOException;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
@@ -75,6 +79,65 @@ public final class StateInspectType {
 
     public StateInspectType elementType() {
         return elementType;
+    }
+
+    void write(DataOutputView output) throws IOException {
+        output.writeInt(kind.ordinal());
+        switch (kind) {
+            case SCALAR:
+                output.writeUTF(logicalType);
+                break;
+            case ROW:
+            case TUPLE:
+                output.writeInt(fields.size());
+                for (StateInspectField field : fields) {
+                    field.write(output);
+                }
+                break;
+            case LIST:
+                elementType.write(output);
+                break;
+            case UNKNOWN:
+                break;
+        }
+    }
+
+    static StateInspectType read(DataInputView input) throws IOException {
+        StateInspectTypeKind kind = typeKind(input.readInt());
+        switch (kind) {
+            case SCALAR:
+                return scalar(input.readUTF());
+            case ROW:
+                return row(readFields(input));
+            case TUPLE:
+                return tuple(readFields(input));
+            case LIST:
+                return list(read(input));
+            case UNKNOWN:
+                return unknown();
+            default:
+                throw new IOException("Unsupported state inspect type kind: " + kind);
+        }
+    }
+
+    private static StateInspectTypeKind typeKind(int ordinal) throws IOException {
+        StateInspectTypeKind[] kinds = StateInspectTypeKind.values();
+        if (ordinal < 0 || ordinal >= kinds.length) {
+            throw new IOException("Unknown state inspect type kind ordinal: " + ordinal);
+        }
+        return kinds[ordinal];
+    }
+
+    private static List<StateInspectField> readFields(DataInputView input) throws IOException {
+        int count = input.readInt();
+        if (count <= 0) {
+            throw new IOException("Structured state inspect type requires fields");
+        }
+        List<StateInspectField> fields = new ArrayList<>(count);
+        for (int index = 0; index < count; index++) {
+            fields.add(StateInspectField.read(input));
+        }
+        return fields;
     }
 
     private static List<StateInspectField> immutableCopy(List<StateInspectField> fields) {

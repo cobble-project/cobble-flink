@@ -705,6 +705,7 @@ final class CobbleKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
         if (stateInspectSchemas.isEmpty()) {
             return StateInspectSchemaStore.empty();
         }
-        return new StateInspectSchemaStore(new ArrayList<>(stateInspectSchemas.values()));
+        return new StateInspectSchemaStore(
+                new ArrayList<>(stateInspectSchemas.values()), stateInspectSemanticSchemas);
     }
 }

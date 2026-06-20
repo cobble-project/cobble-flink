@@ -7,8 +7,11 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import io.cobble.GlobalSnapshot;
 import io.cobble.flink.common.inspect.InspectSchemaRegistryLayout;
+import io.cobble.flink.common.inspect.StateInspectField;
 import io.cobble.flink.common.inspect.StateInspectSchema;
 import io.cobble.flink.common.inspect.StateInspectSchemaStore;
+import io.cobble.flink.common.inspect.StateInspectSemanticSchema;
+import io.cobble.flink.common.inspect.StateInspectType;
 
 import org.apache.flink.api.common.typeutils.base.IntSerializer;
 import org.apache.flink.api.common.typeutils.base.StringSerializer;
@@ -21,6 +24,7 @@ import java.nio.file.Path;
 import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 
 class MonitorInspectSchemaResolverTest {
 
@@ -126,6 +130,49 @@ class MonitorInspectSchemaResolverTest {
         assertEquals("VALUE", targets.get(0).stateKind);
         assertFalse(targets.get(0).allowsColumns);
         assertEquals("timer:timer-state", targets.get(1).id);
+    }
+
+    @Test
+    void schemaTargetsExposeSemanticParts() {
+        GlobalSnapshot snapshot = new GlobalSnapshot();
+        snapshot.columnFamilyIds = new LinkedHashMap<>();
+        snapshot.columnFamilyIds.put("default", 0);
+        snapshot.columnFamilyIds.put("cf-value", 1);
+        StateInspectSemanticSchema semanticSchema =
+                StateInspectSemanticSchema.forValue(
+                        StateInspectType.row(
+                                Collections.singletonList(
+                                        new StateInspectField(
+                                                "f0", StateInspectType.scalar("BIGINT")))),
+                        StateInspectType.unknown(),
+                        StateInspectType.row(
+                                Collections.singletonList(
+                                        new StateInspectField(
+                                                "order_id", StateInspectType.scalar("BIGINT")))));
+        StateInspectSchemaStore store =
+                new StateInspectSchemaStore(
+                        Collections.singletonList(
+                                StateInspectSchema.forValue(
+                                        "value-state",
+                                        "cf-value",
+                                        false,
+                                        IntSerializer.INSTANCE,
+                                        StringSerializer.INSTANCE,
+                                        StringSerializer.INSTANCE)),
+                        Collections.singletonMap("value-state", semanticSchema));
+
+        InspectTarget target =
+                StateInspectTargetBuilder.build(
+                                snapshot,
+                                SchemaResolveResult.available(store, "event", "blob", "hash", 100L))
+                        .get(0);
+        Map<String, Object> targetJson = target.toJson();
+
+        @SuppressWarnings("unchecked")
+        Map<String, Object> parts = (Map<String, Object>) targetJson.get("semantic_parts");
+        assertEquals("ROW", ((Map<?, ?>) parts.get("state_key")).get("kind"));
+        assertEquals("UNKNOWN", ((Map<?, ?>) parts.get("namespace")).get("kind"));
+        assertEquals("ROW", ((Map<?, ?>) parts.get("value")).get("kind"));
     }
 
     @Test

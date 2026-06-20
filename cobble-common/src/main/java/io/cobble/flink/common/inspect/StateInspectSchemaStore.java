@@ -29,6 +29,7 @@ import java.util.Map;
  *   <li>state-schema count int
  *   <li>one {@link StateInspectSchema} entry per count, each written via {@link
  *       StateInspectSchema#write}
+ *   <li>semantic-schema entries keyed by state name
  * </ol>
  *
  * <p>Readers must reject unknown versions with a clear message. An empty store (count 0) is valid
@@ -42,13 +43,31 @@ public final class StateInspectSchemaStore {
     private static final int VERSION = 1;
 
     private final List<StateInspectSchema> schemas;
+    private final Map<String, StateInspectSemanticSchema> semanticSchemas;
 
     public StateInspectSchemaStore(List<StateInspectSchema> schemas) {
-        this.schemas = schemas == null ? Collections.emptyList() : schemas;
+        this(schemas, Collections.emptyMap());
+    }
+
+    public StateInspectSchemaStore(
+            List<StateInspectSchema> schemas,
+            Map<String, StateInspectSemanticSchema> semanticSchemas) {
+        this.schemas = immutableList(schemas);
+        this.semanticSchemas = immutableMap(semanticSchemas);
     }
 
     public List<StateInspectSchema> schemas() {
         return schemas;
+    }
+
+    /** Optional semantic shapes keyed by their state name. */
+    public Map<String, StateInspectSemanticSchema> semanticSchemas() {
+        return semanticSchemas;
+    }
+
+    /** Returns semantic shape metadata for one state, or {@code null} when unavailable. */
+    public StateInspectSemanticSchema semanticSchema(String stateName) {
+        return semanticSchemas.get(stateName);
     }
 
     /** Indexes schemas by state name, last write wins on duplicate names. */
@@ -73,7 +92,7 @@ public final class StateInspectSchemaStore {
     }
 
     private static final StateInspectSchemaStore EMPTY =
-            new StateInspectSchemaStore(Collections.emptyList());
+            new StateInspectSchemaStore(Collections.emptyList(), Collections.emptyMap());
 
     /** Serializes this store to a fresh byte array, suitable for writing to a sidecar file. */
     public byte[] toBytes() throws IOException {
@@ -90,6 +109,12 @@ public final class StateInspectSchemaStore {
         output.writeInt(schemas.size());
         for (StateInspectSchema schema : schemas) {
             schema.write(output);
+        }
+        List<String> semanticStateNames = semanticStateNamesInSchemaOrder();
+        output.writeInt(semanticStateNames.size());
+        for (String stateName : semanticStateNames) {
+            output.writeUTF(stateName);
+            semanticSchemas.get(stateName).write(output);
         }
     }
 
@@ -162,6 +187,41 @@ public final class StateInspectSchemaStore {
         for (int i = 0; i < count; i++) {
             schemas.add(StateInspectSchema.read(input));
         }
-        return new StateInspectSchemaStore(schemas);
+        int semanticCount = input.readInt();
+        if (semanticCount < 0) {
+            throw new IOException("Negative state semantic schema count: " + semanticCount);
+        }
+        Map<String, StateInspectSemanticSchema> semanticSchemas =
+                new LinkedHashMap<>(semanticCount);
+        for (int index = 0; index < semanticCount; index++) {
+            semanticSchemas.put(input.readUTF(), StateInspectSemanticSchema.read(input));
+        }
+        return new StateInspectSchemaStore(schemas, semanticSchemas);
+    }
+
+    private List<String> semanticStateNamesInSchemaOrder() {
+        List<String> names = new ArrayList<>();
+        for (StateInspectSchema schema : schemas) {
+            String stateName = schema.stateName();
+            if (semanticSchemas.containsKey(stateName)) {
+                names.add(stateName);
+            }
+        }
+        return names;
+    }
+
+    private static List<StateInspectSchema> immutableList(List<StateInspectSchema> schemas) {
+        if (schemas == null || schemas.isEmpty()) {
+            return Collections.emptyList();
+        }
+        return Collections.unmodifiableList(new ArrayList<>(schemas));
+    }
+
+    private static Map<String, StateInspectSemanticSchema> immutableMap(
+            Map<String, StateInspectSemanticSchema> semanticSchemas) {
+        if (semanticSchemas == null || semanticSchemas.isEmpty()) {
+            return Collections.emptyMap();
+        }
+        return Collections.unmodifiableMap(new LinkedHashMap<>(semanticSchemas));
     }
 }

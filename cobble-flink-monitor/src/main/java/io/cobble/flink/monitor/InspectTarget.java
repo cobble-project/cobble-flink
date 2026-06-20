@@ -2,7 +2,10 @@ package io.cobble.flink.monitor;
 
 import io.cobble.flink.common.inspect.SinkInspectField;
 import io.cobble.flink.common.inspect.SinkInspectSchema;
+import io.cobble.flink.common.inspect.StateInspectField;
 import io.cobble.flink.common.inspect.StateInspectSchema;
+import io.cobble.flink.common.inspect.StateInspectSemanticSchema;
+import io.cobble.flink.common.inspect.StateInspectType;
 
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
@@ -18,6 +21,7 @@ final class InspectTarget {
     final String stateKind;
     final Map<String, String> serializerClasses;
     final StateInspectSchema schema;
+    final StateInspectSemanticSchema semanticSchema;
     final SinkInspectSchema sinkSchema;
 
     InspectTarget(
@@ -30,6 +34,30 @@ final class InspectTarget {
             Map<String, String> serializerClasses,
             StateInspectSchema schema,
             SinkInspectSchema sinkSchema) {
+        this(
+                id,
+                name,
+                kind,
+                columnFamily,
+                allowsColumns,
+                stateKind,
+                serializerClasses,
+                schema,
+                null,
+                sinkSchema);
+    }
+
+    InspectTarget(
+            String id,
+            String name,
+            String kind,
+            String columnFamily,
+            boolean allowsColumns,
+            String stateKind,
+            Map<String, String> serializerClasses,
+            StateInspectSchema schema,
+            StateInspectSemanticSchema semanticSchema,
+            SinkInspectSchema sinkSchema) {
         this.id = id;
         this.name = name;
         this.kind = kind;
@@ -38,6 +66,7 @@ final class InspectTarget {
         this.stateKind = stateKind;
         this.serializerClasses = serializerClasses;
         this.schema = schema;
+        this.semanticSchema = semanticSchema;
         this.sinkSchema = sinkSchema;
     }
 
@@ -79,6 +108,9 @@ final class InspectTarget {
         if (serializerClasses != null && !serializerClasses.isEmpty()) {
             output.put("serializer_classes", serializerClasses);
         }
+        if (semanticSchema != null && !semanticSchema.isEmpty()) {
+            output.put("semantic_parts", semanticPartsToJson(semanticSchema));
+        }
         if (sinkSchema != null) {
             output.put("key_fields", fieldsToJson(sinkSchema.keyFields()));
             output.put("value_fields", fieldsToJson(sinkSchema.valueFields()));
@@ -96,6 +128,47 @@ final class InspectTarget {
             item.put("structured_column_index", field.structuredColumnIndex());
             item.put("role", field.role().name());
             output.add(item);
+        }
+        return output;
+    }
+
+    private static Map<String, Object> semanticPartsToJson(
+            StateInspectSemanticSchema semanticSchema) {
+        Map<String, Object> output = new LinkedHashMap<>();
+        putType(output, "state_key", semanticSchema.stateKey());
+        putType(output, "namespace", semanticSchema.namespace());
+        putType(output, "value", semanticSchema.value());
+        putType(output, "list_element", semanticSchema.listElement());
+        putType(output, "map_key", semanticSchema.mapUserKey());
+        putType(output, "map_value", semanticSchema.mapUserValue());
+        return output;
+    }
+
+    private static void putType(
+            Map<String, Object> output, String name, StateInspectType inspectType) {
+        if (inspectType != null) {
+            output.put(name, typeToJson(inspectType));
+        }
+    }
+
+    private static Map<String, Object> typeToJson(StateInspectType inspectType) {
+        Map<String, Object> output = new LinkedHashMap<>();
+        output.put("kind", inspectType.kind().name());
+        if (inspectType.logicalType() != null) {
+            output.put("logical_type", inspectType.logicalType());
+        }
+        if (!inspectType.fields().isEmpty()) {
+            List<Map<String, Object>> fields = new ArrayList<>(inspectType.fields().size());
+            for (StateInspectField field : inspectType.fields()) {
+                Map<String, Object> item = new LinkedHashMap<>();
+                item.put("name", field.name());
+                item.put("type", typeToJson(field.type()));
+                fields.add(item);
+            }
+            output.put("fields", fields);
+        }
+        if (inspectType.elementType() != null) {
+            output.put("element_type", typeToJson(inspectType.elementType()));
         }
         return output;
     }
