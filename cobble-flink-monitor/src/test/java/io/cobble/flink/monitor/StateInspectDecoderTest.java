@@ -16,6 +16,7 @@ import org.apache.flink.api.common.ExecutionConfig;
 import org.apache.flink.api.common.typeinfo.Types;
 import org.apache.flink.api.common.typeutils.TypeSerializer;
 import org.apache.flink.api.common.typeutils.base.IntSerializer;
+import org.apache.flink.api.common.typeutils.base.ListSerializer;
 import org.apache.flink.api.common.typeutils.base.LongSerializer;
 import org.apache.flink.api.common.typeutils.base.StringSerializer;
 import org.apache.flink.api.common.typeutils.base.array.BytePrimitiveArraySerializer;
@@ -196,6 +197,65 @@ class StateInspectDecoderTest {
         assertFalse(
                 StateInspectDecoder.matchesSemanticPartFilter(
                         row.decodedParts, "map_key", mapKeyType, Arrays.asList("101")));
+    }
+
+    @Test
+    void decodesSemanticIntervalJoinMapValue() throws Exception {
+        InternalTypeInfo<RowData> recordType = namedRecordType();
+        @SuppressWarnings("unchecked")
+        TypeSerializer<Tuple2<RowData, Boolean>> intervalEntrySerializer =
+                (TypeSerializer<Tuple2<RowData, Boolean>>)
+                        (TypeSerializer<?>)
+                                new TupleTypeInfo<>(recordType, Types.BOOLEAN)
+                                        .createSerializer(new ExecutionConfig());
+        ListSerializer<Tuple2<RowData, Boolean>> intervalEntriesSerializer =
+                new ListSerializer<>(intervalEntrySerializer);
+        StateInspectSchema schema =
+                StateInspectSchema.forMap(
+                        "IntervalJoinLeftCache",
+                        "IntervalJoinLeftCache",
+                        false,
+                        LongSerializer.INSTANCE,
+                        VoidNamespaceSerializer.INSTANCE,
+                        LongSerializer.INSTANCE,
+                        intervalEntriesSerializer);
+        StateInspectType intervalEntryType =
+                StateInspectType.tuple(
+                        Arrays.asList(
+                                new StateInspectField("f0", rowType("order_id", "region")),
+                                new StateInspectField("f1", StateInspectType.scalar("BOOLEAN"))));
+        InspectTarget target =
+                semanticTarget(
+                        schema,
+                        StateInspectSemanticSchema.forMap(
+                                StateInspectType.scalar("BIGINT"),
+                                StateInspectType.unknown(),
+                                StateInspectType.scalar("BIGINT"),
+                                StateInspectType.list(intervalEntryType)));
+        byte[] stateKey = serialize(LongSerializer.INSTANCE, 7L);
+        byte[] mapKey = serialize(LongSerializer.INSTANCE, 100L);
+        byte[] value =
+                serialize(
+                        intervalEntriesSerializer,
+                        Arrays.asList(
+                                Tuple2.of(
+                                        GenericRowData.of(42L, StringData.fromString("east")),
+                                        Boolean.TRUE)));
+
+        StateInspectDecoder.DecodedRow row =
+                StateInspectDecoder.decode(
+                        target,
+                        mapKeyWithVoidNamespace(schema, stateKey, mapKey),
+                        new byte[][] {value});
+
+        assertNull(row.decodeError);
+        Map<?, ?> list = (Map<?, ?>) row.decodedParts.get("map_value");
+        Map<?, ?> entry = (Map<?, ?>) ((List<?>) list.get("values")).get(0);
+        Map<?, ?> record = (Map<?, ?>) ((List<?>) entry.get("fields")).get(0);
+        List<?> recordFields = (List<?>) record.get("fields");
+        assertEquals(42L, ((Map<?, ?>) recordFields.get(0)).get("value"));
+        assertEquals("east", ((Map<?, ?>) recordFields.get(1)).get("value"));
+        assertEquals(Boolean.TRUE, ((Map<?, ?>) ((List<?>) entry.get("fields")).get(1)).get("value"));
     }
 
     @Test
@@ -564,6 +624,13 @@ class StateInspectDecoderTest {
                 schema,
                 semanticSchema,
                 null);
+    }
+
+    private static InternalTypeInfo<RowData> namedRecordType() {
+        return InternalTypeInfo.of(
+                RowType.of(
+                        new LogicalType[] {new BigIntType(false), VarCharType.STRING_TYPE},
+                        new String[] {"order_id", "region"}));
     }
 
     private static StateInspectType rowType(String... fieldNames) {

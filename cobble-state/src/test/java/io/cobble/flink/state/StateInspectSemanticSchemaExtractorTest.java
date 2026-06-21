@@ -13,6 +13,7 @@ import org.apache.flink.api.common.state.MapStateDescriptor;
 import org.apache.flink.api.common.state.ValueStateDescriptor;
 import org.apache.flink.api.common.typeinfo.Types;
 import org.apache.flink.api.java.tuple.Tuple2;
+import org.apache.flink.api.java.typeutils.ListTypeInfo;
 import org.apache.flink.api.java.typeutils.TupleTypeInfo;
 import org.apache.flink.runtime.state.VoidNamespaceSerializer;
 import org.apache.flink.table.data.RowData;
@@ -105,6 +106,100 @@ class StateInspectSemanticSchemaExtractorTest {
 
         assertEquals(StateInspectTypeKind.UNKNOWN, unknownSchema.value().kind());
         assertFalse(unknownSchema.isEmpty());
+    }
+
+    @Test
+    void capturesDeduplicateSortTopNAndTemporalJoinStateShapes() {
+        InternalTypeInfo<RowData> recordType = namedRecordType();
+        InternalTypeInfo<RowData> sortKeyType =
+                InternalTypeInfo.of(
+                        RowType.of(
+                                new LogicalType[] {new BigIntType(false)},
+                                new String[] {"sort_key"}));
+        ListTypeInfo<RowData> recordListType = new ListTypeInfo<>(recordType);
+
+        StateInspectSemanticSchema deduplicate =
+                StateInspectSemanticSchemaExtractor.forValue(
+                        Types.LONG.createSerializer(new ExecutionConfig()),
+                        VoidNamespaceSerializer.INSTANCE,
+                        new ValueStateDescriptor<>("deduplicate-state", recordType));
+        StateInspectSemanticSchema processTimeSort =
+                StateInspectSemanticSchemaExtractor.forList(
+                        Types.LONG.createSerializer(new ExecutionConfig()),
+                        VoidNamespaceSerializer.INSTANCE,
+                        new ListStateDescriptor<>("sortState", recordType));
+        StateInspectSemanticSchema topN =
+                StateInspectSemanticSchemaExtractor.forMap(
+                        Types.LONG.createSerializer(new ExecutionConfig()),
+                        VoidNamespaceSerializer.INSTANCE,
+                        new MapStateDescriptor<>(
+                                "data-state-with-append", sortKeyType, recordListType));
+        StateInspectSemanticSchema temporalJoin =
+                StateInspectSemanticSchemaExtractor.forMap(
+                        Types.LONG.createSerializer(new ExecutionConfig()),
+                        VoidNamespaceSerializer.INSTANCE,
+                        new MapStateDescriptor<>("left", Types.LONG, recordType));
+
+        assertRow(deduplicate.value(), "order_id", "region");
+        assertRow(processTimeSort.listElement(), "order_id", "region");
+        assertRow(topN.mapUserKey(), "sort_key");
+        assertEquals(StateInspectTypeKind.LIST, topN.mapUserValue().kind());
+        assertRow(topN.mapUserValue().elementType(), "order_id", "region");
+        assertEquals(StateInspectTypeKind.SCALAR, temporalJoin.mapUserKey().kind());
+        assertEquals("BIGINT", temporalJoin.mapUserKey().logicalType());
+        assertRow(temporalJoin.mapUserValue(), "order_id", "region");
+    }
+
+    @Test
+    void capturesIntervalJoinAndAggregateFallbackStateShapes() {
+        InternalTypeInfo<RowData> recordType = namedRecordType();
+        TupleTypeInfo<Tuple2<RowData, Boolean>> intervalEntryType =
+                new TupleTypeInfo<>(recordType, Types.BOOLEAN);
+        ListTypeInfo<Tuple2<RowData, Boolean>> intervalEntryListType =
+                new ListTypeInfo<>(intervalEntryType);
+        InternalTypeInfo<RowData> accumulatorType =
+                InternalTypeInfo.ofFields(new BigIntType(false), VarCharType.STRING_TYPE);
+        RowDataSerializer windowAccumulatorSerializer =
+                new RowDataSerializer(new BigIntType(false), VarCharType.STRING_TYPE);
+
+        StateInspectSemanticSchema intervalJoin =
+                StateInspectSemanticSchemaExtractor.forMap(
+                        Types.LONG.createSerializer(new ExecutionConfig()),
+                        VoidNamespaceSerializer.INSTANCE,
+                        new MapStateDescriptor<>(
+                                "IntervalJoinLeftCache", Types.LONG, intervalEntryListType));
+        StateInspectSemanticSchema aggregate =
+                StateInspectSemanticSchemaExtractor.forValue(
+                        Types.LONG.createSerializer(new ExecutionConfig()),
+                        VoidNamespaceSerializer.INSTANCE,
+                        new ValueStateDescriptor<>("accState", accumulatorType));
+        StateInspectSemanticSchema overInput =
+                StateInspectSemanticSchemaExtractor.forMap(
+                        Types.LONG.createSerializer(new ExecutionConfig()),
+                        VoidNamespaceSerializer.INSTANCE,
+                        new MapStateDescriptor<>(
+                                "inputState", Types.LONG, new ListTypeInfo<>(recordType)));
+        StateInspectSemanticSchema windowJoin =
+                StateInspectSemanticSchemaExtractor.forList(
+                        Types.LONG.createSerializer(new ExecutionConfig()),
+                        VoidNamespaceSerializer.INSTANCE,
+                        new ListStateDescriptor<>("left-records", recordType));
+        StateInspectSemanticSchema windowAggregate =
+                StateInspectSemanticSchemaExtractor.forValue(
+                        Types.LONG.createSerializer(new ExecutionConfig()),
+                        VoidNamespaceSerializer.INSTANCE,
+                        new ValueStateDescriptor<>("window-aggs", windowAccumulatorSerializer));
+
+        assertEquals(StateInspectTypeKind.LIST, intervalJoin.mapUserValue().kind());
+        StateInspectType intervalEntry = intervalJoin.mapUserValue().elementType();
+        assertEquals(StateInspectTypeKind.TUPLE, intervalEntry.kind());
+        assertRow(intervalEntry.fields().get(0).type(), "order_id", "region");
+        assertEquals("BOOLEAN", intervalEntry.fields().get(1).type().logicalType());
+        assertRow(aggregate.value(), "f0", "f1");
+        assertEquals(StateInspectTypeKind.LIST, overInput.mapUserValue().kind());
+        assertRow(overInput.mapUserValue().elementType(), "order_id", "region");
+        assertRow(windowJoin.listElement(), "order_id", "region");
+        assertRow(windowAggregate.value(), "f0", "f1");
     }
 
     private static InternalTypeInfo<RowData> namedRecordType() {
