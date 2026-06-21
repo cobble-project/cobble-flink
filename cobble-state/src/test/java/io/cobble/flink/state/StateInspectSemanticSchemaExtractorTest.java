@@ -178,12 +178,19 @@ class StateInspectSemanticSchemaExtractorTest {
                         Types.LONG.createSerializer(new ExecutionConfig()),
                         VoidNamespaceSerializer.INSTANCE,
                         new MapStateDescriptor<>(
-                                "inputState", Types.LONG, new ListTypeInfo<>(recordType)));
+                                "inputState",
+                                Types.LONG,
+                                new ListTypeInfo<>(
+                                        InternalTypeInfo.ofFields(
+                                                new BigIntType(false), VarCharType.STRING_TYPE))));
         StateInspectSemanticSchema windowJoin =
                 StateInspectSemanticSchemaExtractor.forList(
                         Types.LONG.createSerializer(new ExecutionConfig()),
                         VoidNamespaceSerializer.INSTANCE,
-                        new ListStateDescriptor<>("left-records", recordType));
+                        new ListStateDescriptor<>(
+                                "left-records",
+                                new RowDataSerializer(
+                                        new BigIntType(false), VarCharType.STRING_TYPE)));
         StateInspectSemanticSchema windowAggregate =
                 StateInspectSemanticSchemaExtractor.forValue(
                         Types.LONG.createSerializer(new ExecutionConfig()),
@@ -197,9 +204,21 @@ class StateInspectSemanticSchemaExtractorTest {
         assertEquals("BOOLEAN", intervalEntry.fields().get(1).type().logicalType());
         assertRow(aggregate.value(), "f0", "f1");
         assertEquals(StateInspectTypeKind.LIST, overInput.mapUserValue().kind());
-        assertRow(overInput.mapUserValue().elementType(), "order_id", "region");
-        assertRow(windowJoin.listElement(), "order_id", "region");
+        assertRow(overInput.mapUserValue().elementType(), "f0", "f1");
+        assertRow(windowJoin.listElement(), "f0", "f1");
         assertRow(windowAggregate.value(), "f0", "f1");
+    }
+
+    @Test
+    void timerSchemaPreservesTypedKeyAndNamespace() {
+        StateInspectSemanticSchema timer =
+                StateInspectSemanticSchemaExtractor.forTimer(
+                        new RowDataSerializer(new BigIntType(false), VarCharType.STRING_TYPE),
+                        Types.INT.createSerializer(new ExecutionConfig()));
+
+        assertRow(timer.stateKey(), "f0", "f1");
+        assertEquals("INT", timer.namespace().logicalType());
+        assertEquals(StateInspectTypeKind.UNKNOWN, timer.value().kind());
     }
 
     private static InternalTypeInfo<RowData> namedRecordType() {

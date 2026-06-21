@@ -699,6 +699,10 @@ final class CobbleKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
                         CobblePriorityQueueSetFactory.timerQueueColumnFamilyName(stateName),
                         serializer.getKeySerializer(),
                         serializer.getNamespaceSerializer()));
+        stateInspectSemanticSchemas.putIfAbsent(
+                stateName,
+                StateInspectSemanticSchemaExtractor.forTimer(
+                        serializer.getKeySerializer(), serializer.getNamespaceSerializer()));
     }
 
     private StateInspectSchemaStore buildSchemaStore() {

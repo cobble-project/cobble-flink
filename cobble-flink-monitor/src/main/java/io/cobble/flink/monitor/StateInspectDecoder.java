@@ -266,12 +266,14 @@ final class StateInspectDecoder {
         if (target == null
                 || target.schema == null
                 || target.semanticSchema == null
-                || target.semanticSchema.isEmpty()
-                || target.schema.stateKind() == StateKind.TIMER) {
+                || target.semanticSchema.isEmpty()) {
             return null;
         }
         StateInspectSchema schema = target.schema;
         StateInspectSemanticSchema semanticSchema = target.semanticSchema;
+        if (schema.stateKind() == StateKind.TIMER) {
+            return decodeTimerSemanticParts(schema, semanticSchema, rowKey);
+        }
         KeySlices slices =
                 schema.stateKind() == StateKind.MAP
                         ? splitMapKey(schema, rowKey)
@@ -330,6 +332,52 @@ final class StateInspectDecoder {
                             semanticSchema.listElement(),
                             schema.listElementSerializer(),
                             firstColumn(columns));
+        }
+        if (decodeError != null) {
+            throw new IOException(decodeError);
+        }
+        return output.isEmpty() ? null : output;
+    }
+
+    private static Map<String, Object> decodeTimerSemanticParts(
+            StateInspectSchema schema, StateInspectSemanticSchema semanticSchema, byte[] rowKey)
+            throws IOException {
+        requireLength(rowKey, Long.BYTES, "timer timestamp");
+        ByteArrayInputStream bytes = new ByteArrayInputStream(rowKey);
+        DataInputViewStreamWrapper input = new DataInputViewStreamWrapper(bytes);
+        input.readLong();
+        int keyStart = rowKey.length - bytes.available();
+        restore(schema.keySerializer()).deserialize(input);
+        int namespaceStart = rowKey.length - bytes.available();
+        if (isVoidNamespaceSerializer(schema.namespaceSerializer())) {
+            requireLength(
+                    slice(rowKey, namespaceStart, rowKey.length - namespaceStart),
+                    1,
+                    "timer namespace");
+            input.readByte();
+        } else {
+            restore(schema.namespaceSerializer()).deserialize(input);
+        }
+        int end = rowKey.length - bytes.available();
+
+        Map<String, Object> output = new LinkedHashMap<>();
+        String decodeError =
+                addSemanticPart(
+                        output,
+                        null,
+                        "state_key",
+                        semanticSchema.stateKey(),
+                        schema.keySerializer(),
+                        slice(rowKey, keyStart, namespaceStart - keyStart));
+        if (!isVoidNamespaceSerializer(schema.namespaceSerializer())) {
+            decodeError =
+                    addSemanticPart(
+                            output,
+                            decodeError,
+                            "namespace",
+                            semanticSchema.namespace(),
+                            schema.namespaceSerializer(),
+                            slice(rowKey, namespaceStart, end - namespaceStart));
         }
         if (decodeError != null) {
             throw new IOException(decodeError);

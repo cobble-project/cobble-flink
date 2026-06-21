@@ -193,7 +193,7 @@ function renderStateFilterControls() {
   $('map-key-control').classList.toggle('hidden', !mapState || semanticKeyFilter)
   $('state-semantic-key-control').classList.toggle('hidden', !semanticKeyFilter)
   $('sink-key-control').classList.toggle('hidden', !sinkKeyFilter)
-  $('prefix-control').classList.toggle('hidden', schemaState || sinkKeyFilter)
+  $('prefix-control').classList.toggle('hidden', schemaState || sinkKeyFilter || semanticKeyFilter)
   $('state-field-table-control').classList.toggle(
     'hidden',
     !isSemanticStateTableTarget(target),
@@ -509,7 +509,7 @@ async function runScan(direction = 'reset') {
     const bucket = $('bucket').value.trim()
     if (bucket && bucket.toLowerCase() !== 'all') query.set('bucket', bucket)
     const target = activeTarget()
-    if (isSchemaStateTarget(target)) {
+    if (isSchemaStateTarget(target) || isSemanticStateKeyFilterTarget(target)) {
       if (isSemanticStateKeyFilterTarget(target)) {
         const filters = activeSemanticStateKeyFilters(target)
         Object.entries(filters).forEach(([part, values]) => {
@@ -877,12 +877,18 @@ function renderScanResult(data, context = activeScanContext()) {
   const sink = target?.allows_columns
   const timer = isTimerTarget(target)
   const sinkExpanded = isSinkExpandedTable(target)
-  const stateExpanded = !sinkExpanded && isStateExpandedTable(target)
+  const timerFieldTable = timer && isStateExpandedTable(target)
+  const stateExpanded = !timer && !sinkExpanded && isStateExpandedTable(target)
   const sinkTable = sinkExpanded ? sinkTableLayout(target, context, items) : null
-  const stateTable = stateExpanded ? stateTableLayout(target) : null
-  setResultTableExpanded(sinkExpanded || stateExpanded, sinkExpanded ? 'sink' : 'state')
+  const stateTable = stateExpanded || timerFieldTable ? stateTableLayout(target) : null
+  setResultTableExpanded(
+    sinkExpanded || stateExpanded || timerFieldTable,
+    sinkExpanded ? 'sink' : 'state',
+  )
   $('result-head').innerHTML = timer
-    ? '<tr><th>Bucket</th><th>Timer key</th><th>Timestamp</th><th></th></tr>'
+    ? timerFieldTable
+      ? renderTimerStateScanHeader(stateTable)
+      : '<tr><th>Bucket</th><th>Timer key</th><th>Timestamp</th><th></th></tr>'
     : sinkExpanded
     ? renderSinkScanHeader(sinkTable)
     : stateExpanded
@@ -896,12 +902,14 @@ function renderScanResult(data, context = activeScanContext()) {
     const row = document.createElement('tr')
     const trackId = trackIdentity(item.bucket, item.key_b64, context.targetId, context.columns)
     if (timer) {
-      row.innerHTML = `
-        <td>${item.bucket}</td>
-        <td>${renderTimerKey(item.key_b64, item.key_utf8, item.decoded_key, target)}</td>
-        <td>${renderTimerTimestamp(item.decoded_key, item.decode_error)}</td>
-        <td>${renderActionMenu(scanRowActions(item, target, context, trackId))}</td>
-      `
+      row.innerHTML = timerFieldTable
+        ? renderTimerStateScanRow(item, target, context, trackId, stateTable)
+        : `
+          <td>${item.bucket}</td>
+          <td>${renderTimerKey(item.key_b64, item.key_utf8, item.decoded_key, target)}</td>
+          <td>${renderTimerTimestamp(item.decoded_key, item.decode_error)}</td>
+          <td>${renderActionMenu(scanRowActions(item, target, context, trackId))}</td>
+        `
     } else if (sinkExpanded) {
       row.innerHTML = renderSinkScanRow(item, target, context, trackId, sinkTable)
     } else if (stateExpanded) {
@@ -919,6 +927,8 @@ function renderScanResult(data, context = activeScanContext()) {
   if (items.length === 0) {
     const colspan = sinkExpanded
       ? sinkTable.scanColspan
+      : timerFieldTable
+      ? stateTable.timerScanColspan
       : stateExpanded
       ? stateTable.scanColspan
       : 4
@@ -931,13 +941,19 @@ function renderScanResult(data, context = activeScanContext()) {
 function renderLookupResult() {
   const items = state.trackedLookups
   const timerOnly = items.length > 0 && items.every((item) => isTimerTarget(trackedTarget(item)))
+  const timerFieldTable = timerOnly && isStateExpandedLookup(items)
   const sinkExpanded = !timerOnly && isSinkExpandedLookup(items)
   const stateExpanded = !timerOnly && !sinkExpanded && isStateExpandedLookup(items)
   const sinkTable = sinkExpanded ? sinkTableLayout(trackedTarget(items[0]), items[0], items) : null
-  const stateTable = stateExpanded ? stateTableLayout(trackedTarget(items[0])) : null
-  setResultTableExpanded(sinkExpanded || stateExpanded, sinkExpanded ? 'sink' : 'state')
+  const stateTable = stateExpanded || timerFieldTable ? stateTableLayout(trackedTarget(items[0])) : null
+  setResultTableExpanded(
+    sinkExpanded || stateExpanded || timerFieldTable,
+    sinkExpanded ? 'sink' : 'state',
+  )
   $('result-head').innerHTML = timerOnly
-    ? '<tr><th>Target</th><th>Bucket</th><th>Timer key</th><th>Timestamp</th><th></th></tr>'
+    ? timerFieldTable
+      ? renderTimerStateLookupHeader(stateTable)
+      : '<tr><th>Target</th><th>Bucket</th><th>Timer key</th><th>Timestamp</th><th></th></tr>'
     : sinkExpanded
     ? renderSinkLookupHeader(sinkTable)
     : stateExpanded
@@ -949,13 +965,15 @@ function renderLookupResult() {
     const row = document.createElement('tr')
     const target = trackedTarget(item)
     if (timerOnly) {
-      row.innerHTML = `
-        <td>${escapeHtml(item.targetLabel)}</td>
-        <td>${item.bucket}</td>
-        <td>${renderTimerKey(item.keyB64, item.keyUtf8, item.decodedKey, target)}</td>
-        <td>${renderTimerTimestamp(item.decodedKey, item.decodeError)}</td>
-        <td>${renderActionMenu(trackedRowActions(item, target))}</td>
-      `
+      row.innerHTML = timerFieldTable
+        ? renderTimerStateLookupRow(item, target, stateTable)
+        : `
+          <td>${escapeHtml(item.targetLabel)}</td>
+          <td>${item.bucket}</td>
+          <td>${renderTimerKey(item.keyB64, item.keyUtf8, item.decodedKey, target)}</td>
+          <td>${renderTimerTimestamp(item.decodedKey, item.decodeError)}</td>
+          <td>${renderActionMenu(trackedRowActions(item, target))}</td>
+        `
     } else if (sinkExpanded) {
       row.innerHTML = renderSinkLookupRow(item, target, sinkTable)
     } else if (stateExpanded) {
@@ -1156,7 +1174,8 @@ function renderSinkColumns(columns = [], decodedColumns = null, decodeError = nu
 }
 
 function isSemanticStateTableTarget(target) {
-  return target?.kind === 'state' && semanticTableGroups(target).length > 0
+  return (target?.kind === 'state' || target?.kind === 'timer')
+    && semanticTableGroups(target).length > 0
 }
 
 function isStateExpandedTable(target) {
@@ -1210,6 +1229,8 @@ function stateTableLayout(target) {
     groups,
     scanColspan: fieldCount + 2,
     lookupColspan: fieldCount + 3,
+    timerScanColspan: fieldCount + 3,
+    timerLookupColspan: fieldCount + 4,
   }
 }
 
@@ -1230,6 +1251,31 @@ function renderStateLookupHeader(layout) {
       <th rowspan="2">Target</th>
       <th rowspan="2">Bucket</th>
       ${renderStateGroupHeaders(layout.groups)}
+      <th rowspan="2"></th>
+    </tr>
+    <tr>${renderStateFieldHeaders(layout.groups)}</tr>
+  `
+}
+
+function renderTimerStateScanHeader(layout) {
+  return `
+    <tr>
+      <th rowspan="2">Bucket</th>
+      ${renderStateGroupHeaders(layout.groups)}
+      <th rowspan="2">Timestamp</th>
+      <th rowspan="2"></th>
+    </tr>
+    <tr>${renderStateFieldHeaders(layout.groups)}</tr>
+  `
+}
+
+function renderTimerStateLookupHeader(layout) {
+  return `
+    <tr>
+      <th rowspan="2">Target</th>
+      <th rowspan="2">Bucket</th>
+      ${renderStateGroupHeaders(layout.groups)}
+      <th rowspan="2">Timestamp</th>
       <th rowspan="2"></th>
     </tr>
     <tr>${renderStateFieldHeaders(layout.groups)}</tr>
@@ -1260,6 +1306,25 @@ function renderStateLookupRow(item, target, layout) {
     <td>${item.bucket}</td>
     ${renderStateExpandedCells(layout.groups, item.decodedParts, item, target, `track:${item.id}`)}
     <td class="action-cell">${renderDecodeError(item.decodeError)}${renderActionMenu(trackedRowActions(item, target))}</td>
+  `
+}
+
+function renderTimerStateScanRow(item, target, context, trackId, layout) {
+  return `
+    <td>${item.bucket}</td>
+    ${renderStateExpandedCells(layout.groups, item.decoded_parts, item, target, `scan:${trackId}`)}
+    <td>${renderTimerTimestamp(item.decoded_key, item.decode_error)}</td>
+    <td class="action-cell">${renderActionMenu(scanRowActions(item, target, context, trackId))}</td>
+  `
+}
+
+function renderTimerStateLookupRow(item, target, layout) {
+  return `
+    <td>${escapeHtml(item.targetLabel)}</td>
+    <td>${item.bucket}</td>
+    ${renderStateExpandedCells(layout.groups, item.decodedParts, item, target, `track:${item.id}`)}
+    <td>${renderTimerTimestamp(item.decodedKey, item.decodeError)}</td>
+    <td class="action-cell">${renderActionMenu(trackedRowActions(item, target))}</td>
   `
 }
 

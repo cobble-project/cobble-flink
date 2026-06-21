@@ -80,6 +80,14 @@ final class StateInspectSemanticSchemaExtractor {
                 firstKnown(mapValueType, fromMapValueSerializer(descriptor)));
     }
 
+    static StateInspectSemanticSchema forTimer(
+            TypeSerializer<?> keySerializer, TypeSerializer<?> namespaceSerializer) {
+        return StateInspectSemanticSchema.forValue(
+                fromSerializer(keySerializer),
+                fromSerializer(namespaceSerializer),
+                StateInspectType.unknown());
+    }
+
     private static StateInspectType describeDescriptorType(StateDescriptor<?, ?> descriptor) {
         return describeTypeInfo(descriptorTypeInfo(descriptor));
     }

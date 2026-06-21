@@ -255,7 +255,8 @@ class StateInspectDecoderTest {
         List<?> recordFields = (List<?>) record.get("fields");
         assertEquals(42L, ((Map<?, ?>) recordFields.get(0)).get("value"));
         assertEquals("east", ((Map<?, ?>) recordFields.get(1)).get("value"));
-        assertEquals(Boolean.TRUE, ((Map<?, ?>) ((List<?>) entry.get("fields")).get(1)).get("value"));
+        assertEquals(
+                Boolean.TRUE, ((Map<?, ?>) ((List<?>) entry.get("fields")).get(1)).get("value"));
     }
 
     @Test
@@ -444,6 +445,39 @@ class StateInspectDecoderTest {
         assertEquals("user-1", row.decodedKey.get("key"));
         assertEquals("VoidNamespace", row.decodedKey.get("namespace"));
         assertNull(row.decodedValue);
+    }
+
+    @Test
+    void decodesSemanticTimerKeyAndNamespaceParts() throws Exception {
+        StateInspectSchema schema =
+                StateInspectSchema.forTimer(
+                        "event-time-timers",
+                        "__cobble_timer__event-time-timers",
+                        StringSerializer.INSTANCE,
+                        IntSerializer.INSTANCE);
+        InspectTarget target =
+                new InspectTarget(
+                        "timer:event-time-timers",
+                        "event-time-timers",
+                        "timer",
+                        "__cobble_timer__event-time-timers",
+                        false,
+                        schema.stateKind().name(),
+                        java.util.Collections.emptyMap(),
+                        schema,
+                        StateInspectSemanticSchema.forValue(
+                                StateInspectType.scalar("VARCHAR"),
+                                StateInspectType.scalar("INT"),
+                                StateInspectType.unknown()),
+                        null);
+
+        StateInspectDecoder.DecodedRow row =
+                StateInspectDecoder.decode(
+                        target, timerKey(1234L, "user-1", 7), new byte[][] {new byte[0]});
+
+        assertNull(row.decodeError);
+        assertEquals("user-1", ((Map<?, ?>) row.decodedParts.get("state_key")).get("value"));
+        assertEquals(7, ((Map<?, ?>) row.decodedParts.get("namespace")).get("value"));
     }
 
     @Test
