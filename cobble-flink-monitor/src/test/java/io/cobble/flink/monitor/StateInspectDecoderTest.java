@@ -23,6 +23,7 @@ import org.apache.flink.api.common.typeutils.base.array.BytePrimitiveArraySerial
 import org.apache.flink.api.java.tuple.Tuple2;
 import org.apache.flink.api.java.typeutils.TupleTypeInfo;
 import org.apache.flink.core.memory.DataOutputSerializer;
+import org.apache.flink.runtime.state.KeyGroupRangeAssignment;
 import org.apache.flink.runtime.state.VoidNamespaceSerializer;
 import org.apache.flink.table.data.GenericRowData;
 import org.apache.flink.table.data.RowData;
@@ -197,6 +198,79 @@ class StateInspectDecoderTest {
         assertFalse(
                 StateInspectDecoder.matchesSemanticPartFilter(
                         row.decodedParts, "map_key", mapKeyType, Arrays.asList("101")));
+    }
+
+    @Test
+    void calculatesKeyGroupsFromRawAndSemanticStateKeys() throws Exception {
+        StateInspectSchema rawSchema =
+                StateInspectSchema.forValue(
+                        "raw-key",
+                        "raw-key",
+                        false,
+                        StringSerializer.INSTANCE,
+                        VoidNamespaceSerializer.INSTANCE,
+                        IntSerializer.INSTANCE);
+        assertEquals(
+                KeyGroupRangeAssignment.assignToKeyGroup("customer-7", 128),
+                StateInspectDecoder.keyGroupForRawStateKey(
+                        target(rawSchema), "customer-7", null, 128));
+
+        RowDataSerializer rowKeySerializer =
+                new RowDataSerializer(new BigIntType(false), VarCharType.STRING_TYPE);
+        StateInspectSchema semanticSchema =
+                StateInspectSchema.forValue(
+                        "row-key",
+                        "row-key",
+                        false,
+                        rowKeySerializer,
+                        VoidNamespaceSerializer.INSTANCE,
+                        IntSerializer.INSTANCE);
+        InspectTarget semanticTarget =
+                semanticTarget(
+                        semanticSchema,
+                        StateInspectSemanticSchema.forValue(
+                                rowType("order_id", "region"),
+                                StateInspectType.unknown(),
+                                StateInspectType.scalar("INT")));
+        RowData expectedKey =
+                rowKeySerializer.deserialize(
+                        new org.apache.flink.core.memory.DataInputViewStreamWrapper(
+                                new java.io.ByteArrayInputStream(
+                                        serialize(
+                                                rowKeySerializer,
+                                                GenericRowData.of(
+                                                        42L, StringData.fromString("apac"))))));
+
+        assertEquals(
+                KeyGroupRangeAssignment.assignToKeyGroup(expectedKey, 128),
+                StateInspectDecoder.keyGroupForSemanticStateKey(
+                        semanticTarget, Arrays.asList("42", "apac"), 128));
+    }
+
+    @Test
+    void distinguishesSemanticKeyPrefixesFromCompleteKeyFields() throws Exception {
+        StateInspectType keyType = rowType("order_id", "region");
+        Map<String, Object> decoded = new java.util.LinkedHashMap<>();
+        Map<String, Object> stateKey = new java.util.LinkedHashMap<>();
+        stateKey.put(
+                "fields",
+                Arrays.asList(
+                        java.util.Collections.singletonMap("value", 42L),
+                        java.util.Collections.singletonMap("value", "apac")));
+        decoded.put("state_key", stateKey);
+
+        assertTrue(
+                StateInspectDecoder.matchesSemanticPartFilter(
+                        decoded, "state_key", keyType, Arrays.asList("42", "a")));
+        assertFalse(
+                StateInspectDecoder.matchesSemanticPartFilter(
+                        decoded, "state_key", keyType, Arrays.asList("42", "a"), true));
+        assertTrue(
+                StateInspectDecoder.hasCompleteSemanticPartFilter(
+                        keyType, Arrays.asList("42", "apac"), "state key"));
+        assertFalse(
+                StateInspectDecoder.hasCompleteSemanticPartFilter(
+                        keyType, Arrays.asList("42"), "state key"));
     }
 
     @Test

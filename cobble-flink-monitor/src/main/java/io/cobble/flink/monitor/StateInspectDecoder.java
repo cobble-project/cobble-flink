@@ -12,7 +12,9 @@ import org.apache.flink.api.common.typeutils.TypeSerializer;
 import org.apache.flink.api.java.tuple.Tuple;
 import org.apache.flink.core.memory.DataInputViewStreamWrapper;
 import org.apache.flink.core.memory.DataOutputSerializer;
+import org.apache.flink.runtime.state.KeyGroupRangeAssignment;
 import org.apache.flink.table.data.DecimalData;
+import org.apache.flink.table.data.GenericRowData;
 import org.apache.flink.table.data.RowData;
 import org.apache.flink.table.data.StringData;
 import org.apache.flink.table.data.TimestampData;
@@ -456,12 +458,71 @@ final class StateInspectDecoder {
         }
     }
 
+    static boolean hasCompleteSemanticPartFilter(
+            StateInspectType type, List<String> values, String partLabel) throws IOException {
+        validateSemanticPartFilter(type, values, partLabel);
+        return values.size() == semanticFilterFieldTypes(type, partLabel).size();
+    }
+
+    static int keyGroupForRawStateKey(
+            InspectTarget target, String key, byte[] keyBytes, int totalKeyGroups)
+            throws IOException {
+        if (target == null || target.schema == null) {
+            throw new IOException("State schema metadata is required to calculate a Key Group");
+        }
+        byte[] encodedKey =
+                encodeComponent(target.schema.keySerializer(), key, keyBytes, "state key");
+        return keyGroupForSerializedKey(target.schema, encodedKey, totalKeyGroups);
+    }
+
+    static int keyGroupForSemanticStateKey(
+            InspectTarget target, List<String> values, int totalKeyGroups) throws IOException {
+        if (target == null || target.schema == null || target.semanticSchema == null) {
+            throw new IOException("State semantic metadata is required to calculate a Key Group");
+        }
+        StateInspectType type = target.semanticSchema.stateKey();
+        List<StateInspectType> fields = semanticFilterFieldTypes(type, "state key");
+        if (values == null || values.size() != fields.size()) {
+            throw new IOException("All state key fields are required to calculate a Key Group");
+        }
+        Object key;
+        if (type.kind() == StateInspectTypeKind.SCALAR) {
+            key = parseTextValue(target.schema.keySerializer(), values.get(0), "state key");
+        } else if (type.kind() == StateInspectTypeKind.ROW) {
+            GenericRowData row = new GenericRowData(fields.size());
+            for (int index = 0; index < fields.size(); index++) {
+                LogicalType logicalType = LogicalTypeParser.parse(fields.get(index).logicalType());
+                row.setField(
+                        index, SinkInspectDecoder.parseFieldInput(logicalType, values.get(index)));
+            }
+            key = row;
+        } else {
+            throw new IOException(
+                    "Key Group calculation supports scalar and RowData state keys only");
+        }
+
+        TypeSerializer<Object> serializer = restore(target.schema.keySerializer());
+        DataOutputSerializer output = new DataOutputSerializer(64);
+        serializer.serialize(key, output);
+        return keyGroupForSerializedKey(target.schema, output.getCopyOfBuffer(), totalKeyGroups);
+    }
+
     @SuppressWarnings("unchecked")
     static boolean matchesSemanticPartFilter(
             Map<String, Object> decodedParts,
             String partName,
             StateInspectType type,
             List<String> values) {
+        return matchesSemanticPartFilter(decodedParts, partName, type, values, false);
+    }
+
+    @SuppressWarnings("unchecked")
+    static boolean matchesSemanticPartFilter(
+            Map<String, Object> decodedParts,
+            String partName,
+            StateInspectType type,
+            List<String> values,
+            boolean lastFieldExact) {
         if (decodedParts == null || values == null || values.isEmpty()) {
             return false;
         }
@@ -498,7 +559,9 @@ final class StateInspectDecoder {
         }
         for (int index = 0; index < values.size(); index++) {
             if (!semanticValueMatches(
-                    fieldValues.get(index), values.get(index), index == values.size() - 1)) {
+                    fieldValues.get(index),
+                    values.get(index),
+                    index == values.size() - 1 && !lastFieldExact)) {
                 return false;
             }
         }
@@ -529,6 +592,15 @@ final class StateInspectDecoder {
             fields.add(field.type());
         }
         return fields;
+    }
+
+    private static int keyGroupForSerializedKey(
+            StateInspectSchema schema, byte[] encodedKey, int totalKeyGroups) throws IOException {
+        if (totalKeyGroups <= 0) {
+            throw new IOException("A positive Key Group count is required");
+        }
+        Object key = deserialize(schema.keySerializer(), encodedKey);
+        return KeyGroupRangeAssignment.assignToKeyGroup(key, totalKeyGroups);
     }
 
     @SuppressWarnings("unchecked")

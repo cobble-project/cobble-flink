@@ -42,10 +42,18 @@
               Operator
               <select id="operator-select"></select>
             </label>
-            <label>
+            <label id="bucket-control">
               <span id="bucket-label">Bucket</span>
               <input id="bucket" placeholder="all" />
             </label>
+            <div id="key-group-auto-control" class="key-group-auto-control hidden">
+              <label for="key-group-auto">
+                <span>Auto calculate</span>
+                <input id="key-group-auto" type="checkbox" />
+              </label>
+              <button id="key-group-auto-help-button" class="help-icon" type="button" aria-label="Key Group auto calculate help" aria-expanded="false">?</button>
+              <div id="key-group-auto-help-tooltip" class="help-tooltip" role="tooltip">A Key Group can be calculated only from a complete state key. Supplying a namespace or map key makes every preceding key field exact. Select this when the final supplied key field is also complete; otherwise it remains a prefix.</div>
+            </div>
             <label id="target-control">
               Target
               <select id="inspect-target"></select>

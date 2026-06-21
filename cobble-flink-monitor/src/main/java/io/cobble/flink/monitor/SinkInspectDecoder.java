@@ -202,7 +202,7 @@ final class SinkInspectDecoder {
         }
     }
 
-    private static Object parseFieldInput(LogicalType logicalType, String text) throws IOException {
+    static Object parseFieldInput(LogicalType logicalType, String text) throws IOException {
         String value = text == null ? "" : text;
         try {
             LogicalTypeRoot root = logicalType.getTypeRoot();

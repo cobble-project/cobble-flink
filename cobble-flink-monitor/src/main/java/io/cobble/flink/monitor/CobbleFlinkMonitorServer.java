@@ -580,7 +580,16 @@ public final class CobbleFlinkMonitorServer {
             if (timerFilter != null) {
                 prefix = null;
             }
-            StateRowFilter stateFilter = stateRowFilter(params, target);
+            StateRowFilter stateFilter =
+                    stateRowFilter(
+                            params,
+                            target,
+                            "true".equalsIgnoreCase(first(params, "auto_key_group", null)),
+                            "true".equalsIgnoreCase(first(params, "key_group_last_complete", null)),
+                            currentTotalBuckets());
+            if (bucket == null && stateFilter != null && stateFilter.keyGroup != null) {
+                bucket = stateFilter.keyGroup;
+            }
             if (prefix != null && prefix.length > 0 && stateFilter != null) {
                 throw new InputException("`prefix` cannot be combined with state key filters");
             }
@@ -914,7 +923,11 @@ public final class CobbleFlinkMonitorServer {
         }
 
         private static StateRowFilter stateRowFilter(
-                Map<String, List<String>> params, InspectTarget target) {
+                Map<String, List<String>> params,
+                InspectTarget target,
+                boolean autoKeyGroup,
+                boolean lastKeyComplete,
+                int totalKeyGroups) {
             String key = blankToNull(first(params, "state_key", null));
             String namespace = blankToNull(first(params, "namespace", null));
             String mapKey = blankToNull(first(params, "map_key", null));
@@ -930,13 +943,10 @@ public final class CobbleFlinkMonitorServer {
                     semanticPartFilter(params, "namespace_field", "namespace", target, "namespace");
             SemanticPartFilter mapKeyFields =
                     semanticPartFilter(params, "map_key_field", "map key", target, "map_key");
-            boolean hasRawFilter =
-                    key != null
-                            || namespace != null
-                            || mapKey != null
-                            || keyBytes != null
-                            || namespaceBytes != null
-                            || mapKeyBytes != null;
+            boolean hasKey = key != null || keyBytes != null;
+            boolean hasNamespace = namespace != null || namespaceBytes != null;
+            boolean hasMapKey = mapKey != null || mapKeyBytes != null;
+            boolean hasRawFilter = hasKey || hasNamespace || hasMapKey;
             boolean hasSemanticFilter =
                     stateKeyFields != null || namespaceFields != null || mapKeyFields != null;
             if (hasRawFilter && hasSemanticFilter) {
@@ -950,6 +960,9 @@ public final class CobbleFlinkMonitorServer {
                     && namespaceBytes == null
                     && mapKeyBytes == null
                     && !hasSemanticFilter) {
+                if (autoKeyGroup && lastKeyComplete) {
+                    throw new InputException("State key is required to calculate a Key Group");
+                }
                 return null;
             }
             if (hasSemanticFilter) {
@@ -960,8 +973,45 @@ public final class CobbleFlinkMonitorServer {
                 if (!"MAP".equals(target.stateKind) && mapKeyFields != null) {
                     throw new InputException("Map key fields are only valid for MapState");
                 }
+                boolean stateKeyComplete =
+                        stateKeyFields != null
+                                && (namespaceFields != null
+                                        || mapKeyFields != null
+                                        || lastKeyComplete);
+                if (stateKeyComplete && !completeSemanticPart(stateKeyFields, "state key fields")) {
+                    throw new InputException(
+                            "All state key fields are required before namespace or map key fields");
+                }
+                boolean namespaceComplete =
+                        namespaceFields != null && (mapKeyFields != null || lastKeyComplete);
+                if (namespaceComplete
+                        && !completeSemanticPart(namespaceFields, "namespace fields")) {
+                    throw new InputException(
+                            "All namespace fields are required before map key fields");
+                }
+                if (autoKeyGroup && lastKeyComplete && stateKeyFields == null) {
+                    throw new InputException(
+                            "State key fields are required to calculate a Key Group");
+                }
+                Integer keyGroup =
+                        autoKeyGroup && stateKeyComplete
+                                ? keyGroupForSemanticStateKey(
+                                        target, stateKeyFields.values, totalKeyGroups)
+                                : null;
                 return new StateRowFilter(
-                        null, null, null, stateKeyFields, namespaceFields, mapKeyFields);
+                        null,
+                        null,
+                        null,
+                        stateKeyFields == null
+                                ? null
+                                : stateKeyFields.withLastFieldExact(stateKeyComplete),
+                        namespaceFields == null
+                                ? null
+                                : namespaceFields.withLastFieldExact(namespaceComplete),
+                        mapKeyFields == null
+                                ? null
+                                : mapKeyFields.withLastFieldExact(lastKeyComplete),
+                        keyGroup);
             }
             if (!"MAP".equals(target.stateKind) && (mapKey != null || mapKeyBytes != null)) {
                 throw new InputException("Map key filter is only valid for MapState");
@@ -970,7 +1020,35 @@ public final class CobbleFlinkMonitorServer {
                 byte[] prefix =
                         StateInspectDecoder.encodeStateKeyPrefix(
                                 target, key, keyBytes, namespace, namespaceBytes, null, null);
-                return new StateRowFilter(prefix, mapKey, mapKeyBytes, null, null, null);
+                boolean stateKeyComplete = hasKey && (hasNamespace || hasMapKey || lastKeyComplete);
+                if (autoKeyGroup && lastKeyComplete && !hasKey) {
+                    throw new InputException("State key is required to calculate a Key Group");
+                }
+                Integer keyGroup =
+                        autoKeyGroup && stateKeyComplete
+                                ? StateInspectDecoder.keyGroupForRawStateKey(
+                                        target, key, keyBytes, totalKeyGroups)
+                                : null;
+                return new StateRowFilter(prefix, mapKey, mapKeyBytes, null, null, null, keyGroup);
+            } catch (IOException e) {
+                throw new InputException(e.getMessage());
+            }
+        }
+
+        private static boolean completeSemanticPart(SemanticPartFilter filter, String label) {
+            try {
+                return StateInspectDecoder.hasCompleteSemanticPartFilter(
+                        filter.type, filter.values, label);
+            } catch (IOException e) {
+                throw new InputException(e.getMessage());
+            }
+        }
+
+        private static int keyGroupForSemanticStateKey(
+                InspectTarget target, List<String> values, int totalKeyGroups) {
+            try {
+                return StateInspectDecoder.keyGroupForSemanticStateKey(
+                        target, values, totalKeyGroups);
             } catch (IOException e) {
                 throw new InputException(e.getMessage());
             }
@@ -989,7 +1067,7 @@ public final class CobbleFlinkMonitorServer {
             StateInspectType type = semanticPartType(target, partName);
             try {
                 StateInspectDecoder.validateSemanticPartFilter(type, values, label);
-                return new SemanticPartFilter(partName, type, values);
+                return new SemanticPartFilter(partName, type, values, false);
             } catch (IOException e) {
                 throw new InputException(e.getMessage());
             }
@@ -1168,6 +1246,7 @@ public final class CobbleFlinkMonitorServer {
             private final SemanticPartFilter stateKeyFields;
             private final SemanticPartFilter namespaceFields;
             private final SemanticPartFilter mapKeyFields;
+            private final Integer keyGroup;
 
             private StateRowFilter(
                     byte[] prefix,
@@ -1175,13 +1254,15 @@ public final class CobbleFlinkMonitorServer {
                     byte[] mapKeyBytesPrefix,
                     SemanticPartFilter stateKeyFields,
                     SemanticPartFilter namespaceFields,
-                    SemanticPartFilter mapKeyFields) {
+                    SemanticPartFilter mapKeyFields,
+                    Integer keyGroup) {
                 this.prefix = prefix == null ? new byte[0] : prefix;
                 this.mapKeyPrefix = mapKeyPrefix;
                 this.mapKeyBytesPrefix = mapKeyBytesPrefix;
                 this.stateKeyFields = stateKeyFields;
                 this.namespaceFields = namespaceFields;
                 this.mapKeyFields = mapKeyFields;
+                this.keyGroup = keyGroup;
             }
 
             private boolean matches(Map<String, Object> item, InspectTarget target, byte[] rowKey) {
@@ -1220,7 +1301,11 @@ public final class CobbleFlinkMonitorServer {
                     Map<String, Object> decodedParts, SemanticPartFilter filter) {
                 return filter == null
                         || StateInspectDecoder.matchesSemanticPartFilter(
-                                decodedParts, filter.partName, filter.type, filter.values);
+                                decodedParts,
+                                filter.partName,
+                                filter.type,
+                                filter.values,
+                                filter.lastFieldExact);
             }
 
             @SuppressWarnings("unchecked")
@@ -1250,12 +1335,23 @@ public final class CobbleFlinkMonitorServer {
             private final String partName;
             private final StateInspectType type;
             private final List<String> values;
+            private final boolean lastFieldExact;
 
             private SemanticPartFilter(
-                    String partName, StateInspectType type, List<String> values) {
+                    String partName,
+                    StateInspectType type,
+                    List<String> values,
+                    boolean lastFieldExact) {
                 this.partName = partName;
                 this.type = type;
                 this.values = Collections.unmodifiableList(new ArrayList<>(values));
+                this.lastFieldExact = lastFieldExact;
+            }
+
+            private SemanticPartFilter withLastFieldExact(boolean exact) {
+                return exact == lastFieldExact
+                        ? this
+                        : new SemanticPartFilter(partName, type, values, exact);
             }
         }
 

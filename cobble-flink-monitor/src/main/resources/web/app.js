@@ -68,6 +68,7 @@ function setLoading(loading) {
   $('namespace').disabled = loading
   $('map-key').disabled = loading
   $('state-field-table').disabled = loading
+  $('key-group-auto').disabled = loading
   document.querySelectorAll('[data-sink-key-input]').forEach((element) => {
     element.disabled = loading
   })
@@ -100,7 +101,6 @@ async function refresh() {
 
 function renderMeta() {
   const sourceOpen = Boolean(state.meta?.source_open)
-  renderBucketRange()
   renderInspectTabs()
   renderLastUpdates()
   $('refresh-controls').classList.toggle('hidden', !sourceOpen)
@@ -110,6 +110,7 @@ function renderMeta() {
   document.querySelector('#inspect-view .table-shell').classList.toggle('hidden', !sourceOpen)
   renderOperatorOptions()
   renderInspectTargets()
+  renderBucketRange()
   renderStateFilterControls()
   renderActiveResult()
   renderPager()
@@ -144,14 +145,18 @@ function renderOperatorOptions() {
 
 function renderBucketRange() {
   const totalBuckets = Number(state.meta?.total_buckets || 0)
+  const keyGroup = isDecodedTarget(activeTarget())
+  const label = keyGroup ? 'Key Group' : 'Bucket'
   if (totalBuckets > 0) {
-    $('bucket-label').textContent = `Bucket (all or 0-${totalBuckets - 1})`
+    $('bucket-label').textContent = `${label} (all or 0-${totalBuckets - 1})`
     $('bucket').max = String(totalBuckets - 1)
   } else {
-    $('bucket-label').textContent = 'Bucket (all)'
+    $('bucket-label').textContent = `${label} (all)`
     $('bucket').removeAttribute('max')
   }
   $('bucket').placeholder = totalBuckets > 0 ? `all or 0-${totalBuckets - 1}` : 'all'
+  $('key-group-auto-control').classList.toggle('hidden', !keyGroup)
+  $('inspect-controls').classList.toggle('key-group-layout', keyGroup)
 }
 
 function renderInspectTargets() {
@@ -526,6 +531,10 @@ async function runScan(direction = 'reset') {
     } else {
       query.set('prefix', $('prefix').value || '')
     }
+    if (!bucket && isDecodedTarget(target)) {
+      query.set('auto_key_group', 'true')
+      if ($('key-group-auto').checked) query.set('key_group_last_complete', 'true')
+    }
     query.set('limit', $('limit').value || '50')
     if (activeTargetId()) query.set('target', activeTargetId())
     if (activeColumns()) query.set('columns', activeColumns())
@@ -625,6 +634,7 @@ function scheduleInspectAutoRefresh() {
 
 function refreshTargetControls() {
   renderInspectTargets()
+  renderBucketRange()
   resetScanState()
   setLoading(false)
 }
@@ -864,14 +874,14 @@ function renderScanResult(data, context = activeScanContext()) {
   $('result-head').innerHTML = timer
     ? timerFieldTable
       ? renderTimerStateScanHeader(stateTable)
-      : '<tr><th>Bucket</th><th>Timer key</th><th>Timestamp</th><th></th></tr>'
+      : `<tr><th>${bucketHeader(target)}</th><th>Timer key</th><th>Timestamp</th><th></th></tr>`
     : sinkExpanded
     ? renderSinkScanHeader(sinkTable)
     : stateExpanded
     ? renderStateScanHeader(stateTable)
     : sink
     ? '<tr><th>Bucket</th><th>Key</th><th>Columns</th><th></th></tr>'
-    : '<tr><th>Bucket</th><th>Key</th><th>Value</th><th></th></tr>'
+    : `<tr><th>${bucketHeader(target)}</th><th>Key</th><th>Value</th><th></th></tr>`
   const body = $('result-body')
   body.innerHTML = ''
   for (const item of items) {
@@ -929,12 +939,12 @@ function renderLookupResult() {
   $('result-head').innerHTML = timerOnly
     ? timerFieldTable
       ? renderTimerStateLookupHeader(stateTable)
-      : '<tr><th>Target</th><th>Bucket</th><th>Timer key</th><th>Timestamp</th><th></th></tr>'
+      : `<tr><th>Target</th><th>${lookupBucketHeader(items)}</th><th>Timer key</th><th>Timestamp</th><th></th></tr>`
     : sinkExpanded
     ? renderSinkLookupHeader(sinkTable)
     : stateExpanded
     ? renderStateLookupHeader(stateTable)
-    : '<tr><th>Target</th><th>Bucket</th><th>Key</th><th>Value</th><th></th></tr>'
+    : `<tr><th>Target</th><th>${lookupBucketHeader(items)}</th><th>Key</th><th>Value</th><th></th></tr>`
   const body = $('result-body')
   body.innerHTML = ''
   for (const item of items) {
@@ -1213,7 +1223,7 @@ function stateTableLayout(target) {
 function renderStateScanHeader(layout) {
   return `
     <tr>
-      <th rowspan="2">Bucket</th>
+      <th rowspan="2">Key Group</th>
       ${renderStateGroupHeaders(layout.groups)}
       <th rowspan="2"></th>
     </tr>
@@ -1225,7 +1235,7 @@ function renderStateLookupHeader(layout) {
   return `
     <tr>
       <th rowspan="2">Target</th>
-      <th rowspan="2">Bucket</th>
+      <th rowspan="2">Key Group</th>
       ${renderStateGroupHeaders(layout.groups)}
       <th rowspan="2"></th>
     </tr>
@@ -1236,7 +1246,7 @@ function renderStateLookupHeader(layout) {
 function renderTimerStateScanHeader(layout) {
   return `
     <tr>
-      <th rowspan="2">Bucket</th>
+      <th rowspan="2">Key Group</th>
       ${renderStateGroupHeaders(layout.groups)}
       <th rowspan="2">Timestamp</th>
       <th rowspan="2"></th>
@@ -1249,7 +1259,7 @@ function renderTimerStateLookupHeader(layout) {
   return `
     <tr>
       <th rowspan="2">Target</th>
-      <th rowspan="2">Bucket</th>
+      <th rowspan="2">Key Group</th>
       ${renderStateGroupHeaders(layout.groups)}
       <th rowspan="2">Timestamp</th>
       <th rowspan="2"></th>
@@ -1709,6 +1719,16 @@ function isTimerTarget(target) {
   return target?.kind === 'timer'
 }
 
+function bucketHeader(target) {
+  return isDecodedTarget(target) ? 'Key Group' : 'Bucket'
+}
+
+function lookupBucketHeader(items) {
+  return items.length > 0 && items.every((item) => isDecodedTarget(trackedTarget(item)))
+    ? 'Key Group'
+    : 'Bucket'
+}
+
 function isSinkTarget(target) {
   return target?.kind === 'sink'
 }
@@ -1806,10 +1826,23 @@ function toggleSinkKeyHelp() {
   $('sink-key-help-button').setAttribute('aria-expanded', String(visible))
 }
 
+function toggleKeyGroupAutoHelp() {
+  const tooltip = $('key-group-auto-help-tooltip')
+  const visible = !tooltip.classList.contains('visible')
+  tooltip.classList.toggle('visible', visible)
+  $('key-group-auto-help-button').setAttribute('aria-expanded', String(visible))
+}
+
 function closeSinkKeyHelp(event) {
   if (event.target.closest('.sink-key-filter-header')) return
   $('sink-key-help-tooltip').classList.remove('visible')
   $('sink-key-help-button').setAttribute('aria-expanded', 'false')
+}
+
+function closeKeyGroupAutoHelp(event) {
+  if (event.target.closest('.key-group-auto-control')) return
+  $('key-group-auto-help-tooltip').classList.remove('visible')
+  $('key-group-auto-help-button').setAttribute('aria-expanded', 'false')
 }
 
 document.querySelectorAll('.nav-button').forEach((button) => {
@@ -1820,6 +1853,7 @@ $('open-new-path-button').addEventListener('click', openNewPath)
 $('operator-select').addEventListener('change', switchOperator)
 $('inspect-target').addEventListener('change', refreshTargetControls)
 $('sink-key-help-button').addEventListener('click', toggleSinkKeyHelp)
+$('key-group-auto-help-button').addEventListener('click', toggleKeyGroupAutoHelp)
 $('inspect-button').addEventListener('click', () => runInspect())
 $('lookup-button').addEventListener('click', () => runLookup())
 $('clear-lookup-button').addEventListener('click', () => {
@@ -1839,8 +1873,10 @@ $('state-field-table').addEventListener('change', () => {
   invalidatePagination()
   renderActiveResult()
 })
+$('key-group-auto').addEventListener('change', invalidatePagination)
 document.addEventListener('click', closeRowActionPopover)
 document.addEventListener('click', closeSinkKeyHelp)
+document.addEventListener('click', closeKeyGroupAutoHelp)
 window.addEventListener('resize', closeRowActionPopover)
 window.addEventListener('scroll', closeRowActionPopover, true)
 $('new-source-path').addEventListener('keydown', (event) => {

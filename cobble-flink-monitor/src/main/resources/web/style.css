@@ -161,6 +161,10 @@ main {
   margin-bottom: 12px;
 }
 
+.control-grid.key-group-layout #target-control {
+  grid-column: span 3;
+}
+
 .sub-tabs {
   display: inline-flex;
   gap: 4px;
@@ -285,6 +289,34 @@ label {
   width: min(320px, calc(100vw - 48px));
 }
 
+.key-group-auto-control {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  align-self: end;
+  gap: 6px;
+  min-height: 38px;
+}
+
+.key-group-auto-control label {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.key-group-auto-control input {
+  width: auto;
+}
+
+.key-group-auto-control .help-tooltip {
+  top: calc(100% + 6px);
+  left: 0;
+  width: min(340px, calc(100vw - 48px));
+}
+
 input,
 select,
 textarea {
@@ -376,6 +408,8 @@ textarea {
 .help-icon:focus + .help-tooltip,
 .field-table-control:hover .help-tooltip,
 .field-table-control:focus-within .help-tooltip,
+.key-group-auto-control:hover .help-tooltip,
+.key-group-auto-control:focus-within .help-tooltip,
 .help-tooltip.visible {
   opacity: 1;
   pointer-events: auto;
@@ -734,6 +768,10 @@ td:last-child {
 
   .control-grid {
     grid-template-columns: 1fr;
+  }
+
+  .control-grid.key-group-layout #target-control {
+    grid-column: auto;
   }
 
   .scan-run-row {
