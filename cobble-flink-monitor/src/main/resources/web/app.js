@@ -12,8 +12,6 @@ const state = {
   scanLastUpdate: null,
   lookupLastUpdate: null,
   trackedLookups: [],
-  latestRefreshTimer: null,
-  latestRefreshInFlight: false,
   inspectRefreshTimer: null,
   inspectRefreshInFlight: false,
   inspectAutoRefreshEnabled: false,
@@ -91,7 +89,7 @@ async function refresh() {
     state.snapshots = snapshots.snapshots || []
     renderMeta()
     renderSnapshots()
-    scheduleAutoRefresh()
+    scheduleInspectAutoRefresh()
     clearError('refresh')
   } catch (error) {
     showError(error, 'refresh')
@@ -597,28 +595,6 @@ async function runLookup() {
   } finally {
     setLoading(false)
   }
-}
-
-function scheduleAutoRefresh() {
-  if (state.latestRefreshTimer) {
-    clearInterval(state.latestRefreshTimer)
-    state.latestRefreshTimer = null
-  }
-  if (!state.meta?.source_open || state.meta?.selected_checkpoint !== 'latest') {
-    scheduleInspectAutoRefresh()
-    return
-  }
-  const delay = Number(state.meta?.latest_refresh_millis || 5000)
-  state.latestRefreshTimer = setInterval(async () => {
-    if (state.latestRefreshInFlight) return
-    state.latestRefreshInFlight = true
-    try {
-      await refresh()
-    } finally {
-      state.latestRefreshInFlight = false
-    }
-  }, delay)
-  scheduleInspectAutoRefresh()
 }
 
 function scheduleInspectAutoRefresh() {

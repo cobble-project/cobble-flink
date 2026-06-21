@@ -58,7 +58,6 @@ public final class CobbleFlinkMonitorServer {
     private static final String CHECKPOINT_PREFIX = "chk-";
     private static final String COBBLE_MANIFEST_PREFIX = "COBBLE-SNAPSHOT-";
     private static final String COBBLE_MANIFEST_SUFFIX = "-MANIFEST";
-    private static final long DEFAULT_LATEST_REFRESH_MILLIS = 5000L;
     private static final byte[] EMPTY_SCAN_KEY = new byte[0];
     private static final byte[] MAX_SCAN_KEY = maxScanKey();
     private static final Gson GSON =
@@ -420,7 +419,6 @@ public final class CobbleFlinkMonitorServer {
             output.put("catalog", catalog == null ? null : catalog.toJson());
             output.put("inspect_default_limit", config.inspectDefaultLimit);
             output.put("inspect_max_limit", config.inspectMaxLimit);
-            output.put("latest_refresh_millis", DEFAULT_LATEST_REFRESH_MILLIS);
             output.put("uptime_millis", System.currentTimeMillis() - startedAtMillis);
             return output;
         }
