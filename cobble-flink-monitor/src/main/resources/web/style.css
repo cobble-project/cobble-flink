@@ -161,8 +161,21 @@ main {
   margin-bottom: 12px;
 }
 
-.control-grid.key-group-layout #target-control {
-  grid-column: span 3;
+#scan-controls {
+  container-type: inline-size;
+}
+
+@media (min-width: 861px) {
+  .control-grid > #target-control,
+  .control-grid.key-group-layout #target-control,
+  .scan-filter-controls > #prefix-control {
+    grid-column: span 2;
+  }
+
+  .sink-key-row input,
+  .state-semantic-key-row input {
+    max-width: calc(50cqw - 6px);
+  }
 }
 
 .sub-tabs {
@@ -768,10 +781,6 @@ td:last-child {
 
   .control-grid {
     grid-template-columns: 1fr;
-  }
-
-  .control-grid.key-group-layout #target-control {
-    grid-column: auto;
   }
 
   .scan-run-row {
