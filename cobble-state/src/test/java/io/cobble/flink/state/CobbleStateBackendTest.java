@@ -92,6 +92,7 @@ import org.junit.jupiter.api.io.TempDir;
 
 import java.io.File;
 import java.io.IOException;
+import java.io.UncheckedIOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.Arrays;
@@ -669,6 +670,637 @@ class CobbleStateBackendTest {
             assertEquals(timer, queue.poll());
             assertNull(queue.poll());
         }
+    }
+
+    @Test
+    void canonicalRestoreRejectsIncompatibleValueSerializerBeforeDataRead(@TempDir Path tempDir)
+            throws Exception {
+        // The savepoint metadata declares the "value" state as String. The running job re-registers
+        // the same state name with an IntSerializer; the backend must reject the descriptor before
+        // any column family is created or any row is read.
+        int key = 42;
+        int keyGroup = KeyGroupRangeAssignment.assignToKeyGroup(key, 16);
+        KeyGroupsSavepointStateHandle savepoint = createCanonicalSavepoint(key, keyGroup);
+
+        try (TestBackendContext context =
+                createBackendContext(
+                        tempDir,
+                        false,
+                        null,
+                        null,
+                        TtlTimeProvider.DEFAULT,
+                        false,
+                        Collections.singletonList(savepoint),
+                        KeyGroupRange.of(keyGroup, keyGroup))) {
+            CobbleKeyedStateBackend<Integer> backend = context.cobbleBackend;
+            backend.setCurrentKey(key);
+
+            // Snapshot the schema BEFORE registering the mis-typed descriptor; the failure path
+            // must not leave any new column family behind.
+            Set<String> columnFamiliesBefore =
+                    backend.getCobbleDb().currentSchema().columnFamilies().keySet();
+
+            Exception error =
+                    assertThrows(
+                            Exception.class,
+                            () ->
+                                    backend.getPartitionedState(
+                                            org.apache.flink.runtime.state.VoidNamespace.INSTANCE,
+                                            VoidNamespaceSerializer.INSTANCE,
+                                            new ValueStateDescriptor<>(
+                                                    "value", IntSerializer.INSTANCE)));
+            assertTrue(
+                    hasCause(error, org.apache.flink.util.StateMigrationException.class),
+                    "expected StateMigrationException cause, got: " + error);
+            String message = collectMessages(error);
+            assertTrue(
+                    message.contains("value serializer"),
+                    "error must name the offending role, got: " + message);
+            assertTrue(
+                    message.contains(StringSerializer.class.getName()),
+                    "error must name canonical serializer class, got: " + message);
+            assertTrue(
+                    message.contains(IntSerializer.class.getName()),
+                    "error must name the rejected runtime serializer class, got: " + message);
+            assertTrue(message.contains("'value'"), "error must name the state, got: " + message);
+
+            // The schema must be unchanged — no new column family was created for the rejected
+            // state. The canonical restore already created the family for "value", but the failed
+            // descriptor registration must not add anything else.
+            Set<String> columnFamiliesAfter =
+                    backend.getCobbleDb().currentSchema().columnFamilies().keySet();
+            assertEquals(columnFamiliesBefore, columnFamiliesAfter);
+
+            // Re-registering with the canonical-compatible serializer must still succeed: the
+            // failed registration must not have poisoned the registry entry.
+            ValueState<String> recovered =
+                    backend.getPartitionedState(
+                            org.apache.flink.runtime.state.VoidNamespace.INSTANCE,
+                            VoidNamespaceSerializer.INSTANCE,
+                            new ValueStateDescriptor<>("value", StringSerializer.INSTANCE));
+            assertEquals("value-42", recovered.value());
+        }
+    }
+
+    @Test
+    void canonicalRestoreRejectsIncompatibleNamespaceSerializerBeforeDataRead(@TempDir Path tempDir)
+            throws Exception {
+        int key = 42;
+        int keyGroup = KeyGroupRangeAssignment.assignToKeyGroup(key, 16);
+        KeyGroupsSavepointStateHandle savepoint = createCanonicalSavepoint(key, keyGroup);
+
+        try (TestBackendContext context =
+                createBackendContext(
+                        tempDir,
+                        false,
+                        null,
+                        null,
+                        TtlTimeProvider.DEFAULT,
+                        false,
+                        Collections.singletonList(savepoint),
+                        KeyGroupRange.of(keyGroup, keyGroup))) {
+            CobbleKeyedStateBackend<Integer> backend = context.cobbleBackend;
+            backend.setCurrentKey(key);
+
+            // Wrong namespace serializer class (StringSerializer vs canonical
+            // VoidNamespaceSerializer)
+            // must be rejected. The value-serializer class agrees, so this isolates the namespace
+            // check.
+            @SuppressWarnings({"unchecked", "rawtypes"})
+            Exception error =
+                    assertThrows(
+                            Exception.class,
+                            () ->
+                                    backend.getPartitionedState(
+                                            (Object) "any-namespace",
+                                            (org.apache.flink.api.common.typeutils.TypeSerializer)
+                                                    StringSerializer.INSTANCE,
+                                            new ValueStateDescriptor<>(
+                                                    "value", StringSerializer.INSTANCE)));
+            assertTrue(
+                    hasCause(error, org.apache.flink.util.StateMigrationException.class),
+                    "expected StateMigrationException cause, got: " + error);
+            String message = collectMessages(error);
+            assertTrue(
+                    message.contains("namespace serializer"),
+                    "error must name namespace serializer role, got: " + message);
+            assertTrue(
+                    message.contains(VoidNamespaceSerializer.class.getName()),
+                    "error must name canonical namespace serializer class, got: " + message);
+            assertTrue(
+                    message.contains(StringSerializer.class.getName()),
+                    "error must name rejected namespace serializer class, got: " + message);
+        }
+    }
+
+    @Test
+    void canonicalRestoreRejectsKindMismatchBetweenSavepointAndDescriptor(@TempDir Path tempDir)
+            throws Exception {
+        // Canonical savepoint registers "value" as VALUE. The job mis-registers it as LIST.
+        int key = 42;
+        int keyGroup = KeyGroupRangeAssignment.assignToKeyGroup(key, 16);
+        KeyGroupsSavepointStateHandle savepoint = createCanonicalSavepoint(key, keyGroup);
+
+        try (TestBackendContext context =
+                createBackendContext(
+                        tempDir,
+                        false,
+                        null,
+                        null,
+                        TtlTimeProvider.DEFAULT,
+                        false,
+                        Collections.singletonList(savepoint),
+                        KeyGroupRange.of(keyGroup, keyGroup))) {
+            CobbleKeyedStateBackend<Integer> backend = context.cobbleBackend;
+            backend.setCurrentKey(key);
+
+            Exception error =
+                    assertThrows(
+                            Exception.class,
+                            () ->
+                                    backend.getPartitionedState(
+                                            org.apache.flink.runtime.state.VoidNamespace.INSTANCE,
+                                            VoidNamespaceSerializer.INSTANCE,
+                                            new ListStateDescriptor<>(
+                                                    "value", StringSerializer.INSTANCE)));
+            assertTrue(
+                    hasCause(error, org.apache.flink.util.StateMigrationException.class),
+                    "expected StateMigrationException cause, got: " + error);
+            String message = collectMessages(error);
+            assertTrue(
+                    message.contains("kind mismatch") || message.contains("registers"),
+                    "error should report state-kind mismatch, got: " + message);
+            assertTrue(
+                    message.contains("VALUE"),
+                    "error must mention canonical VALUE kind: " + message);
+            assertTrue(
+                    message.contains("LIST"), "error must mention requested LIST kind: " + message);
+        }
+    }
+
+    @Test
+    void canonicalRestoreRejectsIncompatibleTimerElementSerializer(@TempDir Path tempDir)
+            throws Exception {
+        int keyGroup = 3;
+        TimerHeapInternalTimer<Integer, org.apache.flink.runtime.state.VoidNamespace> timer =
+                new TimerHeapInternalTimer<>(
+                        123L,
+                        findKeyForGroup(keyGroup),
+                        org.apache.flink.runtime.state.VoidNamespace.INSTANCE);
+        KeyGroupsSavepointStateHandle savepoint = createCanonicalTimerSavepoint(keyGroup, timer);
+
+        try (TestBackendContext context =
+                createBackendContext(
+                        tempDir,
+                        false,
+                        null,
+                        null,
+                        TtlTimeProvider.DEFAULT,
+                        false,
+                        Collections.singletonList(savepoint),
+                        KeyGroupRange.of(keyGroup, keyGroup))) {
+            CobbleKeyedStateBackend<Integer> backend = context.cobbleBackend;
+
+            // Pass a raw IntSerializer for the timer element — its class differs from the canonical
+            // TimerSerializer, so the registration must fail with a StateMigrationException cause.
+            UncheckedIOException error =
+                    assertThrows(
+                            UncheckedIOException.class,
+                            () ->
+                                    backend.create(
+                                            "timer",
+                                            (org.apache.flink.api.common.typeutils.TypeSerializer)
+                                                    StringSerializer.INSTANCE));
+            assertTrue(
+                    hasCause(error, org.apache.flink.util.StateMigrationException.class),
+                    "expected StateMigrationException cause, got: " + error);
+            String message = collectMessages(error);
+            assertTrue(
+                    message.contains("timer element serializer"),
+                    "error must name timer element serializer role, got: " + message);
+            assertTrue(
+                    message.contains(TimerSerializer.class.getName()),
+                    "error must name canonical TimerSerializer class, got: " + message);
+            assertTrue(
+                    message.contains(StringSerializer.class.getName()),
+                    "error must name rejected runtime serializer class, got: " + message);
+            assertTrue(message.contains("'timer'"), "error must name the state, got: " + message);
+
+            // Re-creating with the canonical serializer must still succeed, proving the failed
+            // create() did not poison the registry entry.
+            KeyGroupedInternalPriorityQueue<
+                            TimerHeapInternalTimer<
+                                    Integer, org.apache.flink.runtime.state.VoidNamespace>>
+                    queue =
+                            backend.create(
+                                    "timer",
+                                    new TimerSerializer<>(
+                                            IntSerializer.INSTANCE,
+                                            VoidNamespaceSerializer.INSTANCE));
+            assertEquals(timer, queue.poll());
+        }
+    }
+
+    @Test
+    void canonicalRestoreHandlesSameStateAcrossMultipleHandlesInDifferentOrder(
+            @TempDir Path tempDir) throws Exception {
+        // Two canonical handles for two different key-groups belonging to the same task. The state
+        // name "value" appears in BOTH handles, but the per-handle metadata IDs differ (a vs b),
+        // and the second handle places it in a different relative position. The backend must
+        // accept the consistent metadata and apply it from any handle, then validate the running
+        // descriptor against it.
+        int keyGroupA = 3;
+        int keyGroupB = 4;
+        int keyA = findKeyForGroup(keyGroupA);
+        int keyB = findKeyForGroup(keyGroupB);
+        KeyGroupsSavepointStateHandle handleA =
+                createCanonicalSavepointSingleValueState(keyGroupA, keyA);
+        KeyGroupsSavepointStateHandle handleB =
+                createCanonicalSavepointSingleValueState(keyGroupB, keyB);
+
+        try (TestBackendContext context =
+                createBackendContext(
+                        tempDir,
+                        false,
+                        null,
+                        null,
+                        TtlTimeProvider.DEFAULT,
+                        false,
+                        // Pass the handles deliberately in reverse key-group order to exercise
+                        // multi-handle ordering: the restored metadata registry must end up with
+                        // a single entry for "value".
+                        Arrays.asList(handleB, handleA),
+                        KeyGroupRange.of(keyGroupA, keyGroupB))) {
+            CobbleKeyedStateBackend<Integer> backend = context.cobbleBackend;
+
+            ValueState<String> valueState =
+                    backend.getPartitionedState(
+                            org.apache.flink.runtime.state.VoidNamespace.INSTANCE,
+                            VoidNamespaceSerializer.INSTANCE,
+                            new ValueStateDescriptor<>("value", StringSerializer.INSTANCE));
+
+            backend.setCurrentKey(keyA);
+            assertEquals("value-" + keyA, valueState.value());
+            backend.setCurrentKey(keyB);
+            assertEquals("value-" + keyB, valueState.value());
+        }
+    }
+
+    @Test
+    void canonicalRestoreRejectsSameClassValueSerializerWithIncompatibleNestedConfig(
+            @TempDir Path tempDir) throws Exception {
+        // P1 regression guard: the canonical metadata records a ListSerializer<String>; the running
+        // job re-registers the SAME state name with a ListSerializer<Integer>. Both outer
+        // serializers share the ListSerializer class, so the obsolete "class equality" check would
+        // have wrongly accepted this. The Flink TypeSerializerSnapshot.resolveSchemaCompatibility
+        // path must observe the nested element-serializer mismatch and reject as incompatible.
+        int key = 42;
+        int keyGroup = KeyGroupRangeAssignment.assignToKeyGroup(key, 16);
+        KeyGroupsSavepointStateHandle savepoint =
+                createCanonicalSavepointSingleValueStateWithSerializer(
+                        keyGroup, key, new ListSerializer<>(StringSerializer.INSTANCE));
+
+        try (TestBackendContext context =
+                createBackendContext(
+                        tempDir,
+                        false,
+                        null,
+                        null,
+                        TtlTimeProvider.DEFAULT,
+                        false,
+                        Collections.singletonList(savepoint),
+                        KeyGroupRange.of(keyGroup, keyGroup))) {
+            CobbleKeyedStateBackend<Integer> backend = context.cobbleBackend;
+            backend.setCurrentKey(key);
+
+            Exception error =
+                    assertThrows(
+                            Exception.class,
+                            () ->
+                                    backend.getPartitionedState(
+                                            org.apache.flink.runtime.state.VoidNamespace.INSTANCE,
+                                            VoidNamespaceSerializer.INSTANCE,
+                                            new ValueStateDescriptor<>(
+                                                    "value",
+                                                    new ListSerializer<>(IntSerializer.INSTANCE))));
+            assertTrue(
+                    hasCause(error, org.apache.flink.util.StateMigrationException.class),
+                    "expected StateMigrationException cause, got: " + error);
+            String message = collectMessages(error);
+            assertTrue(
+                    message.contains("value serializer"),
+                    "error must name the offending role, got: " + message);
+            assertTrue(
+                    message.contains(ListSerializer.class.getName()),
+                    "error must mention the outer ListSerializer class on both sides, got: "
+                            + message);
+            assertTrue(
+                    message.contains("incompatible"),
+                    "error must explain the resolveSchemaCompatibility outcome, got: " + message);
+            assertTrue(message.contains("'value'"), "error must name the state, got: " + message);
+        }
+    }
+
+    @Test
+    void canonicalRestoreRejectsSameClassTimerSerializerWithIncompatibleNestedConfig(
+            @TempDir Path tempDir) throws Exception {
+        // P1 regression guard for priority-queue / timer state. The canonical metadata's
+        // TimerSerializer is constructed over IntSerializer; the running job calls create() with a
+        // TimerSerializer constructed over StringSerializer. Outer TimerSerializer class is
+        // identical on both sides, so only the nested-config-aware Flink resolveSchemaCompatibility
+        // call can detect the mismatch.
+        int keyGroup = 3;
+        TimerHeapInternalTimer<Integer, org.apache.flink.runtime.state.VoidNamespace> timer =
+                new TimerHeapInternalTimer<>(
+                        123L,
+                        findKeyForGroup(keyGroup),
+                        org.apache.flink.runtime.state.VoidNamespace.INSTANCE);
+        KeyGroupsSavepointStateHandle savepoint = createCanonicalTimerSavepoint(keyGroup, timer);
+
+        try (TestBackendContext context =
+                createBackendContext(
+                        tempDir,
+                        false,
+                        null,
+                        null,
+                        TtlTimeProvider.DEFAULT,
+                        false,
+                        Collections.singletonList(savepoint),
+                        KeyGroupRange.of(keyGroup, keyGroup))) {
+            CobbleKeyedStateBackend<Integer> backend = context.cobbleBackend;
+
+            UncheckedIOException error =
+                    assertThrows(
+                            UncheckedIOException.class,
+                            () ->
+                                    backend.create(
+                                            "timer",
+                                            new TimerSerializer<>(
+                                                    StringSerializer.INSTANCE,
+                                                    VoidNamespaceSerializer.INSTANCE)));
+            assertTrue(
+                    hasCause(error, org.apache.flink.util.StateMigrationException.class),
+                    "expected StateMigrationException cause, got: " + error);
+            String message = collectMessages(error);
+            assertTrue(
+                    message.contains("timer element serializer"),
+                    "error must name timer element serializer role, got: " + message);
+            assertTrue(
+                    message.contains(TimerSerializer.class.getName()),
+                    "error must mention the outer TimerSerializer class on both sides, got: "
+                            + message);
+            assertTrue(
+                    message.contains("incompatible"),
+                    "error must explain the resolveSchemaCompatibility outcome, got: " + message);
+            assertTrue(message.contains("'timer'"), "error must name the state, got: " + message);
+
+            // Re-creating with the canonical-compatible serializer must still succeed, proving the
+            // failed create did not poison the registry entry or the column family.
+            KeyGroupedInternalPriorityQueue<
+                            TimerHeapInternalTimer<
+                                    Integer, org.apache.flink.runtime.state.VoidNamespace>>
+                    queue =
+                            backend.create(
+                                    "timer",
+                                    new TimerSerializer<>(
+                                            IntSerializer.INSTANCE,
+                                            VoidNamespaceSerializer.INSTANCE));
+            assertEquals(timer, queue.poll());
+        }
+    }
+
+    @Test
+    void canonicalRestoreRejectsTwoHandlesWithIncompatibleNestedConfigBeforeAnyDbWrite(
+            @TempDir Path tempDir) throws Exception {
+        // P1 regression guard for the two-phase restore: the same state name "value" appears in
+        // two canonical handles. Both record a ListSerializer (same outer class), but the nested
+        // element type differs (String vs Integer). The two-phase preflight must observe the
+        // incompatibility while still inside phase 1 — before any column family is created or any
+        // row is written — and on failure the builder must clean up the entire on-disk instance
+        // directory tree under the configured LOCAL_DIRECTORIES root.
+        int keyGroupA = 3;
+        int keyGroupB = 4;
+        int keyA = findKeyForGroup(keyGroupA);
+        int keyB = findKeyForGroup(keyGroupB);
+        KeyGroupsSavepointStateHandle handleA =
+                createCanonicalSavepointSingleValueStateWithSerializer(
+                        keyGroupA, keyA, new ListSerializer<>(StringSerializer.INSTANCE));
+        KeyGroupsSavepointStateHandle handleB =
+                createCanonicalSavepointSingleValueStateWithSerializer(
+                        keyGroupB, keyB, new ListSerializer<>(IntSerializer.INSTANCE));
+
+        Path configuredLocalDir = tempDir.resolve("configured-local-dir");
+        Exception error =
+                assertThrows(
+                        Exception.class,
+                        () ->
+                                createBackendContext(
+                                                tempDir,
+                                                false,
+                                                null,
+                                                null,
+                                                TtlTimeProvider.DEFAULT,
+                                                false,
+                                                Arrays.asList(handleA, handleB),
+                                                KeyGroupRange.of(keyGroupA, keyGroupB))
+                                        .close());
+        assertTrue(
+                hasCause(error, org.apache.flink.util.StateMigrationException.class),
+                "expected StateMigrationException cause, got: " + error);
+        String message = collectMessages(error);
+        assertTrue(
+                message.contains("between canonical savepoint handles"),
+                "error must identify the multi-handle preflight as the comparison context, got: "
+                        + message);
+        assertTrue(
+                message.contains(ListSerializer.class.getName()),
+                "error must mention the outer ListSerializer class, got: " + message);
+        assertTrue(
+                message.contains("incompatible"),
+                "error must explain the resolveSchemaCompatibility outcome, got: " + message);
+        assertTrue(message.contains("'value'"), "error must name the state, got: " + message);
+
+        // Preflight failure must leave the configured local directory pristine — no per-subtask
+        // instance directory, no Cobble DB, no column family residue.
+        Path[] leakedInstanceDirs = listLeakedInstanceDirs(configuredLocalDir);
+        assertEquals(
+                0,
+                leakedInstanceDirs.length,
+                "Preflight rejection of incompatible multi-handle metadata must not leave a backend "
+                        + "instance directory behind. Found leaked: "
+                        + Arrays.toString(leakedInstanceDirs));
+    }
+
+    @Test
+    void canonicalRestoreReconfiguresKeySerializerForRunningBackend(@TempDir Path tempDir)
+            throws Exception {
+        // P1 regression guard: when Flink reports
+        // TypeSerializerSchemaCompatibility.compatibleWithReconfiguredSerializer for the KEY
+        // serializer, the running backend must end up holding the reconfigured serializer Flink
+        // produced — NOT the one the job initially registered. This is the canonical contract of
+        // setPreviousSerializerSnapshotForRestoredState: the resulting reconfigured serializer is
+        // the one the running pipeline must serialize new keys with.
+        //
+        // Mechanics: the canonical savepoint records keys with
+        // ReconfigurableIntKeySerializer(version="canonical"). The running job registers
+        // ReconfigurableIntKeySerializer(version="runtime"). The custom snapshot's
+        // resolveSchemaCompatibility(currentSerializer) returns
+        // compatibleWithReconfiguredSerializer
+        // with a brand-new ReconfigurableIntKeySerializer(version="reconfigured"). After restore,
+        // backend.getKeySerializer() MUST be the "reconfigured" instance.
+        int key = 42;
+        int keyGroup = KeyGroupRangeAssignment.assignToKeyGroup(key, 16);
+        KeyGroupsSavepointStateHandle savepoint =
+                createCanonicalSavepointSingleValueStateWithKeySerializer(
+                        keyGroup,
+                        key,
+                        new ReconfigurableIntKeySerializer(
+                                ReconfigurableIntKeySerializer.CANONICAL_VERSION));
+
+        try (TestBackendContext context =
+                createBackendContextWithKeySerializer(
+                        tempDir,
+                        Collections.singletonList(savepoint),
+                        KeyGroupRange.of(keyGroup, keyGroup),
+                        new ReconfigurableIntKeySerializer(
+                                ReconfigurableIntKeySerializer.RUNTIME_VERSION))) {
+            CobbleKeyedStateBackend<Integer> backend = context.cobbleBackend;
+
+            // The backend's key serializer must be the reconfigured instance produced by
+            // resolveSchemaCompatibility, not the one the job registered. This is the heart of the
+            // reviewer's P1: if the import phase ran on a throw-away provider, the builder's
+            // provider would never observe the canonical snapshot and would hand the runtime
+            // serializer to the backend.
+            org.apache.flink.api.common.typeutils.TypeSerializer<Integer> keySerializer =
+                    backend.getKeySerializer();
+            assertInstanceOf(ReconfigurableIntKeySerializer.class, keySerializer);
+            assertEquals(
+                    ReconfigurableIntKeySerializer.RECONFIGURED_VERSION,
+                    ((ReconfigurableIntKeySerializer) keySerializer).version,
+                    "backend must hold the reconfigured key serializer that Flink's "
+                            + "TypeSerializerSchemaCompatibility produced");
+
+            // The imported row is still observable end-to-end, proving the import phase actually
+            // ran on the builder's provider (the same one whose currentSchemaSerializer() returned
+            // the reconfigured key serializer used to construct the backend).
+            backend.setCurrentKey(key);
+            ValueState<String> valueState =
+                    backend.getPartitionedState(
+                            org.apache.flink.runtime.state.VoidNamespace.INSTANCE,
+                            VoidNamespaceSerializer.INSTANCE,
+                            new ValueStateDescriptor<>("value", StringSerializer.INSTANCE));
+            assertEquals("value-" + key, valueState.value());
+        }
+    }
+
+    /** Concatenates the messages of {@code error} and every cause in its chain. */
+    private static String collectMessages(Throwable error) {
+        StringBuilder builder = new StringBuilder();
+        Throwable current = error;
+        while (current != null) {
+            if (current.getMessage() != null) {
+                if (builder.length() > 0) {
+                    builder.append(" | ");
+                }
+                builder.append(current.getMessage());
+            }
+            current = current.getCause();
+        }
+        return builder.toString();
+    }
+
+    /**
+     * Builds a canonical savepoint containing only a single {@code value} state for the given
+     * key-group/key — used by the multi-handle test to compose two independent canonical handles
+     * that share the same state name. The serialized payload mirrors {@code value-<key>}.
+     */
+    private static KeyGroupsSavepointStateHandle createCanonicalSavepointSingleValueState(
+            int keyGroup, int key) throws Exception {
+        return createCanonicalSavepointSingleValueStateWithSerializer(
+                keyGroup, key, StringSerializer.INSTANCE);
+    }
+
+    /**
+     * Variant of {@link #createCanonicalSavepointSingleValueState(int, int)} that lets the caller
+     * inject a custom value serializer for the recorded canonical metadata. The body bytes are
+     * intentionally synthetic and are never read (no test that exercises this helper actually
+     * consumes the row — only the preflight metadata is compared), so we can record a
+     * non-String-typed serializer without serializing a matching payload.
+     */
+    private static KeyGroupsSavepointStateHandle
+            createCanonicalSavepointSingleValueStateWithSerializer(
+                    int keyGroup,
+                    int key,
+                    org.apache.flink.api.common.typeutils.TypeSerializer<?> valueSerializer)
+                    throws Exception {
+        List<StateMetaInfoSnapshot> stateMetaInfos =
+                Collections.singletonList(
+                        new RegisteredKeyValueStateBackendMetaInfo<>(
+                                        org.apache.flink.api.common.state.StateDescriptor.Type
+                                                .VALUE,
+                                        "value",
+                                        VoidNamespaceSerializer.INSTANCE,
+                                        valueSerializer)
+                                .snapshot());
+        DataOutputSerializer output = new DataOutputSerializer(256);
+        new KeyedBackendSerializationProxy<>(IntSerializer.INSTANCE, stateMetaInfos, false)
+                .write(output);
+
+        long keyGroupOffset = output.length();
+        output.writeShort(0);
+        writeCanonicalEntry(
+                output,
+                canonicalKey(keyGroup, key, null),
+                CobbleStateKeySerializer.serialize(StringSerializer.INSTANCE, "value-" + key),
+                END_OF_KEY_GROUP_MARK);
+
+        KeyGroupRange range = KeyGroupRange.of(keyGroup, keyGroup);
+        return new KeyGroupsSavepointStateHandle(
+                new KeyGroupRangeOffsets(range, new long[] {keyGroupOffset}),
+                new ByteStreamStateHandle(
+                        "canonical-single-value-kg" + keyGroup, output.getCopyOfBuffer()));
+    }
+
+    /**
+     * Variant of {@link #createCanonicalSavepointSingleValueState(int, int)} that records a custom
+     * KEY serializer in the canonical metadata header. The KEY serializer flows into the
+     * KeyedBackendSerializationProxy and its snapshot is what the import phase later hands to the
+     * builder's StateSerializerProvider via {@code setPreviousSerializerSnapshotForRestoredState
+     * (...)}. The serialized key bytes are produced with {@code IntSerializer.INSTANCE} so the row
+     * remains decodable by any wire-compatible runtime key serializer.
+     */
+    private static KeyGroupsSavepointStateHandle
+            createCanonicalSavepointSingleValueStateWithKeySerializer(
+                    int keyGroup,
+                    int key,
+                    org.apache.flink.api.common.typeutils.TypeSerializer<Integer> keySerializer)
+                    throws Exception {
+        List<StateMetaInfoSnapshot> stateMetaInfos =
+                Collections.singletonList(
+                        new RegisteredKeyValueStateBackendMetaInfo<>(
+                                        org.apache.flink.api.common.state.StateDescriptor.Type
+                                                .VALUE,
+                                        "value",
+                                        VoidNamespaceSerializer.INSTANCE,
+                                        StringSerializer.INSTANCE)
+                                .snapshot());
+        DataOutputSerializer output = new DataOutputSerializer(256);
+        new KeyedBackendSerializationProxy<>(keySerializer, stateMetaInfos, false).write(output);
+
+        long keyGroupOffset = output.length();
+        output.writeShort(0);
+        writeCanonicalEntry(
+                output,
+                canonicalKey(keyGroup, key, null),
+                CobbleStateKeySerializer.serialize(StringSerializer.INSTANCE, "value-" + key),
+                END_OF_KEY_GROUP_MARK);
+
+        KeyGroupRange range = KeyGroupRange.of(keyGroup, keyGroup);
+        return new KeyGroupsSavepointStateHandle(
+                new KeyGroupRangeOffsets(range, new long[] {keyGroupOffset}),
+                new ByteStreamStateHandle(
+                        "canonical-single-value-custom-key-kg" + keyGroup,
+                        output.getCopyOfBuffer()));
     }
 
     @Test
@@ -2838,6 +3470,75 @@ class CobbleStateBackendTest {
         }
     }
 
+    /**
+     * Variant of {@link #createBackendContext(Path, boolean, String, MemorySize, TtlTimeProvider,
+     * boolean, Collection, KeyGroupRange, Configuration)} that lets the test inject a custom key
+     * serializer instead of the default {@code IntSerializer.INSTANCE}. Used by the
+     * reconfigured-key-serializer test to drive the canonical key snapshot through Flink's
+     * StateSerializerProvider machinery on the import phase.
+     */
+    private TestBackendContext createBackendContextWithKeySerializer(
+            Path tempDir,
+            Collection<KeyedStateHandle> stateHandles,
+            KeyGroupRange keyGroupRange,
+            org.apache.flink.api.common.typeutils.TypeSerializer<Integer> keySerializer)
+            throws Exception {
+        Path configuredLocalDir = tempDir.resolve("configured-local-dir");
+        Path taskManagerWorkingDir = tempDir.resolve("tm-working-dir");
+
+        Configuration configuration = new Configuration();
+        configuration.set(CobbleOptions.LOCAL_DIRECTORIES, configuredLocalDir.toString());
+        configuration.set(CobbleOptions.MEMTABLE_BUFFER_RATIO, 0.25d);
+        configuration.set(CobbleOptions.MEMTABLE_BUFFER_COUNT, 4);
+        configuration.set(CobbleOptions.DIRECT_IO_BUFFER_SIZE, MemorySize.parse("8kb"));
+        configuration.set(CobbleOptions.DIRECT_IO_BUFFER_POOL_MAX_SIZE, 128);
+
+        CobbleStateBackend backend =
+                new CobbleStateBackend(false).configure(configuration, getClass().getClassLoader());
+
+        MockEnvironment environment =
+                new MockEnvironmentBuilder()
+                        .setTaskName("cobble-test-task")
+                        .setJobVertexID(TEST_JOB_VERTEX_ID)
+                        .setManagedMemorySize(MemorySize.ofMebiBytes(128).getBytes())
+                        .setTaskManagerRuntimeInfo(
+                                new TestingTaskManagerRuntimeInfo(
+                                        new Configuration(), taskManagerWorkingDir.toFile()))
+                        .setTaskStateManager(new TestTaskStateManagerBuilder().build())
+                        .build();
+
+        AbstractKeyedStateBackend<Integer> keyedStateBackend = null;
+        try {
+            TaskKvStateRegistry kvStateRegistry = environment.getTaskKvStateRegistry();
+            keyedStateBackend =
+                    backend.createKeyedStateBackend(
+                            environment,
+                            environment.getJobID(),
+                            "test-operator",
+                            keySerializer,
+                            16,
+                            keyGroupRange,
+                            kvStateRegistry,
+                            TtlTimeProvider.DEFAULT,
+                            environment.getMetricGroup(),
+                            stateHandles,
+                            new CloseableRegistry(),
+                            0.5d);
+
+            assertInstanceOf(CobbleKeyedStateBackend.class, keyedStateBackend);
+            return new TestBackendContext(
+                    environment,
+                    (CobbleKeyedStateBackend<Integer>) keyedStateBackend,
+                    configuredLocalDir);
+        } catch (Exception e) {
+            if (keyedStateBackend != null) {
+                keyedStateBackend.close();
+            }
+            environment.close();
+            throw e;
+        }
+    }
+
     private static void assertValueStateEntry(
             CobbleKeyedStateBackend<Integer> backend,
             ValueState<String> valueState,
@@ -3359,6 +4060,157 @@ class CobbleStateBackendTest {
                         org.apache.flink.runtime.state.CheckpointedStateScope scope)
                         throws IOException {
             throw new IOException("expected failing checkpoint stream");
+        }
+    }
+
+    /**
+     * Test-only {@link Integer} key serializer that delegates wire format to {@link IntSerializer}
+     * but exposes a snapshot whose {@link
+     * org.apache.flink.api.common.typeutils.TypeSerializerSnapshot#resolveSchemaCompatibility}
+     * always returns {@link
+     * org.apache.flink.api.common.typeutils.TypeSerializerSchemaCompatibility#compatibleWithReconfiguredSerializer
+     * compatibleWithReconfiguredSerializer} carrying a fresh instance with version {@link
+     * #RECONFIGURED_VERSION}. This drives Flink's {@code
+     * StateSerializerProvider.setPreviousSerializerSnapshotForRestoredState} into its reconfigured
+     * branch so the test can assert which provider the import phase ran on.
+     */
+    private static final class ReconfigurableIntKeySerializer
+            extends org.apache.flink.api.common.typeutils.TypeSerializer<Integer> {
+        private static final long serialVersionUID = 1L;
+        static final String CANONICAL_VERSION = "canonical";
+        static final String RUNTIME_VERSION = "runtime";
+        static final String RECONFIGURED_VERSION = "reconfigured";
+
+        final String version;
+
+        ReconfigurableIntKeySerializer(String version) {
+            this.version = version;
+        }
+
+        @Override
+        public boolean isImmutableType() {
+            return IntSerializer.INSTANCE.isImmutableType();
+        }
+
+        @Override
+        public org.apache.flink.api.common.typeutils.TypeSerializer<Integer> duplicate() {
+            return this;
+        }
+
+        @Override
+        public Integer createInstance() {
+            return IntSerializer.INSTANCE.createInstance();
+        }
+
+        @Override
+        public Integer copy(Integer from) {
+            return IntSerializer.INSTANCE.copy(from);
+        }
+
+        @Override
+        public Integer copy(Integer from, Integer reuse) {
+            return IntSerializer.INSTANCE.copy(from, reuse);
+        }
+
+        @Override
+        public int getLength() {
+            return IntSerializer.INSTANCE.getLength();
+        }
+
+        @Override
+        public void serialize(Integer record, DataOutputView target) throws IOException {
+            IntSerializer.INSTANCE.serialize(record, target);
+        }
+
+        @Override
+        public Integer deserialize(DataInputView source) throws IOException {
+            return IntSerializer.INSTANCE.deserialize(source);
+        }
+
+        @Override
+        public Integer deserialize(Integer reuse, DataInputView source) throws IOException {
+            return IntSerializer.INSTANCE.deserialize(reuse, source);
+        }
+
+        @Override
+        public void copy(DataInputView source, DataOutputView target) throws IOException {
+            IntSerializer.INSTANCE.copy(source, target);
+        }
+
+        @Override
+        public boolean equals(Object obj) {
+            return obj instanceof ReconfigurableIntKeySerializer
+                    && ((ReconfigurableIntKeySerializer) obj).version.equals(version);
+        }
+
+        @Override
+        public int hashCode() {
+            return version.hashCode();
+        }
+
+        @Override
+        public TypeSerializerSnapshot<Integer> snapshotConfiguration() {
+            return new ReconfigurableIntKeySerializerSnapshot(version);
+        }
+    }
+
+    /**
+     * Companion snapshot for {@link ReconfigurableIntKeySerializer}. The {@code
+     * resolveSchemaCompatibility} contract is: regardless of the version the runtime supplied,
+     * report {@code compatibleWithReconfiguredSerializer} carrying a brand-new instance whose
+     * version is {@link ReconfigurableIntKeySerializer#RECONFIGURED_VERSION}. Used to verify that
+     * the canonical import path actually feeds the builder's StateSerializerProvider, so the
+     * backend ends up holding the reconfigured serializer.
+     */
+    public static final class ReconfigurableIntKeySerializerSnapshot
+            implements TypeSerializerSnapshot<Integer> {
+        private String snapshotVersion;
+
+        // Public no-arg constructor required for snapshot deserialization, even though this test
+        // path serializes and deserializes through the in-memory ByteStreamStateHandle without
+        // recreating the snapshot class by name.
+        public ReconfigurableIntKeySerializerSnapshot() {
+            this.snapshotVersion = ReconfigurableIntKeySerializer.CANONICAL_VERSION;
+        }
+
+        ReconfigurableIntKeySerializerSnapshot(String snapshotVersion) {
+            this.snapshotVersion = snapshotVersion;
+        }
+
+        @Override
+        public int getCurrentVersion() {
+            return 1;
+        }
+
+        @Override
+        public void writeSnapshot(org.apache.flink.core.memory.DataOutputView out)
+                throws IOException {
+            out.writeUTF(snapshotVersion);
+        }
+
+        @Override
+        public void readSnapshot(int readVersion, DataInputView in, ClassLoader userCodeClassLoader)
+                throws IOException {
+            this.snapshotVersion = in.readUTF();
+        }
+
+        @Override
+        public org.apache.flink.api.common.typeutils.TypeSerializer<Integer> restoreSerializer() {
+            return new ReconfigurableIntKeySerializer(snapshotVersion);
+        }
+
+        @Override
+        public org.apache.flink.api.common.typeutils.TypeSerializerSchemaCompatibility<Integer>
+                resolveSchemaCompatibility(
+                        org.apache.flink.api.common.typeutils.TypeSerializer<Integer>
+                                newSerializer) {
+            // Always force Flink down the "reconfigured" branch so the test can observe whether
+            // the backend ends up using the reconfigured serializer (proves the import phase ran
+            // on the builder's own StateSerializerProvider).
+            return org.apache.flink.api.common.typeutils.TypeSerializerSchemaCompatibility
+                    .compatibleWithReconfiguredSerializer(
+                            new ReconfigurableIntKeySerializer(
+                                    ReconfigurableIntKeySerializer.RECONFIGURED_VERSION));
         }
     }
 

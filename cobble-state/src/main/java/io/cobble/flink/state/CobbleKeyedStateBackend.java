@@ -45,6 +45,7 @@ import org.apache.flink.runtime.state.metrics.LatencyTrackingStateConfig;
 import org.apache.flink.runtime.state.ttl.TtlTimeProvider;
 import org.apache.flink.streaming.api.operators.TimerSerializer;
 import org.apache.flink.util.FileUtils;
+import org.apache.flink.util.StateMigrationException;
 
 import javax.annotation.Nonnull;
 
@@ -75,6 +76,14 @@ final class CobbleKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
     private final Map<String, StateDescriptor.Type> stateTypes;
     private final LinkedHashMap<String, StateInspectSchema> stateInspectSchemas;
     private final LinkedHashMap<String, StateInspectSemanticSchema> stateInspectSemanticSchemas;
+    /**
+     * Canonical-savepoint state metadata kept alive until the matching user-state descriptor
+     * registers. Entries are removed once their state has been validated and registered. States
+     * never registered after restore remain in the map for the lifetime of the backend, which is
+     * fine: Flink does not require every restored state to be re-registered by the running job.
+     */
+    private final LinkedHashMap<String, RestoredKeyedStateMetadata> restoredCanonicalMetadata;
+
     private final PriorityQueueSetFactory priorityQueueFactory;
     private final HeapPriorityQueuesManager heapPriorityQueuesManager;
     private final List<AbstractCobbleState<?, ?, ?>> stateResources;
@@ -98,7 +107,8 @@ final class CobbleKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
             Db cobbleDb,
             boolean manualTtlTimeProviderForTests,
             boolean restoredNativeQueuesMayContainEntries,
-            CobbleStateBackend.PriorityQueueStateType priorityQueueStateType) {
+            CobbleStateBackend.PriorityQueueStateType priorityQueueStateType,
+            Map<String, RestoredKeyedStateMetadata> restoredCanonicalMetadata) {
         super(
                 kvStateRegistry,
                 keySerializer,
@@ -116,6 +126,10 @@ final class CobbleKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
         this.stateTypes = new HashMap<>();
         this.stateInspectSchemas = new LinkedHashMap<>();
         this.stateInspectSemanticSchemas = new LinkedHashMap<>();
+        this.restoredCanonicalMetadata =
+                restoredCanonicalMetadata == null
+                        ? new LinkedHashMap<>()
+                        : new LinkedHashMap<>(restoredCanonicalMetadata);
         this.priorityQueueFactory =
                 createPriorityQueueFactory(
                         cobbleDb,
@@ -193,6 +207,9 @@ final class CobbleKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
                     StateSnapshotTransformer.StateSnapshotTransformFactory<SEV>
                             snapshotTransformFactory)
             throws Exception {
+        // Validate against canonical-savepoint metadata BEFORE any column family is touched, so an
+        // incompatible serializer rejection never partially mutates the backend's schema.
+        validateCanonicalKeyValueMetadata(stateDesc, namespaceSerializer);
         ensureStateColumnFamily(stateDesc);
 
         String stateName = stateDesc.getName();
@@ -216,6 +233,7 @@ final class CobbleKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
                                 valueStateDescriptor.getDefaultValue(),
                                 stateDesc.getTtlConfig());
                 trackStateResource(valueState);
+                restoredCanonicalMetadata.remove(stateName);
                 return (IS) valueState;
             case LIST:
                 IS listState =
@@ -226,6 +244,7 @@ final class CobbleKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
                         namespaceSerializer,
                         (ListStateDescriptor<?>) stateDesc);
                 trackStateResource((AbstractCobbleState<?, ?, ?>) listState);
+                restoredCanonicalMetadata.remove(stateName);
                 return listState;
             case MAP:
                 IS mapState =
@@ -236,10 +255,61 @@ final class CobbleKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
                         namespaceSerializer,
                         (MapStateDescriptor<?, ?>) stateDesc);
                 trackStateResource((AbstractCobbleState<?, ?, ?>) mapState);
+                restoredCanonicalMetadata.remove(stateName);
                 return mapState;
             default:
                 throw unsupportedState(stateDesc);
         }
+    }
+
+    /**
+     * Verifies a newly-registered KV state descriptor against the canonical savepoint metadata
+     * captured at restore time. A miss is allowed (the job may add fresh state after restore); a
+     * hit must agree on state kind and pass Flink's standard {@link
+     * org.apache.flink.api.common.typeutils.TypeSerializerSnapshot#resolveSchemaCompatibility} with
+     * result {@code isCompatibleAsIs()} for both the namespace and the value serializer. Cobble
+     * Flink has not been released, so we do not retain serializer migration paths — anything other
+     * than {@code isCompatibleAsIs()} is rejected.
+     */
+    private <S extends State, SV> void validateCanonicalKeyValueMetadata(
+            StateDescriptor<S, SV> stateDesc, TypeSerializer<?> namespaceSerializer)
+            throws StateMigrationException {
+        RestoredKeyedStateMetadata canonical = restoredCanonicalMetadata.get(stateDesc.getName());
+        if (canonical == null) {
+            return;
+        }
+        if (canonical.kind() != RestoredKeyedStateMetadata.Kind.KEY_VALUE) {
+            throw new StateMigrationException(
+                    "State '"
+                            + stateDesc.getName()
+                            + "' was restored as a "
+                            + canonical.kind()
+                            + " but the running job registers it as a keyed state ("
+                            + stateDesc.getType()
+                            + ").");
+        }
+        if (canonical.stateType() != stateDesc.getType()) {
+            throw new StateMigrationException(
+                    "State '"
+                            + stateDesc.getName()
+                            + "' kind mismatch: canonical savepoint had "
+                            + canonical.stateType()
+                            + ", but the running job registers "
+                            + stateDesc.getType()
+                            + ".");
+        }
+        CanonicalSavepointRestoreOperation.rejectIfNotCompatibleAsIs(
+                stateDesc.getName(),
+                "namespace serializer",
+                canonical.namespaceSerializerSnapshot(),
+                namespaceSerializer,
+                "for the running job");
+        CanonicalSavepointRestoreOperation.rejectIfNotCompatibleAsIs(
+                stateDesc.getName(),
+                "value serializer",
+                canonical.stateSerializerSnapshot(),
+                stateDesc.getSerializer(),
+                "for the running job");
     }
 
     @Nonnull
@@ -257,13 +327,55 @@ final class CobbleKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
                     @Nonnull String stateName,
                     @Nonnull TypeSerializer<T> byteOrderedElementSerializer,
                     boolean allowFutureMetadataUpdates) {
+        try {
+            validateCanonicalPriorityQueueMetadata(stateName, byteOrderedElementSerializer);
+        } catch (StateMigrationException e) {
+            throw new UncheckedIOException(
+                    "Canonical savepoint metadata rejected priority-queue '" + stateName + "'.",
+                    new IOException(e.getMessage(), e));
+        }
         if (heapPriorityQueuesManager != null) {
-            return heapPriorityQueuesManager.createOrUpdate(
-                    stateName, byteOrderedElementSerializer, allowFutureMetadataUpdates);
+            KeyGroupedInternalPriorityQueue<T> queue =
+                    heapPriorityQueuesManager.createOrUpdate(
+                            stateName, byteOrderedElementSerializer, allowFutureMetadataUpdates);
+            restoredCanonicalMetadata.remove(stateName);
+            return queue;
         }
         registerTimerSchema(stateName, byteOrderedElementSerializer);
-        return priorityQueueFactory.create(
-                stateName, byteOrderedElementSerializer, allowFutureMetadataUpdates);
+        KeyGroupedInternalPriorityQueue<T> queue =
+                priorityQueueFactory.create(
+                        stateName, byteOrderedElementSerializer, allowFutureMetadataUpdates);
+        restoredCanonicalMetadata.remove(stateName);
+        return queue;
+    }
+
+    /**
+     * Validates a priority-queue (timer) registration against canonical metadata. Mirrors {@link
+     * #validateCanonicalKeyValueMetadata}: missing entries are allowed (job adds new timer state);
+     * hits must match kind and pass {@code resolveSchemaCompatibility} as {@code
+     * isCompatibleAsIs()}.
+     */
+    private void validateCanonicalPriorityQueueMetadata(
+            String stateName, TypeSerializer<?> byteOrderedElementSerializer)
+            throws StateMigrationException {
+        RestoredKeyedStateMetadata canonical = restoredCanonicalMetadata.get(stateName);
+        if (canonical == null) {
+            return;
+        }
+        if (canonical.kind() != RestoredKeyedStateMetadata.Kind.PRIORITY_QUEUE) {
+            throw new StateMigrationException(
+                    "State '"
+                            + stateName
+                            + "' was restored as a "
+                            + canonical.kind()
+                            + " but the running job registers it as a priority-queue (timers).");
+        }
+        CanonicalSavepointRestoreOperation.rejectIfNotCompatibleAsIs(
+                stateName,
+                "timer element serializer",
+                canonical.elementSerializerSnapshot(),
+                byteOrderedElementSerializer,
+                "for the running job");
     }
 
     @Nonnull

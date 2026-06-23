@@ -32,6 +32,7 @@ import java.util.Collections;
 import java.util.Comparator;
 import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.OptionalLong;
 import java.util.Set;
 import java.util.UUID;
@@ -60,6 +61,13 @@ final class CobbleKeyedStateBackendBuilder<K> {
     private final boolean manualTtlTimeProviderForTests;
     private final Configuration flinkConfig;
     private final CobbleStateBackend.PriorityQueueStateType priorityQueueStateType;
+    /**
+     * Populated by {@link #openDb} on the canonical-savepoint branch and consumed by {@link
+     * #build()} when constructing the backend. Empty (not {@code null}) for native Cobble restore
+     * and fresh-start cases so the backend always sees a deterministic value.
+     */
+    private Map<String, RestoredKeyedStateMetadata> restoredCanonicalMetadata =
+            Collections.emptyMap();
 
     CobbleKeyedStateBackendBuilder(
             Environment env,
@@ -130,7 +138,8 @@ final class CobbleKeyedStateBackendBuilder<K> {
                             resources.db,
                             manualTtlTimeProviderForTests,
                             restoredNativeQueuesMayContainEntries,
-                            priorityQueueStateType);
+                            priorityQueueStateType,
+                            restoredCanonicalMetadata);
             success = true;
             return backend;
         } finally {
@@ -416,14 +425,26 @@ final class CobbleKeyedStateBackendBuilder<K> {
                             keyGroupRange.getEndKeyGroup());
             boolean success = false;
             try {
-                new CanonicalSavepointRestoreOperation<>(
-                                db,
-                                keyGroupRange,
-                                numberOfKeyGroups,
-                                env.getUserCodeClassLoader().asClassLoader(),
-                                restoreStateHandles,
-                                keySerializerProvider)
-                        .restore();
+                restoredCanonicalMetadata =
+                        new CanonicalSavepointRestoreOperation<>(
+                                        db,
+                                        keyGroupRange,
+                                        numberOfKeyGroups,
+                                        env.getUserCodeClassLoader().asClassLoader(),
+                                        restoreStateHandles,
+                                        // Throw-away provider for the preflight pass: Flink mutates
+                                        // it once via
+                                        // setPreviousSerializerSnapshotForRestoredState,
+                                        // so it cannot be the same instance the import pass uses.
+                                        () ->
+                                                StateSerializerProvider.fromNewRegisteredSerializer(
+                                                        keySerializer),
+                                        // Import pass must run on the builder's own provider so
+                                        // that currentSchemaSerializer() reflects any reconfigured
+                                        // key serializer Flink returned for the running job; the
+                                        // backend below is constructed from this same instance.
+                                        keySerializerProvider)
+                                .restore();
                 success = true;
                 return db;
             } catch (org.apache.flink.util.StateMigrationException e) {

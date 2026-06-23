@@ -7,6 +7,8 @@ import io.cobble.structured.StructuredSchemaBuilder;
 
 import org.apache.flink.api.common.state.StateDescriptor;
 import org.apache.flink.api.common.typeutils.TypeSerializer;
+import org.apache.flink.api.common.typeutils.TypeSerializerSchemaCompatibility;
+import org.apache.flink.api.common.typeutils.TypeSerializerSnapshot;
 import org.apache.flink.api.common.typeutils.base.MapSerializer;
 import org.apache.flink.core.memory.DataInputDeserializer;
 import org.apache.flink.core.memory.DataOutputSerializer;
@@ -27,11 +29,36 @@ import org.apache.flink.util.StateMigrationException;
 import java.io.IOException;
 import java.util.Arrays;
 import java.util.Collection;
+import java.util.Collections;
 import java.util.HashMap;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.function.Supplier;
 
-/** Imports Flink's unified canonical savepoint format into a newly opened Cobble DB. */
+/**
+ * Imports Flink's unified canonical savepoint format into a newly opened Cobble DB.
+ *
+ * <p>The restore runs in two strict phases:
+ *
+ * <ol>
+ *   <li><b>Preflight</b> — open every handle's metadata only, validate that same-named state is
+ *       defined consistently across handles (kind / state type / serializer snapshots via Flink's
+ *       {@link TypeSerializerSnapshot#resolveSchemaCompatibility}), and accumulate the resulting
+ *       {@link RestoredKeyedStateMetadata} registry. The row iterators are closed without being
+ *       consumed; no column family is created and no row is written. Any failure here keeps the
+ *       backing Cobble DB schema empty.
+ *   <li><b>Import</b> — re-open the same handles via a fresh {@link FullSnapshotRestoreOperation},
+ *       create the required column families, and write rows.
+ * </ol>
+ *
+ * <p>The two-pass design is required because (a) the row iterator and the metadata share a single
+ * stream, and (b) the reviewer's contract states that a metadata-inconsistent input must fail
+ * before any schema or data mutation. Re-opening the handles is safe — every {@link
+ * org.apache.flink.runtime.state.KeyGroupsStateHandle} owns a {@link
+ * org.apache.flink.runtime.state.StreamStateHandle} whose {@code openInputStream()} returns a fresh
+ * stream per call.
+ */
 final class CanonicalSavepointRestoreOperation<K> {
 
     private static final int STATE_COLUMN_INDEX = 0;
@@ -43,38 +70,247 @@ final class CanonicalSavepointRestoreOperation<K> {
     private final int numberOfKeyGroups;
     private final ClassLoader userCodeClassLoader;
     private final Collection<KeyedStateHandle> restoreStateHandles;
-    private final StateSerializerProvider<K> keySerializerProvider;
+    private final Supplier<StateSerializerProvider<K>> preflightKeySerializerProviderFactory;
+    private final StateSerializerProvider<K> importKeySerializerProvider;
 
+    /**
+     * @param preflightKeySerializerProviderFactory factory invoked exactly once to obtain a
+     *     throw-away {@link StateSerializerProvider} for the metadata-only preflight pass. {@link
+     *     FullSnapshotRestoreOperation#restore()} mutates the supplied provider via {@code
+     *     setPreviousSerializerSnapshotForRestoredState(...)} which is a one-shot operation per
+     *     provider instance, so the preflight must NOT share a provider with the import phase.
+     * @param importKeySerializerProvider the provider the builder will later use to construct the
+     *     backend. The import phase invokes {@link FullSnapshotRestoreOperation#restore()} on this
+     *     instance so that the canonical key-serializer snapshot is registered into the builder's
+     *     own provider; this lets {@code importKeySerializerProvider.currentSchemaSerializer()}
+     *     return the (possibly reconfigured) key serializer Flink chose for the running job, and
+     *     guarantees the backend ends up holding that exact serializer.
+     */
     CanonicalSavepointRestoreOperation(
             Db db,
             KeyGroupRange keyGroupRange,
             int numberOfKeyGroups,
             ClassLoader userCodeClassLoader,
             Collection<KeyedStateHandle> restoreStateHandles,
-            StateSerializerProvider<K> keySerializerProvider) {
+            Supplier<StateSerializerProvider<K>> preflightKeySerializerProviderFactory,
+            StateSerializerProvider<K> importKeySerializerProvider) {
         this.db = db;
         this.keyGroupRange = keyGroupRange;
         this.numberOfKeyGroups = numberOfKeyGroups;
         this.userCodeClassLoader = userCodeClassLoader;
         this.restoreStateHandles = restoreStateHandles;
-        this.keySerializerProvider = keySerializerProvider;
+        this.preflightKeySerializerProviderFactory = preflightKeySerializerProviderFactory;
+        this.importKeySerializerProvider = importKeySerializerProvider;
     }
 
-    void restore() throws IOException, StateMigrationException {
+    /**
+     * Imports every canonical handle into the backing DB and returns the canonical metadata indexed
+     * by state name. Callers (the backend builder) hand the map to {@link CobbleKeyedStateBackend}
+     * so that subsequent descriptor / priority-queue registrations are checked for compatibility
+     * against the canonical definition.
+     */
+    Map<String, RestoredKeyedStateMetadata> restore() throws IOException, StateMigrationException {
+        LinkedHashMap<String, RestoredKeyedStateMetadata> metadata = preflightMetadata();
+        importRows(metadata);
+        return Collections.unmodifiableMap(new LinkedHashMap<>(metadata));
+    }
+
+    /**
+     * Phase 1 — opens every handle's metadata and validates cross-handle consistency without
+     * creating a column family or writing a row. The row iterators returned by Flink are closed
+     * immediately without being consumed; their underlying streams are released and the next phase
+     * will re-open the handles from scratch.
+     */
+    private LinkedHashMap<String, RestoredKeyedStateMetadata> preflightMetadata()
+            throws IOException, StateMigrationException {
+        LinkedHashMap<String, RestoredKeyedStateMetadata> metadata = new LinkedHashMap<>();
         FullSnapshotRestoreOperation<K> restoreOperation =
                 new FullSnapshotRestoreOperation<>(
                         keyGroupRange,
                         userCodeClassLoader,
                         restoreStateHandles,
-                        keySerializerProvider);
+                        preflightKeySerializerProviderFactory.get());
         try (ThrowingIterator<SavepointRestoreResult> restore = restoreOperation.restore()) {
             while (restore.hasNext()) {
-                restoreResult(restore.next());
+                SavepointRestoreResult result = restore.next();
+                // The row iterator must be closed even if we never consume it, so that its
+                // underlying stream is released before the import phase opens a fresh one.
+                try (ThrowingIterator<KeyGroup> ignored = result.getRestoredKeyGroups()) {
+                    recordMetadataFromHandle(result.getStateMetaInfoSnapshots(), metadata);
+                }
+            }
+        }
+        return metadata;
+    }
+
+    private void recordMetadataFromHandle(
+            List<StateMetaInfoSnapshot> snapshots,
+            LinkedHashMap<String, RestoredKeyedStateMetadata> metadata)
+            throws IOException, StateMigrationException {
+        for (StateMetaInfoSnapshot snapshot : snapshots) {
+            switch (snapshot.getBackendStateType()) {
+                case KEY_VALUE:
+                    recordKeyValueMetadata(snapshot, metadata);
+                    break;
+                case PRIORITY_QUEUE:
+                    recordPriorityQueueMetadata(snapshot, metadata);
+                    break;
+                default:
+                    throw new UnsupportedOperationException(
+                            "Cobble canonical savepoint restore supports only keyed state and "
+                                    + "priority queues, but found "
+                                    + snapshot.getBackendStateType()
+                                    + " for state '"
+                                    + snapshot.getName()
+                                    + "'.");
             }
         }
     }
 
-    private void restoreResult(SavepointRestoreResult restoreResult)
+    /**
+     * Validates / records a KV metadata snapshot. Same state name across multiple handles must
+     * agree on kind, state type, and serializer snapshots; the serializer check uses Flink's {@link
+     * TypeSerializerSnapshot#resolveSchemaCompatibility} and accepts only {@code
+     * isCompatibleAsIs()}.
+     */
+    private void recordKeyValueMetadata(
+            StateMetaInfoSnapshot snapshot,
+            LinkedHashMap<String, RestoredKeyedStateMetadata> metadata)
+            throws IOException, StateMigrationException {
+        RegisteredKeyValueStateBackendMetaInfo<?, ?> metaInfo =
+                new RegisteredKeyValueStateBackendMetaInfo<>(snapshot);
+        StateDescriptor.Type stateType = metaInfo.getStateType();
+        if (stateType != StateDescriptor.Type.VALUE
+                && stateType != StateDescriptor.Type.LIST
+                && stateType != StateDescriptor.Type.MAP) {
+            throw new UnsupportedOperationException(
+                    "Cobble canonical savepoint restore does not support "
+                            + stateType
+                            + " state '"
+                            + metaInfo.getName()
+                            + "'. Cobble currently supports VALUE, LIST, and MAP state.");
+        }
+        TypeSerializerSnapshot<?> namespaceSnapshot =
+                snapshot.getTypeSerializerSnapshot(
+                        StateMetaInfoSnapshot.CommonSerializerKeys.NAMESPACE_SERIALIZER);
+        TypeSerializerSnapshot<?> valueSnapshot =
+                snapshot.getTypeSerializerSnapshot(
+                        StateMetaInfoSnapshot.CommonSerializerKeys.VALUE_SERIALIZER);
+        if (namespaceSnapshot == null || valueSnapshot == null) {
+            throw new IOException(
+                    "Canonical savepoint metadata for state '"
+                            + metaInfo.getName()
+                            + "' is missing a required serializer snapshot.");
+        }
+
+        String stateName = metaInfo.getName();
+        RestoredKeyedStateMetadata existing = metadata.get(stateName);
+        if (existing == null) {
+            metadata.put(
+                    stateName,
+                    RestoredKeyedStateMetadata.keyValue(
+                            stateName, stateType, namespaceSnapshot, valueSnapshot, snapshot));
+            return;
+        }
+        if (existing.kind() != RestoredKeyedStateMetadata.Kind.KEY_VALUE) {
+            throw new IOException(
+                    "Canonical savepoint state '"
+                            + stateName
+                            + "' was previously seen as "
+                            + existing.kind()
+                            + " but now appears as KEY_VALUE.");
+        }
+        if (existing.stateType() != stateType) {
+            throw new IOException(
+                    "Canonical savepoint state '"
+                            + stateName
+                            + "' kind mismatch across handles: previously "
+                            + existing.stateType()
+                            + ", now "
+                            + stateType
+                            + ".");
+        }
+        rejectIfNotCompatibleAsIs(
+                stateName,
+                "namespace serializer",
+                existing.namespaceSerializerSnapshot(),
+                namespaceSnapshot.restoreSerializer(),
+                "between canonical savepoint handles");
+        rejectIfNotCompatibleAsIs(
+                stateName,
+                "value serializer",
+                existing.stateSerializerSnapshot(),
+                valueSnapshot.restoreSerializer(),
+                "between canonical savepoint handles");
+    }
+
+    private void recordPriorityQueueMetadata(
+            StateMetaInfoSnapshot snapshot,
+            LinkedHashMap<String, RestoredKeyedStateMetadata> metadata)
+            throws IOException, StateMigrationException {
+        RegisteredPriorityQueueStateBackendMetaInfo<?> metaInfo =
+                new RegisteredPriorityQueueStateBackendMetaInfo<>(snapshot);
+        TypeSerializerSnapshot<?> elementSnapshot =
+                snapshot.getTypeSerializerSnapshot(
+                        StateMetaInfoSnapshot.CommonSerializerKeys.VALUE_SERIALIZER);
+        if (elementSnapshot == null) {
+            throw new IOException(
+                    "Canonical savepoint metadata for priority-queue state '"
+                            + metaInfo.getName()
+                            + "' is missing its element serializer snapshot.");
+        }
+
+        String stateName = metaInfo.getName();
+        RestoredKeyedStateMetadata existing = metadata.get(stateName);
+        if (existing == null) {
+            metadata.put(
+                    stateName,
+                    RestoredKeyedStateMetadata.priorityQueue(stateName, elementSnapshot, snapshot));
+            return;
+        }
+        if (existing.kind() != RestoredKeyedStateMetadata.Kind.PRIORITY_QUEUE) {
+            throw new IOException(
+                    "Canonical savepoint state '"
+                            + stateName
+                            + "' was previously seen as "
+                            + existing.kind()
+                            + " but now appears as PRIORITY_QUEUE.");
+        }
+        rejectIfNotCompatibleAsIs(
+                stateName,
+                "timer element serializer",
+                existing.elementSerializerSnapshot(),
+                elementSnapshot.restoreSerializer(),
+                "between canonical savepoint handles");
+    }
+
+    /**
+     * Phase 2 — opens fresh streams to every handle, creates a column family per KV state, and
+     * writes each row using the metadata accumulated in phase 1.
+     */
+    private void importRows(LinkedHashMap<String, RestoredKeyedStateMetadata> metadata)
+            throws IOException, StateMigrationException {
+        // Use the builder's own key-serializer provider here. FullSnapshotRestoreOperation will
+        // call setPreviousSerializerSnapshotForRestoredState(...) on it, which is what lets
+        // importKeySerializerProvider.currentSchemaSerializer() reflect any reconfigured key
+        // serializer Flink picked (e.g. when resolveSchemaCompatibility returns
+        // compatibleWithReconfiguredSerializer). The backend is constructed from that very
+        // provider, so it ends up holding the reconfigured serializer instance.
+        FullSnapshotRestoreOperation<K> restoreOperation =
+                new FullSnapshotRestoreOperation<>(
+                        keyGroupRange,
+                        userCodeClassLoader,
+                        restoreStateHandles,
+                        importKeySerializerProvider);
+        try (ThrowingIterator<SavepointRestoreResult> restore = restoreOperation.restore()) {
+            while (restore.hasNext()) {
+                restoreResult(restore.next(), importKeySerializerProvider);
+            }
+        }
+    }
+
+    private void restoreResult(
+            SavepointRestoreResult restoreResult, StateSerializerProvider<K> keySerializerProvider)
             throws IOException, StateMigrationException {
         Map<Integer, RestoredState> statesById =
                 createStates(restoreResult.getStateMetaInfoSnapshots());
@@ -108,8 +344,9 @@ final class CanonicalSavepointRestoreOperation<K> {
             RestoredState state;
             switch (snapshot.getBackendStateType()) {
                 case KEY_VALUE:
-                    state = RestoredKeyValueState.from(snapshot);
-                    ensureStateColumnFamily(state.name());
+                    RestoredKeyValueState kv = RestoredKeyValueState.from(snapshot);
+                    ensureStateColumnFamily(kv.name());
+                    state = kv;
                     break;
                 case PRIORITY_QUEUE:
                     state = RestoredPriorityQueueState.from(snapshot);
@@ -126,6 +363,53 @@ final class CanonicalSavepointRestoreOperation<K> {
             statesById.put(stateId, state);
         }
         return statesById;
+    }
+
+    /**
+     * Runs {@link TypeSerializerSnapshot#resolveSchemaCompatibility} on {@code previous} against
+     * {@code current} and rejects anything that is not {@code isCompatibleAsIs()}. Cobble Flink is
+     * unreleased, so {@code compatibleAfterMigration} / {@code
+     * compatibleWithReconfiguredSerializer} / {@code incompatible} are all treated as outright
+     * incompatibilities and reported with the canonical / runtime class names.
+     *
+     * @param compareContext short prepositional phrase added to the failure message, e.g. {@code
+     *     "between canonical savepoint handles"} or {@code "for the running job"}.
+     */
+    static void rejectIfNotCompatibleAsIs(
+            String stateName,
+            String role,
+            TypeSerializerSnapshot<?> previous,
+            TypeSerializer<?> current,
+            String compareContext)
+            throws StateMigrationException {
+        @SuppressWarnings({"rawtypes", "unchecked"})
+        TypeSerializerSchemaCompatibility<?> compatibility =
+                ((TypeSerializerSnapshot) previous).resolveSchemaCompatibility(current);
+        if (compatibility.isCompatibleAsIs()) {
+            return;
+        }
+        String outcome;
+        if (compatibility.isCompatibleAfterMigration()) {
+            outcome = "compatible only after migration";
+        } else if (compatibility.isCompatibleWithReconfiguredSerializer()) {
+            outcome = "compatible only with a reconfigured serializer";
+        } else {
+            outcome = "incompatible";
+        }
+        throw new StateMigrationException(
+                "Incompatible "
+                        + role
+                        + " for state '"
+                        + stateName
+                        + "' "
+                        + compareContext
+                        + ": canonical savepoint snapshot "
+                        + previous.getClass().getName()
+                        + " vs runtime serializer "
+                        + current.getClass().getName()
+                        + " — resolveSchemaCompatibility reported "
+                        + outcome
+                        + ". Cobble does not perform serializer migration on canonical restore.");
     }
 
     private void restoreEntry(
