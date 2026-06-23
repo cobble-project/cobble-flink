@@ -101,6 +101,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.UUID;
 import java.util.concurrent.RunnableFuture;
 
 /** Tests for {@link CobbleStateBackend}. */
@@ -197,6 +198,442 @@ class CobbleStateBackendTest {
             assertEquals("value-42", valueState.value());
             assertEquals(Arrays.asList("left", "right"), toList(listState.get()));
             assertEquals("map-value", mapState.get("map-key"));
+        }
+    }
+
+    @Test
+    void restoresCanonicalSavepointFromCompressedStream(@TempDir Path tempDir) throws Exception {
+        int key = 42;
+        int keyGroup = KeyGroupRangeAssignment.assignToKeyGroup(key, 16);
+        // Hand-authored canonical stream wrapped with SnappyStreamCompressionDecorator, so that the
+        // FullSnapshotRestoreOperation exercises its compressed-read path.
+        KeyGroupsSavepointStateHandle savepoint = createCanonicalSavepoint(key, keyGroup, true);
+
+        try (TestBackendContext context =
+                createBackendContext(
+                        tempDir,
+                        false,
+                        null,
+                        null,
+                        TtlTimeProvider.DEFAULT,
+                        false,
+                        Collections.singletonList(savepoint),
+                        KeyGroupRange.of(keyGroup, keyGroup))) {
+            CobbleKeyedStateBackend<Integer> backend = context.cobbleBackend;
+            backend.setCurrentKey(key);
+
+            ValueState<String> valueState =
+                    backend.getPartitionedState(
+                            org.apache.flink.runtime.state.VoidNamespace.INSTANCE,
+                            VoidNamespaceSerializer.INSTANCE,
+                            new ValueStateDescriptor<>("value", StringSerializer.INSTANCE));
+            ListState<String> listState =
+                    backend.getPartitionedState(
+                            org.apache.flink.runtime.state.VoidNamespace.INSTANCE,
+                            VoidNamespaceSerializer.INSTANCE,
+                            new ListStateDescriptor<>("list", StringSerializer.INSTANCE));
+            MapState<String, String> mapState =
+                    backend.getPartitionedState(
+                            org.apache.flink.runtime.state.VoidNamespace.INSTANCE,
+                            VoidNamespaceSerializer.INSTANCE,
+                            new MapStateDescriptor<>(
+                                    "map", StringSerializer.INSTANCE, StringSerializer.INSTANCE));
+
+            assertEquals("value-42", valueState.value());
+            assertEquals(Arrays.asList("left", "right"), toList(listState.get()));
+            assertEquals("map-value", mapState.get("map-key"));
+        }
+    }
+
+    @Test
+    void rejectsMixOfCanonicalAndNativeRestoreHandles(@TempDir Path tempDir) throws Exception {
+        int key = 42;
+        int keyGroup = KeyGroupRangeAssignment.assignToKeyGroup(key, 16);
+        KeyGroupsSavepointStateHandle canonical = createCanonicalSavepoint(key, keyGroup);
+        // A second handle that is not a KeyGroupsSavepointStateHandle. We do not need it to be
+        // readable: the mixed-handle preflight must reject before any I/O on either handle.
+        KeyedStateHandle nativeHandle =
+                new IncrementalRemoteKeyedStateHandle(
+                        UUID.randomUUID(),
+                        KeyGroupRange.of(keyGroup, keyGroup),
+                        1L,
+                        Collections.emptyList(),
+                        Collections.emptyList(),
+                        new ByteStreamStateHandle("dummy-native-meta", new byte[0]));
+
+        Path configuredLocalDir = tempDir.resolve("configured-local-dir");
+        UnsupportedOperationException error =
+                assertThrows(
+                        UnsupportedOperationException.class,
+                        () ->
+                                createBackendContext(
+                                                tempDir,
+                                                false,
+                                                null,
+                                                null,
+                                                TtlTimeProvider.DEFAULT,
+                                                false,
+                                                Arrays.asList(canonical, nativeHandle),
+                                                KeyGroupRange.of(keyGroup, keyGroup))
+                                        .close());
+        // The error message must name the actual conflicting handle classes so operators can find
+        // the offending source. It must also identify both sides as canonical / non-canonical.
+        assertTrue(
+                error.getMessage().contains("canonical savepoint"),
+                "expected message to mention canonical savepoint, got: " + error.getMessage());
+        assertTrue(
+                error.getMessage().contains(KeyGroupsSavepointStateHandle.class.getName()),
+                "expected message to list canonical handle class, got: " + error.getMessage());
+        assertTrue(
+                error.getMessage().contains(IncrementalRemoteKeyedStateHandle.class.getName()),
+                "expected message to list the conflicting non-canonical handle class, got: "
+                        + error.getMessage());
+        // P1: even when the preflight rejects before any DB is opened, no on-disk artifact must be
+        // left behind under the configured LOCAL_DIRECTORIES root. createVolumeLayout() and any
+        // earlier filesystem step that runs before the preflight must be inside the same failure
+        // cleanup.
+        Path[] leakedInstanceDirs = listLeakedInstanceDirs(configuredLocalDir);
+        assertEquals(
+                0,
+                leakedInstanceDirs.length,
+                "Mixed-handle preflight must not leave a backend instance directory behind. "
+                        + "Found leaked: "
+                        + Arrays.toString(leakedInstanceDirs));
+    }
+
+    @Test
+    void canonicalImportSupportsSubsequentCobbleCheckpoint(@TempDir Path tempDir) throws Exception {
+        int key = 42;
+        int keyGroup = KeyGroupRangeAssignment.assignToKeyGroup(key, 16);
+        KeyGroupsSavepointStateHandle savepoint = createCanonicalSavepoint(key, keyGroup);
+
+        try (TestBackendContext context =
+                createBackendContext(
+                        tempDir,
+                        false,
+                        null,
+                        null,
+                        TtlTimeProvider.DEFAULT,
+                        false,
+                        Collections.singletonList(savepoint),
+                        KeyGroupRange.of(keyGroup, keyGroup))) {
+            CobbleKeyedStateBackend<Integer> backend = context.cobbleBackend;
+            backend.setCurrentKey(key);
+            // Touch every imported state kind so the backend marks them registered.
+            backend.getPartitionedState(
+                            org.apache.flink.runtime.state.VoidNamespace.INSTANCE,
+                            VoidNamespaceSerializer.INSTANCE,
+                            new ValueStateDescriptor<>("value", StringSerializer.INSTANCE))
+                    .value();
+            backend.getPartitionedState(
+                            org.apache.flink.runtime.state.VoidNamespace.INSTANCE,
+                            VoidNamespaceSerializer.INSTANCE,
+                            new ListStateDescriptor<>("list", StringSerializer.INSTANCE))
+                    .get();
+            backend.getPartitionedState(
+                            org.apache.flink.runtime.state.VoidNamespace.INSTANCE,
+                            VoidNamespaceSerializer.INSTANCE,
+                            new MapStateDescriptor<>(
+                                    "map", StringSerializer.INSTANCE, StringSerializer.INSTANCE))
+                    .entries();
+
+            // A canonical-imported backend must be able to produce its own native Cobble
+            // checkpoint,
+            // proving the new DB is fully usable (not a read-only import target).
+            RunnableFuture<SnapshotResult<KeyedStateHandle>> snapshotFuture =
+                    backend.snapshot(
+                            1L,
+                            System.currentTimeMillis(),
+                            new MemCheckpointStreamFactory(1024 * 1024),
+                            CheckpointOptions.forCheckpointWithDefaultLocation());
+            snapshotFuture.run();
+            SnapshotResult<KeyedStateHandle> snapshotResult = snapshotFuture.get();
+            assertNotNull(snapshotResult.getJobManagerOwnedSnapshot());
+            backend.notifyCheckpointComplete(1L);
+        }
+    }
+
+    @Test
+    void failedCanonicalImportLeavesNoUsableDb(@TempDir Path tempDir) throws Exception {
+        int key = 42;
+        int keyGroup = KeyGroupRangeAssignment.assignToKeyGroup(key, 16);
+        // A handle that survives mixed-handle preflight (all KeyGroupsSavepointStateHandle) but
+        // fails inside FullSnapshotRestoreOperation because its metadata header is truncated.
+        KeyGroupsSavepointStateHandle malformed =
+                new KeyGroupsSavepointStateHandle(
+                        new KeyGroupRangeOffsets(
+                                KeyGroupRange.of(keyGroup, keyGroup), new long[] {0L}),
+                        new ByteStreamStateHandle(
+                                "malformed-canonical-savepoint", new byte[] {0, 1, 2, 3}));
+
+        Path configuredLocalDir = tempDir.resolve("configured-local-dir");
+        assertThrows(
+                Exception.class,
+                () ->
+                        createBackendContext(
+                                        tempDir,
+                                        false,
+                                        null,
+                                        null,
+                                        TtlTimeProvider.DEFAULT,
+                                        false,
+                                        Collections.singletonList(malformed),
+                                        KeyGroupRange.of(keyGroup, keyGroup))
+                                .close());
+        // The builder's createBackendResources finally block must delete the newly-allocated
+        // instance directory (the per-subtask job_*/<subtask> tree) on failure so a retried restore
+        // starts from a clean slate. The configured LOCAL_DIRECTORIES root is owned by Flink and
+        // may exist (or not) depending on prior backends; it is not the failed-import's to delete.
+        Path[] leakedInstanceDirs = listLeakedInstanceDirs(configuredLocalDir);
+        assertEquals(
+                0,
+                leakedInstanceDirs.length,
+                "Failed canonical import must not leave a backend instance directory behind. "
+                        + "Found leaked: "
+                        + Arrays.toString(leakedInstanceDirs));
+    }
+
+    @Test
+    void partialCanonicalImportFailureRemovesEverything(@TempDir Path tempDir) throws Exception {
+        int key = 42;
+        int keyGroup = KeyGroupRangeAssignment.assignToKeyGroup(key, 16);
+        // A canonical stream whose first ValueState entry is fully readable, but the second entry's
+        // length prefix is truncated. FullSnapshotRestoreOperation will hand the first entry to our
+        // import operation (which calls db.put), then fail on the second entry while parsing its
+        // length-prefixed byte array. The builder's failure cleanup must still remove the whole
+        // instance directory tree.
+        KeyGroupsSavepointStateHandle savepoint =
+                createPartiallyValidCanonicalSavepoint(key, keyGroup);
+        Path configuredLocalDir = tempDir.resolve("configured-local-dir");
+
+        assertThrows(
+                Exception.class,
+                () ->
+                        createBackendContext(
+                                        tempDir,
+                                        false,
+                                        null,
+                                        null,
+                                        TtlTimeProvider.DEFAULT,
+                                        false,
+                                        Collections.singletonList(savepoint),
+                                        KeyGroupRange.of(keyGroup, keyGroup))
+                                .close());
+        Path[] leakedInstanceDirs = listLeakedInstanceDirs(configuredLocalDir);
+        assertEquals(
+                0,
+                leakedInstanceDirs.length,
+                "Failed canonical import after partial row write must not leave a backend instance "
+                        + "directory behind. Found leaked: "
+                        + Arrays.toString(leakedInstanceDirs));
+    }
+
+    @Test
+    void deleteInstanceDirectoriesPreservesWrapperWithSibling(@TempDir Path tempDir)
+            throws Exception {
+        // Direct unit test for the conservative wrapper deletion contract: when the job/op wrapper
+        // contains another subtask's directory, the failed-import cleanup must remove only the
+        // current instance directory and leave the wrapper (and its sibling) intact. Driving this
+        // through the full backend flow is unreliable because each MockEnvironment generates a
+        // distinct JobID, so two failing restores never share a wrapper.
+        File wrapper = tempDir.resolve("job_test/op_test").toFile();
+        File mySubtask = new File(wrapper, "subtask-0");
+        File peerSubtask = new File(wrapper, "subtask-1");
+        assertTrue(mySubtask.mkdirs(), "setup: create my subtask dir");
+        assertTrue(peerSubtask.mkdirs(), "setup: create peer subtask dir");
+
+        CobbleKeyedStateBackendBuilder.deleteInstanceDirectories(mySubtask);
+
+        assertFalse(mySubtask.exists(), "my subtask dir must be deleted");
+        assertTrue(peerSubtask.exists(), "peer subtask dir must survive");
+        assertTrue(wrapper.exists(), "wrapper must survive while a sibling exists");
+    }
+
+    @Test
+    void deleteInstanceDirectoriesRemovesEmptyWrapper(@TempDir Path tempDir) throws Exception {
+        File wrapper = tempDir.resolve("job_test/op_test").toFile();
+        File mySubtask = new File(wrapper, "subtask-0");
+        assertTrue(mySubtask.mkdirs(), "setup: create my subtask dir");
+
+        CobbleKeyedStateBackendBuilder.deleteInstanceDirectories(mySubtask);
+
+        assertFalse(mySubtask.exists(), "my subtask dir must be deleted");
+        assertFalse(wrapper.exists(), "empty wrapper must be deleted");
+        assertTrue(
+                wrapper.getParentFile().exists(),
+                "LOCAL_DIRECTORIES root (wrapper's parent) is shared and must never be removed");
+    }
+
+    @Test
+    void canonicalImportCobbleCheckpointCobbleRestoreRoundTrip(@TempDir Path tempDir)
+            throws Exception {
+        int key = 42;
+        int keyGroup = KeyGroupRangeAssignment.assignToKeyGroup(key, 16);
+        KeyGroupsSavepointStateHandle savepoint = createCanonicalSavepoint(key, keyGroup);
+
+        // Stage 1: import the canonical savepoint into a Cobble backend and produce a native Cobble
+        // checkpoint. The checkpoint directory is persistent and lives outside both backend
+        // instance directories, so the manifest survives the first backend being closed.
+        String checkpointDirectory = tempDir.resolve("checkpoints").toUri().toString();
+        KeyedStateHandle cobbleCheckpoint;
+        try (TestBackendContext imported =
+                createBackendContext(
+                        tempDir.resolve("imported"),
+                        false,
+                        checkpointDirectory,
+                        null,
+                        TtlTimeProvider.DEFAULT,
+                        false,
+                        Collections.singletonList(savepoint),
+                        KeyGroupRange.of(keyGroup, keyGroup))) {
+            CobbleKeyedStateBackend<Integer> backend = imported.cobbleBackend;
+            backend.setCurrentKey(key);
+
+            // Touch every imported state so descriptors register and the schema is committed before
+            // we snapshot.
+            assertEquals(
+                    "value-42",
+                    backend.getPartitionedState(
+                                    org.apache.flink.runtime.state.VoidNamespace.INSTANCE,
+                                    VoidNamespaceSerializer.INSTANCE,
+                                    new ValueStateDescriptor<>("value", StringSerializer.INSTANCE))
+                            .value());
+            assertEquals(
+                    Arrays.asList("left", "right"),
+                    toList(
+                            backend.getPartitionedState(
+                                            org.apache.flink.runtime.state.VoidNamespace.INSTANCE,
+                                            VoidNamespaceSerializer.INSTANCE,
+                                            new ListStateDescriptor<>(
+                                                    "list", StringSerializer.INSTANCE))
+                                    .get()));
+            assertEquals(
+                    "map-value",
+                    backend.getPartitionedState(
+                                    org.apache.flink.runtime.state.VoidNamespace.INSTANCE,
+                                    VoidNamespaceSerializer.INSTANCE,
+                                    new MapStateDescriptor<>(
+                                            "map",
+                                            StringSerializer.INSTANCE,
+                                            StringSerializer.INSTANCE))
+                            .get("map-key"));
+
+            cobbleCheckpoint = runCheckpointSnapshot(backend, 1L);
+            backend.notifyCheckpointComplete(1L);
+        }
+
+        // Stage 2: start a brand-new Cobble backend, restored from the Cobble checkpoint produced
+        // above (not from the original canonical savepoint), and verify every previously-imported
+        // value is observable. This is the full canonical -> Cobble checkpoint -> Cobble restore
+        // round-trip the reviewer required for Task 1.
+        try (TestBackendContext restored =
+                createBackendContext(
+                        tempDir.resolve("restored"),
+                        false,
+                        checkpointDirectory,
+                        null,
+                        TtlTimeProvider.DEFAULT,
+                        false,
+                        Collections.singletonList(cobbleCheckpoint),
+                        KeyGroupRange.of(keyGroup, keyGroup))) {
+            CobbleKeyedStateBackend<Integer> backend = restored.cobbleBackend;
+            backend.setCurrentKey(key);
+
+            assertEquals(
+                    "value-42",
+                    backend.getPartitionedState(
+                                    org.apache.flink.runtime.state.VoidNamespace.INSTANCE,
+                                    VoidNamespaceSerializer.INSTANCE,
+                                    new ValueStateDescriptor<>("value", StringSerializer.INSTANCE))
+                            .value());
+            assertEquals(
+                    Arrays.asList("left", "right"),
+                    toList(
+                            backend.getPartitionedState(
+                                            org.apache.flink.runtime.state.VoidNamespace.INSTANCE,
+                                            VoidNamespaceSerializer.INSTANCE,
+                                            new ListStateDescriptor<>(
+                                                    "list", StringSerializer.INSTANCE))
+                                    .get()));
+            assertEquals(
+                    "map-value",
+                    backend.getPartitionedState(
+                                    org.apache.flink.runtime.state.VoidNamespace.INSTANCE,
+                                    VoidNamespaceSerializer.INSTANCE,
+                                    new MapStateDescriptor<>(
+                                            "map",
+                                            StringSerializer.INSTANCE,
+                                            StringSerializer.INSTANCE))
+                            .get("map-key"));
+        }
+    }
+
+    /**
+     * Builds a canonical-savepoint stream with one valid VALUE entry followed by a truncated entry
+     * (only a half-written {@code int} length prefix). FullSnapshotRestoreOperation will hand the
+     * first entry to the import operation, which writes one row to the new Cobble DB; the second
+     * entry's deserialize will then throw EOF, leaving a partially-imported DB that the builder
+     * must clean up entirely.
+     */
+    private static KeyGroupsSavepointStateHandle createPartiallyValidCanonicalSavepoint(
+            int key, int keyGroup) throws Exception {
+        List<StateMetaInfoSnapshot> stateMetaInfos =
+                Collections.singletonList(
+                        new RegisteredKeyValueStateBackendMetaInfo<>(
+                                        org.apache.flink.api.common.state.StateDescriptor.Type
+                                                .VALUE,
+                                        "value",
+                                        VoidNamespaceSerializer.INSTANCE,
+                                        StringSerializer.INSTANCE)
+                                .snapshot());
+        DataOutputSerializer output = new DataOutputSerializer(512);
+        new KeyedBackendSerializationProxy<>(IntSerializer.INSTANCE, stateMetaInfos, false)
+                .write(output);
+
+        long keyGroupOffset = output.length();
+        DataOutputSerializer body = new DataOutputSerializer(128);
+        body.writeShort(0);
+        // First entry: a fully-formed Value row, so it is actually imported into the new DB. We
+        // signal END_OF_KEY_GROUP_MARK as the following-state-id, which would normally terminate
+        // the key group; but we keep writing more bytes after it. We instead use a regular
+        // following-state-id so the framework attempts another read, which is where we inject the
+        // truncation below.
+        body.writeBoolean(false); // dummy padding to allow downstream truncation alignment
+        body.setPosition(body.length() - 1); // drop the padding byte we just wrote
+        writeCanonicalEntry(
+                body,
+                canonicalKey(keyGroup, key, null),
+                CobbleStateKeySerializer.serialize(StringSerializer.INSTANCE, "value-42"),
+                0); // following-state-id = 0 keeps the framework reading another entry
+        // Truncated second entry: write only 2 bytes where an int (4 bytes) length prefix is
+        // expected by BytePrimitiveArraySerializer.deserialize, forcing an EOFException after the
+        // first row has already been persisted.
+        body.writeByte(0);
+        body.writeByte(0);
+
+        output.write(body.getCopyOfBuffer());
+
+        KeyGroupRange range = KeyGroupRange.of(keyGroup, keyGroup);
+        return new KeyGroupsSavepointStateHandle(
+                new KeyGroupRangeOffsets(range, new long[] {keyGroupOffset}),
+                new ByteStreamStateHandle(
+                        "partially-valid-canonical-savepoint", output.getCopyOfBuffer()));
+    }
+
+    /**
+     * Returns the per-subtask {@code job_<id>} instance directory trees still living under {@code
+     * localDirRoot}. The builder must delete those when a restore fails; the {@code localDirRoot}
+     * itself is owned by Flink configuration and may exist either way.
+     */
+    private static Path[] listLeakedInstanceDirs(Path localDirRoot) throws IOException {
+        if (!java.nio.file.Files.isDirectory(localDirRoot)) {
+            return new Path[0];
+        }
+        try (java.util.stream.Stream<Path> entries = java.nio.file.Files.list(localDirRoot)) {
+            return entries.filter(java.nio.file.Files::isDirectory)
+                    .filter(p -> p.getFileName().toString().startsWith("job_"))
+                    .sorted()
+                    .toArray(Path[]::new);
         }
     }
 
@@ -2537,6 +2974,11 @@ class CobbleStateBackendTest {
 
     private static KeyGroupsSavepointStateHandle createCanonicalSavepoint(int key, int keyGroup)
             throws Exception {
+        return createCanonicalSavepoint(key, keyGroup, false);
+    }
+
+    private static KeyGroupsSavepointStateHandle createCanonicalSavepoint(
+            int key, int keyGroup, boolean useCompression) throws Exception {
         List<StateMetaInfoSnapshot> stateMetaInfos =
                 Arrays.asList(
                         new RegisteredKeyValueStateBackendMetaInfo<>(
@@ -2561,33 +3003,61 @@ class CobbleStateBackendTest {
                                                 StringSerializer.INSTANCE))
                                 .snapshot());
         DataOutputSerializer output = new DataOutputSerializer(512);
-        new KeyedBackendSerializationProxy<>(IntSerializer.INSTANCE, stateMetaInfos, false)
+        new KeyedBackendSerializationProxy<>(IntSerializer.INSTANCE, stateMetaInfos, useCompression)
                 .write(output);
 
-        long keyGroupOffset = output.length();
-        output.writeShort(0);
+        // Build the key-group body in a separate buffer so we can optionally wrap it with the same
+        // snappy decorator that Flink's FullSnapshotAsyncWriter uses. The compressed/uncompressed
+        // boundary starts at the key-group offset and ends at the END_OF_KEY_GROUP_MARK.
+        DataOutputSerializer body = new DataOutputSerializer(256);
+        body.writeShort(0);
         writeCanonicalEntry(
-                output,
+                body,
                 canonicalKey(keyGroup, key, null),
                 CobbleStateKeySerializer.serialize(StringSerializer.INSTANCE, "value-42"),
                 1);
         byte[] listValue =
                 new org.apache.flink.runtime.state.ListDelimitedSerializer()
                         .serializeList(Arrays.asList("left", "right"), StringSerializer.INSTANCE);
-        writeCanonicalEntry(output, canonicalKey(keyGroup, key, null), listValue, 2);
+        writeCanonicalEntry(body, canonicalKey(keyGroup, key, null), listValue, 2);
         DataOutputSerializer mapValue = new DataOutputSerializer(64);
         mapValue.writeBoolean(false);
         StringSerializer.INSTANCE.serialize("map-value", mapValue);
         writeCanonicalEntry(
-                output,
+                body,
                 canonicalKey(keyGroup, key, "map-key"),
                 mapValue.getCopyOfBuffer(),
                 END_OF_KEY_GROUP_MARK);
 
+        long keyGroupOffset = output.length();
+        writeKeyGroupBody(output, body.getCopyOfBuffer(), useCompression);
+
         KeyGroupRange range = KeyGroupRange.of(keyGroup, keyGroup);
         return new KeyGroupsSavepointStateHandle(
                 new KeyGroupRangeOffsets(range, new long[] {keyGroupOffset}),
-                new ByteStreamStateHandle("canonical-savepoint", output.getCopyOfBuffer()));
+                new ByteStreamStateHandle(
+                        useCompression ? "canonical-savepoint-compressed" : "canonical-savepoint",
+                        output.getCopyOfBuffer()));
+    }
+
+    /**
+     * Appends a key-group body to {@code output}, optionally wrapped by the same snappy decorator
+     * Flink uses for compressed canonical streams. The decorator is closed before any further bytes
+     * are written, matching {@link FullSnapshotAsyncWriter}'s behavior.
+     */
+    private static void writeKeyGroupBody(
+            DataOutputSerializer output, byte[] body, boolean useCompression) throws IOException {
+        if (!useCompression) {
+            output.write(body);
+            return;
+        }
+        java.io.ByteArrayOutputStream sink = new java.io.ByteArrayOutputStream(body.length);
+        try (java.io.OutputStream compressed =
+                org.apache.flink.runtime.state.SnappyStreamCompressionDecorator.INSTANCE
+                        .decorateWithCompression((java.io.OutputStream) sink)) {
+            compressed.write(body);
+        }
+        output.write(sink.toByteArray());
     }
 
     private static KeyGroupsSavepointStateHandle createCanonicalTimerSavepoint(

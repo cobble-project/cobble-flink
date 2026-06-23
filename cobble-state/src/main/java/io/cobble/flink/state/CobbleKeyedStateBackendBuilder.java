@@ -225,31 +225,61 @@ final class CobbleKeyedStateBackendBuilder<K> {
     /** Creates the local working directory, writes config JSON, and opens the Cobble DB. */
     private CobbleBackendResources prepareCobbleResources(
             StateSerializerProvider<K> keySerializerProvider) throws IOException {
+        // Everything that creates on-disk artifacts for this backend instance must live inside a
+        // single failure-cleanup try/finally. Even calls that look read-only (createVolumeLayout)
+        // invoke rejectMixedRestoreHandles() / readRestoreSources() and can throw after
+        // instanceBasePath has already been materialized on disk. Wrapping them here ensures a
+        // failed restore never leaves a job_<id>/op_<name> tree behind.
         Files.createDirectories(instanceBasePath.toPath());
-
-        VolumeLayout volumeLayout = createVolumeLayout();
-        Files.createDirectories(volumeLayout.localVolumePath.toPath());
-
-        Path configPath =
-                new File(instanceBasePath, COBBLE_CONFIG_FILE_PREFIX + UUID.randomUUID() + ".json")
-                        .toPath();
-        Config config = createCobbleConfig(volumeLayout);
-        Files.write(configPath, config.toJson().getBytes(StandardCharsets.UTF_8));
-
         Db db = null;
         boolean success = false;
         try {
+            VolumeLayout volumeLayout = createVolumeLayout();
+            Files.createDirectories(volumeLayout.localVolumePath.toPath());
+
+            Path configPath =
+                    new File(
+                                    instanceBasePath,
+                                    COBBLE_CONFIG_FILE_PREFIX + UUID.randomUUID() + ".json")
+                            .toPath();
+            Config config = createCobbleConfig(volumeLayout);
+            Files.write(configPath, config.toJson().getBytes(StandardCharsets.UTF_8));
+
             db = openDb(configPath, keySerializerProvider);
+            CobbleBackendResources resources =
+                    new CobbleBackendResources(
+                            instanceBasePath, volumeLayout.localVolumePath, configPath, config, db);
             success = true;
-            return new CobbleBackendResources(
-                    instanceBasePath, volumeLayout.localVolumePath, configPath, config, db);
+            return resources;
         } finally {
             if (!success) {
                 if (db != null) {
                     db.close();
                 }
-                org.apache.flink.util.FileUtils.deleteDirectory(instanceBasePath);
+                deleteInstanceDirectories(instanceBasePath);
             }
+        }
+    }
+
+    /**
+     * Deletes the per-subtask instance directory and, only when the parent {@code
+     * job_<id>/op_<name>} wrapper has been observed as empty, deletes that wrapper too. We do not
+     * remove the wrapper when {@code listFiles()} returns {@code null} (I/O failure or wrapper
+     * already gone) — leaving the directory in place is preferable to deleting a tree we cannot
+     * safely characterize, especially when another concurrent subtask may still own a sibling. The
+     * configured {@code LOCAL_DIRECTORIES} root is shared across backends and is never removed
+     * here.
+     */
+    @org.apache.flink.annotation.VisibleForTesting
+    static void deleteInstanceDirectories(File instanceBasePath) throws IOException {
+        org.apache.flink.util.FileUtils.deleteDirectory(instanceBasePath);
+        File jobOperatorDir = instanceBasePath.getParentFile();
+        if (jobOperatorDir == null || !jobOperatorDir.isDirectory()) {
+            return;
+        }
+        File[] siblings = jobOperatorDir.listFiles();
+        if (siblings != null && siblings.length == 0) {
+            org.apache.flink.util.FileUtils.deleteDirectory(jobOperatorDir);
         }
     }
 
@@ -284,6 +314,8 @@ final class CobbleKeyedStateBackendBuilder<K> {
                 || isCanonicalSavepointRestore()) {
             return;
         }
+
+        rejectMixedRestoreHandles();
 
         List<RestoreSource> restoreSources = readRestoreSources();
         boolean resumeSingleSource = canResumeSingleSource(restoreSources);
@@ -374,6 +406,8 @@ final class CobbleKeyedStateBackendBuilder<K> {
                     keyGroupRange.getEndKeyGroup());
         }
 
+        rejectMixedRestoreHandles();
+
         if (isCanonicalSavepointRestore()) {
             Db db =
                     Db.open(
@@ -456,6 +490,42 @@ final class CobbleKeyedStateBackendBuilder<K> {
             }
         }
         return true;
+    }
+
+    /**
+     * Fails fast when canonical savepoint handles are mixed with any other Flink keyed-state handle
+     * class. Mixing cannot produce a consistent restore: canonical handles require importing into a
+     * fresh DB, while every other handle (native Cobble incremental, or any third-party handle)
+     * resumes an existing Cobble DB. This is enforced before any writable DB is opened so a partial
+     * import never leaves a usable backend behind. The error lists the distinct conflicting handle
+     * class names so the operator can identify the offending source.
+     */
+    private void rejectMixedRestoreHandles() {
+        if (restoreStateHandles == null || restoreStateHandles.isEmpty()) {
+            return;
+        }
+        Set<String> canonicalClasses = new LinkedHashSet<>();
+        Set<String> nonCanonicalClasses = new LinkedHashSet<>();
+        for (KeyedStateHandle handle : restoreStateHandles) {
+            if (handle == null) {
+                continue;
+            }
+            String className = handle.getClass().getName();
+            if (handle instanceof KeyGroupsSavepointStateHandle) {
+                canonicalClasses.add(className);
+            } else {
+                nonCanonicalClasses.add(className);
+            }
+        }
+        if (!canonicalClasses.isEmpty() && !nonCanonicalClasses.isEmpty()) {
+            throw new UnsupportedOperationException(
+                    "Cobble cannot restore from a mix of canonical savepoint handles "
+                            + canonicalClasses
+                            + " and non-canonical handles "
+                            + nonCanonicalClasses
+                            + ". Restart the job from a single source: either a canonical "
+                            + "savepoint or a Cobble checkpoint.");
+        }
     }
 
     private Db restoreRescaledDb(Path configPath, List<RestoreSource> restoreSources)
