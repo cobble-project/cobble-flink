@@ -1,5 +1,7 @@
 package io.cobble.flink.state;
 
+import static org.apache.flink.runtime.state.FullSnapshotUtil.END_OF_KEY_GROUP_MARK;
+import static org.apache.flink.runtime.state.FullSnapshotUtil.setMetaDataFollowsFlagInKey;
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -32,37 +34,58 @@ import org.apache.flink.api.common.time.Time;
 import org.apache.flink.api.common.typeutils.SimpleTypeSerializerSnapshot;
 import org.apache.flink.api.common.typeutils.TypeSerializerSnapshot;
 import org.apache.flink.api.common.typeutils.base.IntSerializer;
+import org.apache.flink.api.common.typeutils.base.ListSerializer;
+import org.apache.flink.api.common.typeutils.base.MapSerializer;
 import org.apache.flink.api.common.typeutils.base.StringSerializer;
 import org.apache.flink.api.common.typeutils.base.TypeSerializerSingleton;
+import org.apache.flink.api.common.typeutils.base.array.BytePrimitiveArraySerializer;
 import org.apache.flink.configuration.CheckpointingOptions;
 import org.apache.flink.configuration.Configuration;
 import org.apache.flink.configuration.MemorySize;
+import org.apache.flink.contrib.streaming.state.RocksDBStateBackend;
+import org.apache.flink.core.execution.SavepointFormatType;
 import org.apache.flink.core.fs.CloseableRegistry;
 import org.apache.flink.core.memory.DataInputView;
 import org.apache.flink.core.memory.DataInputViewStreamWrapper;
+import org.apache.flink.core.memory.DataOutputSerializer;
 import org.apache.flink.core.memory.DataOutputView;
 import org.apache.flink.runtime.checkpoint.CheckpointOptions;
+import org.apache.flink.runtime.checkpoint.SavepointType;
 import org.apache.flink.runtime.jobgraph.JobVertexID;
 import org.apache.flink.runtime.operators.testutils.MockEnvironment;
 import org.apache.flink.runtime.operators.testutils.MockEnvironmentBuilder;
 import org.apache.flink.runtime.query.TaskKvStateRegistry;
 import org.apache.flink.runtime.state.AbstractKeyedStateBackend;
+import org.apache.flink.runtime.state.CheckpointStorageLocationReference;
+import org.apache.flink.runtime.state.CheckpointableKeyedStateBackend;
+import org.apache.flink.runtime.state.CompositeKeySerializationUtils;
 import org.apache.flink.runtime.state.IncrementalRemoteKeyedStateHandle;
 import org.apache.flink.runtime.state.KeyGroupRange;
 import org.apache.flink.runtime.state.KeyGroupRangeAssignment;
+import org.apache.flink.runtime.state.KeyGroupRangeOffsets;
 import org.apache.flink.runtime.state.KeyGroupedInternalPriorityQueue;
+import org.apache.flink.runtime.state.KeyGroupsSavepointStateHandle;
 import org.apache.flink.runtime.state.Keyed;
+import org.apache.flink.runtime.state.KeyedBackendSerializationProxy;
 import org.apache.flink.runtime.state.KeyedStateHandle;
 import org.apache.flink.runtime.state.PriorityComparable;
+import org.apache.flink.runtime.state.RegisteredKeyValueStateBackendMetaInfo;
+import org.apache.flink.runtime.state.RegisteredPriorityQueueStateBackendMetaInfo;
+import org.apache.flink.runtime.state.SavepointResources;
+import org.apache.flink.runtime.state.SavepointSnapshotStrategy;
 import org.apache.flink.runtime.state.SnapshotResult;
+import org.apache.flink.runtime.state.SnapshotStrategyRunner;
 import org.apache.flink.runtime.state.TestTaskStateManagerBuilder;
 import org.apache.flink.runtime.state.VoidNamespaceSerializer;
 import org.apache.flink.runtime.state.heap.HeapPriorityQueueElement;
 import org.apache.flink.runtime.state.internal.InternalKvState;
+import org.apache.flink.runtime.state.memory.ByteStreamStateHandle;
 import org.apache.flink.runtime.state.memory.MemCheckpointStreamFactory;
+import org.apache.flink.runtime.state.metainfo.StateMetaInfoSnapshot;
 import org.apache.flink.runtime.state.ttl.MockTtlTimeProvider;
 import org.apache.flink.runtime.state.ttl.TtlTimeProvider;
 import org.apache.flink.runtime.util.TestingTaskManagerRuntimeInfo;
+import org.apache.flink.streaming.api.operators.TimerHeapInternalTimer;
 import org.apache.flink.streaming.api.operators.TimerSerializer;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
@@ -89,6 +112,126 @@ class CobbleStateBackendTest {
     @Test
     void createsBackendAndLoadsNativeLibrary() {
         assertDoesNotThrow(() -> new CobbleStateBackend());
+    }
+
+    @Test
+    void restoresCanonicalSavepointValueListAndMapState(@TempDir Path tempDir) throws Exception {
+        int key = 42;
+        int keyGroup = KeyGroupRangeAssignment.assignToKeyGroup(key, 16);
+        KeyGroupsSavepointStateHandle savepoint = createCanonicalSavepoint(key, keyGroup);
+
+        try (TestBackendContext context =
+                createBackendContext(
+                        tempDir,
+                        false,
+                        null,
+                        null,
+                        TtlTimeProvider.DEFAULT,
+                        false,
+                        Collections.singletonList(savepoint),
+                        KeyGroupRange.of(keyGroup, keyGroup))) {
+            CobbleKeyedStateBackend<Integer> backend = context.cobbleBackend;
+            backend.setCurrentKey(key);
+
+            ValueState<String> valueState =
+                    backend.getPartitionedState(
+                            org.apache.flink.runtime.state.VoidNamespace.INSTANCE,
+                            VoidNamespaceSerializer.INSTANCE,
+                            new ValueStateDescriptor<>("value", StringSerializer.INSTANCE));
+            ListState<String> listState =
+                    backend.getPartitionedState(
+                            org.apache.flink.runtime.state.VoidNamespace.INSTANCE,
+                            VoidNamespaceSerializer.INSTANCE,
+                            new ListStateDescriptor<>("list", StringSerializer.INSTANCE));
+            MapState<String, String> mapState =
+                    backend.getPartitionedState(
+                            org.apache.flink.runtime.state.VoidNamespace.INSTANCE,
+                            VoidNamespaceSerializer.INSTANCE,
+                            new MapStateDescriptor<>(
+                                    "map", StringSerializer.INSTANCE, StringSerializer.INSTANCE));
+
+            assertEquals("value-42", valueState.value());
+            assertEquals(Arrays.asList("left", "right"), toList(listState.get()));
+            assertEquals("map-value", mapState.get("map-key"));
+        }
+    }
+
+    @Test
+    void restoresRocksDbCanonicalSavepointValueListAndMapState(@TempDir Path tempDir)
+            throws Exception {
+        int key = 42;
+        int keyGroup = KeyGroupRangeAssignment.assignToKeyGroup(key, 16);
+        KeyedStateHandle savepoint = createRocksDbCanonicalSavepoint(tempDir, key, keyGroup);
+        assertInstanceOf(KeyGroupsSavepointStateHandle.class, savepoint);
+
+        try (TestBackendContext context =
+                createBackendContext(
+                        tempDir,
+                        false,
+                        null,
+                        null,
+                        TtlTimeProvider.DEFAULT,
+                        false,
+                        Collections.singletonList(savepoint),
+                        KeyGroupRange.of(keyGroup, keyGroup))) {
+            CobbleKeyedStateBackend<Integer> backend = context.cobbleBackend;
+            backend.setCurrentKey(key);
+
+            ValueState<String> valueState =
+                    backend.getPartitionedState(
+                            org.apache.flink.runtime.state.VoidNamespace.INSTANCE,
+                            VoidNamespaceSerializer.INSTANCE,
+                            new ValueStateDescriptor<>("value", StringSerializer.INSTANCE));
+            ListState<String> listState =
+                    backend.getPartitionedState(
+                            org.apache.flink.runtime.state.VoidNamespace.INSTANCE,
+                            VoidNamespaceSerializer.INSTANCE,
+                            new ListStateDescriptor<>("list", StringSerializer.INSTANCE));
+            MapState<String, String> mapState =
+                    backend.getPartitionedState(
+                            org.apache.flink.runtime.state.VoidNamespace.INSTANCE,
+                            VoidNamespaceSerializer.INSTANCE,
+                            new MapStateDescriptor<>(
+                                    "map", StringSerializer.INSTANCE, StringSerializer.INSTANCE));
+
+            assertEquals("value-42", valueState.value());
+            assertEquals(Arrays.asList("left", "right"), toList(listState.get()));
+            assertEquals("map-value", mapState.get("map-key"));
+        }
+    }
+
+    @Test
+    void restoresCanonicalSavepointTimerState(@TempDir Path tempDir) throws Exception {
+        int keyGroup = 3;
+        TimerHeapInternalTimer<Integer, org.apache.flink.runtime.state.VoidNamespace> timer =
+                new TimerHeapInternalTimer<>(
+                        123L,
+                        findKeyForGroup(keyGroup),
+                        org.apache.flink.runtime.state.VoidNamespace.INSTANCE);
+        KeyGroupsSavepointStateHandle savepoint = createCanonicalTimerSavepoint(keyGroup, timer);
+
+        try (TestBackendContext context =
+                createBackendContext(
+                        tempDir,
+                        false,
+                        null,
+                        null,
+                        TtlTimeProvider.DEFAULT,
+                        false,
+                        Collections.singletonList(savepoint),
+                        KeyGroupRange.of(keyGroup, keyGroup))) {
+            KeyGroupedInternalPriorityQueue<
+                            TimerHeapInternalTimer<
+                                    Integer, org.apache.flink.runtime.state.VoidNamespace>>
+                    queue =
+                            context.cobbleBackend.create(
+                                    "timer",
+                                    new TimerSerializer<>(
+                                            IntSerializer.INSTANCE,
+                                            VoidNamespaceSerializer.INSTANCE));
+            assertEquals(timer, queue.poll());
+            assertNull(queue.poll());
+        }
     }
 
     @Test
@@ -2311,6 +2454,198 @@ class CobbleStateBackendTest {
                 incrementalHandle.getMetaStateHandle().openInputStream()) {
             return CobbleSnapshotMetadata.read(new DataInputViewStreamWrapper(inputStream));
         }
+    }
+
+    private KeyedStateHandle createRocksDbCanonicalSavepoint(Path tempDir, int key, int keyGroup)
+            throws Exception {
+        Path rocksDbPath = tempDir.resolve("rocksdb-local");
+        MockEnvironment environment =
+                new MockEnvironmentBuilder()
+                        .setTaskName("rocksdb-canonical-savepoint")
+                        .setJobVertexID(TEST_JOB_VERTEX_ID)
+                        .setManagedMemorySize(MemorySize.ofMebiBytes(128).getBytes())
+                        .setTaskManagerRuntimeInfo(
+                                new TestingTaskManagerRuntimeInfo(
+                                        new Configuration(),
+                                        tempDir.resolve("rocksdb-tm").toFile()))
+                        .setTaskStateManager(new TestTaskStateManagerBuilder().build())
+                        .build();
+        AbstractKeyedStateBackend<Integer> backend = null;
+        try {
+            RocksDBStateBackend rocksDbBackend = new RocksDBStateBackend(rocksDbPath.toUri());
+            backend =
+                    rocksDbBackend.createKeyedStateBackend(
+                            environment,
+                            environment.getJobID(),
+                            "rocksdb-canonical-savepoint",
+                            IntSerializer.INSTANCE,
+                            16,
+                            KeyGroupRange.of(keyGroup, keyGroup),
+                            environment.getTaskKvStateRegistry(),
+                            TtlTimeProvider.DEFAULT,
+                            environment.getMetricGroup(),
+                            Collections.emptyList(),
+                            new CloseableRegistry(),
+                            0.5d);
+            backend.setCurrentKey(key);
+            ValueState<String> valueState =
+                    backend.getPartitionedState(
+                            org.apache.flink.runtime.state.VoidNamespace.INSTANCE,
+                            VoidNamespaceSerializer.INSTANCE,
+                            new ValueStateDescriptor<>("value", StringSerializer.INSTANCE));
+            ListState<String> listState =
+                    backend.getPartitionedState(
+                            org.apache.flink.runtime.state.VoidNamespace.INSTANCE,
+                            VoidNamespaceSerializer.INSTANCE,
+                            new ListStateDescriptor<>("list", StringSerializer.INSTANCE));
+            MapState<String, String> mapState =
+                    backend.getPartitionedState(
+                            org.apache.flink.runtime.state.VoidNamespace.INSTANCE,
+                            VoidNamespaceSerializer.INSTANCE,
+                            new MapStateDescriptor<>(
+                                    "map", StringSerializer.INSTANCE, StringSerializer.INSTANCE));
+            valueState.update("value-42");
+            listState.addAll(Arrays.asList("left", "right"));
+            mapState.put("map-key", "map-value");
+
+            SavepointResources<Integer> savepointResources =
+                    ((CheckpointableKeyedStateBackend<Integer>) backend).savepoint();
+            RunnableFuture<SnapshotResult<KeyedStateHandle>> snapshotFuture =
+                    new SnapshotStrategyRunner<>(
+                                    "RocksDB canonical savepoint",
+                                    new SavepointSnapshotStrategy<>(
+                                            savepointResources.getSnapshotResources()),
+                                    new CloseableRegistry(),
+                                    savepointResources.getPreferredSnapshotExecutionType())
+                            .snapshot(
+                                    1L,
+                                    System.currentTimeMillis(),
+                                    new MemCheckpointStreamFactory(1024 * 1024),
+                                    CheckpointOptions.alignedNoTimeout(
+                                            SavepointType.savepoint(SavepointFormatType.CANONICAL),
+                                            CheckpointStorageLocationReference.getDefault()));
+            snapshotFuture.run();
+            SnapshotResult<KeyedStateHandle> snapshotResult = snapshotFuture.get();
+            return snapshotResult.getJobManagerOwnedSnapshot();
+        } finally {
+            if (backend != null) {
+                backend.dispose();
+            }
+            environment.close();
+        }
+    }
+
+    private static KeyGroupsSavepointStateHandle createCanonicalSavepoint(int key, int keyGroup)
+            throws Exception {
+        List<StateMetaInfoSnapshot> stateMetaInfos =
+                Arrays.asList(
+                        new RegisteredKeyValueStateBackendMetaInfo<>(
+                                        org.apache.flink.api.common.state.StateDescriptor.Type
+                                                .VALUE,
+                                        "value",
+                                        VoidNamespaceSerializer.INSTANCE,
+                                        StringSerializer.INSTANCE)
+                                .snapshot(),
+                        new RegisteredKeyValueStateBackendMetaInfo<>(
+                                        org.apache.flink.api.common.state.StateDescriptor.Type.LIST,
+                                        "list",
+                                        VoidNamespaceSerializer.INSTANCE,
+                                        new ListSerializer<>(StringSerializer.INSTANCE))
+                                .snapshot(),
+                        new RegisteredKeyValueStateBackendMetaInfo<>(
+                                        org.apache.flink.api.common.state.StateDescriptor.Type.MAP,
+                                        "map",
+                                        VoidNamespaceSerializer.INSTANCE,
+                                        new MapSerializer<>(
+                                                StringSerializer.INSTANCE,
+                                                StringSerializer.INSTANCE))
+                                .snapshot());
+        DataOutputSerializer output = new DataOutputSerializer(512);
+        new KeyedBackendSerializationProxy<>(IntSerializer.INSTANCE, stateMetaInfos, false)
+                .write(output);
+
+        long keyGroupOffset = output.length();
+        output.writeShort(0);
+        writeCanonicalEntry(
+                output,
+                canonicalKey(keyGroup, key, null),
+                CobbleStateKeySerializer.serialize(StringSerializer.INSTANCE, "value-42"),
+                1);
+        byte[] listValue =
+                new org.apache.flink.runtime.state.ListDelimitedSerializer()
+                        .serializeList(Arrays.asList("left", "right"), StringSerializer.INSTANCE);
+        writeCanonicalEntry(output, canonicalKey(keyGroup, key, null), listValue, 2);
+        DataOutputSerializer mapValue = new DataOutputSerializer(64);
+        mapValue.writeBoolean(false);
+        StringSerializer.INSTANCE.serialize("map-value", mapValue);
+        writeCanonicalEntry(
+                output,
+                canonicalKey(keyGroup, key, "map-key"),
+                mapValue.getCopyOfBuffer(),
+                END_OF_KEY_GROUP_MARK);
+
+        KeyGroupRange range = KeyGroupRange.of(keyGroup, keyGroup);
+        return new KeyGroupsSavepointStateHandle(
+                new KeyGroupRangeOffsets(range, new long[] {keyGroupOffset}),
+                new ByteStreamStateHandle("canonical-savepoint", output.getCopyOfBuffer()));
+    }
+
+    private static KeyGroupsSavepointStateHandle createCanonicalTimerSavepoint(
+            int keyGroup,
+            TimerHeapInternalTimer<Integer, org.apache.flink.runtime.state.VoidNamespace> timer)
+            throws Exception {
+        TimerSerializer<Integer, org.apache.flink.runtime.state.VoidNamespace> serializer =
+                new TimerSerializer<>(IntSerializer.INSTANCE, VoidNamespaceSerializer.INSTANCE);
+        DataOutputSerializer output = new DataOutputSerializer(256);
+        new KeyedBackendSerializationProxy<>(
+                        IntSerializer.INSTANCE,
+                        Collections.singletonList(
+                                new RegisteredPriorityQueueStateBackendMetaInfo<>(
+                                                "timer", serializer)
+                                        .snapshot()),
+                        false)
+                .write(output);
+
+        long keyGroupOffset = output.length();
+        output.writeShort(0);
+        DataOutputSerializer timerKey = new DataOutputSerializer(32);
+        CompositeKeySerializationUtils.writeKeyGroup(
+                keyGroup,
+                CompositeKeySerializationUtils.computeRequiredBytesInKeyGroupPrefix(16),
+                timerKey);
+        serializer.serialize(timer, timerKey);
+        writeCanonicalEntry(output, timerKey.getCopyOfBuffer(), new byte[0], END_OF_KEY_GROUP_MARK);
+
+        KeyGroupRange range = KeyGroupRange.of(keyGroup, keyGroup);
+        return new KeyGroupsSavepointStateHandle(
+                new KeyGroupRangeOffsets(range, new long[] {keyGroupOffset}),
+                new ByteStreamStateHandle("canonical-timer-savepoint", output.getCopyOfBuffer()));
+    }
+
+    private static byte[] canonicalKey(int keyGroup, int key, String mapKey) throws IOException {
+        DataOutputSerializer output = new DataOutputSerializer(64);
+        int keyGroupPrefixBytes =
+                CompositeKeySerializationUtils.computeRequiredBytesInKeyGroupPrefix(16);
+        CompositeKeySerializationUtils.writeKeyGroup(keyGroup, keyGroupPrefixBytes, output);
+        CompositeKeySerializationUtils.writeKey(key, IntSerializer.INSTANCE, output, false);
+        CompositeKeySerializationUtils.writeNameSpace(
+                org.apache.flink.runtime.state.VoidNamespace.INSTANCE,
+                VoidNamespaceSerializer.INSTANCE,
+                output,
+                false);
+        if (mapKey != null) {
+            StringSerializer.INSTANCE.serialize(mapKey, output);
+        }
+        return output.getCopyOfBuffer();
+    }
+
+    private static void writeCanonicalEntry(
+            DataOutputSerializer output, byte[] key, byte[] value, int followingStateId)
+            throws IOException {
+        setMetaDataFollowsFlagInKey(key);
+        BytePrimitiveArraySerializer.INSTANCE.serialize(key, output);
+        BytePrimitiveArraySerializer.INSTANCE.serialize(value, output);
+        output.writeShort(followingStateId);
     }
 
     private static Iterable<String> assertListStateValues(

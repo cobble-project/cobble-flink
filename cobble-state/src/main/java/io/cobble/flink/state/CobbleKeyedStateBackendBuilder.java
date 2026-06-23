@@ -11,7 +11,9 @@ import org.apache.flink.runtime.execution.Environment;
 import org.apache.flink.runtime.query.TaskKvStateRegistry;
 import org.apache.flink.runtime.state.IncrementalRemoteKeyedStateHandle;
 import org.apache.flink.runtime.state.KeyGroupRange;
+import org.apache.flink.runtime.state.KeyGroupsSavepointStateHandle;
 import org.apache.flink.runtime.state.KeyedStateHandle;
+import org.apache.flink.runtime.state.StateSerializerProvider;
 import org.apache.flink.runtime.state.heap.InternalKeyContextImpl;
 import org.apache.flink.runtime.state.metrics.LatencyTrackingStateConfig;
 import org.apache.flink.runtime.state.ttl.TtlTimeProvider;
@@ -102,7 +104,9 @@ final class CobbleKeyedStateBackendBuilder<K> {
     CobbleKeyedStateBackend<K> build() throws IOException {
         CloseableRegistry cancelStreamRegistryForBackend = new CloseableRegistry();
         validateTimerBackendRestoreCompatibility();
-        CobbleBackendResources resources = prepareCobbleResources();
+        StateSerializerProvider<K> keySerializerProvider =
+                StateSerializerProvider.fromNewRegisteredSerializer(keySerializer);
+        CobbleBackendResources resources = prepareCobbleResources(keySerializerProvider);
         boolean success = false;
         try {
             // Restored native timer queues can contain rows before Flink recreates their logical
@@ -112,7 +116,7 @@ final class CobbleKeyedStateBackendBuilder<K> {
             CobbleKeyedStateBackend<K> backend =
                     new CobbleKeyedStateBackend<>(
                             kvStateRegistry,
-                            keySerializer,
+                            keySerializerProvider.currentSchemaSerializer(),
                             env.getUserCodeClassLoader().asClassLoader(),
                             env.getExecutionConfig(),
                             ttlTimeProvider,
@@ -219,7 +223,8 @@ final class CobbleKeyedStateBackendBuilder<K> {
     }
 
     /** Creates the local working directory, writes config JSON, and opens the Cobble DB. */
-    private CobbleBackendResources prepareCobbleResources() throws IOException {
+    private CobbleBackendResources prepareCobbleResources(
+            StateSerializerProvider<K> keySerializerProvider) throws IOException {
         Files.createDirectories(instanceBasePath.toPath());
 
         VolumeLayout volumeLayout = createVolumeLayout();
@@ -234,7 +239,7 @@ final class CobbleKeyedStateBackendBuilder<K> {
         Db db = null;
         boolean success = false;
         try {
-            db = openDb(configPath);
+            db = openDb(configPath, keySerializerProvider);
             success = true;
             return new CobbleBackendResources(
                     instanceBasePath, volumeLayout.localVolumePath, configPath, config, db);
@@ -274,7 +279,9 @@ final class CobbleKeyedStateBackendBuilder<K> {
      * stay READONLY.
      */
     private void addRestoreSourceVolumes(List<Config.VolumeDescriptor> volumes) throws IOException {
-        if (restoreStateHandles == null || restoreStateHandles.isEmpty()) {
+        if (restoreStateHandles == null
+                || restoreStateHandles.isEmpty()
+                || isCanonicalSavepointRestore()) {
             return;
         }
 
@@ -358,12 +365,40 @@ final class CobbleKeyedStateBackendBuilder<K> {
         return config;
     }
 
-    private Db openDb(Path configPath) throws IOException {
+    private Db openDb(Path configPath, StateSerializerProvider<K> keySerializerProvider)
+            throws IOException {
         if (restoreStateHandles == null || restoreStateHandles.isEmpty()) {
             return Db.open(
                     configPath.toString(),
                     keyGroupRange.getStartKeyGroup(),
                     keyGroupRange.getEndKeyGroup());
+        }
+
+        if (isCanonicalSavepointRestore()) {
+            Db db =
+                    Db.open(
+                            configPath.toString(),
+                            keyGroupRange.getStartKeyGroup(),
+                            keyGroupRange.getEndKeyGroup());
+            boolean success = false;
+            try {
+                new CanonicalSavepointRestoreOperation<>(
+                                db,
+                                keyGroupRange,
+                                numberOfKeyGroups,
+                                env.getUserCodeClassLoader().asClassLoader(),
+                                restoreStateHandles,
+                                keySerializerProvider)
+                        .restore();
+                success = true;
+                return db;
+            } catch (org.apache.flink.util.StateMigrationException e) {
+                throw new IOException("Failed to restore canonical savepoint state.", e);
+            } finally {
+                if (!success) {
+                    db.close();
+                }
+            }
         }
 
         List<RestoreSource> restoreSources = readRestoreSources();
@@ -409,6 +444,18 @@ final class CobbleKeyedStateBackendBuilder<K> {
         restoreSources.sort(
                 Comparator.comparingInt(source -> source.keyGroupRange.getStartKeyGroup()));
         return restoreSources;
+    }
+
+    private boolean isCanonicalSavepointRestore() {
+        if (restoreStateHandles == null || restoreStateHandles.isEmpty()) {
+            return false;
+        }
+        for (KeyedStateHandle restoreStateHandle : restoreStateHandles) {
+            if (!(restoreStateHandle instanceof KeyGroupsSavepointStateHandle)) {
+                return false;
+            }
+        }
+        return true;
     }
 
     private Db restoreRescaledDb(Path configPath, List<RestoreSource> restoreSources)
