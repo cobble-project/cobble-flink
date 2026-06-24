@@ -274,6 +274,9 @@ final class SinkInspectDecoder {
     }
 
     private static Object render(Object value, byte[] rawBytes) {
+        if (value instanceof Long) {
+            return DisplayLong.forJson((Long) value);
+        }
         if (value == null
                 || value instanceof String
                 || value instanceof Number

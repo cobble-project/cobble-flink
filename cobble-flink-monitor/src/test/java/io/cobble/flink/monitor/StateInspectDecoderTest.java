@@ -936,6 +936,34 @@ class StateInspectDecoderTest {
     }
 
     @Test
+    void preservesUnsafeLongValuesAcrossTheJsonBoundary() throws Exception {
+        StateInspectSchema schema =
+                StateInspectSchema.forAggregating(
+                        "aggregating-state",
+                        "cf-aggregating",
+                        false,
+                        StringSerializer.INSTANCE,
+                        StringSerializer.INSTANCE,
+                        LongSerializer.INSTANCE);
+        InspectTarget target =
+                semanticTarget(
+                        schema,
+                        StateInspectSemanticSchema.forAggregating(
+                                StateInspectType.scalar("VARCHAR"),
+                                StateInspectType.unknown(),
+                                StateInspectType.scalar("BIGINT")));
+        byte[] rowKey = keyAndNamespace("user-1", "window-a");
+        byte[][] columns = new byte[][] {serialize(LongSerializer.INSTANCE, Long.MAX_VALUE)};
+
+        StateInspectDecoder.DecodedRow row = StateInspectDecoder.decode(target, rowKey, columns);
+
+        assertNull(row.decodeError);
+        Object decodedValue = ((Map<?, ?>) row.decodedParts.get("value")).get("value");
+        assertEquals(Long.toString(Long.MAX_VALUE), decodedValue.toString());
+        assertEquals("\"" + Long.MAX_VALUE + "\"", CobbleFlinkMonitorServer.toJson(decodedValue));
+    }
+
+    @Test
     void inspectTargetJsonForAggregatingSurfacesStateKindAndAccumulatorLabel() {
         // The state_kind is AGGREGATING, and toJson() must surface a value_part_label of
         // "Accumulator" so the monitor UI can re-label the value group. The wire field

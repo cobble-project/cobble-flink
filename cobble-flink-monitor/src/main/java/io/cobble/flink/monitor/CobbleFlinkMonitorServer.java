@@ -17,6 +17,8 @@ import com.google.gson.JsonArray;
 import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
+import com.google.gson.JsonPrimitive;
+import com.google.gson.JsonSerializer;
 import com.sun.net.httpserver.Headers;
 import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpHandler;
@@ -64,6 +66,10 @@ public final class CobbleFlinkMonitorServer {
             new GsonBuilder()
                     .setFieldNamingPolicy(FieldNamingPolicy.LOWER_CASE_WITH_UNDERSCORES)
                     .serializeNulls()
+                    .registerTypeAdapter(
+                            DisplayLong.class,
+                            (JsonSerializer<DisplayLong>)
+                                    (value, type, context) -> new JsonPrimitive(value.toString()))
                     .create();
 
     private CobbleFlinkMonitorServer() {}
@@ -2780,12 +2786,16 @@ public final class CobbleFlinkMonitorServer {
 
     private static void sendJson(HttpExchange exchange, int status, Object body)
             throws IOException {
-        byte[] payload = GSON.toJson(body).getBytes(StandardCharsets.UTF_8);
+        byte[] payload = toJson(body).getBytes(StandardCharsets.UTF_8);
         exchange.getResponseHeaders().set("Content-Type", "application/json; charset=utf-8");
         exchange.sendResponseHeaders(status, payload.length);
         try (OutputStream output = exchange.getResponseBody()) {
             output.write(payload);
         }
+    }
+
+    static String toJson(Object body) {
+        return GSON.toJson(body);
     }
 
     private static void sendError(HttpExchange exchange, int status, String message)

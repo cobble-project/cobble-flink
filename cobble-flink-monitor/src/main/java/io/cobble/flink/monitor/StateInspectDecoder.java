@@ -153,7 +153,7 @@ final class StateInspectDecoder {
         int end = rowKey.length - bytes.available();
 
         Map<String, Object> output = new LinkedHashMap<>();
-        output.put("timestamp", timestamp);
+        output.put("timestamp", DisplayLong.forJson(timestamp));
         output.put("key", render(key, slice(rowKey, keyStart, namespaceStart - keyStart), null));
         output.put(
                 "namespace",
@@ -769,6 +769,9 @@ final class StateInspectDecoder {
     }
 
     private static Object renderSemanticScalar(Object value) throws IOException {
+        if (value instanceof Long) {
+            return DisplayLong.forJson((Long) value);
+        }
         if (value == null
                 || value instanceof String
                 || value instanceof Number
@@ -1044,6 +1047,9 @@ final class StateInspectDecoder {
 
     private static Object render(Object value, byte[] rawBytes, TypeSerializer<Object> serializer)
             throws IOException {
+        if (value instanceof Long) {
+            return DisplayLong.forJson((Long) value);
+        }
         if (value == null
                 || value instanceof String
                 || value instanceof Number

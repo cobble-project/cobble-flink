@@ -59,6 +59,31 @@ class SinkInspectDecoderTest {
     }
 
     @Test
+    void preservesUnsafeBigintAcrossTheJsonBoundary() throws Exception {
+        SinkInspectSchema schema =
+                new SinkInspectSchema(
+                        Collections.singletonList(SinkInspectField.key("id", "BIGINT", 0, -1)),
+                        Collections.singletonList(SinkInspectField.value("value", "BIGINT", 1, 0)));
+        InspectTarget target = InspectTarget.sink("sink", schema);
+
+        SinkInspectDecoder.DecodedRow row =
+                SinkInspectDecoder.decode(
+                        target,
+                        key(field("BIGINT", Long.valueOf(Long.MAX_VALUE))),
+                        new byte[][] {field("BIGINT", Long.valueOf(Long.MIN_VALUE))},
+                        null);
+
+        assertNull(row.decodeError);
+        Object decodedKey = row.decodedKey.get(0).get("value");
+        Object decodedValue = row.decodedColumns.get(0).get("value");
+        assertEquals(Long.toString(Long.MAX_VALUE), decodedKey.toString());
+        assertEquals(Long.toString(Long.MIN_VALUE), decodedValue.toString());
+        assertEquals(
+                "[\"" + Long.MAX_VALUE + "\",\"" + Long.MIN_VALUE + "\"]",
+                CobbleFlinkMonitorServer.toJson(Arrays.asList(decodedKey, decodedValue)));
+    }
+
+    @Test
     void decodesOnlyProjectedColumns() throws Exception {
         SinkInspectSchema schema =
                 new SinkInspectSchema(
