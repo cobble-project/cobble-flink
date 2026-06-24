@@ -63,6 +63,7 @@ public final class CobbleFlinkMonitorServer {
     private static final Gson GSON =
             new GsonBuilder()
                     .setFieldNamingPolicy(FieldNamingPolicy.LOWER_CASE_WITH_UNDERSCORES)
+                    .serializeNulls()
                     .create();
 
     private CobbleFlinkMonitorServer() {}

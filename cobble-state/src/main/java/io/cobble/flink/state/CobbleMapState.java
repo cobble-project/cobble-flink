@@ -33,6 +33,12 @@ final class CobbleMapState<K, N, UK, UV> extends AbstractCobbleState<K, N, Map<U
 
     private final TypeSerializer<UK> userKeySerializer;
     private final TypeSerializer<UV> userValueSerializer;
+    /**
+     * Cached adapter that fronts {@link #userValueSerializer} with the canonical {@code isNull}
+     * byte. Reused on every encode/decode so the put/get hot path stays allocation-free.
+     */
+    private final TypeSerializer<UV> userValueRowCodec;
+
     private final ScanOptions emptyCheckScanOptions;
     private final ScanOptions emptyCheckFastScanOptions;
     // Fixed user-key length from serializer.getLength(); -1 means variable.
@@ -63,6 +69,7 @@ final class CobbleMapState<K, N, UK, UV> extends AbstractCobbleState<K, N, Map<U
                 ttlConfig);
         this.userKeySerializer = mapSerializer.getKeySerializer();
         this.userValueSerializer = mapSerializer.getValueSerializer();
+        this.userValueRowCodec = MapValueCodec.adapterFor(this.userValueSerializer);
         this.emptyCheckScanOptions = ScanOptions.defaults().columnFamily(columnFamily);
         this.emptyCheckFastScanOptions =
                 ScanOptions.defaults().columnFamily(columnFamily).maxRows(1);
@@ -91,11 +98,13 @@ final class CobbleMapState<K, N, UK, UV> extends AbstractCobbleState<K, N, Map<U
     @Override
     public void put(UK userKey, UV userValue) throws IOException {
         Preconditions.checkNotNull(userKey, "MapState user key must not be null.");
-        Preconditions.checkNotNull(userValue, "MapState user value must not be null.");
+        // userValue may legitimately be null: Flink/RocksDB MapState semantics distinguish a
+        // present-null entry from an absent one; both surface as null from get(...) but
+        // contains(...) returns true for present-null.
         CobbleStateKeySerializer.DirectBufferSlice directKey =
                 directMapEntryRowKey(currentKey(), currentNamespace(), userKeySerializer, userKey);
         CobbleStateKeySerializer.DirectBufferSlice directValue =
-                directValueSerializer.serialize(userValueSerializer, userValue);
+                MapValueCodec.encode(directValueSerializer, userValueRowCodec, userValue);
         db.putDirectWithOptions(
                 currentBucket(),
                 directKey.buffer(),
@@ -110,6 +119,7 @@ final class CobbleMapState<K, N, UK, UV> extends AbstractCobbleState<K, N, Map<U
     public void putAll(Map<UK, UV> value) throws IOException {
         Preconditions.checkNotNull(value, "MapState putAll value must not be null.");
         for (Map.Entry<UK, UV> entry : value.entrySet()) {
+            // entry.getValue() may be null; put(...) handles it (present-null row).
             put(entry.getKey(), entry.getValue());
         }
     }
@@ -123,7 +133,15 @@ final class CobbleMapState<K, N, UK, UV> extends AbstractCobbleState<K, N, Map<U
     @Override
     public boolean contains(UK userKey) throws IOException {
         Preconditions.checkNotNull(userKey, "MapState user key must not be null.");
-        return getEntryValueDirect(currentKey(), currentNamespace(), userKey) != null;
+        // Physical row presence: get(...) returning null could mean absent OR present-null, so we
+        // must not derive contains from it. We probe the encoded row directly.
+        CobbleStateKeySerializer.DirectBufferSlice directKey =
+                directMapEntryRowKey(currentKey(), currentNamespace(), userKeySerializer, userKey);
+        try (DirectEncodedRow encodedRow =
+                db.getDirectEncodedRowWithOptions(
+                        currentBucket(), directKey.buffer(), directKey.length(), readOptions)) {
+            return encodedRow != null;
+        }
     }
 
     @Override
@@ -334,7 +352,13 @@ final class CobbleMapState<K, N, UK, UV> extends AbstractCobbleState<K, N, Map<U
                         emptyCheckFastScanOptions)) {
             DirectScanRow row = cursor.nextRow();
             if (row == null) {
-                return EmptyCheckProbeResult.ABSENT;
+                // Fast scan capped at maxRows(1) may have consumed a tombstone before
+                // surfacing a live row, in which case Cobble returns null even when the
+                // map is non-empty. Falling through to the slow path (no maxRows cap)
+                // gives the caller the authoritative answer. Treating this as ABSENT
+                // here would make isEmpty() incorrectly report true after a remove(...)
+                // that left tombstones in front of live rows.
+                return EmptyCheckProbeResult.UNKNOWN;
             }
             ByteBuffer rowKey = row.getKey();
             if (startsWithMapKeyNamespacePrefix(rowKey, keyNamespacePrefix)) {
@@ -398,6 +422,10 @@ final class CobbleMapState<K, N, UK, UV> extends AbstractCobbleState<K, N, Map<U
             throws IOException {
         byte[] keyNamespacePrefix = mapKeyNamespacePrefix(key, namespace);
         LinkedHashMap<DUK, DUV> entries = new LinkedHashMap<>();
+        // readEntries is called from queryable-state with a freshly-duplicated user-value
+        // serializer per invocation, so the adapter is built once here and reused inside the
+        // scan loop rather than being allocated per row.
+        TypeSerializer<DUV> rowCodec = MapValueCodec.adapterFor(deserializedUserValueSerializer);
 
         DirectScanBounds directScanBounds = prepareDirectScanBounds(keyNamespacePrefix);
         try (DirectScanCursor cursor =
@@ -423,8 +451,7 @@ final class CobbleMapState<K, N, UK, UV> extends AbstractCobbleState<K, N, Map<U
                                 deserializedUserKeySerializer, rowKey, keyNamespacePrefix.length);
                 DUV userValue =
                         row.decodeBytesColumn(
-                                STATE_COLUMN_INDEX,
-                                input -> deserializeValue(deserializedUserValueSerializer, input));
+                                STATE_COLUMN_INDEX, input -> MapValueCodec.decode(rowCodec, input));
                 entries.put(userKey, userValue);
             }
         }
@@ -466,8 +493,10 @@ final class CobbleMapState<K, N, UK, UV> extends AbstractCobbleState<K, N, Map<U
             if (encodedRow == null) {
                 return null;
             }
+            // A present-null entry decodes to null too — get(...) cannot distinguish the two; use
+            // contains(...) for physical row presence.
             return encodedRow.decodeBytesColumn(
-                    STATE_COLUMN_INDEX, input -> deserializeValue(userValueSerializer, input));
+                    STATE_COLUMN_INDEX, input -> MapValueCodec.decode(userValueRowCodec, input));
         }
     }
 
@@ -675,6 +704,12 @@ final class CobbleMapState<K, N, UK, UV> extends AbstractCobbleState<K, N, Map<U
         private final byte[] keyNamespacePrefix;
         private final TypeSerializer<DUK> deserializedUserKeySerializer;
         private final TypeSerializer<DUV> deserializedUserValueSerializer;
+        /**
+         * Cached {@link MapValueCodec#adapterFor} adapter over {@link
+         * #deserializedUserValueSerializer}. Built once per iterator so each row decode reuses the
+         * same adapter instead of allocating a new one.
+         */
+        private final TypeSerializer<DUV> userValueRowCodec;
 
         private Map.Entry<DUK, DUV> nextEntry;
         private boolean finished;
@@ -689,6 +724,7 @@ final class CobbleMapState<K, N, UK, UV> extends AbstractCobbleState<K, N, Map<U
             this.keyNamespacePrefix = keyNamespacePrefix;
             this.deserializedUserKeySerializer = deserializedUserKeySerializer;
             this.deserializedUserValueSerializer = deserializedUserValueSerializer;
+            this.userValueRowCodec = MapValueCodec.adapterFor(deserializedUserValueSerializer);
         }
 
         @Override
@@ -734,9 +770,7 @@ final class CobbleMapState<K, N, UK, UV> extends AbstractCobbleState<K, N, Map<U
                     DUV userValue =
                             row.decodeBytesColumn(
                                     STATE_COLUMN_INDEX,
-                                    input ->
-                                            deserializeValue(
-                                                    deserializedUserValueSerializer, input));
+                                    input -> MapValueCodec.decode(userValueRowCodec, input));
                     nextEntry = new AbstractMap.SimpleImmutableEntry<>(userKey, userValue);
                     return;
                 } catch (IOException e) {

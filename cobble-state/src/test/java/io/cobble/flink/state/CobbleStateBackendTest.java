@@ -49,6 +49,7 @@ import org.apache.flink.core.memory.DataInputView;
 import org.apache.flink.core.memory.DataInputViewStreamWrapper;
 import org.apache.flink.core.memory.DataOutputSerializer;
 import org.apache.flink.core.memory.DataOutputView;
+import org.apache.flink.queryablestate.client.state.serialization.KvStateSerializer;
 import org.apache.flink.runtime.checkpoint.CheckpointOptions;
 import org.apache.flink.runtime.checkpoint.SavepointType;
 import org.apache.flink.runtime.jobgraph.JobVertexID;
@@ -95,9 +96,11 @@ import java.io.IOException;
 import java.io.UncheckedIOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collection;
 import java.util.Collections;
+import java.util.Iterator;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -2648,6 +2651,285 @@ class CobbleStateBackendTest {
     }
 
     @Test
+    void mapStatePresentNullDistinctFromAbsent(@TempDir Path tempDir) throws Exception {
+        try (TestBackendContext context =
+                createBackendContext(tempDir, false, null, MemorySize.ofMebiBytes(1))) {
+            CobbleKeyedStateBackend<Integer> backend = context.cobbleBackend;
+            MapState<String, String> state =
+                    backend.getPartitionedState(
+                            "null-values-ns",
+                            StringSerializer.INSTANCE,
+                            new MapStateDescriptor<>(
+                                    "null-values-map",
+                                    StringSerializer.INSTANCE,
+                                    StringSerializer.INSTANCE));
+            backend.setCurrentKey(1);
+
+            state.put("present-null", null);
+            state.put("present-non-null", "v");
+
+            // get(...) cannot tell present-null from absent — both return null. Only contains(...)
+            // distinguishes them, by going through physical row presence.
+            assertTrue(state.contains("present-null"));
+            assertNull(state.get("present-null"));
+            assertTrue(state.contains("present-non-null"));
+            assertEquals("v", state.get("present-non-null"));
+            assertFalse(state.contains("absent"));
+            assertNull(state.get("absent"));
+            assertFalse(state.isEmpty());
+        }
+    }
+
+    @Test
+    void mapStateIteratorYieldsPresentNullEntries(@TempDir Path tempDir) throws Exception {
+        try (TestBackendContext context =
+                createBackendContext(tempDir, false, null, MemorySize.ofMebiBytes(1))) {
+            CobbleKeyedStateBackend<Integer> backend = context.cobbleBackend;
+            MapState<String, String> state =
+                    backend.getPartitionedState(
+                            "iter-null-ns",
+                            StringSerializer.INSTANCE,
+                            new MapStateDescriptor<>(
+                                    "iter-null-map",
+                                    StringSerializer.INSTANCE,
+                                    StringSerializer.INSTANCE));
+            backend.setCurrentKey(2);
+            state.put("a", null);
+            state.put("b", "vb");
+
+            Map<String, String> observed = new LinkedHashMap<>();
+            for (Map.Entry<String, String> entry : state.entries()) {
+                observed.put(entry.getKey(), entry.getValue());
+            }
+            Map<String, String> expected = new LinkedHashMap<>();
+            expected.put("a", null);
+            expected.put("b", "vb");
+            assertEquals(expected, observed);
+
+            // keys() and values() must also see both entries; values() carries the null verbatim.
+            Set<String> keys = new java.util.HashSet<>();
+            state.keys().forEach(keys::add);
+            assertEquals(new java.util.HashSet<>(Arrays.asList("a", "b")), keys);
+
+            List<String> values = new ArrayList<>();
+            state.values().forEach(values::add);
+            assertEquals(2, values.size());
+            assertTrue(values.contains(null));
+            assertTrue(values.contains("vb"));
+        }
+    }
+
+    @Test
+    void mapStateIteratorSetValueThrowsUnsupported(@TempDir Path tempDir) throws Exception {
+        try (TestBackendContext context =
+                createBackendContext(tempDir, false, null, MemorySize.ofMebiBytes(1))) {
+            CobbleKeyedStateBackend<Integer> backend = context.cobbleBackend;
+            MapState<String, String> state =
+                    backend.getPartitionedState(
+                            "iter-immutable-ns",
+                            StringSerializer.INSTANCE,
+                            new MapStateDescriptor<>(
+                                    "iter-immutable-map",
+                                    StringSerializer.INSTANCE,
+                                    StringSerializer.INSTANCE));
+            backend.setCurrentKey(3);
+            state.put("k", "v");
+
+            Iterator<Map.Entry<String, String>> it = state.iterator();
+            assertTrue(it.hasNext());
+            Map.Entry<String, String> entry = it.next();
+            assertThrows(UnsupportedOperationException.class, () -> entry.setValue("v2"));
+            assertThrows(UnsupportedOperationException.class, () -> entry.setValue(null));
+            // Drain to exhaustion so the iterator's underlying cursor closes; leaving it open
+            // would deadlock the surrounding Db.close() in the test-context teardown.
+            while (it.hasNext()) {
+                it.next();
+            }
+        }
+    }
+
+    @Test
+    void mapStatePutAllAcceptsNullValues(@TempDir Path tempDir) throws Exception {
+        try (TestBackendContext context =
+                createBackendContext(tempDir, false, null, MemorySize.ofMebiBytes(1))) {
+            CobbleKeyedStateBackend<Integer> backend = context.cobbleBackend;
+            MapState<String, String> state =
+                    backend.getPartitionedState(
+                            "putall-null-ns",
+                            StringSerializer.INSTANCE,
+                            new MapStateDescriptor<>(
+                                    "putall-null-map",
+                                    StringSerializer.INSTANCE,
+                                    StringSerializer.INSTANCE));
+            backend.setCurrentKey(4);
+
+            Map<String, String> payload = new LinkedHashMap<>();
+            payload.put("k1", null);
+            payload.put("k2", "v2");
+            state.putAll(payload);
+
+            assertTrue(state.contains("k1"));
+            assertNull(state.get("k1"));
+            assertEquals("v2", state.get("k2"));
+        }
+    }
+
+    @Test
+    void mapStateRemoveAndClearWorkOnPresentNullRows(@TempDir Path tempDir) throws Exception {
+        try (TestBackendContext context =
+                createBackendContext(tempDir, false, null, MemorySize.ofMebiBytes(1))) {
+            CobbleKeyedStateBackend<Integer> backend = context.cobbleBackend;
+            MapState<String, String> state =
+                    backend.getPartitionedState(
+                            "remove-null-ns",
+                            StringSerializer.INSTANCE,
+                            new MapStateDescriptor<>(
+                                    "remove-null-map",
+                                    StringSerializer.INSTANCE,
+                                    StringSerializer.INSTANCE));
+            backend.setCurrentKey(5);
+            state.put("a", null);
+            state.put("b", null);
+            assertTrue(state.contains("a"));
+            assertTrue(state.contains("b"));
+
+            state.remove("a");
+            assertFalse(state.contains("a"));
+            assertTrue(state.contains("b"));
+            // isEmpty() must remain authoritative even when the fast-path scan returns
+            // empty due to tombstones consuming its maxRows budget; CobbleMapState
+            // falls through to the slow path in that case.
+            assertFalse(state.isEmpty());
+            int liveCount = 0;
+            for (Map.Entry<String, String> ignored : state.entries()) {
+                liveCount++;
+            }
+            assertEquals(1, liveCount);
+
+            state.clear();
+            assertFalse(state.contains("b"));
+            assertTrue(state.isEmpty());
+        }
+    }
+
+    @Test
+    void mapStateGetSerializedValueIncludesPresentNullEntries(@TempDir Path tempDir)
+            throws Exception {
+        try (TestBackendContext context =
+                createBackendContext(tempDir, false, null, MemorySize.ofMebiBytes(1))) {
+            CobbleKeyedStateBackend<Integer> backend = context.cobbleBackend;
+            MapStateDescriptor<String, String> descriptor =
+                    new MapStateDescriptor<>(
+                            "qs-null-map", StringSerializer.INSTANCE, StringSerializer.INSTANCE);
+            MapState<String, String> state =
+                    backend.getPartitionedState(
+                            "qs-null-ns", StringSerializer.INSTANCE, descriptor);
+            backend.setCurrentKey(6);
+            state.put("present-null", null);
+            state.put("present-non-null", "v");
+
+            @SuppressWarnings("unchecked")
+            InternalKvState<Integer, String, Map<String, String>> internalState =
+                    (InternalKvState<Integer, String, Map<String, String>>) state;
+            byte[] keyAndNamespace =
+                    KvStateSerializer.serializeKeyAndNamespace(
+                            6, IntSerializer.INSTANCE, "qs-null-ns", StringSerializer.INSTANCE);
+            byte[] serialized =
+                    internalState.getSerializedValue(
+                            keyAndNamespace,
+                            internalState.getKeySerializer(),
+                            internalState.getNamespaceSerializer(),
+                            internalState.getValueSerializer());
+            assertNotNull(serialized);
+            Map<String, String> roundTripped =
+                    KvStateSerializer.deserializeMap(
+                            serialized, StringSerializer.INSTANCE, StringSerializer.INSTANCE);
+            Map<String, String> expected = new LinkedHashMap<>();
+            expected.put("present-null", null);
+            expected.put("present-non-null", "v");
+            assertEquals(expected, roundTripped);
+        }
+    }
+
+    @Test
+    void mapStatePresentNullRowSurvivesCobbleNativeCheckpoint(@TempDir Path tempDir)
+            throws Exception {
+        int key = 7;
+        String checkpointDirectory = tempDir.resolve("checkpoints").toString();
+        MapStateDescriptor<String, String> descriptor =
+                new MapStateDescriptor<>(
+                        "native-null-map", StringSerializer.INSTANCE, StringSerializer.INSTANCE);
+        KeyedStateHandle snapshotHandle;
+        try (TestBackendContext context =
+                createBackendContext(tempDir.resolve("source"), false, checkpointDirectory)) {
+            CobbleKeyedStateBackend<Integer> backend = context.cobbleBackend;
+            MapState<String, String> state =
+                    backend.getPartitionedState(
+                            "native-null-ns", StringSerializer.INSTANCE, descriptor);
+            backend.setCurrentKey(key);
+            state.put("present-null", null);
+            state.put("present-non-null", "v");
+            snapshotHandle = runCheckpointSnapshot(backend, 90L);
+        }
+
+        try (TestBackendContext context =
+                createBackendContext(
+                        tempDir.resolve("restore"),
+                        false,
+                        checkpointDirectory,
+                        null,
+                        TtlTimeProvider.DEFAULT,
+                        false,
+                        Collections.singletonList(snapshotHandle),
+                        KeyGroupRange.of(0, 15))) {
+            CobbleKeyedStateBackend<Integer> backend = context.cobbleBackend;
+            backend.setCurrentKey(key);
+            MapState<String, String> state =
+                    backend.getPartitionedState(
+                            "native-null-ns", StringSerializer.INSTANCE, descriptor);
+            assertTrue(state.contains("present-null"));
+            assertNull(state.get("present-null"));
+            assertTrue(state.contains("present-non-null"));
+            assertEquals("v", state.get("present-non-null"));
+        }
+    }
+
+    @Test
+    void canonicalRestoreAcceptsPresentNullMapValue(@TempDir Path tempDir) throws Exception {
+        int key = 42;
+        int keyGroup = KeyGroupRangeAssignment.assignToKeyGroup(key, 16);
+        KeyGroupsSavepointStateHandle savepoint =
+                createCanonicalMapSavepointWithNullValue(key, keyGroup);
+
+        try (TestBackendContext context =
+                createBackendContext(
+                        tempDir,
+                        false,
+                        null,
+                        null,
+                        TtlTimeProvider.DEFAULT,
+                        false,
+                        Collections.singletonList(savepoint),
+                        KeyGroupRange.of(keyGroup, keyGroup))) {
+            CobbleKeyedStateBackend<Integer> backend = context.cobbleBackend;
+            backend.setCurrentKey(key);
+            MapState<String, String> mapState =
+                    backend.getPartitionedState(
+                            org.apache.flink.runtime.state.VoidNamespace.INSTANCE,
+                            VoidNamespaceSerializer.INSTANCE,
+                            new MapStateDescriptor<>(
+                                    "map-null",
+                                    StringSerializer.INSTANCE,
+                                    StringSerializer.INSTANCE));
+
+            assertTrue(mapState.contains("map-key-null"));
+            assertNull(mapState.get("map-key-null"));
+            assertTrue(mapState.contains("map-key-nonnull"));
+            assertEquals("map-value", mapState.get("map-key-nonnull"));
+        }
+    }
+
+    @Test
     void listStateReadWriteExceedsFourMemtables(@TempDir Path tempDir) throws Exception {
         try (TestBackendContext context =
                 createBackendContext(tempDir, false, null, MemorySize.ofMebiBytes(1))) {
@@ -3759,6 +4041,60 @@ class CobbleStateBackendTest {
             compressed.write(body);
         }
         output.write(sink.toByteArray());
+    }
+
+    /**
+     * Builds a canonical savepoint with a single MAP state ("map-null") that contains both a
+     * present-null entry (canonical leading {@code writeBoolean(true)}) and a present non-null
+     * entry (canonical {@code writeBoolean(false)} + payload). Used to prove the canonical import
+     * path threads null-valued map entries into Cobble unchanged.
+     */
+    private static KeyGroupsSavepointStateHandle createCanonicalMapSavepointWithNullValue(
+            int key, int keyGroup) throws Exception {
+        List<StateMetaInfoSnapshot> stateMetaInfos =
+                Collections.singletonList(
+                        new RegisteredKeyValueStateBackendMetaInfo<>(
+                                        org.apache.flink.api.common.state.StateDescriptor.Type.MAP,
+                                        "map-null",
+                                        VoidNamespaceSerializer.INSTANCE,
+                                        new MapSerializer<>(
+                                                StringSerializer.INSTANCE,
+                                                StringSerializer.INSTANCE))
+                                .snapshot());
+        DataOutputSerializer output = new DataOutputSerializer(256);
+        new KeyedBackendSerializationProxy<>(IntSerializer.INSTANCE, stateMetaInfos, false)
+                .write(output);
+
+        DataOutputSerializer body = new DataOutputSerializer(128);
+        body.writeShort(0);
+
+        // Present-null map entry: isNull = true, no payload.
+        DataOutputSerializer presentNullValue = new DataOutputSerializer(4);
+        presentNullValue.writeBoolean(true);
+        writeCanonicalEntry(
+                body,
+                canonicalKey(keyGroup, key, "map-key-null"),
+                presentNullValue.getCopyOfBuffer(),
+                0);
+
+        // Present non-null map entry: isNull = false, then serialized user value.
+        DataOutputSerializer presentNonNullValue = new DataOutputSerializer(32);
+        presentNonNullValue.writeBoolean(false);
+        StringSerializer.INSTANCE.serialize("map-value", presentNonNullValue);
+        writeCanonicalEntry(
+                body,
+                canonicalKey(keyGroup, key, "map-key-nonnull"),
+                presentNonNullValue.getCopyOfBuffer(),
+                END_OF_KEY_GROUP_MARK);
+
+        long keyGroupOffset = output.length();
+        writeKeyGroupBody(output, body.getCopyOfBuffer(), false);
+
+        KeyGroupRange range = KeyGroupRange.of(keyGroup, keyGroup);
+        return new KeyGroupsSavepointStateHandle(
+                new KeyGroupRangeOffsets(range, new long[] {keyGroupOffset}),
+                new ByteStreamStateHandle(
+                        "canonical-savepoint-map-null", output.getCopyOfBuffer()));
     }
 
     private static KeyGroupsSavepointStateHandle createCanonicalTimerSavepoint(

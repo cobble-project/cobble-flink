@@ -1328,7 +1328,8 @@ function renderStateExpandedCells(groups, decodedParts, item, target, displayId)
 }
 
 function semanticTableValue(part, field, index) {
-  if (!part || typeof part !== 'object') return undefined
+  if (part === null) return index === 0 ? null : undefined
+  if (part === undefined || typeof part !== 'object') return undefined
   if (Array.isArray(part.fields)) {
     return part.fields.find((candidate) => candidate?.name === field.name) || part.fields[index]
   }

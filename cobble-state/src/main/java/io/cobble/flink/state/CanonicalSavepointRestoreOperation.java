@@ -576,15 +576,12 @@ final class CanonicalSavepointRestoreOperation<K> {
                 throws IOException {
             MapSerializer mapSerializer = (MapSerializer) valueSerializer;
             Object userKey = mapSerializer.getKeySerializer().deserialize(keyInput);
-            DataInputDeserializer valueInput = new DataInputDeserializer(rawValue);
-            if (valueInput.readBoolean()) {
-                throw new UnsupportedOperationException(
-                        "Cobble canonical savepoint restore does not support null MapState values "
-                                + "for state '"
-                                + name
-                                + "'.");
-            }
-            Object userValue = mapSerializer.getValueSerializer().deserialize(valueInput);
+            // Canonical MapState value layout matches Cobble's on-disk MapState row value
+            // byte-for-byte: leading isNull byte + (optional) user-value bytes. Validate the
+            // payload up front so a malformed row fails before we touch the DB, then persist the
+            // canonical bytes verbatim — re-encoding would be a no-op round-trip and risks drift
+            // from the canonical wire format.
+            MapValueCodec.validate(rawValue, mapSerializer.getValueSerializer());
             db.put(
                     keyGroup,
                     buildMapKey(
@@ -596,8 +593,7 @@ final class CanonicalSavepointRestoreOperation<K> {
                             mapSerializer.getKeySerializer()),
                     name,
                     STATE_COLUMN_INDEX,
-                    CobbleStateKeySerializer.serialize(
-                            mapSerializer.getValueSerializer(), userValue));
+                    rawValue);
         }
     }
 

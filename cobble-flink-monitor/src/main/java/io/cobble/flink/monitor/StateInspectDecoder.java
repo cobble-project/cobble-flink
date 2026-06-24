@@ -233,10 +233,52 @@ final class StateInspectDecoder {
         }
         if (schema.stateKind() == StateKind.MAP) {
             Map<String, Object> output = new LinkedHashMap<>();
-            output.put("map_value", decodeDisplay(schema.mapUserValueSerializer(), valueBytes));
+            output.put("map_value", decodeMapValueDisplay(schema, valueBytes));
             return output;
         }
         throw new IOException("Unsupported state kind: " + schema.stateKind());
+    }
+
+    /**
+     * Renders a Cobble MapState row value column. The on-disk layout matches Flink's canonical
+     * RocksDB MapState: one {@code isNull} byte followed by the user value bytes when not null.
+     * Returns {@code null} for both an absent column (no row) and a present-null entry; the
+     * higher-layer display already distinguishes those by whether the row itself exists.
+     */
+    private static Object decodeMapValueDisplay(StateInspectSchema schema, byte[] valueBytes)
+            throws IOException {
+        if (valueBytes == null) {
+            return null;
+        }
+        byte[] payload = unwrapMapValuePayload(valueBytes);
+        if (payload == null) {
+            return null;
+        }
+        return decodeDisplay(schema.mapUserValueSerializer(), payload);
+    }
+
+    /**
+     * Strips the leading {@code isNull} byte from a Cobble MapState row value column. Returns the
+     * user-value payload bytes, or {@code null} when the bytes encode a present-null entry. Treats
+     * any non-zero leading byte as "present null" to match {@code MapValueCodec}'s decode behavior.
+     * Callers must skip {@code null} or absent columns before calling this method; the absence of a
+     * row is a higher-layer signal, distinct from "present null".
+     */
+    private static byte[] unwrapMapValuePayload(byte[] valueBytes) throws IOException {
+        if (valueBytes == null) {
+            throw new IOException(
+                    "MapState row value column is missing; callers must check presence first.");
+        }
+        if (valueBytes.length == 0) {
+            throw new IOException(
+                    "MapState row value column is empty; expected at least the isNull byte.");
+        }
+        if (valueBytes[0] != 0x00) {
+            return null;
+        }
+        byte[] payload = new byte[valueBytes.length - 1];
+        System.arraycopy(valueBytes, 1, payload, 0, payload.length);
+        return payload;
     }
 
     private static List<Object> deserializeListElements(
@@ -309,14 +351,26 @@ final class StateInspectDecoder {
                             semanticSchema.mapUserKey(),
                             schema.mapUserKeySerializer(),
                             slices.mapKey);
-            decodeError =
-                    addSemanticPart(
-                            output,
-                            decodeError,
-                            "map_value",
-                            semanticSchema.mapUserValue(),
-                            schema.mapUserValueSerializer(),
-                            firstColumn(columns));
+            byte[] mapValueColumn = firstColumn(columns);
+            if (mapValueColumn != null) {
+                byte[] mapValuePayload = unwrapMapValuePayload(mapValueColumn);
+                if (mapValuePayload == null && isKnownSemanticType(semanticSchema.mapUserValue())) {
+                    // Present-null MapState entry: emit a literal null so callers can
+                    // distinguish it from a wrapped scalar JSON object whose nested value is
+                    // null. The map_value key is still present in the output to indicate the
+                    // row exists. Absent rows (no column at all) skip this branch entirely.
+                    output.put("map_value", null);
+                } else {
+                    decodeError =
+                            addSemanticPart(
+                                    output,
+                                    decodeError,
+                                    "map_value",
+                                    semanticSchema.mapUserValue(),
+                                    schema.mapUserValueSerializer(),
+                                    mapValuePayload);
+                }
+            }
         } else if (schema.stateKind() == StateKind.VALUE) {
             decodeError =
                     addSemanticPart(

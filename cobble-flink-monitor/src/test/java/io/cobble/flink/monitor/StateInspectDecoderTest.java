@@ -106,7 +106,7 @@ class StateInspectDecoderTest {
                         StringSerializer.INSTANCE);
         InspectTarget target = target(schema);
         byte[] rowKey = mapKey("user-1", "ns", "field-a");
-        byte[][] columns = new byte[][] {serialize(StringSerializer.INSTANCE, "value-a")};
+        byte[][] columns = new byte[][] {mapValueBytes(StringSerializer.INSTANCE, "value-a")};
 
         StateInspectDecoder.DecodedRow row = StateInspectDecoder.decode(target, rowKey, columns);
 
@@ -115,6 +115,32 @@ class StateInspectDecoderTest {
         assertEquals("ns", row.decodedKey.get("namespace"));
         assertEquals("field-a", row.decodedKey.get("map_key"));
         assertEquals("value-a", ((java.util.Map<?, ?>) row.decodedValue).get("map_value"));
+    }
+
+    @Test
+    void decodesMapStatePresentNullValue() throws Exception {
+        StateInspectSchema schema =
+                StateInspectSchema.forMap(
+                        "map-state",
+                        "cf-map",
+                        false,
+                        StringSerializer.INSTANCE,
+                        StringSerializer.INSTANCE,
+                        StringSerializer.INSTANCE,
+                        StringSerializer.INSTANCE);
+        InspectTarget target = target(schema);
+        byte[] rowKey = mapKey("user-1", "ns", serialize(StringSerializer.INSTANCE, "field-a"));
+        byte[][] columns = new byte[][] {mapValueBytesPresentNull()};
+
+        StateInspectDecoder.DecodedRow row = StateInspectDecoder.decode(target, rowKey, columns);
+
+        assertNull(row.decodeError);
+        assertEquals("user-1", row.decodedKey.get("key"));
+        assertEquals("ns", row.decodedKey.get("namespace"));
+        assertEquals("field-a", row.decodedKey.get("map_key"));
+        java.util.Map<?, ?> decodedValue = (java.util.Map<?, ?>) row.decodedValue;
+        assertTrue(decodedValue.containsKey("map_value"));
+        assertNull(decodedValue.get("map_value"));
     }
 
     @Test
@@ -147,13 +173,93 @@ class StateInspectDecoderTest {
                 StateInspectDecoder.decode(
                         target,
                         mapKeyWithVoidNamespace(schema, stateKey, mapKey),
-                        new byte[][] {serialize(IntSerializer.INSTANCE, 3)});
+                        new byte[][] {mapValueBytes(IntSerializer.INSTANCE, 3)});
 
         assertNull(row.decodeError);
         assertEquals(7L, semanticFieldValue(row.decodedParts, "state_key", 0));
         assertEquals(100L, semanticFieldValue(row.decodedParts, "map_key", 0));
         assertEquals("apac", semanticFieldValue(row.decodedParts, "map_key", 1));
         assertEquals(3, ((Map<?, ?>) row.decodedParts.get("map_value")).get("value"));
+    }
+
+    @Test
+    void decodesSemanticInnerJoinMapPartsWithPresentNullValue() throws Exception {
+        RowDataSerializer stateKeySerializer = new RowDataSerializer(new BigIntType(false));
+        RowDataSerializer recordSerializer =
+                new RowDataSerializer(new BigIntType(false), VarCharType.STRING_TYPE);
+        StateInspectSchema schema =
+                StateInspectSchema.forMap(
+                        "left-records",
+                        "left-records",
+                        false,
+                        stateKeySerializer,
+                        VoidNamespaceSerializer.INSTANCE,
+                        recordSerializer,
+                        IntSerializer.INSTANCE);
+        InspectTarget target =
+                semanticTarget(
+                        schema,
+                        StateInspectSemanticSchema.forMap(
+                                rowType("f0"),
+                                StateInspectType.unknown(),
+                                rowType("order_id", "region"),
+                                StateInspectType.scalar("INT")));
+        byte[] stateKey = serialize(stateKeySerializer, GenericRowData.of(7L));
+        byte[] mapKey =
+                serialize(recordSerializer, GenericRowData.of(100L, StringData.fromString("apac")));
+
+        StateInspectDecoder.DecodedRow row =
+                StateInspectDecoder.decode(
+                        target,
+                        mapKeyWithVoidNamespace(schema, stateKey, mapKey),
+                        new byte[][] {mapValueBytesPresentNull()});
+
+        assertNull(row.decodeError);
+        assertEquals(7L, semanticFieldValue(row.decodedParts, "state_key", 0));
+        assertEquals(100L, semanticFieldValue(row.decodedParts, "map_key", 0));
+        assertEquals("apac", semanticFieldValue(row.decodedParts, "map_key", 1));
+        assertTrue(row.decodedParts.containsKey("map_value"));
+        assertNull(row.decodedParts.get("map_value"));
+    }
+
+    @Test
+    void decodesSemanticMapPartsWithAbsentRowOmitsMapValue() throws Exception {
+        RowDataSerializer stateKeySerializer = new RowDataSerializer(new BigIntType(false));
+        RowDataSerializer recordSerializer =
+                new RowDataSerializer(new BigIntType(false), VarCharType.STRING_TYPE);
+        StateInspectSchema schema =
+                StateInspectSchema.forMap(
+                        "left-records",
+                        "left-records",
+                        false,
+                        stateKeySerializer,
+                        VoidNamespaceSerializer.INSTANCE,
+                        recordSerializer,
+                        IntSerializer.INSTANCE);
+        InspectTarget target =
+                semanticTarget(
+                        schema,
+                        StateInspectSemanticSchema.forMap(
+                                rowType("f0"),
+                                StateInspectType.unknown(),
+                                rowType("order_id", "region"),
+                                StateInspectType.scalar("INT")));
+        byte[] stateKey = serialize(stateKeySerializer, GenericRowData.of(7L));
+        byte[] mapKey =
+                serialize(recordSerializer, GenericRowData.of(100L, StringData.fromString("apac")));
+
+        // Track/lookup of a key that has no row in Cobble: monitor invokes decode with no
+        // value columns. The semantic output must omit map_value entirely so callers can
+        // distinguish "row absent" from "row present, value null".
+        StateInspectDecoder.DecodedRow row =
+                StateInspectDecoder.decode(
+                        target, mapKeyWithVoidNamespace(schema, stateKey, mapKey), new byte[0][]);
+
+        assertNull(row.decodeError);
+        assertEquals(7L, semanticFieldValue(row.decodedParts, "state_key", 0));
+        assertEquals(100L, semanticFieldValue(row.decodedParts, "map_key", 0));
+        assertEquals("apac", semanticFieldValue(row.decodedParts, "map_key", 1));
+        assertFalse(row.decodedParts.containsKey("map_value"));
     }
 
     @Test
@@ -187,7 +293,7 @@ class StateInspectDecoderTest {
                 StateInspectDecoder.decode(
                         target,
                         mapKeyWithVoidNamespace(schema, stateKey, mapKey),
-                        new byte[][] {serialize(IntSerializer.INSTANCE, 3)});
+                        new byte[][] {mapValueBytes(IntSerializer.INSTANCE, 3)});
 
         assertTrue(
                 StateInspectDecoder.matchesSemanticPartFilter(
@@ -309,7 +415,7 @@ class StateInspectDecoderTest {
         byte[] stateKey = serialize(LongSerializer.INSTANCE, 7L);
         byte[] mapKey = serialize(LongSerializer.INSTANCE, 100L);
         byte[] value =
-                serialize(
+                mapValueBytes(
                         intervalEntriesSerializer,
                         Arrays.asList(
                                 Tuple2.of(
@@ -418,7 +524,7 @@ class StateInspectDecoderTest {
                         target,
                         mapKeyWithVoidNamespace(schema, stateKey, mapKey),
                         new byte[][] {
-                            serialize(
+                            mapValueBytes(
                                     tupleSerializer,
                                     Tuple2.of(
                                             GenericRowData.of(100L, StringData.fromString("apac")),
@@ -591,7 +697,7 @@ class StateInspectDecoderTest {
                                 IntSerializer.INSTANCE));
         InspectTarget target = target(schema);
         byte[] rowKey = mapKeyWithVoidNamespace("user-1", "field-a");
-        byte[][] columns = new byte[][] {serialize(IntSerializer.INSTANCE, 42)};
+        byte[][] columns = new byte[][] {mapValueBytes(IntSerializer.INSTANCE, 42)};
 
         StateInspectDecoder.DecodedRow row = StateInspectDecoder.decode(target, rowKey, columns);
 
@@ -699,7 +805,7 @@ class StateInspectDecoderTest {
 
         StateInspectDecoder.DecodedRow row =
                 StateInspectDecoder.decode(
-                        target, rowKey, new byte[][] {serialize(IntSerializer.INSTANCE, 7)});
+                        target, rowKey, new byte[][] {mapValueBytes(IntSerializer.INSTANCE, 7)});
         assertNull(row.decodeError);
         assertEquals(
                 CobbleFlinkMonitorServer.bytesJson(new byte[] {1, 2, 3}),
@@ -872,6 +978,24 @@ class StateInspectDecoderTest {
         DataOutputSerializer output = new DataOutputSerializer(32);
         serializer.serialize(value, output);
         return output.getCopyOfBuffer();
+    }
+
+    /**
+     * Builds the on-disk Cobble MapState row value column: {@code 0x00 | userValueBytes} for a
+     * present non-null entry. Mirrors {@code MapValueCodec.encode} in cobble-state.
+     */
+    private static <T> byte[] mapValueBytes(TypeSerializer<T> serializer, T value)
+            throws Exception {
+        byte[] payload = serialize(serializer, value);
+        byte[] row = new byte[payload.length + 1];
+        row[0] = 0x00;
+        System.arraycopy(payload, 0, row, 1, payload.length);
+        return row;
+    }
+
+    /** Builds the on-disk Cobble MapState row value column for a present-null entry. */
+    private static byte[] mapValueBytesPresentNull() {
+        return new byte[] {0x01};
     }
 
     private static StateInspectSchema withVoidNamespace(StateInspectSchema schema)
