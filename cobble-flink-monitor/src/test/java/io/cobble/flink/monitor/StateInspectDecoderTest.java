@@ -812,6 +812,74 @@ class StateInspectDecoderTest {
                 ((Map<?, ?>) row.decodedKey).get("map_key"));
     }
 
+    @Test
+    void decodesReducingStateValuePartLikeValueState() throws Exception {
+        StateInspectSchema schema =
+                StateInspectSchema.forReducing(
+                        "reducing-state",
+                        "cf-reducing",
+                        false,
+                        StringSerializer.INSTANCE,
+                        StringSerializer.INSTANCE,
+                        IntSerializer.INSTANCE);
+        InspectTarget target = target(schema);
+        byte[] rowKey = keyAndNamespace("user-1", "window-a");
+        byte[][] columns = new byte[][] {serialize(IntSerializer.INSTANCE, 42)};
+
+        StateInspectDecoder.DecodedRow row = StateInspectDecoder.decode(target, rowKey, columns);
+
+        assertNull(row.decodeError);
+        assertEquals("user-1", row.decodedKey.get("key"));
+        assertEquals("window-a", row.decodedKey.get("namespace"));
+        assertEquals(42, row.decodedValue);
+    }
+
+    @Test
+    void decodesReducingStateSemanticPartsYieldsSingleValuePart() throws Exception {
+        StateInspectSchema schema =
+                StateInspectSchema.forReducing(
+                        "reducing-state",
+                        "cf-reducing",
+                        false,
+                        StringSerializer.INSTANCE,
+                        StringSerializer.INSTANCE,
+                        IntSerializer.INSTANCE);
+        InspectTarget target =
+                semanticTarget(
+                        schema,
+                        StateInspectSemanticSchema.forReducing(
+                                StateInspectType.scalar("VARCHAR"),
+                                StateInspectType.unknown(),
+                                StateInspectType.scalar("INT")));
+        byte[] rowKey = keyAndNamespace("user-1", "window-a");
+        byte[][] columns = new byte[][] {serialize(IntSerializer.INSTANCE, 99)};
+
+        StateInspectDecoder.DecodedRow row = StateInspectDecoder.decode(target, rowKey, columns);
+
+        assertNull(row.decodeError);
+        assertEquals(99, ((Map<?, ?>) row.decodedParts.get("value")).get("value"));
+        assertFalse(row.decodedParts.containsKey("list_element"));
+        assertFalse(row.decodedParts.containsKey("map_key"));
+        assertFalse(row.decodedParts.containsKey("map_value"));
+    }
+
+    @Test
+    void inspectTargetJsonForReducingSurfacesStateKind() {
+        StateInspectSchema schema =
+                StateInspectSchema.forReducing(
+                        "reducing-state",
+                        "cf-reducing",
+                        false,
+                        StringSerializer.INSTANCE,
+                        StringSerializer.INSTANCE,
+                        IntSerializer.INSTANCE);
+        InspectTarget target = target(schema);
+
+        Map<String, Object> json = target.toJson();
+
+        assertEquals("REDUCING", json.get("state_kind"));
+    }
+
     private static InspectTarget target(StateInspectSchema schema) {
         return new InspectTarget(
                 schema.stateName(),

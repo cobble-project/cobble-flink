@@ -6,6 +6,7 @@ import io.cobble.flink.common.inspect.StateInspectType;
 
 import org.apache.flink.api.common.state.ListStateDescriptor;
 import org.apache.flink.api.common.state.MapStateDescriptor;
+import org.apache.flink.api.common.state.ReducingStateDescriptor;
 import org.apache.flink.api.common.state.StateDescriptor;
 import org.apache.flink.api.common.state.ValueStateDescriptor;
 import org.apache.flink.api.common.typeinfo.TypeInformation;
@@ -44,6 +45,18 @@ final class StateInspectSemanticSchemaExtractor {
                 firstKnown(
                         describeDescriptorType(descriptor),
                         fromValueDescriptorSerializer(descriptor)));
+    }
+
+    static StateInspectSemanticSchema forReducing(
+            TypeSerializer<?> stateKeySerializer,
+            TypeSerializer<?> namespaceSerializer,
+            ReducingStateDescriptor<?> descriptor) {
+        return StateInspectSemanticSchema.forReducing(
+                fromSerializer(stateKeySerializer),
+                fromSerializer(namespaceSerializer),
+                firstKnown(
+                        describeDescriptorType(descriptor),
+                        fromReducingDescriptorSerializer(descriptor)));
     }
 
     static StateInspectSemanticSchema forList(
@@ -94,6 +107,15 @@ final class StateInspectSemanticSchemaExtractor {
 
     private static StateInspectType fromValueDescriptorSerializer(
             ValueStateDescriptor<?> descriptor) {
+        try {
+            return fromSerializer(descriptor.getSerializer());
+        } catch (RuntimeException ignored) {
+            return null;
+        }
+    }
+
+    private static StateInspectType fromReducingDescriptorSerializer(
+            ReducingStateDescriptor<?> descriptor) {
         try {
             return fromSerializer(descriptor.getSerializer());
         } catch (RuntimeException ignored) {

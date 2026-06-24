@@ -23,15 +23,19 @@ import io.cobble.flink.common.inspect.StateInspectType;
 import io.cobble.flink.common.inspect.StateKind;
 import io.cobble.structured.Schema;
 
+import org.apache.flink.api.common.functions.ReduceFunction;
 import org.apache.flink.api.common.state.ListState;
 import org.apache.flink.api.common.state.ListStateDescriptor;
 import org.apache.flink.api.common.state.MapState;
 import org.apache.flink.api.common.state.MapStateDescriptor;
+import org.apache.flink.api.common.state.ReducingState;
+import org.apache.flink.api.common.state.ReducingStateDescriptor;
 import org.apache.flink.api.common.state.StateTtlConfig;
 import org.apache.flink.api.common.state.ValueState;
 import org.apache.flink.api.common.state.ValueStateDescriptor;
 import org.apache.flink.api.common.time.Time;
 import org.apache.flink.api.common.typeutils.SimpleTypeSerializerSnapshot;
+import org.apache.flink.api.common.typeutils.TypeSerializer;
 import org.apache.flink.api.common.typeutils.TypeSerializerSnapshot;
 import org.apache.flink.api.common.typeutils.base.IntSerializer;
 import org.apache.flink.api.common.typeutils.base.ListSerializer;
@@ -80,6 +84,7 @@ import org.apache.flink.runtime.state.TestTaskStateManagerBuilder;
 import org.apache.flink.runtime.state.VoidNamespaceSerializer;
 import org.apache.flink.runtime.state.heap.HeapPriorityQueueElement;
 import org.apache.flink.runtime.state.internal.InternalKvState;
+import org.apache.flink.runtime.state.internal.InternalReducingState;
 import org.apache.flink.runtime.state.memory.ByteStreamStateHandle;
 import org.apache.flink.runtime.state.memory.MemCheckpointStreamFactory;
 import org.apache.flink.runtime.state.metainfo.StateMetaInfoSnapshot;
@@ -2539,6 +2544,35 @@ class CobbleStateBackendTest {
     }
 
     @Test
+    void reducingStateTtlExpiresFromFlinkAndCobble(@TempDir Path tempDir) throws Exception {
+        MockTtlTimeProvider ttlTimeProvider = new MockTtlTimeProvider();
+        ttlTimeProvider.setCurrentTimestamp(0L);
+
+        try (TestBackendContext context =
+                createBackendContext(
+                        tempDir, false, null, MemorySize.ofMebiBytes(1), ttlTimeProvider, true)) {
+            CobbleKeyedStateBackend<Integer> backend = context.cobbleBackend;
+            ReducingStateDescriptor<Integer> descriptor =
+                    new ReducingStateDescriptor<>(
+                            "ttl-reducing-state", sumReducer(), IntSerializer.INSTANCE);
+            descriptor.enableTimeToLive(StateTtlConfig.newBuilder(Time.seconds(5)).build());
+
+            backend.setCurrentKey(14);
+            ReducingState<Integer> state =
+                    backend.getPartitionedState(
+                            "ttl-reducing-ns", StringSerializer.INSTANCE, descriptor);
+            state.add(3);
+            state.add(4);
+
+            setTtlTime(backend, ttlTimeProvider, 4_000L);
+            assertEquals(7, state.get());
+
+            setTtlTime(backend, ttlTimeProvider, 6_000L);
+            assertNull(state.get());
+        }
+    }
+
+    @Test
     void ttlDisabledStatesRemainAfterTimeAdvanceIncludingListElements(@TempDir Path tempDir)
             throws Exception {
         MockTtlTimeProvider ttlTimeProvider = new MockTtlTimeProvider();
@@ -3558,6 +3592,941 @@ class CobbleStateBackendTest {
             }
         }
         assertTrue(found, "One event file should reference the schema hash " + expectedHash);
+    }
+
+    // -------- ReducingState tests (Task 3B) --------
+
+    @Test
+    void reducingStateGetReturnsNullWhenAbsent(@TempDir Path tempDir) throws Exception {
+        try (TestBackendContext context = createBackendContext(tempDir, false, null)) {
+            CobbleKeyedStateBackend<Integer> backend = context.cobbleBackend;
+            backend.setCurrentKey(1);
+            ReducingState<Integer> state =
+                    backend.getPartitionedState(
+                            "ns",
+                            StringSerializer.INSTANCE,
+                            new ReducingStateDescriptor<>(
+                                    "absent-reducing", sumReducer(), IntSerializer.INSTANCE));
+            assertNull(state.get());
+        }
+    }
+
+    @Test
+    void reducingStateAddOnEmptyWritesValue(@TempDir Path tempDir) throws Exception {
+        try (TestBackendContext context = createBackendContext(tempDir, false, null)) {
+            CobbleKeyedStateBackend<Integer> backend = context.cobbleBackend;
+            backend.setCurrentKey(1);
+            ReducingState<Integer> state =
+                    backend.getPartitionedState(
+                            "ns",
+                            StringSerializer.INSTANCE,
+                            new ReducingStateDescriptor<>(
+                                    "rs-empty-add", sumReducer(), IntSerializer.INSTANCE));
+            state.add(7);
+            assertEquals(7, state.get());
+        }
+    }
+
+    @Test
+    void reducingStateAddAccumulatesViaReduceFunction(@TempDir Path tempDir) throws Exception {
+        try (TestBackendContext context = createBackendContext(tempDir, false, null)) {
+            CobbleKeyedStateBackend<Integer> backend = context.cobbleBackend;
+            backend.setCurrentKey(1);
+            ReducingState<Integer> state =
+                    backend.getPartitionedState(
+                            "ns",
+                            StringSerializer.INSTANCE,
+                            new ReducingStateDescriptor<>(
+                                    "rs-accum", sumReducer(), IntSerializer.INSTANCE));
+            state.add(2);
+            state.add(3);
+            state.add(5);
+            assertEquals(10, state.get());
+        }
+    }
+
+    @Test
+    void reducingStateAddNullClearsExistingValue(@TempDir Path tempDir) throws Exception {
+        try (TestBackendContext context = createBackendContext(tempDir, false, null)) {
+            CobbleKeyedStateBackend<Integer> backend = context.cobbleBackend;
+            backend.setCurrentKey(1);
+            ReducingState<Integer> state =
+                    backend.getPartitionedState(
+                            "ns",
+                            StringSerializer.INSTANCE,
+                            new ReducingStateDescriptor<>(
+                                    "rs-add-null", sumReducer(), IntSerializer.INSTANCE));
+            state.add(4);
+            // Matches Flink HeapReducingState.add(null): clears the existing entry.
+            state.add(null);
+            assertNull(state.get());
+        }
+    }
+
+    @Test
+    void reducingStateClearRemovesRow(@TempDir Path tempDir) throws Exception {
+        try (TestBackendContext context = createBackendContext(tempDir, false, null)) {
+            CobbleKeyedStateBackend<Integer> backend = context.cobbleBackend;
+            backend.setCurrentKey(1);
+            ReducingState<Integer> state =
+                    backend.getPartitionedState(
+                            "ns",
+                            StringSerializer.INSTANCE,
+                            new ReducingStateDescriptor<>(
+                                    "rs-clear", sumReducer(), IntSerializer.INSTANCE));
+            state.add(11);
+            state.clear();
+            assertNull(state.get());
+        }
+    }
+
+    @Test
+    void reducingStateNamespaceIsolation(@TempDir Path tempDir) throws Exception {
+        try (TestBackendContext context = createBackendContext(tempDir, false, null)) {
+            CobbleKeyedStateBackend<Integer> backend = context.cobbleBackend;
+            backend.setCurrentKey(1);
+            ReducingStateDescriptor<Integer> descriptor =
+                    new ReducingStateDescriptor<>(
+                            "rs-ns-isolation", sumReducer(), IntSerializer.INSTANCE);
+            InternalReducingState<Integer, String, Integer> state =
+                    asInternalReducingState(
+                            backend.getPartitionedState(
+                                    "a", StringSerializer.INSTANCE, descriptor));
+
+            state.setCurrentNamespace("a");
+            state.add(10);
+            state.setCurrentNamespace("b");
+            state.add(20);
+
+            state.setCurrentNamespace("a");
+            assertEquals(10, state.get());
+            state.setCurrentNamespace("b");
+            assertEquals(20, state.get());
+        }
+    }
+
+    @Test
+    void reducingStateKeyIsolation(@TempDir Path tempDir) throws Exception {
+        try (TestBackendContext context = createBackendContext(tempDir, false, null)) {
+            CobbleKeyedStateBackend<Integer> backend = context.cobbleBackend;
+            ReducingStateDescriptor<Integer> descriptor =
+                    new ReducingStateDescriptor<>(
+                            "rs-key-isolation", sumReducer(), IntSerializer.INSTANCE);
+
+            backend.setCurrentKey(1);
+            ReducingState<Integer> s1 =
+                    backend.getPartitionedState("ns", StringSerializer.INSTANCE, descriptor);
+            s1.add(100);
+
+            backend.setCurrentKey(2);
+            ReducingState<Integer> s2 =
+                    backend.getPartitionedState("ns", StringSerializer.INSTANCE, descriptor);
+            s2.add(200);
+
+            backend.setCurrentKey(1);
+            assertEquals(
+                    100,
+                    backend.getPartitionedState("ns", StringSerializer.INSTANCE, descriptor).get());
+            backend.setCurrentKey(2);
+            assertEquals(
+                    200,
+                    backend.getPartitionedState("ns", StringSerializer.INSTANCE, descriptor).get());
+        }
+    }
+
+    @Test
+    void reducingStateRoundTripsCustomPojoSerializer(@TempDir Path tempDir) throws Exception {
+        try (TestBackendContext context = createBackendContext(tempDir, false, null)) {
+            CobbleKeyedStateBackend<Integer> backend = context.cobbleBackend;
+            backend.setCurrentKey(7);
+            ReducingState<String> state =
+                    backend.getPartitionedState(
+                            "ns",
+                            StringSerializer.INSTANCE,
+                            new ReducingStateDescriptor<>(
+                                    "rs-pojo", stringConcatReducer(), StringSerializer.INSTANCE));
+            state.add("a");
+            state.add("b");
+            state.add("c");
+            // Left-fold via the reducer: ((a+b)+c) = "abc".
+            assertEquals("abc", state.get());
+        }
+    }
+
+    @Test
+    void reducingStateMergeNamespacesEmptySourcesIsNoOp(@TempDir Path tempDir) throws Exception {
+        try (TestBackendContext context = createBackendContext(tempDir, false, null)) {
+            CobbleKeyedStateBackend<Integer> backend = context.cobbleBackend;
+            backend.setCurrentKey(1);
+            ReducingStateDescriptor<Integer> descriptor =
+                    new ReducingStateDescriptor<>(
+                            "rs-merge-empty", sumReducer(), IntSerializer.INSTANCE);
+            InternalReducingState<Integer, String, Integer> state =
+                    asInternalReducingState(
+                            backend.getPartitionedState(
+                                    "target", StringSerializer.INSTANCE, descriptor));
+            state.setCurrentNamespace("target");
+            state.add(5);
+            state.mergeNamespaces("target", Collections.<String>emptyList());
+            state.setCurrentNamespace("target");
+            assertEquals(5, state.get());
+        }
+    }
+
+    @Test
+    void reducingStateMergeNamespacesAllSourcesAbsentTargetUnchanged(@TempDir Path tempDir)
+            throws Exception {
+        try (TestBackendContext context = createBackendContext(tempDir, false, null)) {
+            CobbleKeyedStateBackend<Integer> backend = context.cobbleBackend;
+            backend.setCurrentKey(1);
+            ReducingStateDescriptor<Integer> descriptor =
+                    new ReducingStateDescriptor<>(
+                            "rs-merge-no-src", sumReducer(), IntSerializer.INSTANCE);
+            InternalReducingState<Integer, String, Integer> state =
+                    asInternalReducingState(
+                            backend.getPartitionedState(
+                                    "target", StringSerializer.INSTANCE, descriptor));
+            state.setCurrentNamespace("target");
+            state.add(9);
+            state.mergeNamespaces("target", Arrays.asList("missing-1", "missing-2"));
+            state.setCurrentNamespace("target");
+            assertEquals(9, state.get());
+        }
+    }
+
+    @Test
+    void reducingStateMergeNamespacesAllSourcesAbsentTargetAbsentLeavesTargetAbsent(
+            @TempDir Path tempDir) throws Exception {
+        try (TestBackendContext context = createBackendContext(tempDir, false, null)) {
+            CobbleKeyedStateBackend<Integer> backend = context.cobbleBackend;
+            backend.setCurrentKey(1);
+            ReducingStateDescriptor<Integer> descriptor =
+                    new ReducingStateDescriptor<>(
+                            "rs-merge-allabsent", sumReducer(), IntSerializer.INSTANCE);
+            InternalReducingState<Integer, String, Integer> state =
+                    asInternalReducingState(
+                            backend.getPartitionedState(
+                                    "target", StringSerializer.INSTANCE, descriptor));
+            state.mergeNamespaces("target", Arrays.asList("missing-1", "missing-2"));
+            state.setCurrentNamespace("target");
+            assertNull(state.get());
+        }
+    }
+
+    @Test
+    void reducingStateMergeNamespacesFoldsSourcesIntoExistingTarget(@TempDir Path tempDir)
+            throws Exception {
+        try (TestBackendContext context = createBackendContext(tempDir, false, null)) {
+            CobbleKeyedStateBackend<Integer> backend = context.cobbleBackend;
+            backend.setCurrentKey(1);
+            ReducingStateDescriptor<Integer> descriptor =
+                    new ReducingStateDescriptor<>(
+                            "rs-merge-into-target", sumReducer(), IntSerializer.INSTANCE);
+            InternalReducingState<Integer, String, Integer> state =
+                    asInternalReducingState(
+                            backend.getPartitionedState(
+                                    "target", StringSerializer.INSTANCE, descriptor));
+            state.setCurrentNamespace("target");
+            state.add(10);
+            state.setCurrentNamespace("s1");
+            state.add(3);
+            state.setCurrentNamespace("s2");
+            state.add(4);
+
+            state.mergeNamespaces("target", Arrays.asList("s1", "s2"));
+
+            state.setCurrentNamespace("target");
+            // foldedSources = reduce(3,4)=7; newTarget = reduce(10,7)=17.
+            assertEquals(17, state.get());
+            state.setCurrentNamespace("s1");
+            assertNull(state.get());
+            state.setCurrentNamespace("s2");
+            assertNull(state.get());
+        }
+    }
+
+    @Test
+    void reducingStateMergeNamespacesFoldsSourcesIntoAbsentTarget(@TempDir Path tempDir)
+            throws Exception {
+        try (TestBackendContext context = createBackendContext(tempDir, false, null)) {
+            CobbleKeyedStateBackend<Integer> backend = context.cobbleBackend;
+            backend.setCurrentKey(1);
+            ReducingStateDescriptor<Integer> descriptor =
+                    new ReducingStateDescriptor<>(
+                            "rs-merge-absent-target", sumReducer(), IntSerializer.INSTANCE);
+            InternalReducingState<Integer, String, Integer> state =
+                    asInternalReducingState(
+                            backend.getPartitionedState(
+                                    "target", StringSerializer.INSTANCE, descriptor));
+            state.setCurrentNamespace("s1");
+            state.add(11);
+            state.setCurrentNamespace("s2");
+            state.add(22);
+
+            state.mergeNamespaces("target", Arrays.asList("s1", "s2"));
+
+            state.setCurrentNamespace("target");
+            assertEquals(33, state.get());
+            state.setCurrentNamespace("s1");
+            assertNull(state.get());
+            state.setCurrentNamespace("s2");
+            assertNull(state.get());
+        }
+    }
+
+    @Test
+    void reducingStateMergeNamespacesNonCommutativeReducer(@TempDir Path tempDir) throws Exception {
+        try (TestBackendContext context = createBackendContext(tempDir, false, null)) {
+            CobbleKeyedStateBackend<Integer> backend = context.cobbleBackend;
+            backend.setCurrentKey(1);
+            ReducingStateDescriptor<String> descriptor =
+                    new ReducingStateDescriptor<>(
+                            "rs-merge-concat", stringConcatReducer(), StringSerializer.INSTANCE);
+            InternalReducingState<Integer, String, String> state =
+                    asInternalReducingState(
+                            backend.getPartitionedState(
+                                    "target", StringSerializer.INSTANCE, descriptor));
+            state.setCurrentNamespace("ns-a");
+            state.add("a");
+            state.setCurrentNamespace("ns-b");
+            state.add("b");
+            state.setCurrentNamespace("ns-c");
+            state.add("c");
+
+            // target absent; sources in insertion order [a,b,c] -> left-fold = "abc".
+            state.mergeNamespaces("target", Arrays.asList("ns-a", "ns-b", "ns-c"));
+
+            state.setCurrentNamespace("target");
+            assertEquals("abc", state.get());
+        }
+    }
+
+    @Test
+    void reducingStateMergeNamespacesDuplicateSourceCountedOnce(@TempDir Path tempDir)
+            throws Exception {
+        try (TestBackendContext context = createBackendContext(tempDir, false, null)) {
+            CobbleKeyedStateBackend<Integer> backend = context.cobbleBackend;
+            backend.setCurrentKey(1);
+            CountingReducer<Integer> counting = new CountingReducer<>(sumReducer());
+            ReducingStateDescriptor<Integer> descriptor =
+                    new ReducingStateDescriptor<>("rs-merge-dup", counting, IntSerializer.INSTANCE);
+            InternalReducingState<Integer, String, Integer> state =
+                    asInternalReducingState(
+                            backend.getPartitionedState(
+                                    "target", StringSerializer.INSTANCE, descriptor));
+            state.setCurrentNamespace("s1");
+            state.add(50);
+
+            counting.calls = 0;
+            state.mergeNamespaces("target", Arrays.asList("s1", "s1"));
+
+            state.setCurrentNamespace("target");
+            assertEquals(50, state.get());
+            // First "s1" contributes once; second "s1" must be dedup'd: zero reducer invocations
+            // are expected since there is only one captured source and target is absent.
+            assertEquals(0, counting.calls);
+            state.setCurrentNamespace("s1");
+            assertNull(state.get());
+        }
+    }
+
+    @Test
+    void reducingStateMergeNamespacesTargetInSourcesWithOthers(@TempDir Path tempDir)
+            throws Exception {
+        try (TestBackendContext context = createBackendContext(tempDir, false, null)) {
+            CobbleKeyedStateBackend<Integer> backend = context.cobbleBackend;
+            backend.setCurrentKey(1);
+            ReducingStateDescriptor<Integer> descriptor =
+                    new ReducingStateDescriptor<>(
+                            "rs-merge-target-in-src", sumReducer(), IntSerializer.INSTANCE);
+            InternalReducingState<Integer, String, Integer> state =
+                    asInternalReducingState(
+                            backend.getPartitionedState(
+                                    "target", StringSerializer.INSTANCE, descriptor));
+            state.setCurrentNamespace("target");
+            state.add(8);
+            state.setCurrentNamespace("s1");
+            state.add(13);
+
+            state.mergeNamespaces("target", Arrays.asList("target", "s1"));
+
+            state.setCurrentNamespace("target");
+            // Vt=8 and Vs1=13 are folded together; target's contribution enters via the
+            // captured-source path exactly once: foldedSources = reduce(8,13)=21. targetValue is
+            // null (target was in sources). newTarget = 21.
+            assertEquals(21, state.get());
+            state.setCurrentNamespace("s1");
+            assertNull(state.get());
+        }
+    }
+
+    @Test
+    void reducingStateMergeNamespacesSourcesEqualsTargetOnlyIsNoSelfReduce(@TempDir Path tempDir)
+            throws Exception {
+        try (TestBackendContext context = createBackendContext(tempDir, false, null)) {
+            CobbleKeyedStateBackend<Integer> backend = context.cobbleBackend;
+            backend.setCurrentKey(1);
+            CountingReducer<Integer> counting = new CountingReducer<>(sumReducer());
+            ReducingStateDescriptor<Integer> descriptor =
+                    new ReducingStateDescriptor<>(
+                            "rs-merge-self", counting, IntSerializer.INSTANCE);
+            InternalReducingState<Integer, String, Integer> state =
+                    asInternalReducingState(
+                            backend.getPartitionedState(
+                                    "target", StringSerializer.INSTANCE, descriptor));
+            state.setCurrentNamespace("target");
+            state.add(42);
+
+            counting.calls = 0;
+            state.mergeNamespaces("target", Collections.singletonList("target"));
+
+            state.setCurrentNamespace("target");
+            assertEquals(42, state.get());
+            // Vt was captured as a source value; foldedSources = Vt with no further reduce, and
+            // targetValue is null because target was in sources. Reducer must NOT be invoked.
+            assertEquals(0, counting.calls);
+        }
+    }
+
+    @Test
+    void reducingStateMergeNamespacesReducerMutatesFirstArgStillWritesBack(@TempDir Path tempDir)
+            throws Exception {
+        try (TestBackendContext context = createBackendContext(tempDir, false, null)) {
+            CobbleKeyedStateBackend<Integer> backend = context.cobbleBackend;
+            backend.setCurrentKey(1);
+            // A reducer that mutates its first argument and returns the same reference.
+            ReduceFunction<int[]> inPlace =
+                    (a, b) -> {
+                        a[0] = a[0] + b[0];
+                        return a;
+                    };
+            ReducingStateDescriptor<int[]> descriptor =
+                    new ReducingStateDescriptor<>(
+                            "rs-merge-mutate", inPlace, IntArraySerializer.INSTANCE);
+            InternalReducingState<Integer, String, int[]> state =
+                    asInternalReducingState(
+                            backend.getPartitionedState(
+                                    "target", StringSerializer.INSTANCE, descriptor));
+            state.setCurrentNamespace("target");
+            state.add(new int[] {5});
+            state.setCurrentNamespace("s1");
+            state.add(new int[] {7});
+
+            state.mergeNamespaces("target", Collections.singletonList("s1"));
+
+            state.setCurrentNamespace("target");
+            int[] result = state.get();
+            assertNotNull(result);
+            assertEquals(12, result[0]);
+        }
+    }
+
+    @Test
+    void reducingStateMergeNamespacesVariableLengthNamespaceBytes(@TempDir Path tempDir)
+            throws Exception {
+        try (TestBackendContext context = createBackendContext(tempDir, false, null)) {
+            CobbleKeyedStateBackend<Integer> backend = context.cobbleBackend;
+            backend.setCurrentKey(1);
+            ReducingStateDescriptor<Integer> descriptor =
+                    new ReducingStateDescriptor<>(
+                            "rs-merge-varlen", sumReducer(), IntSerializer.INSTANCE);
+            InternalReducingState<Integer, String, Integer> state =
+                    asInternalReducingState(
+                            backend.getPartitionedState(
+                                    "target", StringSerializer.INSTANCE, descriptor));
+            // Two source namespaces with deliberately different serialized lengths.
+            state.setCurrentNamespace("a");
+            state.add(1);
+            state.setCurrentNamespace("a-longer-namespace");
+            state.add(2);
+
+            state.mergeNamespaces("target", Arrays.asList("a", "a-longer-namespace"));
+
+            state.setCurrentNamespace("target");
+            assertEquals(3, state.get());
+            state.setCurrentNamespace("a");
+            assertNull(state.get());
+            state.setCurrentNamespace("a-longer-namespace");
+            assertNull(state.get());
+        }
+    }
+
+    @Test
+    void reducingStateMergeNamespacesPropagatesReducerException(@TempDir Path tempDir)
+            throws Exception {
+        try (TestBackendContext context = createBackendContext(tempDir, false, null)) {
+            CobbleKeyedStateBackend<Integer> backend = context.cobbleBackend;
+            backend.setCurrentKey(1);
+            ReduceFunction<Integer> boom =
+                    (a, b) -> {
+                        throw new IllegalStateException("boom");
+                    };
+            ReducingStateDescriptor<Integer> descriptor =
+                    new ReducingStateDescriptor<>("rs-merge-throws", boom, IntSerializer.INSTANCE);
+            InternalReducingState<Integer, String, Integer> state =
+                    asInternalReducingState(
+                            backend.getPartitionedState(
+                                    "target", StringSerializer.INSTANCE, descriptor));
+            state.setCurrentNamespace("target");
+            // Use ReducingState directly to avoid going through add(reduce). We seed each
+            // namespace via updateInternal, which is a plain put.
+            state.updateInternal(10);
+            state.setCurrentNamespace("s1");
+            state.updateInternal(20);
+            state.setCurrentNamespace("s2");
+            state.updateInternal(30);
+
+            IllegalStateException error =
+                    assertThrows(
+                            IllegalStateException.class,
+                            () -> state.mergeNamespaces("target", Arrays.asList("s1", "s2")));
+            assertEquals("boom", error.getMessage());
+
+            // Pre-merge values must be intact: no source row deleted, target unchanged.
+            state.setCurrentNamespace("target");
+            assertEquals(10, state.get());
+            state.setCurrentNamespace("s1");
+            assertEquals(20, state.get());
+            state.setCurrentNamespace("s2");
+            assertEquals(30, state.get());
+        }
+    }
+
+    @Test
+    void reducingStateSchemaRoundTripsThroughWriteAndRead(@TempDir Path tempDir) throws Exception {
+        try (TestBackendContext context = createBackendContext(tempDir, false, null)) {
+            CobbleKeyedStateBackend<Integer> backend = context.cobbleBackend;
+            backend.setCurrentKey(1);
+            ReducingStateDescriptor<Integer> descriptor =
+                    new ReducingStateDescriptor<>(
+                            "rs-schema", sumReducer(), IntSerializer.INSTANCE);
+            backend.getPartitionedState("ns", StringSerializer.INSTANCE, descriptor).add(1);
+
+            StateInspectSchema schema = backend.getStateInspectSchemas().get("rs-schema");
+            assertNotNull(schema);
+            assertEquals(StateKind.REDUCING, schema.stateKind());
+
+            // Round-trip via the StateInspectSchemaStore wire format.
+            StateInspectSchemaStore store =
+                    new StateInspectSchemaStore(Collections.singletonList(schema));
+            byte[] bytes = store.toBytes();
+            StateInspectSchemaStore roundTripped = StateInspectSchemaStore.fromBytes(bytes);
+            StateInspectSchema decoded = roundTripped.schemas().get(0);
+            assertEquals(StateKind.REDUCING, decoded.stateKind());
+            assertEquals(schema.serializerClassNames(), decoded.serializerClassNames());
+        }
+    }
+
+    @Test
+    void restoresCanonicalSavepointReducingState(@TempDir Path tempDir) throws Exception {
+        int key = 42;
+        int keyGroup = KeyGroupRangeAssignment.assignToKeyGroup(key, 16);
+        // Single REDUCING entry with a serialized "sum-so-far" value, void namespace.
+        KeyGroupsSavepointStateHandle savepoint =
+                createCanonicalReducingSavepoint(key, keyGroup, 100);
+
+        try (TestBackendContext context =
+                createBackendContext(
+                        tempDir,
+                        false,
+                        null,
+                        null,
+                        TtlTimeProvider.DEFAULT,
+                        false,
+                        Collections.singletonList(savepoint),
+                        KeyGroupRange.of(keyGroup, keyGroup))) {
+            CobbleKeyedStateBackend<Integer> backend = context.cobbleBackend;
+            backend.setCurrentKey(key);
+
+            ReducingState<Integer> state =
+                    backend.getPartitionedState(
+                            org.apache.flink.runtime.state.VoidNamespace.INSTANCE,
+                            VoidNamespaceSerializer.INSTANCE,
+                            new ReducingStateDescriptor<>(
+                                    "reducing", sumReducer(), IntSerializer.INSTANCE));
+            assertEquals(100, state.get());
+
+            // Imported value continues to participate in further add()/reduce() calls.
+            state.add(23);
+            assertEquals(123, state.get());
+        }
+    }
+
+    @Test
+    void canonicalReducingImportSurvivesCobbleCheckpointAndRestore(@TempDir Path tempDir)
+            throws Exception {
+        int key = 42;
+        int keyGroup = KeyGroupRangeAssignment.assignToKeyGroup(key, 16);
+        // Stage 0: build a RocksDB canonical savepoint that includes a ReducingState entry,
+        // matching the exact wire format Flink would emit for a real job.
+        KeyedStateHandle rocksSavepoint =
+                createRocksDbCanonicalReducingSavepoint(tempDir, key, keyGroup, 7);
+
+        String checkpointDirectory = tempDir.resolve("checkpoints").toUri().toString();
+        KeyedStateHandle cobbleCheckpoint;
+
+        // Stage 1: import the canonical savepoint into Cobble, mutate via add(), then snapshot.
+        try (TestBackendContext imported =
+                createBackendContext(
+                        tempDir.resolve("imported"),
+                        false,
+                        checkpointDirectory,
+                        null,
+                        TtlTimeProvider.DEFAULT,
+                        false,
+                        Collections.singletonList(rocksSavepoint),
+                        KeyGroupRange.of(keyGroup, keyGroup))) {
+            CobbleKeyedStateBackend<Integer> backend = imported.cobbleBackend;
+            backend.setCurrentKey(key);
+
+            ReducingState<Integer> state =
+                    backend.getPartitionedState(
+                            org.apache.flink.runtime.state.VoidNamespace.INSTANCE,
+                            VoidNamespaceSerializer.INSTANCE,
+                            new ReducingStateDescriptor<>(
+                                    "reducing", sumReducer(), IntSerializer.INSTANCE));
+            // The RocksDB savepoint helper seeds the reducing state to `seed`.
+            assertEquals(7, state.get());
+            state.add(35);
+            assertEquals(42, state.get());
+
+            cobbleCheckpoint = runCheckpointSnapshot(backend, 1L);
+            backend.notifyCheckpointComplete(1L);
+        }
+
+        // Stage 2: brand-new Cobble backend, restored from the *Cobble* checkpoint (not from the
+        // canonical savepoint), observes the post-mutation value.
+        try (TestBackendContext restored =
+                createBackendContext(
+                        tempDir.resolve("restored"),
+                        false,
+                        checkpointDirectory,
+                        null,
+                        TtlTimeProvider.DEFAULT,
+                        false,
+                        Collections.singletonList(cobbleCheckpoint),
+                        KeyGroupRange.of(keyGroup, keyGroup))) {
+            CobbleKeyedStateBackend<Integer> backend = restored.cobbleBackend;
+            backend.setCurrentKey(key);
+
+            ReducingState<Integer> state =
+                    backend.getPartitionedState(
+                            org.apache.flink.runtime.state.VoidNamespace.INSTANCE,
+                            VoidNamespaceSerializer.INSTANCE,
+                            new ReducingStateDescriptor<>(
+                                    "reducing", sumReducer(), IntSerializer.INSTANCE));
+            assertEquals(42, state.get());
+        }
+    }
+
+    @Test
+    void canonicalRestoreRejectsIncompatibleReducingValueSerializerBeforeDataRead(
+            @TempDir Path tempDir) throws Exception {
+        // Savepoint declares "reducing" with a String value serializer. The job re-registers it
+        // with IntSerializer — the backend must reject the descriptor before any column family is
+        // created or any row is read.
+        int key = 42;
+        int keyGroup = KeyGroupRangeAssignment.assignToKeyGroup(key, 16);
+        KeyGroupsSavepointStateHandle savepoint =
+                createCanonicalReducingSavepointWithSerializer(
+                        key, keyGroup, "stored-string", StringSerializer.INSTANCE);
+
+        try (TestBackendContext context =
+                createBackendContext(
+                        tempDir,
+                        false,
+                        null,
+                        null,
+                        TtlTimeProvider.DEFAULT,
+                        false,
+                        Collections.singletonList(savepoint),
+                        KeyGroupRange.of(keyGroup, keyGroup))) {
+            CobbleKeyedStateBackend<Integer> backend = context.cobbleBackend;
+            backend.setCurrentKey(key);
+
+            Set<String> columnFamiliesBefore =
+                    backend.getCobbleDb().currentSchema().columnFamilies().keySet();
+
+            Exception error =
+                    assertThrows(
+                            Exception.class,
+                            () ->
+                                    backend.getPartitionedState(
+                                            org.apache.flink.runtime.state.VoidNamespace.INSTANCE,
+                                            VoidNamespaceSerializer.INSTANCE,
+                                            new ReducingStateDescriptor<>(
+                                                    "reducing",
+                                                    sumReducer(),
+                                                    IntSerializer.INSTANCE)));
+            assertTrue(
+                    hasCause(error, org.apache.flink.util.StateMigrationException.class),
+                    "expected StateMigrationException cause, got: " + error);
+            String message = collectMessages(error);
+            assertTrue(
+                    message.contains("value serializer"),
+                    "error must name the offending role, got: " + message);
+            assertTrue(
+                    message.contains(StringSerializer.class.getName()),
+                    "error must name canonical serializer class, got: " + message);
+            assertTrue(
+                    message.contains(IntSerializer.class.getName()),
+                    "error must name the rejected runtime serializer class, got: " + message);
+            assertTrue(
+                    message.contains("'reducing'"), "error must name the state, got: " + message);
+
+            // Schema must be unchanged. The canonical restore created the family for "reducing",
+            // but the failed descriptor registration must not add or mutate anything else.
+            Set<String> columnFamiliesAfter =
+                    backend.getCobbleDb().currentSchema().columnFamilies().keySet();
+            assertEquals(columnFamiliesBefore, columnFamiliesAfter);
+
+            // Re-registering with the canonical-compatible serializer must still succeed.
+            ReducingState<String> recovered =
+                    backend.getPartitionedState(
+                            org.apache.flink.runtime.state.VoidNamespace.INSTANCE,
+                            VoidNamespaceSerializer.INSTANCE,
+                            new ReducingStateDescriptor<>(
+                                    "reducing", stringConcatReducer(), StringSerializer.INSTANCE));
+            assertEquals("stored-string", recovered.get());
+        }
+    }
+
+    /**
+     * Builds a hand-authored canonical savepoint stream with a single REDUCING entry under void
+     * namespace, value serializer = IntSerializer, single Int payload {@code value}.
+     */
+    private static KeyGroupsSavepointStateHandle createCanonicalReducingSavepoint(
+            int key, int keyGroup, int value) throws Exception {
+        return createCanonicalReducingSavepointWithSerializer(
+                key, keyGroup, value, IntSerializer.INSTANCE);
+    }
+
+    private static <V> KeyGroupsSavepointStateHandle createCanonicalReducingSavepointWithSerializer(
+            int key, int keyGroup, V value, TypeSerializer<V> valueSerializer) throws Exception {
+        List<StateMetaInfoSnapshot> stateMetaInfos =
+                Collections.singletonList(
+                        new RegisteredKeyValueStateBackendMetaInfo<>(
+                                        org.apache.flink.api.common.state.StateDescriptor.Type
+                                                .REDUCING,
+                                        "reducing",
+                                        VoidNamespaceSerializer.INSTANCE,
+                                        valueSerializer)
+                                .snapshot());
+        DataOutputSerializer output = new DataOutputSerializer(256);
+        new KeyedBackendSerializationProxy<>(IntSerializer.INSTANCE, stateMetaInfos, false)
+                .write(output);
+
+        DataOutputSerializer body = new DataOutputSerializer(64);
+        body.writeShort(0);
+        writeCanonicalEntry(
+                body,
+                canonicalKey(keyGroup, key, null),
+                CobbleStateKeySerializer.serialize(valueSerializer, value),
+                END_OF_KEY_GROUP_MARK);
+
+        long keyGroupOffset = output.length();
+        writeKeyGroupBody(output, body.getCopyOfBuffer(), false);
+
+        KeyGroupRange range = KeyGroupRange.of(keyGroup, keyGroup);
+        return new KeyGroupsSavepointStateHandle(
+                new KeyGroupRangeOffsets(range, new long[] {keyGroupOffset}),
+                new ByteStreamStateHandle(
+                        "canonical-reducing-savepoint", output.getCopyOfBuffer()));
+    }
+
+    /**
+     * Spin up a real RocksDB state backend, register a ReducingState, seed it via {@code
+     * add(seed)}, and produce a canonical savepoint handle. This exercises the byte-identical
+     * compatibility of Cobble's REDUCING import path with Flink's actual canonical writer.
+     */
+    private KeyedStateHandle createRocksDbCanonicalReducingSavepoint(
+            Path tempDir, int key, int keyGroup, int seed) throws Exception {
+        Path rocksDbPath = tempDir.resolve("rocksdb-local-reducing");
+        MockEnvironment environment =
+                new MockEnvironmentBuilder()
+                        .setTaskName("rocksdb-canonical-reducing-savepoint")
+                        .setJobVertexID(TEST_JOB_VERTEX_ID)
+                        .setManagedMemorySize(MemorySize.ofMebiBytes(128).getBytes())
+                        .setTaskManagerRuntimeInfo(
+                                new TestingTaskManagerRuntimeInfo(
+                                        new Configuration(),
+                                        tempDir.resolve("rocksdb-reducing-tm").toFile()))
+                        .setTaskStateManager(new TestTaskStateManagerBuilder().build())
+                        .build();
+        AbstractKeyedStateBackend<Integer> backend = null;
+        try {
+            RocksDBStateBackend rocksDbBackend = new RocksDBStateBackend(rocksDbPath.toUri());
+            backend =
+                    rocksDbBackend.createKeyedStateBackend(
+                            environment,
+                            environment.getJobID(),
+                            "rocksdb-canonical-reducing-savepoint",
+                            IntSerializer.INSTANCE,
+                            16,
+                            KeyGroupRange.of(keyGroup, keyGroup),
+                            environment.getTaskKvStateRegistry(),
+                            TtlTimeProvider.DEFAULT,
+                            environment.getMetricGroup(),
+                            Collections.emptyList(),
+                            new CloseableRegistry(),
+                            0.5d);
+            backend.setCurrentKey(key);
+            ReducingState<Integer> state =
+                    backend.getPartitionedState(
+                            org.apache.flink.runtime.state.VoidNamespace.INSTANCE,
+                            VoidNamespaceSerializer.INSTANCE,
+                            new ReducingStateDescriptor<>(
+                                    "reducing", sumReducer(), IntSerializer.INSTANCE));
+            state.add(seed);
+
+            SavepointResources<Integer> savepointResources =
+                    ((CheckpointableKeyedStateBackend<Integer>) backend).savepoint();
+            RunnableFuture<SnapshotResult<KeyedStateHandle>> snapshotFuture =
+                    new SnapshotStrategyRunner<>(
+                                    "RocksDB canonical reducing savepoint",
+                                    new SavepointSnapshotStrategy<>(
+                                            savepointResources.getSnapshotResources()),
+                                    new CloseableRegistry(),
+                                    savepointResources.getPreferredSnapshotExecutionType())
+                            .snapshot(
+                                    1L,
+                                    System.currentTimeMillis(),
+                                    new MemCheckpointStreamFactory(1024 * 1024),
+                                    CheckpointOptions.alignedNoTimeout(
+                                            SavepointType.savepoint(SavepointFormatType.CANONICAL),
+                                            CheckpointStorageLocationReference.getDefault()));
+            snapshotFuture.run();
+            SnapshotResult<KeyedStateHandle> snapshotResult = snapshotFuture.get();
+            return snapshotResult.getJobManagerOwnedSnapshot();
+        } finally {
+            if (backend != null) {
+                backend.dispose();
+            }
+            environment.close();
+        }
+    }
+
+    // -------- ReducingState test helpers --------
+
+    private static ReduceFunction<Integer> sumReducer() {
+        return (a, b) -> a + b;
+    }
+
+    private static ReduceFunction<String> stringConcatReducer() {
+        return (a, b) -> a + b;
+    }
+
+    @SuppressWarnings("unchecked")
+    private static <K, N, V> InternalReducingState<K, N, V> asInternalReducingState(Object state) {
+        return (InternalReducingState<K, N, V>) state;
+    }
+
+    /** Wraps a reducer and counts how many times {@link #reduce} is invoked. */
+    private static final class CountingReducer<T> implements ReduceFunction<T> {
+        private final ReduceFunction<T> delegate;
+        int calls;
+
+        CountingReducer(ReduceFunction<T> delegate) {
+            this.delegate = delegate;
+        }
+
+        @Override
+        public T reduce(T a, T b) throws Exception {
+            calls++;
+            return delegate.reduce(a, b);
+        }
+    }
+
+    /** Variable-length TypeSerializer<int[]> used by the mutate-in-place test. */
+    private static final class IntArraySerializer
+            extends org.apache.flink.api.common.typeutils.TypeSerializer<int[]> {
+
+        static final IntArraySerializer INSTANCE = new IntArraySerializer();
+
+        @Override
+        public boolean isImmutableType() {
+            return false;
+        }
+
+        @Override
+        public org.apache.flink.api.common.typeutils.TypeSerializer<int[]> duplicate() {
+            return this;
+        }
+
+        @Override
+        public int[] createInstance() {
+            return new int[0];
+        }
+
+        @Override
+        public int[] copy(int[] from) {
+            return from == null ? null : Arrays.copyOf(from, from.length);
+        }
+
+        @Override
+        public int[] copy(int[] from, int[] reuse) {
+            return copy(from);
+        }
+
+        @Override
+        public int getLength() {
+            return -1;
+        }
+
+        @Override
+        public void serialize(int[] record, DataOutputView target) throws IOException {
+            target.writeInt(record.length);
+            for (int v : record) {
+                target.writeInt(v);
+            }
+        }
+
+        @Override
+        public int[] deserialize(DataInputView source) throws IOException {
+            int length = source.readInt();
+            int[] out = new int[length];
+            for (int i = 0; i < length; i++) {
+                out[i] = source.readInt();
+            }
+            return out;
+        }
+
+        @Override
+        public int[] deserialize(int[] reuse, DataInputView source) throws IOException {
+            return deserialize(source);
+        }
+
+        @Override
+        public void copy(DataInputView source, DataOutputView target) throws IOException {
+            int length = source.readInt();
+            target.writeInt(length);
+            for (int i = 0; i < length; i++) {
+                target.writeInt(source.readInt());
+            }
+        }
+
+        @Override
+        public boolean equals(Object obj) {
+            return obj instanceof IntArraySerializer;
+        }
+
+        @Override
+        public int hashCode() {
+            return IntArraySerializer.class.hashCode();
+        }
+
+        @Override
+        public TypeSerializerSnapshot<int[]> snapshotConfiguration() {
+            return new IntArraySerializerSnapshot();
+        }
+    }
+
+    /** Stateless serializer snapshot for {@link IntArraySerializer}. */
+    public static final class IntArraySerializerSnapshot
+            extends SimpleTypeSerializerSnapshot<int[]> {
+        public IntArraySerializerSnapshot() {
+            super(() -> IntArraySerializer.INSTANCE);
+        }
     }
 
     private static int countFiles(Path root) throws IOException {

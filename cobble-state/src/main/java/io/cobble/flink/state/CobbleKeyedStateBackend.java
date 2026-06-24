@@ -13,6 +13,7 @@ import org.apache.flink.annotation.VisibleForTesting;
 import org.apache.flink.api.common.ExecutionConfig;
 import org.apache.flink.api.common.state.ListStateDescriptor;
 import org.apache.flink.api.common.state.MapStateDescriptor;
+import org.apache.flink.api.common.state.ReducingStateDescriptor;
 import org.apache.flink.api.common.state.State;
 import org.apache.flink.api.common.state.StateDescriptor;
 import org.apache.flink.api.common.state.ValueStateDescriptor;
@@ -257,6 +258,18 @@ final class CobbleKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
                 trackStateResource((AbstractCobbleState<?, ?, ?>) mapState);
                 restoredCanonicalMetadata.remove(stateName);
                 return mapState;
+            case REDUCING:
+                IS reducingState =
+                        createReducingState(
+                                namespaceSerializer, (ReducingStateDescriptor<?>) stateDesc);
+                registerReducingSchema(
+                        stateName,
+                        ttlEnabled,
+                        namespaceSerializer,
+                        (ReducingStateDescriptor<?>) stateDesc);
+                trackStateResource((AbstractCobbleState<?, ?, ?>) reducingState);
+                restoredCanonicalMetadata.remove(stateName);
+                return reducingState;
             default:
                 throw unsupportedState(stateDesc);
         }
@@ -535,6 +548,23 @@ final class CobbleKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
                         stateDesc.getTtlConfig());
     }
 
+    /** Creates the typed Cobble-backed Flink ReducingState wrapper. */
+    @SuppressWarnings("unchecked")
+    private <N, T, S extends State, IS extends S> IS createReducingState(
+            TypeSerializer<N> namespaceSerializer, ReducingStateDescriptor<?> stateDesc) {
+        ReducingStateDescriptor<T> reducingStateDescriptor = (ReducingStateDescriptor<T>) stateDesc;
+        return (IS)
+                new CobbleReducingState<>(
+                        this,
+                        cobbleDb,
+                        stateDesc.getName(),
+                        keySerializer,
+                        namespaceSerializer,
+                        reducingStateDescriptor.getSerializer(),
+                        reducingStateDescriptor.getReduceFunction(),
+                        stateDesc.getTtlConfig());
+    }
+
     /**
      * Creates or validates the bytes-only column-family contract for keyed state.
      *
@@ -753,6 +783,26 @@ final class CobbleKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
                 stateName,
                 StateInspectSemanticSchemaExtractor.forValue(
                         keySerializer, namespaceSerializer, valueDescriptor));
+    }
+
+    private void registerReducingSchema(
+            String stateName,
+            boolean ttlEnabled,
+            TypeSerializer<?> namespaceSerializer,
+            ReducingStateDescriptor<?> reducingDescriptor) {
+        stateInspectSchemas.putIfAbsent(
+                stateName,
+                StateInspectSchema.forReducing(
+                        stateName,
+                        stateName,
+                        ttlEnabled,
+                        keySerializer,
+                        namespaceSerializer,
+                        reducingDescriptor.getSerializer()));
+        stateInspectSemanticSchemas.putIfAbsent(
+                stateName,
+                StateInspectSemanticSchemaExtractor.forReducing(
+                        keySerializer, namespaceSerializer, reducingDescriptor));
     }
 
     private void registerListSchema(

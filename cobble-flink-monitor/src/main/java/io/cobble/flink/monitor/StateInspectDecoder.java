@@ -219,7 +219,7 @@ final class StateInspectDecoder {
         if (valueBytes == null) {
             return null;
         }
-        if (schema.stateKind() == StateKind.VALUE) {
+        if (schema.stateKind() == StateKind.VALUE || schema.stateKind() == StateKind.REDUCING) {
             return decodeDisplay(schema.valueSerializer(), valueBytes);
         }
         if (schema.stateKind() == StateKind.LIST) {
@@ -371,7 +371,8 @@ final class StateInspectDecoder {
                                     mapValuePayload);
                 }
             }
-        } else if (schema.stateKind() == StateKind.VALUE) {
+        } else if (schema.stateKind() == StateKind.VALUE
+                || schema.stateKind() == StateKind.REDUCING) {
             decodeError =
                     addSemanticPart(
                             output,

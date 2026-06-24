@@ -120,6 +120,27 @@ public final class StateInspectSchema {
                 null);
     }
 
+    /** Captures a ReducingState schema (single value column, like ValueState). */
+    public static <K, N, V> StateInspectSchema forReducing(
+            String stateName,
+            String columnFamily,
+            boolean ttlEnabled,
+            TypeSerializer<K> keySerializer,
+            TypeSerializer<N> namespaceSerializer,
+            TypeSerializer<V> valueSerializer) {
+        return new StateInspectSchema(
+                stateName,
+                StateKind.REDUCING,
+                columnFamily,
+                ttlEnabled,
+                keySerializer,
+                namespaceSerializer,
+                valueSerializer,
+                null,
+                null,
+                null);
+    }
+
     /** Captures a ListState schema. */
     public static <K, N, E> StateInspectSchema forList(
             String stateName,
@@ -222,7 +243,7 @@ public final class StateInspectSchema {
 
         this.keySerializer = SerializerInspectSchema.fromSerializer(keySerializer);
         this.namespaceSerializer = SerializerInspectSchema.fromSerializer(namespaceSerializer);
-        if (stateKind == StateKind.VALUE) {
+        if (stateKind == StateKind.VALUE || stateKind == StateKind.REDUCING) {
             this.valueSerializer = SerializerInspectSchema.fromSerializer(primaryValueSerializer);
             this.listElementSerializer = null;
             this.mapUserKeySerializer = null;
@@ -319,6 +340,7 @@ public final class StateInspectSchema {
         names.put("namespace", className(namespaceSerializer));
         switch (stateKind) {
             case VALUE:
+            case REDUCING:
                 names.put("value", className(valueSerializer));
                 break;
             case LIST:
@@ -395,6 +417,7 @@ public final class StateInspectSchema {
         namespaceSerializer.write(output);
         switch (stateKind) {
             case VALUE:
+            case REDUCING:
                 valueSerializer.write(output);
                 break;
             case LIST:
@@ -428,6 +451,7 @@ public final class StateInspectSchema {
         SerializerInspectSchema mapUserValueSerializer = null;
         switch (kind) {
             case VALUE:
+            case REDUCING:
                 valueSerializer = SerializerInspectSchema.read(input);
                 break;
             case LIST:

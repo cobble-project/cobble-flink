@@ -36,6 +36,12 @@ public final class StateInspectSemanticSchema {
         return new StateInspectSemanticSchema(stateKey, namespace, value, null, null, null);
     }
 
+    /** Reducing state has the same logical part shape as value state. */
+    public static StateInspectSemanticSchema forReducing(
+            StateInspectType stateKey, StateInspectType namespace, StateInspectType value) {
+        return new StateInspectSemanticSchema(stateKey, namespace, value, null, null, null);
+    }
+
     public static StateInspectSemanticSchema forList(
             StateInspectType stateKey, StateInspectType namespace, StateInspectType listElement) {
         return new StateInspectSemanticSchema(stateKey, namespace, null, listElement, null, null);

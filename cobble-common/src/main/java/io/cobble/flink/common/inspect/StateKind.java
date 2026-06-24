@@ -12,7 +12,8 @@ public enum StateKind {
     VALUE,
     LIST,
     MAP,
-    TIMER;
+    TIMER,
+    REDUCING;
 
     private static final StateKind[] VALUES = values();
 
