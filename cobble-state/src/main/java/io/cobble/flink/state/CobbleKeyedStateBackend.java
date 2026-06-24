@@ -11,6 +11,7 @@ import io.cobble.structured.StructuredSchemaBuilder;
 
 import org.apache.flink.annotation.VisibleForTesting;
 import org.apache.flink.api.common.ExecutionConfig;
+import org.apache.flink.api.common.state.AggregatingStateDescriptor;
 import org.apache.flink.api.common.state.ListStateDescriptor;
 import org.apache.flink.api.common.state.MapStateDescriptor;
 import org.apache.flink.api.common.state.ReducingStateDescriptor;
@@ -208,6 +209,9 @@ final class CobbleKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
                     StateSnapshotTransformer.StateSnapshotTransformFactory<SEV>
                             snapshotTransformFactory)
             throws Exception {
+        // Reject unsupported state kinds (e.g. FOLDING) BEFORE any column-family creation so a
+        // failed registration leaves the backend's schema and column-family map untouched.
+        assertSupportedStateKind(stateDesc);
         // Validate against canonical-savepoint metadata BEFORE any column family is touched, so an
         // incompatible serializer rejection never partially mutates the backend's schema.
         validateCanonicalKeyValueMetadata(stateDesc, namespaceSerializer);
@@ -270,6 +274,38 @@ final class CobbleKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
                 trackStateResource((AbstractCobbleState<?, ?, ?>) reducingState);
                 restoredCanonicalMetadata.remove(stateName);
                 return reducingState;
+            case AGGREGATING:
+                IS aggregatingState =
+                        createAggregatingState(
+                                namespaceSerializer,
+                                (AggregatingStateDescriptor<?, ?, ?>) stateDesc);
+                registerAggregatingSchema(
+                        stateName,
+                        ttlEnabled,
+                        namespaceSerializer,
+                        (AggregatingStateDescriptor<?, ?, ?>) stateDesc);
+                trackStateResource((AbstractCobbleState<?, ?, ?>) aggregatingState);
+                restoredCanonicalMetadata.remove(stateName);
+                return aggregatingState;
+            default:
+                throw unsupportedState(stateDesc);
+        }
+    }
+
+    /**
+     * Pre-flight rejection for state kinds Cobble does not support. Called before {@link
+     * #validateCanonicalKeyValueMetadata} and {@link #ensureStateColumnFamily} so an unsupported
+     * registration leaves the backend's column-family map and structured schema unchanged.
+     */
+    private static <S extends State, SV> void assertSupportedStateKind(
+            StateDescriptor<S, SV> stateDesc) {
+        switch (stateDesc.getType()) {
+            case VALUE:
+            case LIST:
+            case MAP:
+            case REDUCING:
+            case AGGREGATING:
+                return;
             default:
                 throw unsupportedState(stateDesc);
         }
@@ -566,6 +602,27 @@ final class CobbleKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
     }
 
     /**
+     * Creates the typed Cobble-backed Flink AggregatingState wrapper. The descriptor's value
+     * serializer ({@code getSerializer()}) is the accumulator (ACC) serializer.
+     */
+    @SuppressWarnings({"unchecked", "rawtypes"})
+    private <N, S extends State, IS extends S> IS createAggregatingState(
+            TypeSerializer<N> namespaceSerializer, AggregatingStateDescriptor<?, ?, ?> stateDesc) {
+        AggregatingStateDescriptor<Object, Object, Object> aggDescriptor =
+                (AggregatingStateDescriptor<Object, Object, Object>) stateDesc;
+        return (IS)
+                new CobbleAggregatingState<K, N, Object, Object, Object>(
+                        this,
+                        cobbleDb,
+                        stateDesc.getName(),
+                        keySerializer,
+                        namespaceSerializer,
+                        aggDescriptor.getSerializer(),
+                        aggDescriptor.getAggregateFunction(),
+                        stateDesc.getTtlConfig());
+    }
+
+    /**
      * Creates or validates the bytes-only column-family contract for keyed state.
      *
      * <p>Structured schema families default unspecified columns to bytes, so an existing family
@@ -803,6 +860,31 @@ final class CobbleKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
                 stateName,
                 StateInspectSemanticSchemaExtractor.forReducing(
                         keySerializer, namespaceSerializer, reducingDescriptor));
+    }
+
+    /**
+     * Registers the inspect schema for an AggregatingState. The persisted value type is the
+     * accumulator (ACC), so we pass {@link AggregatingStateDescriptor#getSerializer()} which
+     * returns the accumulator serializer (not the output (OUT) serializer).
+     */
+    private void registerAggregatingSchema(
+            String stateName,
+            boolean ttlEnabled,
+            TypeSerializer<?> namespaceSerializer,
+            AggregatingStateDescriptor<?, ?, ?> aggregatingDescriptor) {
+        stateInspectSchemas.putIfAbsent(
+                stateName,
+                StateInspectSchema.forAggregating(
+                        stateName,
+                        stateName,
+                        ttlEnabled,
+                        keySerializer,
+                        namespaceSerializer,
+                        aggregatingDescriptor.getSerializer()));
+        stateInspectSemanticSchemas.putIfAbsent(
+                stateName,
+                StateInspectSemanticSchemaExtractor.forAggregating(
+                        keySerializer, namespaceSerializer, aggregatingDescriptor));
     }
 
     private void registerListSchema(

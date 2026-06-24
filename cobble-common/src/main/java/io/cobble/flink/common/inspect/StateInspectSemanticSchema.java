@@ -42,6 +42,15 @@ public final class StateInspectSemanticSchema {
         return new StateInspectSemanticSchema(stateKey, namespace, value, null, null, null);
     }
 
+    /**
+     * Aggregating state has the same logical part shape as value state; the {@code value} slot
+     * carries the accumulator (ACC) shape, not the output (OUT) shape.
+     */
+    public static StateInspectSemanticSchema forAggregating(
+            StateInspectType stateKey, StateInspectType namespace, StateInspectType value) {
+        return new StateInspectSemanticSchema(stateKey, namespace, value, null, null, null);
+    }
+
     public static StateInspectSemanticSchema forList(
             StateInspectType stateKey, StateInspectType namespace, StateInspectType listElement) {
         return new StateInspectSemanticSchema(stateKey, namespace, null, listElement, null, null);

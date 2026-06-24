@@ -489,6 +489,7 @@ function activeScanContext() {
     keyFields: target?.key_fields || [],
     valueFields: target?.value_fields || [],
     semanticParts: target?.semantic_parts || {},
+    valuePartLabel: target?.value_part_label || target?.valuePartLabel || null,
   }
 }
 
@@ -664,6 +665,7 @@ function trackScanItem(trackId) {
     keyFields: context.keyFields,
     valueFields: context.valueFields,
     semanticParts: context.semanticParts,
+    valuePartLabel: context.valuePartLabel,
     value: item.columns || item.value || null,
     decodedKey: item.decoded_key || null,
     decodedColumns: item.decoded_columns || null,
@@ -1185,11 +1187,12 @@ function semanticTableSignature(target) {
 
 function semanticTableGroups(target) {
   const parts = target?.semantic_parts || target?.semanticParts || {}
+  const valuePartLabel = target?.value_part_label || target?.valuePartLabel || 'Value'
   const candidates = [
     { id: 'state_key', label: 'State key', type: parts.state_key },
     { id: 'namespace', label: 'Namespace', type: parts.namespace },
     { id: 'map_key', label: 'Map key', type: parts.map_key },
-    { id: 'value', label: 'Value', type: parts.value || parts.list_element || parts.map_value },
+    { id: 'value', label: valuePartLabel, type: parts.value || parts.list_element || parts.map_value },
   ]
   return candidates
     .map((group) => ({ ...group, fields: semanticTableFields(group.type) }))
@@ -1703,6 +1706,7 @@ function trackedTarget(item) {
     key_fields: item.keyFields || [],
     value_fields: item.valueFields || [],
     semantic_parts: item.semanticParts || {},
+    value_part_label: item.valuePartLabel || null,
   }
 }
 

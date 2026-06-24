@@ -880,6 +880,106 @@ class StateInspectDecoderTest {
         assertEquals("REDUCING", json.get("state_kind"));
     }
 
+    @Test
+    void decodesAggregatingStateValuePartLikeValueState() throws Exception {
+        // AggregatingState persists the accumulator (ACC). The decoder routes it through the same
+        // value-decode path as VALUE/REDUCING, so the decoded value is the accumulator type.
+        StateInspectSchema schema =
+                StateInspectSchema.forAggregating(
+                        "aggregating-state",
+                        "cf-aggregating",
+                        false,
+                        StringSerializer.INSTANCE,
+                        StringSerializer.INSTANCE,
+                        LongSerializer.INSTANCE);
+        InspectTarget target = target(schema);
+        byte[] rowKey = keyAndNamespace("user-1", "window-a");
+        byte[][] columns = new byte[][] {serialize(LongSerializer.INSTANCE, 123L)};
+
+        StateInspectDecoder.DecodedRow row = StateInspectDecoder.decode(target, rowKey, columns);
+
+        assertNull(row.decodeError);
+        assertEquals("user-1", row.decodedKey.get("key"));
+        assertEquals("window-a", row.decodedKey.get("namespace"));
+        assertEquals(123L, row.decodedValue);
+    }
+
+    @Test
+    void decodesAggregatingStateSemanticPartsYieldsSingleValuePart() throws Exception {
+        // Semantic-parts decoding must thread the AGGREGATING accumulator into a single "value"
+        // bucket — no list_element / map_key / map_value should appear.
+        StateInspectSchema schema =
+                StateInspectSchema.forAggregating(
+                        "aggregating-state",
+                        "cf-aggregating",
+                        false,
+                        StringSerializer.INSTANCE,
+                        StringSerializer.INSTANCE,
+                        LongSerializer.INSTANCE);
+        InspectTarget target =
+                semanticTarget(
+                        schema,
+                        StateInspectSemanticSchema.forAggregating(
+                                StateInspectType.scalar("VARCHAR"),
+                                StateInspectType.unknown(),
+                                StateInspectType.scalar("BIGINT")));
+        byte[] rowKey = keyAndNamespace("user-1", "window-a");
+        byte[][] columns = new byte[][] {serialize(LongSerializer.INSTANCE, 99L)};
+
+        StateInspectDecoder.DecodedRow row = StateInspectDecoder.decode(target, rowKey, columns);
+
+        assertNull(row.decodeError);
+        assertEquals(99L, ((Map<?, ?>) row.decodedParts.get("value")).get("value"));
+        assertFalse(row.decodedParts.containsKey("list_element"));
+        assertFalse(row.decodedParts.containsKey("map_key"));
+        assertFalse(row.decodedParts.containsKey("map_value"));
+    }
+
+    @Test
+    void inspectTargetJsonForAggregatingSurfacesStateKindAndAccumulatorLabel() {
+        // The state_kind is AGGREGATING, and toJson() must surface a value_part_label of
+        // "Accumulator" so the monitor UI can re-label the value group. The wire field
+        // decoded_value remains unchanged — only an additional label is emitted.
+        StateInspectSchema schema =
+                StateInspectSchema.forAggregating(
+                        "aggregating-state",
+                        "cf-aggregating",
+                        false,
+                        StringSerializer.INSTANCE,
+                        StringSerializer.INSTANCE,
+                        LongSerializer.INSTANCE);
+        InspectTarget target = target(schema);
+
+        Map<String, Object> json = target.toJson();
+
+        assertEquals("AGGREGATING", json.get("state_kind"));
+        assertEquals("Accumulator", json.get("value_part_label"));
+    }
+
+    @Test
+    void inspectTargetJsonForValueAndReducingHaveNoAccumulatorLabel() {
+        // Non-AGGREGATING kinds must NOT emit value_part_label — the label is AGGREGATING-only.
+        StateInspectSchema valueSchema =
+                StateInspectSchema.forValue(
+                        "value-state",
+                        "cf-value",
+                        false,
+                        StringSerializer.INSTANCE,
+                        StringSerializer.INSTANCE,
+                        IntSerializer.INSTANCE);
+        StateInspectSchema reducingSchema =
+                StateInspectSchema.forReducing(
+                        "reducing-state",
+                        "cf-reducing",
+                        false,
+                        StringSerializer.INSTANCE,
+                        StringSerializer.INSTANCE,
+                        IntSerializer.INSTANCE);
+
+        assertFalse(target(valueSchema).toJson().containsKey("value_part_label"));
+        assertFalse(target(reducingSchema).toJson().containsKey("value_part_label"));
+    }
+
     private static InspectTarget target(StateInspectSchema schema) {
         return new InspectTarget(
                 schema.stateName(),

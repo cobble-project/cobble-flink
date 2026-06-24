@@ -13,7 +13,8 @@ public enum StateKind {
     LIST,
     MAP,
     TIMER,
-    REDUCING;
+    REDUCING,
+    AGGREGATING;
 
     private static final StateKind[] VALUES = values();
 

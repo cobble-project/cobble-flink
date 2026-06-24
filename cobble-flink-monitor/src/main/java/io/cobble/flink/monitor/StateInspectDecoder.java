@@ -219,7 +219,9 @@ final class StateInspectDecoder {
         if (valueBytes == null) {
             return null;
         }
-        if (schema.stateKind() == StateKind.VALUE || schema.stateKind() == StateKind.REDUCING) {
+        if (schema.stateKind() == StateKind.VALUE
+                || schema.stateKind() == StateKind.REDUCING
+                || schema.stateKind() == StateKind.AGGREGATING) {
             return decodeDisplay(schema.valueSerializer(), valueBytes);
         }
         if (schema.stateKind() == StateKind.LIST) {
@@ -372,7 +374,8 @@ final class StateInspectDecoder {
                 }
             }
         } else if (schema.stateKind() == StateKind.VALUE
-                || schema.stateKind() == StateKind.REDUCING) {
+                || schema.stateKind() == StateKind.REDUCING
+                || schema.stateKind() == StateKind.AGGREGATING) {
             decodeError =
                     addSemanticPart(
                             output,

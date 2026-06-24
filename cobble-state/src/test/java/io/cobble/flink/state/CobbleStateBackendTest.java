@@ -23,7 +23,10 @@ import io.cobble.flink.common.inspect.StateInspectType;
 import io.cobble.flink.common.inspect.StateKind;
 import io.cobble.structured.Schema;
 
+import org.apache.flink.api.common.functions.AggregateFunction;
 import org.apache.flink.api.common.functions.ReduceFunction;
+import org.apache.flink.api.common.state.AggregatingState;
+import org.apache.flink.api.common.state.AggregatingStateDescriptor;
 import org.apache.flink.api.common.state.ListState;
 import org.apache.flink.api.common.state.ListStateDescriptor;
 import org.apache.flink.api.common.state.MapState;
@@ -39,6 +42,7 @@ import org.apache.flink.api.common.typeutils.TypeSerializer;
 import org.apache.flink.api.common.typeutils.TypeSerializerSnapshot;
 import org.apache.flink.api.common.typeutils.base.IntSerializer;
 import org.apache.flink.api.common.typeutils.base.ListSerializer;
+import org.apache.flink.api.common.typeutils.base.LongSerializer;
 import org.apache.flink.api.common.typeutils.base.MapSerializer;
 import org.apache.flink.api.common.typeutils.base.StringSerializer;
 import org.apache.flink.api.common.typeutils.base.TypeSerializerSingleton;
@@ -83,6 +87,7 @@ import org.apache.flink.runtime.state.SnapshotStrategyRunner;
 import org.apache.flink.runtime.state.TestTaskStateManagerBuilder;
 import org.apache.flink.runtime.state.VoidNamespaceSerializer;
 import org.apache.flink.runtime.state.heap.HeapPriorityQueueElement;
+import org.apache.flink.runtime.state.internal.InternalAggregatingState;
 import org.apache.flink.runtime.state.internal.InternalKvState;
 import org.apache.flink.runtime.state.internal.InternalReducingState;
 import org.apache.flink.runtime.state.memory.ByteStreamStateHandle;
@@ -4434,6 +4439,1685 @@ class CobbleStateBackendTest {
         public T reduce(T a, T b) throws Exception {
             calls++;
             return delegate.reduce(a, b);
+        }
+    }
+
+    // -------- AggregatingState tests (Task 3C) --------
+
+    @Test
+    void aggregatingStateGetReturnsNullWhenAbsent(@TempDir Path tempDir) throws Exception {
+        try (TestBackendContext context = createBackendContext(tempDir, false, null)) {
+            CobbleKeyedStateBackend<Integer> backend = context.cobbleBackend;
+            backend.setCurrentKey(1);
+            AggregatingState<Integer, String> state =
+                    backend.getPartitionedState(
+                            "ns",
+                            StringSerializer.INSTANCE,
+                            new AggregatingStateDescriptor<>(
+                                    "absent-agg", new SumAggregator(), LongSerializer.INSTANCE));
+            assertNull(state.get());
+        }
+    }
+
+    @Test
+    void aggregatingStateAddOnEmptyCreatesAccumulator(@TempDir Path tempDir) throws Exception {
+        try (TestBackendContext context = createBackendContext(tempDir, false, null)) {
+            CobbleKeyedStateBackend<Integer> backend = context.cobbleBackend;
+            backend.setCurrentKey(1);
+            AggregatingState<Integer, String> state =
+                    backend.getPartitionedState(
+                            "ns",
+                            StringSerializer.INSTANCE,
+                            new AggregatingStateDescriptor<>(
+                                    "ag-empty-add", new SumAggregator(), LongSerializer.INSTANCE));
+            state.add(7);
+            // createAccumulator()=0; add(7,0)=7; getResult(7)="sum=7".
+            assertEquals("sum=7", state.get());
+        }
+    }
+
+    @Test
+    void aggregatingStateAddAccumulatesViaAggregateFunction(@TempDir Path tempDir)
+            throws Exception {
+        try (TestBackendContext context = createBackendContext(tempDir, false, null)) {
+            CobbleKeyedStateBackend<Integer> backend = context.cobbleBackend;
+            backend.setCurrentKey(1);
+            AggregatingState<Integer, String> state =
+                    backend.getPartitionedState(
+                            "ns",
+                            StringSerializer.INSTANCE,
+                            new AggregatingStateDescriptor<>(
+                                    "ag-accum", new SumAggregator(), LongSerializer.INSTANCE));
+            state.add(2);
+            state.add(3);
+            state.add(5);
+            assertEquals("sum=10", state.get());
+        }
+    }
+
+    @Test
+    void aggregatingStateGetUsesGetResultForOutput(@TempDir Path tempDir) throws Exception {
+        // Sanity: OUT (String) is computed via AggregateFunction.getResult, not by deserializing
+        // the stored accumulator as the output type.
+        try (TestBackendContext context = createBackendContext(tempDir, false, null)) {
+            CobbleKeyedStateBackend<Integer> backend = context.cobbleBackend;
+            backend.setCurrentKey(1);
+            AggregatingState<Integer, String> state =
+                    backend.getPartitionedState(
+                            "ns",
+                            StringSerializer.INSTANCE,
+                            new AggregatingStateDescriptor<>(
+                                    "ag-output", new SumAggregator(), LongSerializer.INSTANCE));
+            state.add(42);
+            String out = state.get();
+            assertNotNull(out);
+            assertTrue(out.startsWith("sum="), "OUT must come from getResult, got: " + out);
+        }
+    }
+
+    @Test
+    void aggregatingStateAddNullClearsExistingValue(@TempDir Path tempDir) throws Exception {
+        try (TestBackendContext context = createBackendContext(tempDir, false, null)) {
+            CobbleKeyedStateBackend<Integer> backend = context.cobbleBackend;
+            backend.setCurrentKey(1);
+            AggregatingState<Integer, String> state =
+                    backend.getPartitionedState(
+                            "ns",
+                            StringSerializer.INSTANCE,
+                            new AggregatingStateDescriptor<>(
+                                    "ag-add-null", new SumAggregator(), LongSerializer.INSTANCE));
+            state.add(4);
+            // Matches Flink HeapAggregatingState.add(null): clears the existing entry.
+            state.add(null);
+            assertNull(state.get());
+        }
+    }
+
+    @Test
+    void aggregatingStateClearRemovesRow(@TempDir Path tempDir) throws Exception {
+        try (TestBackendContext context = createBackendContext(tempDir, false, null)) {
+            CobbleKeyedStateBackend<Integer> backend = context.cobbleBackend;
+            backend.setCurrentKey(1);
+            AggregatingState<Integer, String> state =
+                    backend.getPartitionedState(
+                            "ns",
+                            StringSerializer.INSTANCE,
+                            new AggregatingStateDescriptor<>(
+                                    "ag-clear", new SumAggregator(), LongSerializer.INSTANCE));
+            state.add(11);
+            state.clear();
+            assertNull(state.get());
+        }
+    }
+
+    @Test
+    void aggregatingStateNamespaceIsolation(@TempDir Path tempDir) throws Exception {
+        try (TestBackendContext context = createBackendContext(tempDir, false, null)) {
+            CobbleKeyedStateBackend<Integer> backend = context.cobbleBackend;
+            backend.setCurrentKey(1);
+            AggregatingStateDescriptor<Integer, Long, String> descriptor =
+                    new AggregatingStateDescriptor<>(
+                            "ag-ns-isolation", new SumAggregator(), LongSerializer.INSTANCE);
+            InternalAggregatingState<Integer, String, Integer, Long, String> state =
+                    asInternalAggregatingState(
+                            backend.getPartitionedState(
+                                    "a", StringSerializer.INSTANCE, descriptor));
+
+            state.setCurrentNamespace("a");
+            state.add(10);
+            state.setCurrentNamespace("b");
+            state.add(20);
+
+            state.setCurrentNamespace("a");
+            assertEquals("sum=10", state.get());
+            state.setCurrentNamespace("b");
+            assertEquals("sum=20", state.get());
+        }
+    }
+
+    @Test
+    void aggregatingStateKeyIsolation(@TempDir Path tempDir) throws Exception {
+        try (TestBackendContext context = createBackendContext(tempDir, false, null)) {
+            CobbleKeyedStateBackend<Integer> backend = context.cobbleBackend;
+            AggregatingStateDescriptor<Integer, Long, String> descriptor =
+                    new AggregatingStateDescriptor<>(
+                            "ag-key-isolation", new SumAggregator(), LongSerializer.INSTANCE);
+
+            backend.setCurrentKey(1);
+            AggregatingState<Integer, String> s1 =
+                    backend.getPartitionedState("ns", StringSerializer.INSTANCE, descriptor);
+            s1.add(100);
+
+            backend.setCurrentKey(2);
+            AggregatingState<Integer, String> s2 =
+                    backend.getPartitionedState("ns", StringSerializer.INSTANCE, descriptor);
+            s2.add(200);
+
+            backend.setCurrentKey(1);
+            assertEquals(
+                    "sum=100",
+                    ((AggregatingState<Integer, String>)
+                                    backend.getPartitionedState(
+                                            "ns", StringSerializer.INSTANCE, descriptor))
+                            .get());
+            backend.setCurrentKey(2);
+            assertEquals(
+                    "sum=200",
+                    ((AggregatingState<Integer, String>)
+                                    backend.getPartitionedState(
+                                            "ns", StringSerializer.INSTANCE, descriptor))
+                            .get());
+        }
+    }
+
+    @Test
+    void aggregatingStateMergeNamespacesEmptySourcesIsNoOp(@TempDir Path tempDir) throws Exception {
+        try (TestBackendContext context = createBackendContext(tempDir, false, null)) {
+            CobbleKeyedStateBackend<Integer> backend = context.cobbleBackend;
+            backend.setCurrentKey(1);
+            AggregatingStateDescriptor<Integer, Long, String> descriptor =
+                    new AggregatingStateDescriptor<>(
+                            "ag-merge-empty", new SumAggregator(), LongSerializer.INSTANCE);
+            InternalAggregatingState<Integer, String, Integer, Long, String> state =
+                    asInternalAggregatingState(
+                            backend.getPartitionedState(
+                                    "target", StringSerializer.INSTANCE, descriptor));
+            state.setCurrentNamespace("target");
+            state.add(5);
+            state.mergeNamespaces("target", Collections.<String>emptyList());
+            state.setCurrentNamespace("target");
+            assertEquals("sum=5", state.get());
+        }
+    }
+
+    @Test
+    void aggregatingStateMergeNamespacesAllSourcesAbsentTargetUnchanged(@TempDir Path tempDir)
+            throws Exception {
+        try (TestBackendContext context = createBackendContext(tempDir, false, null)) {
+            CobbleKeyedStateBackend<Integer> backend = context.cobbleBackend;
+            backend.setCurrentKey(1);
+            AggregatingStateDescriptor<Integer, Long, String> descriptor =
+                    new AggregatingStateDescriptor<>(
+                            "ag-merge-no-src", new SumAggregator(), LongSerializer.INSTANCE);
+            InternalAggregatingState<Integer, String, Integer, Long, String> state =
+                    asInternalAggregatingState(
+                            backend.getPartitionedState(
+                                    "target", StringSerializer.INSTANCE, descriptor));
+            state.setCurrentNamespace("target");
+            state.add(9);
+            state.mergeNamespaces("target", Arrays.asList("missing-1", "missing-2"));
+            state.setCurrentNamespace("target");
+            assertEquals("sum=9", state.get());
+        }
+    }
+
+    @Test
+    void aggregatingStateMergeNamespacesAllSourcesAbsentTargetAbsentLeavesTargetAbsent(
+            @TempDir Path tempDir) throws Exception {
+        try (TestBackendContext context = createBackendContext(tempDir, false, null)) {
+            CobbleKeyedStateBackend<Integer> backend = context.cobbleBackend;
+            backend.setCurrentKey(1);
+            AggregatingStateDescriptor<Integer, Long, String> descriptor =
+                    new AggregatingStateDescriptor<>(
+                            "ag-merge-allabsent", new SumAggregator(), LongSerializer.INSTANCE);
+            InternalAggregatingState<Integer, String, Integer, Long, String> state =
+                    asInternalAggregatingState(
+                            backend.getPartitionedState(
+                                    "target", StringSerializer.INSTANCE, descriptor));
+            state.mergeNamespaces("target", Arrays.asList("missing-1", "missing-2"));
+            state.setCurrentNamespace("target");
+            assertNull(state.get());
+        }
+    }
+
+    @Test
+    void aggregatingStateMergeNamespacesFoldsSourcesIntoExistingTarget(@TempDir Path tempDir)
+            throws Exception {
+        try (TestBackendContext context = createBackendContext(tempDir, false, null)) {
+            CobbleKeyedStateBackend<Integer> backend = context.cobbleBackend;
+            backend.setCurrentKey(1);
+            AggregatingStateDescriptor<Integer, Long, String> descriptor =
+                    new AggregatingStateDescriptor<>(
+                            "ag-merge-into-target", new SumAggregator(), LongSerializer.INSTANCE);
+            InternalAggregatingState<Integer, String, Integer, Long, String> state =
+                    asInternalAggregatingState(
+                            backend.getPartitionedState(
+                                    "target", StringSerializer.INSTANCE, descriptor));
+            state.setCurrentNamespace("target");
+            state.add(10);
+            state.setCurrentNamespace("s1");
+            state.add(3);
+            state.setCurrentNamespace("s2");
+            state.add(4);
+
+            state.mergeNamespaces("target", Arrays.asList("s1", "s2"));
+
+            state.setCurrentNamespace("target");
+            // foldedSources = merge(3,4)=7; newTarget = merge(10,7)=17; getResult=>"sum=17".
+            assertEquals("sum=17", state.get());
+            state.setCurrentNamespace("s1");
+            assertNull(state.get());
+            state.setCurrentNamespace("s2");
+            assertNull(state.get());
+        }
+    }
+
+    @Test
+    void aggregatingStateMergeNamespacesFoldsSourcesIntoAbsentTarget(@TempDir Path tempDir)
+            throws Exception {
+        try (TestBackendContext context = createBackendContext(tempDir, false, null)) {
+            CobbleKeyedStateBackend<Integer> backend = context.cobbleBackend;
+            backend.setCurrentKey(1);
+            AggregatingStateDescriptor<Integer, Long, String> descriptor =
+                    new AggregatingStateDescriptor<>(
+                            "ag-merge-absent-target", new SumAggregator(), LongSerializer.INSTANCE);
+            InternalAggregatingState<Integer, String, Integer, Long, String> state =
+                    asInternalAggregatingState(
+                            backend.getPartitionedState(
+                                    "target", StringSerializer.INSTANCE, descriptor));
+            state.setCurrentNamespace("s1");
+            state.add(11);
+            state.setCurrentNamespace("s2");
+            state.add(22);
+
+            state.mergeNamespaces("target", Arrays.asList("s1", "s2"));
+
+            state.setCurrentNamespace("target");
+            assertEquals("sum=33", state.get());
+            state.setCurrentNamespace("s1");
+            assertNull(state.get());
+            state.setCurrentNamespace("s2");
+            assertNull(state.get());
+        }
+    }
+
+    @Test
+    void aggregatingStateMergeNamespacesNonCommutativeAggregator(@TempDir Path tempDir)
+            throws Exception {
+        try (TestBackendContext context = createBackendContext(tempDir, false, null)) {
+            CobbleKeyedStateBackend<Integer> backend = context.cobbleBackend;
+            backend.setCurrentKey(1);
+            AggregatingStateDescriptor<String, String, String> descriptor =
+                    new AggregatingStateDescriptor<>(
+                            "ag-merge-concat",
+                            new StringConcatAggregator(),
+                            StringSerializer.INSTANCE);
+            InternalAggregatingState<Integer, String, String, String, String> state =
+                    asInternalAggregatingState(
+                            backend.getPartitionedState(
+                                    "target", StringSerializer.INSTANCE, descriptor));
+            state.setCurrentNamespace("ns-a");
+            state.add("a");
+            state.setCurrentNamespace("ns-b");
+            state.add("b");
+            state.setCurrentNamespace("ns-c");
+            state.add("c");
+
+            // target absent; sources in insertion order [a,b,c] -> left-fold via merge = "abc".
+            state.mergeNamespaces("target", Arrays.asList("ns-a", "ns-b", "ns-c"));
+
+            state.setCurrentNamespace("target");
+            assertEquals("abc", state.get());
+        }
+    }
+
+    @Test
+    void aggregatingStateMergeNamespacesDuplicateSourceCountedOnce(@TempDir Path tempDir)
+            throws Exception {
+        try (TestBackendContext context = createBackendContext(tempDir, false, null)) {
+            CobbleKeyedStateBackend<Integer> backend = context.cobbleBackend;
+            backend.setCurrentKey(1);
+            CountingAggregator counting = new CountingAggregator(new SumAggregator());
+            AggregatingStateDescriptor<Integer, Long, String> descriptor =
+                    new AggregatingStateDescriptor<>(
+                            "ag-merge-dup", counting, LongSerializer.INSTANCE);
+            InternalAggregatingState<Integer, String, Integer, Long, String> state =
+                    asInternalAggregatingState(
+                            backend.getPartitionedState(
+                                    "target", StringSerializer.INSTANCE, descriptor));
+            state.setCurrentNamespace("s1");
+            state.add(50);
+
+            counting.mergeCalls = 0;
+            state.mergeNamespaces("target", Arrays.asList("s1", "s1"));
+
+            state.setCurrentNamespace("target");
+            assertEquals("sum=50", state.get());
+            // First "s1" contributes once; second "s1" must be dedup'd: zero merge invocations
+            // are expected since there is only one captured source and target is absent.
+            assertEquals(0, counting.mergeCalls);
+            state.setCurrentNamespace("s1");
+            assertNull(state.get());
+        }
+    }
+
+    @Test
+    void aggregatingStateMergeNamespacesTargetInSourcesWithOthers(@TempDir Path tempDir)
+            throws Exception {
+        try (TestBackendContext context = createBackendContext(tempDir, false, null)) {
+            CobbleKeyedStateBackend<Integer> backend = context.cobbleBackend;
+            backend.setCurrentKey(1);
+            AggregatingStateDescriptor<Integer, Long, String> descriptor =
+                    new AggregatingStateDescriptor<>(
+                            "ag-merge-target-in-src", new SumAggregator(), LongSerializer.INSTANCE);
+            InternalAggregatingState<Integer, String, Integer, Long, String> state =
+                    asInternalAggregatingState(
+                            backend.getPartitionedState(
+                                    "target", StringSerializer.INSTANCE, descriptor));
+            state.setCurrentNamespace("target");
+            state.add(8);
+            state.setCurrentNamespace("s1");
+            state.add(13);
+
+            state.mergeNamespaces("target", Arrays.asList("target", "s1"));
+
+            state.setCurrentNamespace("target");
+            // Vt=8 and Vs1=13 are folded together; target's contribution enters via the
+            // captured-source path exactly once: foldedSources = merge(8,13)=21. targetValue is
+            // null (target was in sources). newTarget = 21; getResult => "sum=21".
+            assertEquals("sum=21", state.get());
+            state.setCurrentNamespace("s1");
+            assertNull(state.get());
+        }
+    }
+
+    @Test
+    void aggregatingStateMergeNamespacesSourcesEqualsTargetOnlyIsNoSelfMerge(@TempDir Path tempDir)
+            throws Exception {
+        try (TestBackendContext context = createBackendContext(tempDir, false, null)) {
+            CobbleKeyedStateBackend<Integer> backend = context.cobbleBackend;
+            backend.setCurrentKey(1);
+            CountingAggregator counting = new CountingAggregator(new SumAggregator());
+            AggregatingStateDescriptor<Integer, Long, String> descriptor =
+                    new AggregatingStateDescriptor<>(
+                            "ag-merge-self", counting, LongSerializer.INSTANCE);
+            InternalAggregatingState<Integer, String, Integer, Long, String> state =
+                    asInternalAggregatingState(
+                            backend.getPartitionedState(
+                                    "target", StringSerializer.INSTANCE, descriptor));
+            state.setCurrentNamespace("target");
+            state.add(42);
+
+            counting.mergeCalls = 0;
+            state.mergeNamespaces("target", Collections.singletonList("target"));
+
+            state.setCurrentNamespace("target");
+            assertEquals("sum=42", state.get());
+            // Vt was captured as a source; foldedSources = Vt with no further merge, and
+            // targetValue is null because target was in sources. merge() must NOT be invoked.
+            assertEquals(0, counting.mergeCalls);
+        }
+    }
+
+    @Test
+    void aggregatingStateMergeNamespacesVariableLengthNamespaceBytes(@TempDir Path tempDir)
+            throws Exception {
+        try (TestBackendContext context = createBackendContext(tempDir, false, null)) {
+            CobbleKeyedStateBackend<Integer> backend = context.cobbleBackend;
+            backend.setCurrentKey(1);
+            AggregatingStateDescriptor<Integer, Long, String> descriptor =
+                    new AggregatingStateDescriptor<>(
+                            "ag-merge-varlen", new SumAggregator(), LongSerializer.INSTANCE);
+            InternalAggregatingState<Integer, String, Integer, Long, String> state =
+                    asInternalAggregatingState(
+                            backend.getPartitionedState(
+                                    "target", StringSerializer.INSTANCE, descriptor));
+            // Two source namespaces with deliberately different serialized lengths.
+            state.setCurrentNamespace("a");
+            state.add(1);
+            state.setCurrentNamespace("a-longer-namespace");
+            state.add(2);
+
+            state.mergeNamespaces("target", Arrays.asList("a", "a-longer-namespace"));
+
+            state.setCurrentNamespace("target");
+            assertEquals("sum=3", state.get());
+            state.setCurrentNamespace("a");
+            assertNull(state.get());
+            state.setCurrentNamespace("a-longer-namespace");
+            assertNull(state.get());
+        }
+    }
+
+    @Test
+    void aggregatingStateMergeNamespacesPropagatesMergerException(@TempDir Path tempDir)
+            throws Exception {
+        try (TestBackendContext context = createBackendContext(tempDir, false, null)) {
+            CobbleKeyedStateBackend<Integer> backend = context.cobbleBackend;
+            backend.setCurrentKey(1);
+            AggregateFunction<Integer, Long, String> boom =
+                    new AggregateFunction<Integer, Long, String>() {
+                        @Override
+                        public Long createAccumulator() {
+                            return 0L;
+                        }
+
+                        @Override
+                        public Long add(Integer in, Long acc) {
+                            return acc + in;
+                        }
+
+                        @Override
+                        public String getResult(Long acc) {
+                            return "sum=" + acc;
+                        }
+
+                        @Override
+                        public Long merge(Long a, Long b) {
+                            throw new IllegalStateException("boom");
+                        }
+                    };
+            AggregatingStateDescriptor<Integer, Long, String> descriptor =
+                    new AggregatingStateDescriptor<>(
+                            "ag-merge-throws", boom, LongSerializer.INSTANCE);
+            InternalAggregatingState<Integer, String, Integer, Long, String> state =
+                    asInternalAggregatingState(
+                            backend.getPartitionedState(
+                                    "target", StringSerializer.INSTANCE, descriptor));
+            state.setCurrentNamespace("target");
+            // Use updateInternal to plant accumulators directly without going through add(merge).
+            state.updateInternal(10L);
+            state.setCurrentNamespace("s1");
+            state.updateInternal(20L);
+            state.setCurrentNamespace("s2");
+            state.updateInternal(30L);
+
+            IllegalStateException error =
+                    assertThrows(
+                            IllegalStateException.class,
+                            () -> state.mergeNamespaces("target", Arrays.asList("s1", "s2")));
+            assertEquals("boom", error.getMessage());
+
+            // Pre-merge accumulators must be intact (compute-then-write boundary): no source row
+            // deleted, target unchanged.
+            state.setCurrentNamespace("target");
+            assertEquals(Long.valueOf(10L), state.getInternal());
+            state.setCurrentNamespace("s1");
+            assertEquals(Long.valueOf(20L), state.getInternal());
+            state.setCurrentNamespace("s2");
+            assertEquals(Long.valueOf(30L), state.getInternal());
+        }
+    }
+
+    @Test
+    void aggregateAddReturningNullClearsState(@TempDir Path tempDir) throws Exception {
+        // P2: AggregateFunction.add returning null must clear the row via updateInternal.
+        try (TestBackendContext context = createBackendContext(tempDir, false, null)) {
+            CobbleKeyedStateBackend<Integer> backend = context.cobbleBackend;
+            backend.setCurrentKey(1);
+            AggregateFunction<Integer, Long, String> addReturnsNull =
+                    new AggregateFunction<Integer, Long, String>() {
+                        @Override
+                        public Long createAccumulator() {
+                            return 0L;
+                        }
+
+                        @Override
+                        public Long add(Integer in, Long acc) {
+                            // Signal "clear" via null accumulator.
+                            return in < 0 ? null : acc + in;
+                        }
+
+                        @Override
+                        public String getResult(Long acc) {
+                            return "sum=" + acc;
+                        }
+
+                        @Override
+                        public Long merge(Long a, Long b) {
+                            return a + b;
+                        }
+                    };
+            AggregatingState<Integer, String> state =
+                    backend.getPartitionedState(
+                            "ns",
+                            StringSerializer.INSTANCE,
+                            new AggregatingStateDescriptor<>(
+                                    "ag-add-null-result", addReturnsNull, LongSerializer.INSTANCE));
+            state.add(5);
+            state.add(7);
+            assertEquals("sum=12", state.get());
+            // Negative triggers null accumulator -> updateInternal(null) -> clear.
+            state.add(-1);
+            assertNull(state.get());
+        }
+    }
+
+    @Test
+    void aggregateMergeReturningNullDeletesTarget(@TempDir Path tempDir) throws Exception {
+        // P2: AggregateFunction.merge returning null while combining target+folded must delete
+        // the target row instead of writing a null accumulator.
+        try (TestBackendContext context = createBackendContext(tempDir, false, null)) {
+            CobbleKeyedStateBackend<Integer> backend = context.cobbleBackend;
+            backend.setCurrentKey(1);
+            AggregateFunction<Integer, Long, String> mergeReturnsNull =
+                    new AggregateFunction<Integer, Long, String>() {
+                        @Override
+                        public Long createAccumulator() {
+                            return 0L;
+                        }
+
+                        @Override
+                        public Long add(Integer in, Long acc) {
+                            return acc + in;
+                        }
+
+                        @Override
+                        public String getResult(Long acc) {
+                            return "sum=" + acc;
+                        }
+
+                        @Override
+                        public Long merge(Long a, Long b) {
+                            return null;
+                        }
+                    };
+            AggregatingStateDescriptor<Integer, Long, String> descriptor =
+                    new AggregatingStateDescriptor<>(
+                            "ag-merge-null-result", mergeReturnsNull, LongSerializer.INSTANCE);
+            InternalAggregatingState<Integer, String, Integer, Long, String> state =
+                    asInternalAggregatingState(
+                            backend.getPartitionedState(
+                                    "target", StringSerializer.INSTANCE, descriptor));
+            state.setCurrentNamespace("target");
+            state.updateInternal(10L);
+            state.setCurrentNamespace("s1");
+            state.updateInternal(20L);
+
+            // merge(10,20) returns null -> target row must be deleted.
+            state.mergeNamespaces("target", Collections.singletonList("s1"));
+
+            state.setCurrentNamespace("target");
+            assertNull(state.getInternal(), "target row must be deleted when merge returns null");
+            assertNull(state.get());
+            state.setCurrentNamespace("s1");
+            assertNull(state.getInternal(), "source row must always be deleted post-merge");
+        }
+    }
+
+    @Test
+    void aggregateAddExceptionPreservesPersistedValue(@TempDir Path tempDir) throws Exception {
+        // P2: An AggregateFunction.add that mutates its accumulator and then throws must not
+        // leak the mutated value to persisted state. add() is compute-then-write via
+        // updateInternal, so a throw before the write keeps the prior bytes intact.
+        try (TestBackendContext context = createBackendContext(tempDir, false, null)) {
+            CobbleKeyedStateBackend<Integer> backend = context.cobbleBackend;
+            backend.setCurrentKey(1);
+            AggregateFunction<Integer, long[], String> mutateThenThrow =
+                    new AggregateFunction<Integer, long[], String>() {
+                        @Override
+                        public long[] createAccumulator() {
+                            return new long[] {0L};
+                        }
+
+                        @Override
+                        public long[] add(Integer in, long[] acc) {
+                            acc[0] = acc[0] + in;
+                            if (in == 99) {
+                                throw new IllegalStateException("boom");
+                            }
+                            return acc;
+                        }
+
+                        @Override
+                        public String getResult(long[] acc) {
+                            return "sum=" + acc[0];
+                        }
+
+                        @Override
+                        public long[] merge(long[] a, long[] b) {
+                            return new long[] {a[0] + b[0]};
+                        }
+                    };
+            AggregatingStateDescriptor<Integer, long[], String> descriptor =
+                    new AggregatingStateDescriptor<>(
+                            "ag-add-throws-preserved",
+                            mutateThenThrow,
+                            LongArraySerializer.INSTANCE);
+            AggregatingState<Integer, String> state =
+                    backend.getPartitionedState("ns", StringSerializer.INSTANCE, descriptor);
+            state.add(10);
+            state.add(20);
+            assertEquals("sum=30", state.get());
+
+            // Mutator throws after mutating its in-memory accumulator; persisted state must be
+            // unaffected because updateInternal never runs.
+            assertThrows(IllegalStateException.class, () -> state.add(99));
+
+            assertEquals("sum=30", state.get());
+        }
+    }
+
+    @Test
+    void aggregateMergeExceptionPreservesPersistedSourcesAndTarget(@TempDir Path tempDir)
+            throws Exception {
+        // P2: Steps 1-6 of mergeNamespaces are compute-only. A throw before step 7 must leave
+        // both source and target rows untouched. This is the exception-preserves-persisted-state
+        // boundary that protects against partial writes.
+        try (TestBackendContext context = createBackendContext(tempDir, false, null)) {
+            CobbleKeyedStateBackend<Integer> backend = context.cobbleBackend;
+            backend.setCurrentKey(1);
+            AggregateFunction<Integer, long[], String> mutateThenThrow =
+                    new AggregateFunction<Integer, long[], String>() {
+                        @Override
+                        public long[] createAccumulator() {
+                            return new long[] {0L};
+                        }
+
+                        @Override
+                        public long[] add(Integer in, long[] acc) {
+                            return new long[] {acc[0] + in};
+                        }
+
+                        @Override
+                        public String getResult(long[] acc) {
+                            return "sum=" + acc[0];
+                        }
+
+                        @Override
+                        public long[] merge(long[] a, long[] b) {
+                            // Mutate first arg in place, then throw before returning.
+                            a[0] = a[0] + b[0];
+                            throw new IllegalStateException("boom-merge");
+                        }
+                    };
+            AggregatingStateDescriptor<Integer, long[], String> descriptor =
+                    new AggregatingStateDescriptor<>(
+                            "ag-merge-throws-preserved",
+                            mutateThenThrow,
+                            LongArraySerializer.INSTANCE);
+            InternalAggregatingState<Integer, String, Integer, long[], String> state =
+                    asInternalAggregatingState(
+                            backend.getPartitionedState(
+                                    "target", StringSerializer.INSTANCE, descriptor));
+            state.setCurrentNamespace("target");
+            state.updateInternal(new long[] {10L});
+            state.setCurrentNamespace("s1");
+            state.updateInternal(new long[] {20L});
+            state.setCurrentNamespace("s2");
+            state.updateInternal(new long[] {30L});
+
+            IllegalStateException error =
+                    assertThrows(
+                            IllegalStateException.class,
+                            () -> state.mergeNamespaces("target", Arrays.asList("s1", "s2")));
+            assertEquals("boom-merge", error.getMessage());
+
+            // Persisted state must be intact post-throw (compute-then-write boundary).
+            state.setCurrentNamespace("target");
+            assertEquals(10L, state.getInternal()[0]);
+            state.setCurrentNamespace("s1");
+            assertEquals(20L, state.getInternal()[0]);
+            state.setCurrentNamespace("s2");
+            assertEquals(30L, state.getInternal()[0]);
+        }
+    }
+
+    @Test
+    void aggregatingStateMergeNamespacesAggregatorMutatesFirstArgStillWritesBack(
+            @TempDir Path tempDir) throws Exception {
+        try (TestBackendContext context = createBackendContext(tempDir, false, null)) {
+            CobbleKeyedStateBackend<Integer> backend = context.cobbleBackend;
+            backend.setCurrentKey(1);
+            AggregateFunction<Integer, long[], String> inPlaceMerge =
+                    new AggregateFunction<Integer, long[], String>() {
+                        @Override
+                        public long[] createAccumulator() {
+                            return new long[] {0L};
+                        }
+
+                        @Override
+                        public long[] add(Integer in, long[] acc) {
+                            return new long[] {acc[0] + in};
+                        }
+
+                        @Override
+                        public String getResult(long[] acc) {
+                            return "sum=" + acc[0];
+                        }
+
+                        @Override
+                        public long[] merge(long[] a, long[] b) {
+                            a[0] = a[0] + b[0];
+                            return a;
+                        }
+                    };
+            AggregatingStateDescriptor<Integer, long[], String> descriptor =
+                    new AggregatingStateDescriptor<>(
+                            "ag-merge-mutate", inPlaceMerge, LongArraySerializer.INSTANCE);
+            InternalAggregatingState<Integer, String, Integer, long[], String> state =
+                    asInternalAggregatingState(
+                            backend.getPartitionedState(
+                                    "target", StringSerializer.INSTANCE, descriptor));
+            state.setCurrentNamespace("target");
+            state.updateInternal(new long[] {5L});
+            state.setCurrentNamespace("s1");
+            state.updateInternal(new long[] {7L});
+
+            state.mergeNamespaces("target", Collections.singletonList("s1"));
+
+            state.setCurrentNamespace("target");
+            assertEquals(12L, state.getInternal()[0]);
+        }
+    }
+
+    @Test
+    void aggregatingMergeNullThenLaterSourceReseedsMergedValue(@TempDir Path tempDir)
+            throws Exception {
+        // Heap semantics: merge(a,b) returning null does not terminate source folding. A later
+        // non-null source should become the new merged value and still be written into target.
+        try (TestBackendContext context = createBackendContext(tempDir, false, null)) {
+            CobbleKeyedStateBackend<Integer> backend = context.cobbleBackend;
+            backend.setCurrentKey(1);
+            AggregateFunction<Integer, Long, String> cancelingMerge =
+                    new AggregateFunction<Integer, Long, String>() {
+                        @Override
+                        public Long createAccumulator() {
+                            return 0L;
+                        }
+
+                        @Override
+                        public Long add(Integer in, Long acc) {
+                            return acc + in;
+                        }
+
+                        @Override
+                        public String getResult(Long acc) {
+                            return "sum=" + acc;
+                        }
+
+                        @Override
+                        public Long merge(Long a, Long b) {
+                            // First two source accumulators cancel to null; a later non-null source
+                            // must re-seed foldedSources instead of being skipped.
+                            if (a == 1L && b == 2L) {
+                                return null;
+                            }
+                            return a + b;
+                        }
+                    };
+            AggregatingStateDescriptor<Integer, Long, String> descriptor =
+                    new AggregatingStateDescriptor<>(
+                            "ag-merge-null-reseed", cancelingMerge, LongSerializer.INSTANCE);
+            InternalAggregatingState<Integer, String, Integer, Long, String> state =
+                    asInternalAggregatingState(
+                            backend.getPartitionedState(
+                                    "target", StringSerializer.INSTANCE, descriptor));
+            state.setCurrentNamespace("s1");
+            state.updateInternal(1L);
+            state.setCurrentNamespace("s2");
+            state.updateInternal(2L);
+            state.setCurrentNamespace("s3");
+            state.updateInternal(30L);
+
+            state.mergeNamespaces("target", Arrays.asList("s1", "s2", "s3"));
+
+            state.setCurrentNamespace("target");
+            assertEquals(Long.valueOf(30L), state.getInternal());
+            assertEquals("sum=30", state.get());
+            state.setCurrentNamespace("s1");
+            assertNull(state.getInternal());
+            state.setCurrentNamespace("s2");
+            assertNull(state.getInternal());
+            state.setCurrentNamespace("s3");
+            assertNull(state.getInternal());
+        }
+    }
+
+    @Test
+    void aggregatingMergeFinalNullLeavesIndependentTargetUntouched(@TempDir Path tempDir)
+            throws Exception {
+        // Heap semantics: if folding sources produces no merged value, transform(target, ...) is
+        // not
+        // called. An independent target must not be rewritten/deleted (and TTL must not be
+        // refreshed).
+        try (TestBackendContext context = createBackendContext(tempDir, false, null)) {
+            CobbleKeyedStateBackend<Integer> backend = context.cobbleBackend;
+            backend.setCurrentKey(1);
+            AggregateFunction<Integer, Long, String> mergeAlwaysNull =
+                    new AggregateFunction<Integer, Long, String>() {
+                        @Override
+                        public Long createAccumulator() {
+                            return 0L;
+                        }
+
+                        @Override
+                        public Long add(Integer in, Long acc) {
+                            return acc + in;
+                        }
+
+                        @Override
+                        public String getResult(Long acc) {
+                            return "sum=" + acc;
+                        }
+
+                        @Override
+                        public Long merge(Long a, Long b) {
+                            return null;
+                        }
+                    };
+            AggregatingStateDescriptor<Integer, Long, String> descriptor =
+                    new AggregatingStateDescriptor<>(
+                            "ag-merge-final-null-independent-target",
+                            mergeAlwaysNull,
+                            LongSerializer.INSTANCE);
+            InternalAggregatingState<Integer, String, Integer, Long, String> state =
+                    asInternalAggregatingState(
+                            backend.getPartitionedState(
+                                    "target", StringSerializer.INSTANCE, descriptor));
+            state.setCurrentNamespace("target");
+            state.updateInternal(10L);
+            state.setCurrentNamespace("s1");
+            state.updateInternal(1L);
+            state.setCurrentNamespace("s2");
+            state.updateInternal(2L);
+
+            state.mergeNamespaces("target", Arrays.asList("s1", "s2"));
+
+            state.setCurrentNamespace("target");
+            assertEquals(Long.valueOf(10L), state.getInternal());
+            assertEquals("sum=10", state.get());
+            state.setCurrentNamespace("s1");
+            assertNull(state.getInternal());
+            state.setCurrentNamespace("s2");
+            assertNull(state.getInternal());
+        }
+    }
+
+    @Test
+    void aggregatingMergeFinalNullDeletesTargetWhenTargetWasASource(@TempDir Path tempDir)
+            throws Exception {
+        // Heap semantics: target listed in sources is removed during source folding. If final
+        // merged
+        // remains null, there is no transform write-back, so target stays deleted.
+        try (TestBackendContext context = createBackendContext(tempDir, false, null)) {
+            CobbleKeyedStateBackend<Integer> backend = context.cobbleBackend;
+            backend.setCurrentKey(1);
+            AggregateFunction<Integer, Long, String> mergeAlwaysNull =
+                    new AggregateFunction<Integer, Long, String>() {
+                        @Override
+                        public Long createAccumulator() {
+                            return 0L;
+                        }
+
+                        @Override
+                        public Long add(Integer in, Long acc) {
+                            return acc + in;
+                        }
+
+                        @Override
+                        public String getResult(Long acc) {
+                            return "sum=" + acc;
+                        }
+
+                        @Override
+                        public Long merge(Long a, Long b) {
+                            return null;
+                        }
+                    };
+            AggregatingStateDescriptor<Integer, Long, String> descriptor =
+                    new AggregatingStateDescriptor<>(
+                            "ag-merge-final-null-target-source",
+                            mergeAlwaysNull,
+                            LongSerializer.INSTANCE);
+            InternalAggregatingState<Integer, String, Integer, Long, String> state =
+                    asInternalAggregatingState(
+                            backend.getPartitionedState(
+                                    "target", StringSerializer.INSTANCE, descriptor));
+            state.setCurrentNamespace("target");
+            state.updateInternal(10L);
+            state.setCurrentNamespace("s1");
+            state.updateInternal(1L);
+
+            state.mergeNamespaces("target", Arrays.asList("target", "s1"));
+
+            state.setCurrentNamespace("target");
+            assertNull(state.getInternal());
+            assertNull(state.get());
+            state.setCurrentNamespace("s1");
+            assertNull(state.getInternal());
+        }
+    }
+
+    @Test
+    void aggregatingStateUpdateInternalNullClears(@TempDir Path tempDir) throws Exception {
+        // Direct contract test for updateInternal(null) -> clear.
+        try (TestBackendContext context = createBackendContext(tempDir, false, null)) {
+            CobbleKeyedStateBackend<Integer> backend = context.cobbleBackend;
+            backend.setCurrentKey(1);
+            AggregatingStateDescriptor<Integer, Long, String> descriptor =
+                    new AggregatingStateDescriptor<>(
+                            "ag-update-null", new SumAggregator(), LongSerializer.INSTANCE);
+            InternalAggregatingState<Integer, String, Integer, Long, String> state =
+                    asInternalAggregatingState(
+                            backend.getPartitionedState(
+                                    "ns", StringSerializer.INSTANCE, descriptor));
+            state.setCurrentNamespace("ns");
+            state.updateInternal(123L);
+            assertEquals(Long.valueOf(123L), state.getInternal());
+            state.updateInternal(null);
+            assertNull(state.getInternal());
+        }
+    }
+
+    // -------- AggregatingState canonical-restore + FOLDING-rejection tests (Task 3C) --------
+
+    @Test
+    void restoresCanonicalSavepointAggregatingState(@TempDir Path tempDir) throws Exception {
+        int key = 42;
+        int keyGroup = KeyGroupRangeAssignment.assignToKeyGroup(key, 16);
+        // Single AGGREGATING entry with a serialized Long accumulator under void namespace.
+        KeyGroupsSavepointStateHandle savepoint =
+                createCanonicalAggregatingSavepoint(key, keyGroup, 100L);
+
+        try (TestBackendContext context =
+                createBackendContext(
+                        tempDir,
+                        false,
+                        null,
+                        null,
+                        TtlTimeProvider.DEFAULT,
+                        false,
+                        Collections.singletonList(savepoint),
+                        KeyGroupRange.of(keyGroup, keyGroup))) {
+            CobbleKeyedStateBackend<Integer> backend = context.cobbleBackend;
+            backend.setCurrentKey(key);
+
+            AggregatingState<Integer, String> state =
+                    backend.getPartitionedState(
+                            org.apache.flink.runtime.state.VoidNamespace.INSTANCE,
+                            VoidNamespaceSerializer.INSTANCE,
+                            new AggregatingStateDescriptor<>(
+                                    "aggregating", new SumAggregator(), LongSerializer.INSTANCE));
+            // Accumulator was 100 -> getResult formats it as "sum=100".
+            assertEquals("sum=100", state.get());
+
+            // Imported accumulator continues to participate in add().
+            state.add(23);
+            assertEquals("sum=123", state.get());
+        }
+    }
+
+    @Test
+    void canonicalAggregatingImportSurvivesCobbleCheckpointAndRestore(@TempDir Path tempDir)
+            throws Exception {
+        int key = 42;
+        int keyGroup = KeyGroupRangeAssignment.assignToKeyGroup(key, 16);
+        // Stage 0: build a real RocksDB canonical savepoint with an AggregatingState entry.
+        KeyedStateHandle rocksSavepoint =
+                createRocksDbCanonicalAggregatingSavepoint(tempDir, key, keyGroup, 7);
+
+        String checkpointDirectory = tempDir.resolve("checkpoints").toUri().toString();
+        KeyedStateHandle cobbleCheckpoint;
+
+        // Stage 1: import the canonical savepoint, mutate via add(), then snapshot.
+        try (TestBackendContext imported =
+                createBackendContext(
+                        tempDir.resolve("imported"),
+                        false,
+                        checkpointDirectory,
+                        null,
+                        TtlTimeProvider.DEFAULT,
+                        false,
+                        Collections.singletonList(rocksSavepoint),
+                        KeyGroupRange.of(keyGroup, keyGroup))) {
+            CobbleKeyedStateBackend<Integer> backend = imported.cobbleBackend;
+            backend.setCurrentKey(key);
+
+            AggregatingState<Integer, String> state =
+                    backend.getPartitionedState(
+                            org.apache.flink.runtime.state.VoidNamespace.INSTANCE,
+                            VoidNamespaceSerializer.INSTANCE,
+                            new AggregatingStateDescriptor<>(
+                                    "aggregating", new SumAggregator(), LongSerializer.INSTANCE));
+            // The RocksDB savepoint helper seeded the accumulator to `seed`.
+            assertEquals("sum=7", state.get());
+            state.add(35);
+            assertEquals("sum=42", state.get());
+
+            cobbleCheckpoint = runCheckpointSnapshot(backend, 1L);
+            backend.notifyCheckpointComplete(1L);
+        }
+
+        // Stage 2: brand-new backend, restored from the Cobble checkpoint, observes the
+        // post-mutation accumulator.
+        try (TestBackendContext restored =
+                createBackendContext(
+                        tempDir.resolve("restored"),
+                        false,
+                        checkpointDirectory,
+                        null,
+                        TtlTimeProvider.DEFAULT,
+                        false,
+                        Collections.singletonList(cobbleCheckpoint),
+                        KeyGroupRange.of(keyGroup, keyGroup))) {
+            CobbleKeyedStateBackend<Integer> backend = restored.cobbleBackend;
+            backend.setCurrentKey(key);
+
+            AggregatingState<Integer, String> state =
+                    backend.getPartitionedState(
+                            org.apache.flink.runtime.state.VoidNamespace.INSTANCE,
+                            VoidNamespaceSerializer.INSTANCE,
+                            new AggregatingStateDescriptor<>(
+                                    "aggregating", new SumAggregator(), LongSerializer.INSTANCE));
+            assertEquals("sum=42", state.get());
+        }
+    }
+
+    @Test
+    void canonicalRestoreRejectsIncompatibleAggregatingValueSerializerBeforeDataRead(
+            @TempDir Path tempDir) throws Exception {
+        // Savepoint declares "aggregating" with a String accumulator serializer. The runtime job
+        // re-registers it with a Long accumulator — the backend must reject before mutating any
+        // column family or reading any row.
+        int key = 42;
+        int keyGroup = KeyGroupRangeAssignment.assignToKeyGroup(key, 16);
+        KeyGroupsSavepointStateHandle savepoint =
+                createCanonicalAggregatingSavepointWithSerializer(
+                        key, keyGroup, "stored-string", StringSerializer.INSTANCE);
+
+        try (TestBackendContext context =
+                createBackendContext(
+                        tempDir,
+                        false,
+                        null,
+                        null,
+                        TtlTimeProvider.DEFAULT,
+                        false,
+                        Collections.singletonList(savepoint),
+                        KeyGroupRange.of(keyGroup, keyGroup))) {
+            CobbleKeyedStateBackend<Integer> backend = context.cobbleBackend;
+            backend.setCurrentKey(key);
+
+            Set<String> columnFamiliesBefore =
+                    backend.getCobbleDb().currentSchema().columnFamilies().keySet();
+
+            Exception error =
+                    assertThrows(
+                            Exception.class,
+                            () ->
+                                    backend.getPartitionedState(
+                                            org.apache.flink.runtime.state.VoidNamespace.INSTANCE,
+                                            VoidNamespaceSerializer.INSTANCE,
+                                            new AggregatingStateDescriptor<>(
+                                                    "aggregating",
+                                                    new SumAggregator(),
+                                                    LongSerializer.INSTANCE)));
+            assertTrue(
+                    hasCause(error, org.apache.flink.util.StateMigrationException.class),
+                    "expected StateMigrationException cause, got: " + error);
+            String message = collectMessages(error);
+            assertTrue(
+                    message.contains("value serializer"),
+                    "error must name the offending role, got: " + message);
+            assertTrue(
+                    message.contains(StringSerializer.class.getName()),
+                    "error must name canonical serializer class, got: " + message);
+            assertTrue(
+                    message.contains(LongSerializer.class.getName()),
+                    "error must name the rejected runtime serializer class, got: " + message);
+            assertTrue(
+                    message.contains("'aggregating'"),
+                    "error must name the state, got: " + message);
+
+            // Schema must be unchanged. The canonical restore already created the family for
+            // "aggregating", but the failed descriptor registration must not add or mutate anything
+            // else.
+            Set<String> columnFamiliesAfter =
+                    backend.getCobbleDb().currentSchema().columnFamilies().keySet();
+            assertEquals(columnFamiliesBefore, columnFamiliesAfter);
+
+            // Re-registering with the canonical-compatible serializer must still succeed.
+            AggregatingState<String, String> recovered =
+                    backend.getPartitionedState(
+                            org.apache.flink.runtime.state.VoidNamespace.INSTANCE,
+                            VoidNamespaceSerializer.INSTANCE,
+                            new AggregatingStateDescriptor<>(
+                                    "aggregating",
+                                    new StringConcatAggregator(),
+                                    StringSerializer.INSTANCE));
+            assertEquals("stored-string", recovered.get());
+        }
+    }
+
+    @Test
+    void canonicalRestoreRejectsKindMismatchBetweenAggregatingSavepointAndReducingDescriptor(
+            @TempDir Path tempDir) throws Exception {
+        // Canonical savepoint registers "agg" as AGGREGATING; runtime re-registers it as REDUCING.
+        int key = 42;
+        int keyGroup = KeyGroupRangeAssignment.assignToKeyGroup(key, 16);
+        KeyGroupsSavepointStateHandle savepoint =
+                createCanonicalAggregatingSavepointNamed(key, keyGroup, 5L, "agg");
+
+        try (TestBackendContext context =
+                createBackendContext(
+                        tempDir,
+                        false,
+                        null,
+                        null,
+                        TtlTimeProvider.DEFAULT,
+                        false,
+                        Collections.singletonList(savepoint),
+                        KeyGroupRange.of(keyGroup, keyGroup))) {
+            CobbleKeyedStateBackend<Integer> backend = context.cobbleBackend;
+            backend.setCurrentKey(key);
+
+            Exception error =
+                    assertThrows(
+                            Exception.class,
+                            () ->
+                                    backend.getPartitionedState(
+                                            org.apache.flink.runtime.state.VoidNamespace.INSTANCE,
+                                            VoidNamespaceSerializer.INSTANCE,
+                                            new ReducingStateDescriptor<>(
+                                                    "agg",
+                                                    (a, b) -> a + b,
+                                                    LongSerializer.INSTANCE)));
+            assertTrue(
+                    hasCause(error, org.apache.flink.util.StateMigrationException.class),
+                    "expected StateMigrationException cause, got: " + error);
+            String message = collectMessages(error);
+            assertTrue(
+                    message.contains("kind mismatch") || message.contains("registers"),
+                    "error should report state-kind mismatch, got: " + message);
+            assertTrue(
+                    message.contains("AGGREGATING"),
+                    "error must mention canonical AGGREGATING kind: " + message);
+            assertTrue(
+                    message.contains("REDUCING"),
+                    "error must mention requested REDUCING kind: " + message);
+        }
+    }
+
+    @Test
+    void canonicalRestoreRejectsFoldingStateBeforeDataRead(@TempDir Path tempDir) throws Exception {
+        // Build a canonical savepoint whose metadata advertises a FOLDING state. The Cobble
+        // canonical-restore path must reject FOLDING outright (it never made it to the column
+        // family / data-read stage).
+        int keyGroup = 7;
+        KeyGroupsSavepointStateHandle savepoint = createCanonicalFoldingSavepoint(keyGroup);
+
+        Exception error =
+                assertThrows(
+                        Exception.class,
+                        () -> {
+                            try (TestBackendContext context =
+                                    createBackendContext(
+                                            tempDir,
+                                            false,
+                                            null,
+                                            null,
+                                            TtlTimeProvider.DEFAULT,
+                                            false,
+                                            Collections.singletonList(savepoint),
+                                            KeyGroupRange.of(keyGroup, keyGroup))) {
+                                // Pass-through: the failure happens during backend construction's
+                                // restore pass before any user-visible state operations.
+                                context.cobbleBackend.setCurrentKey(0);
+                            }
+                        });
+        assertTrue(
+                hasCause(error, UnsupportedOperationException.class),
+                "expected UnsupportedOperationException cause, got: " + error);
+        String message = collectMessages(error);
+        assertTrue(
+                message.contains("FOLDING"),
+                "error must mention the rejected FOLDING kind, got: " + message);
+    }
+
+    @Test
+    void freshBackendRejectsFoldingStateDescriptorWithoutMutatingSchema(@TempDir Path tempDir)
+            throws Exception {
+        // No savepoint — exercise the pre-flight rejection inside createOrUpdateInternalState. The
+        // descriptor must be refused BEFORE ensureStateColumnFamily, so the backend's column-family
+        // map must remain unchanged.
+        try (TestBackendContext context = createBackendContext(tempDir, false, null)) {
+            CobbleKeyedStateBackend<Integer> backend = context.cobbleBackend;
+            backend.setCurrentKey(1);
+
+            Set<String> columnFamiliesBefore =
+                    backend.getCobbleDb().currentSchema().columnFamilies().keySet();
+            Map<String, StateInspectSchema> schemasBefore =
+                    new LinkedHashMap<>(backend.getStateInspectSchemas());
+
+            @SuppressWarnings({"serial", "unchecked", "rawtypes"})
+            org.apache.flink.api.common.state.StateDescriptor foldingDescriptor =
+                    new org.apache.flink.api.common.state.StateDescriptor<
+                            org.apache.flink.api.common.state.State, Integer>(
+                            "folding-rejected", IntSerializer.INSTANCE, 0) {
+                        @Override
+                        public org.apache.flink.api.common.state.StateDescriptor.Type getType() {
+                            return org.apache.flink.api.common.state.StateDescriptor.Type.FOLDING;
+                        }
+                    };
+
+            IllegalArgumentException error =
+                    assertThrows(
+                            IllegalArgumentException.class,
+                            () ->
+                                    backend.getPartitionedState(
+                                            "ns",
+                                            StringSerializer.INSTANCE,
+                                            (org.apache.flink.api.common.state.StateDescriptor)
+                                                    foldingDescriptor));
+            String message = collectMessages(error);
+            assertTrue(
+                    message.contains("not supported"),
+                    "error should say the descriptor is unsupported, got: " + message);
+
+            // Pre-flight rejection must NOT mutate the column-family set or the schema map.
+            Set<String> columnFamiliesAfter =
+                    backend.getCobbleDb().currentSchema().columnFamilies().keySet();
+            assertEquals(columnFamiliesBefore, columnFamiliesAfter);
+            assertEquals(schemasBefore.keySet(), backend.getStateInspectSchemas().keySet());
+        }
+    }
+
+    /**
+     * Builds a hand-authored canonical savepoint with a single AGGREGATING entry under void
+     * namespace, value serializer = LongSerializer, single Long accumulator payload.
+     */
+    private static KeyGroupsSavepointStateHandle createCanonicalAggregatingSavepoint(
+            int key, int keyGroup, long accumulator) throws Exception {
+        return createCanonicalAggregatingSavepointWithSerializer(
+                key, keyGroup, accumulator, LongSerializer.INSTANCE);
+    }
+
+    private static <V>
+            KeyGroupsSavepointStateHandle createCanonicalAggregatingSavepointWithSerializer(
+                    int key, int keyGroup, V accumulator, TypeSerializer<V> accumulatorSerializer)
+                    throws Exception {
+        return createCanonicalAggregatingSavepointNamedWithSerializer(
+                key, keyGroup, accumulator, accumulatorSerializer, "aggregating");
+    }
+
+    private static KeyGroupsSavepointStateHandle createCanonicalAggregatingSavepointNamed(
+            int key, int keyGroup, long accumulator, String stateName) throws Exception {
+        return createCanonicalAggregatingSavepointNamedWithSerializer(
+                key, keyGroup, accumulator, LongSerializer.INSTANCE, stateName);
+    }
+
+    private static <V>
+            KeyGroupsSavepointStateHandle createCanonicalAggregatingSavepointNamedWithSerializer(
+                    int key,
+                    int keyGroup,
+                    V accumulator,
+                    TypeSerializer<V> accumulatorSerializer,
+                    String stateName)
+                    throws Exception {
+        List<StateMetaInfoSnapshot> stateMetaInfos =
+                Collections.singletonList(
+                        new RegisteredKeyValueStateBackendMetaInfo<>(
+                                        org.apache.flink.api.common.state.StateDescriptor.Type
+                                                .AGGREGATING,
+                                        stateName,
+                                        VoidNamespaceSerializer.INSTANCE,
+                                        accumulatorSerializer)
+                                .snapshot());
+        DataOutputSerializer output = new DataOutputSerializer(256);
+        new KeyedBackendSerializationProxy<>(IntSerializer.INSTANCE, stateMetaInfos, false)
+                .write(output);
+
+        DataOutputSerializer body = new DataOutputSerializer(64);
+        body.writeShort(0);
+        writeCanonicalEntry(
+                body,
+                canonicalKey(keyGroup, key, null),
+                CobbleStateKeySerializer.serialize(accumulatorSerializer, accumulator),
+                END_OF_KEY_GROUP_MARK);
+
+        long keyGroupOffset = output.length();
+        writeKeyGroupBody(output, body.getCopyOfBuffer(), false);
+
+        KeyGroupRange range = KeyGroupRange.of(keyGroup, keyGroup);
+        return new KeyGroupsSavepointStateHandle(
+                new KeyGroupRangeOffsets(range, new long[] {keyGroupOffset}),
+                new ByteStreamStateHandle(
+                        "canonical-aggregating-savepoint", output.getCopyOfBuffer()));
+    }
+
+    /**
+     * Builds a canonical savepoint whose metadata advertises a FOLDING state (with a void namespace
+     * and Long value serializer). The savepoint body is intentionally empty — the failure must
+     * surface at metadata-recording time, before any data row is read.
+     */
+    private static KeyGroupsSavepointStateHandle createCanonicalFoldingSavepoint(int keyGroup)
+            throws Exception {
+        List<StateMetaInfoSnapshot> stateMetaInfos =
+                Collections.singletonList(
+                        new RegisteredKeyValueStateBackendMetaInfo<>(
+                                        org.apache.flink.api.common.state.StateDescriptor.Type
+                                                .FOLDING,
+                                        "folding",
+                                        VoidNamespaceSerializer.INSTANCE,
+                                        LongSerializer.INSTANCE)
+                                .snapshot());
+        DataOutputSerializer output = new DataOutputSerializer(256);
+        new KeyedBackendSerializationProxy<>(IntSerializer.INSTANCE, stateMetaInfos, false)
+                .write(output);
+
+        DataOutputSerializer body = new DataOutputSerializer(8);
+        body.writeShort(0);
+        body.writeByte(END_OF_KEY_GROUP_MARK);
+
+        long keyGroupOffset = output.length();
+        writeKeyGroupBody(output, body.getCopyOfBuffer(), false);
+
+        KeyGroupRange range = KeyGroupRange.of(keyGroup, keyGroup);
+        return new KeyGroupsSavepointStateHandle(
+                new KeyGroupRangeOffsets(range, new long[] {keyGroupOffset}),
+                new ByteStreamStateHandle("canonical-folding-savepoint", output.getCopyOfBuffer()));
+    }
+
+    /**
+     * Spins up a real RocksDB state backend, registers an AggregatingState seeded via {@code
+     * add(seed)}, and produces a canonical savepoint handle. Exercises byte-identical compatibility
+     * of Cobble's AGGREGATING import path with Flink's actual canonical writer.
+     */
+    private KeyedStateHandle createRocksDbCanonicalAggregatingSavepoint(
+            Path tempDir, int key, int keyGroup, int seed) throws Exception {
+        Path rocksDbPath = tempDir.resolve("rocksdb-local-aggregating");
+        MockEnvironment environment =
+                new MockEnvironmentBuilder()
+                        .setTaskName("rocksdb-canonical-aggregating-savepoint")
+                        .setJobVertexID(TEST_JOB_VERTEX_ID)
+                        .setManagedMemorySize(MemorySize.ofMebiBytes(128).getBytes())
+                        .setTaskManagerRuntimeInfo(
+                                new TestingTaskManagerRuntimeInfo(
+                                        new Configuration(),
+                                        tempDir.resolve("rocksdb-aggregating-tm").toFile()))
+                        .setTaskStateManager(new TestTaskStateManagerBuilder().build())
+                        .build();
+        AbstractKeyedStateBackend<Integer> backend = null;
+        try {
+            RocksDBStateBackend rocksDbBackend = new RocksDBStateBackend(rocksDbPath.toUri());
+            backend =
+                    rocksDbBackend.createKeyedStateBackend(
+                            environment,
+                            environment.getJobID(),
+                            "rocksdb-canonical-aggregating-savepoint",
+                            IntSerializer.INSTANCE,
+                            16,
+                            KeyGroupRange.of(keyGroup, keyGroup),
+                            environment.getTaskKvStateRegistry(),
+                            TtlTimeProvider.DEFAULT,
+                            environment.getMetricGroup(),
+                            Collections.emptyList(),
+                            new CloseableRegistry(),
+                            0.5d);
+            backend.setCurrentKey(key);
+            AggregatingState<Integer, String> state =
+                    backend.getPartitionedState(
+                            org.apache.flink.runtime.state.VoidNamespace.INSTANCE,
+                            VoidNamespaceSerializer.INSTANCE,
+                            new AggregatingStateDescriptor<>(
+                                    "aggregating", new SumAggregator(), LongSerializer.INSTANCE));
+            state.add(seed);
+
+            SavepointResources<Integer> savepointResources =
+                    ((CheckpointableKeyedStateBackend<Integer>) backend).savepoint();
+            RunnableFuture<SnapshotResult<KeyedStateHandle>> snapshotFuture =
+                    new SnapshotStrategyRunner<>(
+                                    "RocksDB canonical aggregating savepoint",
+                                    new SavepointSnapshotStrategy<>(
+                                            savepointResources.getSnapshotResources()),
+                                    new CloseableRegistry(),
+                                    savepointResources.getPreferredSnapshotExecutionType())
+                            .snapshot(
+                                    1L,
+                                    System.currentTimeMillis(),
+                                    new MemCheckpointStreamFactory(1024 * 1024),
+                                    CheckpointOptions.alignedNoTimeout(
+                                            SavepointType.savepoint(SavepointFormatType.CANONICAL),
+                                            CheckpointStorageLocationReference.getDefault()));
+            snapshotFuture.run();
+            SnapshotResult<KeyedStateHandle> snapshotResult = snapshotFuture.get();
+            return snapshotResult.getJobManagerOwnedSnapshot();
+        } finally {
+            if (backend != null) {
+                backend.dispose();
+            }
+            environment.close();
+        }
+    }
+
+    @Test
+    void aggregatingStateTtlExpiresFromFlinkAndCobble(@TempDir Path tempDir) throws Exception {
+        MockTtlTimeProvider ttlTimeProvider = new MockTtlTimeProvider();
+        ttlTimeProvider.setCurrentTimestamp(0L);
+
+        try (TestBackendContext context =
+                createBackendContext(
+                        tempDir, false, null, MemorySize.ofMebiBytes(1), ttlTimeProvider, true)) {
+            CobbleKeyedStateBackend<Integer> backend = context.cobbleBackend;
+            AggregatingStateDescriptor<Integer, Long, String> descriptor =
+                    new AggregatingStateDescriptor<>(
+                            "ttl-aggregating-state", new SumAggregator(), LongSerializer.INSTANCE);
+            descriptor.enableTimeToLive(StateTtlConfig.newBuilder(Time.seconds(5)).build());
+
+            backend.setCurrentKey(14);
+            AggregatingState<Integer, String> state =
+                    backend.getPartitionedState(
+                            "ttl-aggregating-ns", StringSerializer.INSTANCE, descriptor);
+            state.add(3);
+            state.add(4);
+
+            setTtlTime(backend, ttlTimeProvider, 4_000L);
+            assertEquals("sum=7", state.get());
+
+            setTtlTime(backend, ttlTimeProvider, 6_000L);
+            assertNull(state.get());
+        }
+    }
+
+    @Test
+    void aggregatingStateSchemaRoundTripsThroughWriteAndRead(@TempDir Path tempDir)
+            throws Exception {
+        try (TestBackendContext context = createBackendContext(tempDir, false, null)) {
+            CobbleKeyedStateBackend<Integer> backend = context.cobbleBackend;
+            backend.setCurrentKey(1);
+            AggregatingStateDescriptor<Integer, Long, String> descriptor =
+                    new AggregatingStateDescriptor<>(
+                            "ag-schema", new SumAggregator(), LongSerializer.INSTANCE);
+            backend.getPartitionedState("ns", StringSerializer.INSTANCE, descriptor).add(1);
+
+            StateInspectSchema schema = backend.getStateInspectSchemas().get("ag-schema");
+            assertNotNull(schema);
+            assertEquals(StateKind.AGGREGATING, schema.stateKind());
+
+            // The captured value serializer must be the ACCUMULATOR type (Long), not the OUT type
+            // (String) — accumulators are what live on disk for AggregatingState.
+            assertEquals(
+                    LongSerializer.INSTANCE.getClass().getName(),
+                    schema.valueSerializer().serializerClassName());
+
+            // Round-trip via the StateInspectSchemaStore wire format.
+            StateInspectSchemaStore store =
+                    new StateInspectSchemaStore(Collections.singletonList(schema));
+            byte[] bytes = store.toBytes();
+            StateInspectSchemaStore roundTripped = StateInspectSchemaStore.fromBytes(bytes);
+            StateInspectSchema decoded = roundTripped.schemas().get(0);
+            assertEquals(StateKind.AGGREGATING, decoded.stateKind());
+            assertEquals(schema.serializerClassNames(), decoded.serializerClassNames());
+        }
+    }
+
+    // -------- AggregatingState test helpers --------
+
+    /** IN=Integer, ACC=Long, OUT=String. ACC and OUT are deliberately different types. */
+    private static final class SumAggregator implements AggregateFunction<Integer, Long, String> {
+        @Override
+        public Long createAccumulator() {
+            return 0L;
+        }
+
+        @Override
+        public Long add(Integer in, Long acc) {
+            return acc + in;
+        }
+
+        @Override
+        public String getResult(Long acc) {
+            return "sum=" + acc;
+        }
+
+        @Override
+        public Long merge(Long a, Long b) {
+            return a + b;
+        }
+    }
+
+    /** Non-commutative aggregator: IN=ACC=OUT=String, accumulator is the concatenation so far. */
+    private static final class StringConcatAggregator
+            implements AggregateFunction<String, String, String> {
+        @Override
+        public String createAccumulator() {
+            return "";
+        }
+
+        @Override
+        public String add(String in, String acc) {
+            return acc + in;
+        }
+
+        @Override
+        public String getResult(String acc) {
+            return acc;
+        }
+
+        @Override
+        public String merge(String a, String b) {
+            return a + b;
+        }
+    }
+
+    /** Wraps an aggregator and counts merge() invocations (parallel to {@link CountingReducer}). */
+    private static final class CountingAggregator
+            implements AggregateFunction<Integer, Long, String> {
+        private final AggregateFunction<Integer, Long, String> delegate;
+        int mergeCalls;
+
+        CountingAggregator(AggregateFunction<Integer, Long, String> delegate) {
+            this.delegate = delegate;
+        }
+
+        @Override
+        public Long createAccumulator() {
+            return delegate.createAccumulator();
+        }
+
+        @Override
+        public Long add(Integer in, Long acc) {
+            return delegate.add(in, acc);
+        }
+
+        @Override
+        public String getResult(Long acc) {
+            return delegate.getResult(acc);
+        }
+
+        @Override
+        public Long merge(Long a, Long b) {
+            mergeCalls++;
+            return delegate.merge(a, b);
+        }
+    }
+
+    @SuppressWarnings("unchecked")
+    private static <K, N, IN, ACC, OUT>
+            InternalAggregatingState<K, N, IN, ACC, OUT> asInternalAggregatingState(Object state) {
+        return (InternalAggregatingState<K, N, IN, ACC, OUT>) state;
+    }
+
+    /** Variable-length TypeSerializer<long[]> used by exception-preserves-state tests. */
+    private static final class LongArraySerializer
+            extends org.apache.flink.api.common.typeutils.TypeSerializer<long[]> {
+
+        static final LongArraySerializer INSTANCE = new LongArraySerializer();
+
+        @Override
+        public boolean isImmutableType() {
+            return false;
+        }
+
+        @Override
+        public org.apache.flink.api.common.typeutils.TypeSerializer<long[]> duplicate() {
+            return this;
+        }
+
+        @Override
+        public long[] createInstance() {
+            return new long[0];
+        }
+
+        @Override
+        public long[] copy(long[] from) {
+            return from == null ? null : Arrays.copyOf(from, from.length);
+        }
+
+        @Override
+        public long[] copy(long[] from, long[] reuse) {
+            return copy(from);
+        }
+
+        @Override
+        public int getLength() {
+            return -1;
+        }
+
+        @Override
+        public void serialize(long[] record, DataOutputView target) throws IOException {
+            target.writeInt(record.length);
+            for (long v : record) {
+                target.writeLong(v);
+            }
+        }
+
+        @Override
+        public long[] deserialize(DataInputView source) throws IOException {
+            int length = source.readInt();
+            long[] out = new long[length];
+            for (int i = 0; i < length; i++) {
+                out[i] = source.readLong();
+            }
+            return out;
+        }
+
+        @Override
+        public long[] deserialize(long[] reuse, DataInputView source) throws IOException {
+            return deserialize(source);
+        }
+
+        @Override
+        public void copy(DataInputView source, DataOutputView target) throws IOException {
+            int length = source.readInt();
+            target.writeInt(length);
+            for (int i = 0; i < length; i++) {
+                target.writeLong(source.readLong());
+            }
+        }
+
+        @Override
+        public boolean equals(Object obj) {
+            return obj instanceof LongArraySerializer;
+        }
+
+        @Override
+        public int hashCode() {
+            return LongArraySerializer.class.hashCode();
+        }
+
+        @Override
+        public TypeSerializerSnapshot<long[]> snapshotConfiguration() {
+            return new LongArraySerializerSnapshot();
+        }
+    }
+
+    /** Stateless serializer snapshot for {@link LongArraySerializer}. */
+    public static final class LongArraySerializerSnapshot
+            extends SimpleTypeSerializerSnapshot<long[]> {
+        public LongArraySerializerSnapshot() {
+            super(() -> LongArraySerializer.INSTANCE);
         }
     }
 

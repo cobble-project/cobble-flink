@@ -4,6 +4,7 @@ import io.cobble.flink.common.inspect.StateInspectField;
 import io.cobble.flink.common.inspect.StateInspectSemanticSchema;
 import io.cobble.flink.common.inspect.StateInspectType;
 
+import org.apache.flink.api.common.state.AggregatingStateDescriptor;
 import org.apache.flink.api.common.state.ListStateDescriptor;
 import org.apache.flink.api.common.state.MapStateDescriptor;
 import org.apache.flink.api.common.state.ReducingStateDescriptor;
@@ -57,6 +58,24 @@ final class StateInspectSemanticSchemaExtractor {
                 firstKnown(
                         describeDescriptorType(descriptor),
                         fromReducingDescriptorSerializer(descriptor)));
+    }
+
+    /**
+     * Aggregating state stores the accumulator (ACC), so the value slot describes the accumulator
+     * shape, not the output (OUT). We only consult the descriptor's value serializer (which is the
+     * accumulator serializer); the descriptor's declared {@code typeInfo} is the output type and
+     * would be misleading here.
+     */
+    static StateInspectSemanticSchema forAggregating(
+            TypeSerializer<?> stateKeySerializer,
+            TypeSerializer<?> namespaceSerializer,
+            AggregatingStateDescriptor<?, ?, ?> descriptor) {
+        return StateInspectSemanticSchema.forAggregating(
+                fromSerializer(stateKeySerializer),
+                fromSerializer(namespaceSerializer),
+                firstKnown(
+                        fromAggregatingDescriptorSerializer(descriptor),
+                        StateInspectType.unknown()));
     }
 
     static StateInspectSemanticSchema forList(
@@ -117,6 +136,16 @@ final class StateInspectSemanticSchemaExtractor {
     private static StateInspectType fromReducingDescriptorSerializer(
             ReducingStateDescriptor<?> descriptor) {
         try {
+            return fromSerializer(descriptor.getSerializer());
+        } catch (RuntimeException ignored) {
+            return null;
+        }
+    }
+
+    private static StateInspectType fromAggregatingDescriptorSerializer(
+            AggregatingStateDescriptor<?, ?, ?> descriptor) {
+        try {
+            // getSerializer() returns the accumulator serializer for AggregatingStateDescriptor.
             return fromSerializer(descriptor.getSerializer());
         } catch (RuntimeException ignored) {
             return null;

@@ -6,6 +6,7 @@ import io.cobble.flink.common.inspect.StateInspectField;
 import io.cobble.flink.common.inspect.StateInspectSchema;
 import io.cobble.flink.common.inspect.StateInspectSemanticSchema;
 import io.cobble.flink.common.inspect.StateInspectType;
+import io.cobble.flink.common.inspect.StateKind;
 
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
@@ -104,6 +105,12 @@ final class InspectTarget {
         output.put("allows_columns", allowsColumns);
         if (stateKind != null) {
             output.put("state_kind", stateKind);
+            // AggregatingState persists the accumulator (ACC), not the output (OUT). Surface a
+            // human-friendly label so the UI can show the "value" group as "Accumulator" without
+            // changing the wire field name (decoded_value stays the same).
+            if (StateKind.AGGREGATING.name().equals(stateKind)) {
+                output.put("value_part_label", "Accumulator");
+            }
         }
         if (serializerClasses != null && !serializerClasses.isEmpty()) {
             output.put("serializer_classes", serializerClasses);

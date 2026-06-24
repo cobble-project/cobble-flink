@@ -141,6 +141,30 @@ public final class StateInspectSchema {
                 null);
     }
 
+    /**
+     * Captures an AggregatingState schema. The persisted value type is the accumulator (ACC), not
+     * the output (OUT); single-column row layout matches ValueState/ReducingState.
+     */
+    public static <K, N, ACC> StateInspectSchema forAggregating(
+            String stateName,
+            String columnFamily,
+            boolean ttlEnabled,
+            TypeSerializer<K> keySerializer,
+            TypeSerializer<N> namespaceSerializer,
+            TypeSerializer<ACC> accumulatorSerializer) {
+        return new StateInspectSchema(
+                stateName,
+                StateKind.AGGREGATING,
+                columnFamily,
+                ttlEnabled,
+                keySerializer,
+                namespaceSerializer,
+                accumulatorSerializer,
+                null,
+                null,
+                null);
+    }
+
     /** Captures a ListState schema. */
     public static <K, N, E> StateInspectSchema forList(
             String stateName,
@@ -243,7 +267,9 @@ public final class StateInspectSchema {
 
         this.keySerializer = SerializerInspectSchema.fromSerializer(keySerializer);
         this.namespaceSerializer = SerializerInspectSchema.fromSerializer(namespaceSerializer);
-        if (stateKind == StateKind.VALUE || stateKind == StateKind.REDUCING) {
+        if (stateKind == StateKind.VALUE
+                || stateKind == StateKind.REDUCING
+                || stateKind == StateKind.AGGREGATING) {
             this.valueSerializer = SerializerInspectSchema.fromSerializer(primaryValueSerializer);
             this.listElementSerializer = null;
             this.mapUserKeySerializer = null;
@@ -341,6 +367,7 @@ public final class StateInspectSchema {
         switch (stateKind) {
             case VALUE:
             case REDUCING:
+            case AGGREGATING:
                 names.put("value", className(valueSerializer));
                 break;
             case LIST:
@@ -418,6 +445,7 @@ public final class StateInspectSchema {
         switch (stateKind) {
             case VALUE:
             case REDUCING:
+            case AGGREGATING:
                 valueSerializer.write(output);
                 break;
             case LIST:
@@ -452,6 +480,7 @@ public final class StateInspectSchema {
         switch (kind) {
             case VALUE:
             case REDUCING:
+            case AGGREGATING:
                 valueSerializer = SerializerInspectSchema.read(input);
                 break;
             case LIST:

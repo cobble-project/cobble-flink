@@ -183,13 +183,15 @@ final class CanonicalSavepointRestoreOperation<K> {
         if (stateType != StateDescriptor.Type.VALUE
                 && stateType != StateDescriptor.Type.LIST
                 && stateType != StateDescriptor.Type.MAP
-                && stateType != StateDescriptor.Type.REDUCING) {
+                && stateType != StateDescriptor.Type.REDUCING
+                && stateType != StateDescriptor.Type.AGGREGATING) {
             throw new UnsupportedOperationException(
                     "Cobble canonical savepoint restore does not support "
                             + stateType
                             + " state '"
                             + metaInfo.getName()
-                            + "'. Cobble currently supports VALUE, LIST, MAP, and REDUCING state.");
+                            + "'. Cobble currently supports VALUE, LIST, MAP, REDUCING, and"
+                            + " AGGREGATING state.");
         }
         TypeSerializerSnapshot<?> namespaceSnapshot =
                 snapshot.getTypeSerializerSnapshot(
@@ -479,13 +481,15 @@ final class CanonicalSavepointRestoreOperation<K> {
             if (stateType != StateDescriptor.Type.VALUE
                     && stateType != StateDescriptor.Type.LIST
                     && stateType != StateDescriptor.Type.MAP
-                    && stateType != StateDescriptor.Type.REDUCING) {
+                    && stateType != StateDescriptor.Type.REDUCING
+                    && stateType != StateDescriptor.Type.AGGREGATING) {
                 throw new UnsupportedOperationException(
                         "Cobble canonical savepoint restore does not support "
                                 + stateType
                                 + " state '"
                                 + metaInfo.getName()
-                                + "'. Cobble currently supports VALUE, LIST, MAP, and REDUCING state.");
+                                + "'. Cobble currently supports VALUE, LIST, MAP, REDUCING, and"
+                                + " AGGREGATING state.");
             }
             return new RestoredKeyValueState(
                     metaInfo.getName(),
@@ -534,9 +538,11 @@ final class CanonicalSavepointRestoreOperation<K> {
             switch (stateType) {
                 case VALUE:
                 case REDUCING:
-                    // ReducingState shares the VALUE storage shape (single serialized V in column
-                    // 0); canonical payload bytes are wire-identical to what CobbleReducingState
-                    // would write, so import them verbatim with no transformation.
+                case AGGREGATING:
+                    // ReducingState and AggregatingState share the VALUE storage shape (single
+                    // serialized payload in column 0); canonical bytes are wire-identical to what
+                    // Cobble{Reducing,Aggregating}State would write (the persisted type is the
+                    // accumulator for AGGREGATING), so import them verbatim with no transformation.
                     db.put(
                             keyGroup,
                             buildKeyAndNamespace(

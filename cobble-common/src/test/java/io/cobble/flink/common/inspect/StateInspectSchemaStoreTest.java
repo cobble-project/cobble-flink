@@ -11,6 +11,7 @@ import org.apache.flink.api.common.typeutils.TypeSerializer;
 import org.apache.flink.api.common.typeutils.TypeSerializerSnapshot;
 import org.apache.flink.api.common.typeutils.base.IntSerializer;
 import org.apache.flink.api.common.typeutils.base.ListSerializer;
+import org.apache.flink.api.common.typeutils.base.LongSerializer;
 import org.apache.flink.api.common.typeutils.base.MapSerializer;
 import org.apache.flink.api.common.typeutils.base.StringSerializer;
 import org.apache.flink.core.memory.DataInputDeserializer;
@@ -235,6 +236,77 @@ class StateInspectSchemaStoreTest {
         assertNotNull(out.mapUserValueSerializer());
         assertNull(out.valueSerializer());
         assertNull(out.listElementSerializer());
+    }
+
+    @Test
+    void aggregatingStateSchemaRoundTrips() throws IOException {
+        // AggregatingState persists the accumulator (ACC), so the serializer captured under the
+        // "value" role is the accumulator serializer. Single-column row layout matches
+        // ValueState/ReducingState.
+        StateInspectSchema schema =
+                StateInspectSchema.forAggregating(
+                        "agg-state",
+                        "agg-state",
+                        false,
+                        IntSerializer.INSTANCE,
+                        StringSerializer.INSTANCE,
+                        LongSerializer.INSTANCE);
+        StateInspectSchemaStore restored =
+                roundTrip(new StateInspectSchemaStore(Arrays.asList(schema)));
+
+        StateInspectSchema out = restored.schemas().get(0);
+        assertEquals(StateKind.AGGREGATING, out.stateKind());
+        assertEquals("agg-state", out.stateName());
+        assertEquals("agg-state", out.columnFamily());
+        assertFalse(out.ttlEnabled());
+
+        // key=Int(fixed,4), namespace=String(var,-1) -> only one variable part so no length stored.
+        assertTrue(out.keyFixedLength());
+        assertFalse(out.namespaceFixedLength());
+        assertFalse(out.keyLengthStored());
+
+        // Aggregating fills the same value slot as VALUE/REDUCING (single accumulator column).
+        assertNotNull(out.valueSerializer());
+        assertNull(out.listElementSerializer());
+        assertNull(out.mapUserKeySerializer());
+        assertNull(out.mapUserValueSerializer());
+
+        // The captured serializer is the accumulator type (Long), confirming ACC-not-OUT capture.
+        assertEquals(
+                LongSerializer.INSTANCE.getClass().getName(),
+                out.valueSerializer().serializerClassName());
+        assertEquals(8, out.valueSerializer().lengthTag());
+
+        // Restored serializer should be a live LongSerializer.
+        TypeSerializer<?> restoredAccumulator =
+                out.valueSerializer().restoreSerializer(getClass().getClassLoader());
+        assertNotNull(restoredAccumulator);
+        assertTrue(restoredAccumulator instanceof LongSerializer);
+    }
+
+    @Test
+    void aggregatingSchemaCapturesAccumulatorSerializerNotOutput() throws IOException {
+        // Sanity: the public factory takes the accumulator serializer (ACC=Long) — even though a
+        // real AggregateFunction's OUT could be a different type like String, the schema must
+        // record the accumulator class, because that is what is on disk.
+        StateInspectSchema schema =
+                StateInspectSchema.forAggregating(
+                        "acc-not-output",
+                        "acc-not-output",
+                        false,
+                        IntSerializer.INSTANCE,
+                        StringSerializer.INSTANCE,
+                        LongSerializer.INSTANCE);
+
+        // OUT (e.g. String) must never leak into the captured schema's value role.
+        assertEquals(
+                LongSerializer.INSTANCE.getClass().getName(),
+                schema.valueSerializer().serializerClassName());
+        assertFalse(
+                schema.valueSerializer()
+                        .serializerClassName()
+                        .equals(StringSerializer.INSTANCE.getClass().getName()),
+                "value serializer must be ACC (Long), not OUT (String)");
     }
 
     @Test
