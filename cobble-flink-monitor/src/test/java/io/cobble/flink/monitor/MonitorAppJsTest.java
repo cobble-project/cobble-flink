@@ -33,8 +33,12 @@ class MonitorAppJsTest {
                         + "const aggregatingCamel = semanticTableGroups({ semanticParts: { value: valueType }, valuePartLabel: 'Accumulator' }).find((g) => g.id === 'value').label;\n"
                         + "const value = semanticTableGroups({ semantic_parts: { value: valueType }, state_kind: 'VALUE' }).find((g) => g.id === 'value').label;\n"
                         + "const reducing = semanticTableGroups({ semantic_parts: { value: valueType }, state_kind: 'REDUCING' }).find((g) => g.id === 'value').label;\n"
-                        + "const rendered = renderStateGroupHeaders(semanticTableGroups({ semantic_parts: { value: valueType }, value_part_label: 'Accumulator' }));\n"
-                        + "console.log(JSON.stringify({ aggregating, aggregatingCamel, value, reducing, rendered }));\n";
+                        + "const aggregatingTarget = { kind: 'state', semantic_parts: { value: valueType }, value_part_label: 'Accumulator' };\n"
+                        + "const reducingTarget = { kind: 'state', semantic_parts: { value: valueType }, state_kind: 'REDUCING' };\n"
+                        + "const rendered = renderStateGroupHeaders(semanticTableGroups(aggregatingTarget));\n"
+                        + "const matchingSignature = semanticTableSignature(aggregatingTarget) === semanticTableSignature(aggregatingTarget);\n"
+                        + "const mixedSignature = semanticTableSignature(aggregatingTarget) === semanticTableSignature(reducingTarget);\n"
+                        + "console.log(JSON.stringify({ aggregating, aggregatingCamel, value, reducing, rendered, matchingSignature, mixedSignature }));\n";
 
         Process process = new ProcessBuilder("node", "--input-type=module", "-").start();
         process.getOutputStream().write(harness.getBytes(StandardCharsets.UTF_8));
@@ -50,6 +54,8 @@ class MonitorAppJsTest {
         assertTrue(stdout.contains("\"reducing\":\"Value\""));
         assertTrue(stdout.contains("Accumulator"));
         assertFalse(stdout.contains(">Value</th>"));
+        assertTrue(stdout.contains("\"matchingSignature\":true"));
+        assertTrue(stdout.contains("\"mixedSignature\":false"));
     }
 
     private static String readAppJs() throws IOException {

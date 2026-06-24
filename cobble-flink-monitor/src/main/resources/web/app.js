@@ -1181,7 +1181,7 @@ function isStateExpandedLookup(items) {
 function semanticTableSignature(target) {
   if (!isSemanticStateTableTarget(target)) return ''
   return semanticTableGroups(target)
-    .map((group) => `${group.id}:${group.fields.map((field) => `${field.name}:${field.logical_type}`).join(',')}`)
+    .map((group) => `${group.id}:${group.label}:${group.fields.map((field) => `${field.name}:${field.logical_type}`).join(',')}`)
     .join('|')
 }
 
