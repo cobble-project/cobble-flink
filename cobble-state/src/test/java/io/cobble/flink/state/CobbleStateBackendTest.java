@@ -96,8 +96,13 @@ import org.apache.flink.runtime.state.metainfo.StateMetaInfoSnapshot;
 import org.apache.flink.runtime.state.ttl.MockTtlTimeProvider;
 import org.apache.flink.runtime.state.ttl.TtlTimeProvider;
 import org.apache.flink.runtime.util.TestingTaskManagerRuntimeInfo;
+import org.apache.flink.streaming.api.operators.InternalTimeServiceManagerImpl;
+import org.apache.flink.streaming.api.operators.InternalTimerService;
+import org.apache.flink.streaming.api.operators.KeyContext;
 import org.apache.flink.streaming.api.operators.TimerHeapInternalTimer;
 import org.apache.flink.streaming.api.operators.TimerSerializer;
+import org.apache.flink.streaming.api.operators.Triggerable;
+import org.apache.flink.streaming.runtime.tasks.TestProcessingTimeService;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
@@ -6851,6 +6856,168 @@ class CobbleStateBackendTest {
             }
             environment.close();
         }
+    }
+
+    /**
+     * Creates a real RocksDB canonical savepoint containing event-time and/or processing-time
+     * timers registered through Flink's {@link InternalTimeServiceManagerImpl}. Unlike {@link
+     * #createCanonicalTimerSavepoint(int, TimerHeapInternalTimer)} (which hand-crafts the bytes),
+     * this helper spins up a real {@link RocksDBStateBackend}, registers timers via the genuine
+     * {@link InternalTimerService#registerEventTimeTimer}/{@code registerProcessingTimeTimer} API,
+     * and lets {@code RocksDBKeyedStateBackend.savepoint()} produce the canonical bytes.
+     *
+     * <p>The resulting {@link KeyGroupsSavepointStateHandle} contains two {@code PRIORITY_QUEUE}
+     * states named {@code _timer_state/processing_<timerServiceName>} and {@code
+     * _timer_state/event_<timerServiceName>} — exactly the format Cobble's {@code
+     * CanonicalSavepointRestoreOperation.RestoredPriorityQueueState} restores.
+     *
+     * @param tempDir scratch directory for the RocksDB working files.
+     * @param keyGroupRange the key-group range the producing backend owns (16 total key-groups).
+     * @param timerServiceName the timer-service name passed to {@code getInternalTimerService};
+     *     Flink derives the queue names {@code _timer_state/{processing,event}_<name>} from it.
+     * @param registrar a callback that receives the live backend and timer service; it should call
+     *     {@code backend.setCurrentKey(...)} then {@code timerService.registerEventTimeTimer(...)}
+     *     / {@code registerProcessingTimeTimer(...)} for each timer to seed into the savepoint.
+     */
+    KeyedStateHandle createRocksDbCanonicalTimerSavepoint(
+            Path tempDir,
+            KeyGroupRange keyGroupRange,
+            String timerServiceName,
+            TimerRegistrar<org.apache.flink.runtime.state.VoidNamespace> registrar)
+            throws Exception {
+        return createRocksDbCanonicalTimerSavepoint(
+                tempDir,
+                keyGroupRange,
+                timerServiceName,
+                VoidNamespaceSerializer.INSTANCE,
+                registrar);
+    }
+
+    /**
+     * Generic variant of {@link #createRocksDbCanonicalTimerSavepoint(Path, KeyGroupRange, String,
+     * TimerRegistrar)} that accepts a custom namespace serializer, so callers can seed timers under
+     * real namespaces (e.g. {@link StringSerializer}) and verify namespace isolation after restore.
+     *
+     * @param namespaceSerializer the namespace serializer passed to {@code
+     *     getInternalTimerService}.
+     * @param registrar a callback typed to the same namespace; see the {@link VoidNamespace}
+     *     overload for the contract.
+     * @param <N> the namespace type.
+     */
+    <N> KeyedStateHandle createRocksDbCanonicalTimerSavepoint(
+            Path tempDir,
+            KeyGroupRange keyGroupRange,
+            String timerServiceName,
+            TypeSerializer<N> namespaceSerializer,
+            TimerRegistrar<N> registrar)
+            throws Exception {
+        Path rocksDbPath = tempDir.resolve("rocksdb-local-timers");
+        MockEnvironment environment =
+                new MockEnvironmentBuilder()
+                        .setTaskName("rocksdb-canonical-timer-savepoint")
+                        .setJobVertexID(TEST_JOB_VERTEX_ID)
+                        .setManagedMemorySize(MemorySize.ofMebiBytes(128).getBytes())
+                        .setTaskManagerRuntimeInfo(
+                                new TestingTaskManagerRuntimeInfo(
+                                        new Configuration(),
+                                        tempDir.resolve("rocksdb-timers-tm").toFile()))
+                        .setTaskStateManager(new TestTaskStateManagerBuilder().build())
+                        .build();
+        RocksDBStateBackend rocksDbBackend = new RocksDBStateBackend(rocksDbPath.toUri());
+        // PriorityQueueStateType.ROCKSDB is the default: timers live as RocksDB column
+        // families and are therefore included in the canonical savepoint's KV stream.
+        final AbstractKeyedStateBackend<Integer> backend =
+                rocksDbBackend.createKeyedStateBackend(
+                        environment,
+                        environment.getJobID(),
+                        "rocksdb-canonical-timer-savepoint",
+                        IntSerializer.INSTANCE,
+                        16,
+                        keyGroupRange,
+                        environment.getTaskKvStateRegistry(),
+                        TtlTimeProvider.DEFAULT,
+                        environment.getMetricGroup(),
+                        Collections.emptyList(),
+                        new CloseableRegistry(),
+                        0.5d);
+        try {
+            // The keyed state backend is not itself a KeyContext (AbstractKeyedStateBackend
+            // implements InternalKeyContext, not the streaming KeyContext).
+            // InternalTimerServiceImpl only needs getCurrentKey()/setCurrentKey() from the
+            // context, so a thin adapter that delegates to the backend is sufficient. We never
+            // advance the TestProcessingTimeService clock, so processing-time callbacks never
+            // fire; the timers simply sit in the queues.
+            KeyContext keyContext =
+                    new KeyContext() {
+                        @Override
+                        public void setCurrentKey(Object key) {
+                            backend.setCurrentKey((Integer) key);
+                        }
+
+                        @Override
+                        public Object getCurrentKey() {
+                            return backend.getCurrentKey();
+                        }
+                    };
+            InternalTimeServiceManagerImpl<Integer> timerManager =
+                    InternalTimeServiceManagerImpl.create(
+                            (CheckpointableKeyedStateBackend<Integer>) backend,
+                            getClass().getClassLoader(),
+                            keyContext,
+                            new TestProcessingTimeService(),
+                            Collections.emptyList());
+
+            InternalTimerService<N> timerService =
+                    timerManager.getInternalTimerService(
+                            timerServiceName,
+                            IntSerializer.INSTANCE,
+                            namespaceSerializer,
+                            new NoOpTriggerable<>());
+
+            registrar.register(backend, timerService);
+
+            SavepointResources<Integer> savepointResources =
+                    ((CheckpointableKeyedStateBackend<Integer>) backend).savepoint();
+            RunnableFuture<SnapshotResult<KeyedStateHandle>> snapshotFuture =
+                    new SnapshotStrategyRunner<>(
+                                    "RocksDB canonical timer savepoint",
+                                    new SavepointSnapshotStrategy<>(
+                                            savepointResources.getSnapshotResources()),
+                                    new CloseableRegistry(),
+                                    savepointResources.getPreferredSnapshotExecutionType())
+                            .snapshot(
+                                    1L,
+                                    System.currentTimeMillis(),
+                                    new MemCheckpointStreamFactory(1024 * 1024),
+                                    CheckpointOptions.alignedNoTimeout(
+                                            SavepointType.savepoint(SavepointFormatType.CANONICAL),
+                                            CheckpointStorageLocationReference.getDefault()));
+            snapshotFuture.run();
+            SnapshotResult<KeyedStateHandle> snapshotResult = snapshotFuture.get();
+            return snapshotResult.getJobManagerOwnedSnapshot();
+        } finally {
+            backend.dispose();
+            environment.close();
+        }
+    }
+
+    /** Callback for {@link #createRocksDbCanonicalTimerSavepoint} to seed timers. */
+    @FunctionalInterface
+    interface TimerRegistrar<N> {
+        void register(
+                AbstractKeyedStateBackend<Integer> backend, InternalTimerService<N> timerService)
+                throws Exception;
+    }
+
+    /** A no-op {@link Triggerable} so the timer service can be constructed without firing. */
+    private static final class NoOpTriggerable<N> implements Triggerable<Integer, N> {
+        @Override
+        public void onEventTime(
+                org.apache.flink.streaming.api.operators.InternalTimer<Integer, N> timer) {}
+
+        @Override
+        public void onProcessingTime(
+                org.apache.flink.streaming.api.operators.InternalTimer<Integer, N> timer) {}
     }
 
     private KeyedStateHandle createRocksDbCanonicalSavepoint(Path tempDir, int key, int keyGroup)
