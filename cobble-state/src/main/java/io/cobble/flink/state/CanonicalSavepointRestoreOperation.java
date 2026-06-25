@@ -588,11 +588,12 @@ final class CanonicalSavepointRestoreOperation<K> {
                 throws IOException {
             MapSerializer mapSerializer = (MapSerializer) valueSerializer;
             Object userKey = mapSerializer.getKeySerializer().deserialize(keyInput);
-            // Canonical MapState value layout matches Cobble's on-disk MapState row value
-            // byte-for-byte: leading isNull byte + (optional) user-value bytes. Validate the
-            // payload up front so a malformed row fails before we touch the DB, then persist the
-            // canonical bytes verbatim — re-encoding would be a no-op round-trip and risks drift
-            // from the canonical wire format.
+            // Canonical MapState present-non-null values match Cobble's row-value layout:
+            // leading isNull=false byte + user-value bytes. Present-null rows are looser in real
+            // RocksDB canonical savepoints: after the isNull=true marker, RocksDB may keep
+            // serializer-produced bytes, and its read path ignores those bytes. Cobble validates
+            // that shape, imports the canonical bytes verbatim, and its decode path also ignores
+            // the trailing bytes for present-null rows.
             MapValueCodec.validate(rawValue, mapSerializer.getValueSerializer());
             db.put(
                     keyGroup,

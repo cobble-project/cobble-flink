@@ -88,14 +88,18 @@ final class MapValueCodec {
     }
 
     /**
-     * Validates that the given bytes are a well-formed Cobble/canonical MapState row value: the
-     * leading isNull byte followed by exactly the expected payload (or nothing, for present-null).
-     * Throws {@link IOException} if the payload is malformed or if there are trailing bytes after
-     * the user value. Used by the canonical-savepoint restore path as a per-entry check immediately
-     * before that entry is written, so the same bytes can be persisted verbatim afterwards. This is
-     * not a transaction-wide preflight: earlier entries in the same restore may already have been
-     * written when a later validate fails; restore-level error handling is responsible for cleaning
-     * up partially-restored state.
+     * Validates that the given bytes are a well-formed Cobble/canonical MapState row value: a
+     * leading isNull byte followed by exactly the expected user-value payload for present non-null
+     * entries. Present-null entries may be the compact Cobble form (only the null marker) or real
+     * RocksDB canonical bytes that keep serializer-produced bytes after the null marker; decode
+     * paths intentionally ignore those trailing bytes once the marker says "null".
+     *
+     * <p>Throws {@link IOException} if the present-non-null payload is malformed or has trailing
+     * bytes after the user value. Used by the canonical-savepoint restore path as a per-entry check
+     * immediately before that entry is written, so the same bytes can be persisted verbatim
+     * afterwards. This is not a transaction-wide preflight: earlier entries in the same restore may
+     * already have been written when a later validate fails; restore-level error handling is
+     * responsible for cleaning up partially-restored state.
      */
     static void validate(byte[] rowValueBytes, TypeSerializer<?> userValueSerializer)
             throws IOException {
@@ -105,9 +109,15 @@ final class MapValueCodec {
         }
         DataInputDeserializer input = new DataInputDeserializer(rowValueBytes);
         byte marker = input.readByte();
-        if (marker == PRESENT_NON_NULL) {
-            userValueSerializer.deserialize(input);
+        if (marker != PRESENT_NON_NULL) {
+            // Real RocksDB canonical MapState bytes are produced by serializeValueNullSensitive:
+            // write the null marker, then still invoke the user-value serializer with null. Some
+            // serializers (for example StringSerializer) therefore leave bytes after the marker,
+            // while RocksDB's own read path ignores them once the marker says "null". Cobble must
+            // accept both those real canonical rows and its own compact one-byte null rows.
+            return;
         }
+        userValueSerializer.deserialize(input);
         if (input.available() != 0) {
             throw new IOException(
                     "MapState row value has "

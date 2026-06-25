@@ -216,6 +216,183 @@ class CobbleStateBackendTest {
     }
 
     @Test
+    void restoresRealRocksDbCanonicalSavepointAllStateKindsAndRoundTripsCobbleCheckpoint(
+            @TempDir Path tempDir) throws Exception {
+        int key1 = findKeyForGroup(3);
+        int key2 = findKeyForGroup(11);
+        KeyGroupRange keyGroupRange = KeyGroupRange.of(3, 11);
+        KeyedStateHandle savepoint =
+                createRocksDbCanonicalAllStateKindsSavepoint(tempDir, key1, key2, keyGroupRange);
+        assertInstanceOf(KeyGroupsSavepointStateHandle.class, savepoint);
+
+        String checkpointDirectory = tempDir.resolve("checkpoints").toUri().toString();
+        KeyedStateHandle cobbleCheckpoint;
+
+        try (TestBackendContext imported =
+                createBackendContext(
+                        tempDir.resolve("imported-all-kinds"),
+                        false,
+                        checkpointDirectory,
+                        null,
+                        TtlTimeProvider.DEFAULT,
+                        false,
+                        Collections.singletonList(savepoint),
+                        keyGroupRange)) {
+            CobbleKeyedStateBackend<Integer> backend = imported.cobbleBackend;
+
+            ValueState<String> value = valueState(backend, "value-all", "ns-a");
+            ListState<String> list = listState(backend, "list-all", "ns-a");
+            MapState<String, String> map = mapState(backend, "map-all", "ns-a");
+            ReducingState<Integer> reducing = reducingState(backend, "reducing-all", "ns-a");
+            AggregatingState<Integer, String> aggregating =
+                    aggregatingState(backend, "aggregating-all", "ns-a");
+
+            backend.setCurrentKey(key1);
+            assertEquals("value-k1-ns-a", value.value());
+            assertEquals(Arrays.asList("k1-a-left", "k1-a-right"), toList(list.get()));
+            assertTrue(map.contains("k1-null"));
+            assertNull(map.get("k1-null"));
+            assertTrue(map.contains("k1-a"));
+            assertEquals("map-k1-a", map.get("k1-a"));
+            assertEquals(Integer.valueOf(3), reducing.get());
+            assertEquals("sum=7", aggregating.get());
+
+            backend.setCurrentKey(key2);
+            assertEquals("value-k2-ns-a", value.value());
+            assertEquals(Arrays.asList("k2-a-left", "k2-a-right"), toList(list.get()));
+            assertTrue(map.contains("k2-null"));
+            assertNull(map.get("k2-null"));
+            assertTrue(map.contains("k2-a"));
+            assertEquals("map-k2-a", map.get("k2-a"));
+            assertEquals(Integer.valueOf(30), reducing.get());
+            assertEquals("sum=70", aggregating.get());
+
+            ValueState<String> valueNsB = valueState(backend, "value-all", "ns-b");
+            ListState<String> listNsB = listState(backend, "list-all", "ns-b");
+            MapState<String, String> mapNsB = mapState(backend, "map-all", "ns-b");
+            ReducingState<Integer> reducingNsB = reducingState(backend, "reducing-all", "ns-b");
+            AggregatingState<Integer, String> aggregatingNsB =
+                    aggregatingState(backend, "aggregating-all", "ns-b");
+            backend.setCurrentKey(key1);
+            assertEquals("value-k1-ns-b", valueNsB.value());
+            assertEquals(Arrays.asList("k1-b-only"), toList(listNsB.get()));
+            assertEquals("map-k1-b", mapNsB.get("k1-b"));
+            assertEquals(Integer.valueOf(5), reducingNsB.get());
+            assertEquals("sum=11", aggregatingNsB.get());
+            backend.setCurrentKey(key2);
+            assertNull(valueNsB.value());
+            assertNull(listNsB.get());
+            assertFalse(mapNsB.contains("k1-b"));
+            assertNull(reducingNsB.get());
+            assertNull(aggregatingNsB.get());
+
+            // Mutate every state kind after import. This verifies the imported DB is fully
+            // writable,
+            // not merely readable, before producing a native Cobble checkpoint. Re-fetch ns-a after
+            // the ns-b checks above because getPartitionedState mutates the cached state's current
+            // namespace as a side effect.
+            value = valueState(backend, "value-all", "ns-a");
+            list = listState(backend, "list-all", "ns-a");
+            map = mapState(backend, "map-all", "ns-a");
+            reducing = reducingState(backend, "reducing-all", "ns-a");
+            aggregating = aggregatingState(backend, "aggregating-all", "ns-a");
+
+            backend.setCurrentKey(key1);
+            value.update("value-k1-ns-a-mutated");
+            list.add("k1-a-tail");
+            map.put("k1-a", "map-k1-a-mutated");
+            map.put("k1-extra", "map-k1-extra");
+            reducing.add(4);
+            aggregating.add(8);
+
+            backend.setCurrentKey(key2);
+            value.update("value-k2-ns-a-mutated");
+            list.addAll(Arrays.asList("k2-a-third", "k2-a-fourth"));
+            map.put("k2-a", "map-k2-a-mutated");
+            map.remove("k2-null");
+            reducing.add(40);
+            aggregating.add(80);
+
+            valueNsB = valueState(backend, "value-all", "ns-b");
+            listNsB = listState(backend, "list-all", "ns-b");
+            mapNsB = mapState(backend, "map-all", "ns-b");
+            reducingNsB = reducingState(backend, "reducing-all", "ns-b");
+            aggregatingNsB = aggregatingState(backend, "aggregating-all", "ns-b");
+
+            backend.setCurrentKey(key1);
+            valueNsB.clear();
+            listNsB.clear();
+            mapNsB.put("k1-b-extra", "map-k1-b-extra");
+            reducingNsB.add(6);
+            aggregatingNsB.add(12);
+
+            cobbleCheckpoint = runCheckpointSnapshot(backend, 301L);
+            backend.notifyCheckpointComplete(301L);
+        }
+
+        try (TestBackendContext restored =
+                createBackendContext(
+                        tempDir.resolve("restored-all-kinds"),
+                        false,
+                        checkpointDirectory,
+                        null,
+                        TtlTimeProvider.DEFAULT,
+                        false,
+                        Collections.singletonList(cobbleCheckpoint),
+                        keyGroupRange)) {
+            CobbleKeyedStateBackend<Integer> backend = restored.cobbleBackend;
+
+            ValueState<String> value = valueState(backend, "value-all", "ns-a");
+            ListState<String> list = listState(backend, "list-all", "ns-a");
+            MapState<String, String> map = mapState(backend, "map-all", "ns-a");
+            ReducingState<Integer> reducing = reducingState(backend, "reducing-all", "ns-a");
+            AggregatingState<Integer, String> aggregating =
+                    aggregatingState(backend, "aggregating-all", "ns-a");
+
+            backend.setCurrentKey(key1);
+            assertEquals("value-k1-ns-a-mutated", value.value());
+            assertEquals(Arrays.asList("k1-a-left", "k1-a-right", "k1-a-tail"), toList(list.get()));
+            assertTrue(map.contains("k1-null"));
+            assertNull(map.get("k1-null"));
+            assertEquals("map-k1-a-mutated", map.get("k1-a"));
+            assertEquals("map-k1-extra", map.get("k1-extra"));
+            assertEquals(Integer.valueOf(7), reducing.get());
+            assertEquals("sum=15", aggregating.get());
+
+            backend.setCurrentKey(key2);
+            assertEquals("value-k2-ns-a-mutated", value.value());
+            assertEquals(
+                    Arrays.asList("k2-a-left", "k2-a-right", "k2-a-third", "k2-a-fourth"),
+                    toList(list.get()));
+            assertFalse(map.contains("k2-null"));
+            assertEquals("map-k2-a-mutated", map.get("k2-a"));
+            assertEquals(Integer.valueOf(70), reducing.get());
+            assertEquals("sum=150", aggregating.get());
+
+            ValueState<String> valueNsB = valueState(backend, "value-all", "ns-b");
+            ListState<String> listNsB = listState(backend, "list-all", "ns-b");
+            MapState<String, String> mapNsB = mapState(backend, "map-all", "ns-b");
+            ReducingState<Integer> reducingNsB = reducingState(backend, "reducing-all", "ns-b");
+            AggregatingState<Integer, String> aggregatingNsB =
+                    aggregatingState(backend, "aggregating-all", "ns-b");
+            backend.setCurrentKey(key1);
+            assertNull(valueNsB.value());
+            assertNull(listNsB.get());
+            assertEquals("map-k1-b", mapNsB.get("k1-b"));
+            assertEquals("map-k1-b-extra", mapNsB.get("k1-b-extra"));
+            assertEquals(Integer.valueOf(11), reducingNsB.get());
+            assertEquals("sum=23", aggregatingNsB.get());
+
+            backend.setCurrentKey(key2);
+            assertNull(valueNsB.value());
+            assertNull(listNsB.get());
+            assertFalse(mapNsB.contains("k1-b"));
+            assertNull(reducingNsB.get());
+            assertNull(aggregatingNsB.get());
+        }
+    }
+
+    @Test
     void restoresCanonicalSavepointFromCompressedStream(@TempDir Path tempDir) throws Exception {
         int key = 42;
         int keyGroup = KeyGroupRangeAssignment.assignToKeyGroup(key, 16);
@@ -6029,6 +6206,53 @@ class CobbleStateBackendTest {
         return (InternalAggregatingState<K, N, IN, ACC, OUT>) state;
     }
 
+    private static ValueState<String> valueState(
+            AbstractKeyedStateBackend<Integer> backend, String name, String namespace)
+            throws Exception {
+        return backend.getPartitionedState(
+                namespace,
+                StringSerializer.INSTANCE,
+                new ValueStateDescriptor<>(name, StringSerializer.INSTANCE));
+    }
+
+    private static ListState<String> listState(
+            AbstractKeyedStateBackend<Integer> backend, String name, String namespace)
+            throws Exception {
+        return backend.getPartitionedState(
+                namespace,
+                StringSerializer.INSTANCE,
+                new ListStateDescriptor<>(name, StringSerializer.INSTANCE));
+    }
+
+    private static MapState<String, String> mapState(
+            AbstractKeyedStateBackend<Integer> backend, String name, String namespace)
+            throws Exception {
+        return backend.getPartitionedState(
+                namespace,
+                StringSerializer.INSTANCE,
+                new MapStateDescriptor<>(
+                        name, StringSerializer.INSTANCE, StringSerializer.INSTANCE));
+    }
+
+    private static ReducingState<Integer> reducingState(
+            AbstractKeyedStateBackend<Integer> backend, String name, String namespace)
+            throws Exception {
+        return backend.getPartitionedState(
+                namespace,
+                StringSerializer.INSTANCE,
+                new ReducingStateDescriptor<>(name, sumReducer(), IntSerializer.INSTANCE));
+    }
+
+    private static AggregatingState<Integer, String> aggregatingState(
+            AbstractKeyedStateBackend<Integer> backend, String name, String namespace)
+            throws Exception {
+        return backend.getPartitionedState(
+                namespace,
+                StringSerializer.INSTANCE,
+                new AggregatingStateDescriptor<>(
+                        name, new SumAggregator(), LongSerializer.INSTANCE));
+    }
+
     /** Variable-length TypeSerializer<long[]> used by exception-preserves-state tests. */
     private static final class LongArraySerializer
             extends org.apache.flink.api.common.typeutils.TypeSerializer<long[]> {
@@ -6526,6 +6750,106 @@ class CobbleStateBackendTest {
         try (org.apache.flink.core.fs.FSDataInputStream inputStream =
                 incrementalHandle.getMetaStateHandle().openInputStream()) {
             return CobbleSnapshotMetadata.read(new DataInputViewStreamWrapper(inputStream));
+        }
+    }
+
+    private KeyedStateHandle createRocksDbCanonicalAllStateKindsSavepoint(
+            Path tempDir, int key1, int key2, KeyGroupRange keyGroupRange) throws Exception {
+        Path rocksDbPath = tempDir.resolve("rocksdb-local-all-kinds");
+        MockEnvironment environment =
+                new MockEnvironmentBuilder()
+                        .setTaskName("rocksdb-canonical-all-kinds-savepoint")
+                        .setJobVertexID(TEST_JOB_VERTEX_ID)
+                        .setManagedMemorySize(MemorySize.ofMebiBytes(128).getBytes())
+                        .setTaskManagerRuntimeInfo(
+                                new TestingTaskManagerRuntimeInfo(
+                                        new Configuration(),
+                                        tempDir.resolve("rocksdb-all-kinds-tm").toFile()))
+                        .setTaskStateManager(new TestTaskStateManagerBuilder().build())
+                        .build();
+        AbstractKeyedStateBackend<Integer> backend = null;
+        try {
+            RocksDBStateBackend rocksDbBackend = new RocksDBStateBackend(rocksDbPath.toUri());
+            backend =
+                    rocksDbBackend.createKeyedStateBackend(
+                            environment,
+                            environment.getJobID(),
+                            "rocksdb-canonical-all-kinds-savepoint",
+                            IntSerializer.INSTANCE,
+                            16,
+                            keyGroupRange,
+                            environment.getTaskKvStateRegistry(),
+                            TtlTimeProvider.DEFAULT,
+                            environment.getMetricGroup(),
+                            Collections.emptyList(),
+                            new CloseableRegistry(),
+                            0.5d);
+
+            ValueState<String> valueNsA = valueState(backend, "value-all", "ns-a");
+            ListState<String> listNsA = listState(backend, "list-all", "ns-a");
+            MapState<String, String> mapNsA = mapState(backend, "map-all", "ns-a");
+            ReducingState<Integer> reducingNsA = reducingState(backend, "reducing-all", "ns-a");
+            AggregatingState<Integer, String> aggregatingNsA =
+                    aggregatingState(backend, "aggregating-all", "ns-a");
+
+            backend.setCurrentKey(key1);
+            valueNsA.update("value-k1-ns-a");
+            listNsA.addAll(Arrays.asList("k1-a-left", "k1-a-right"));
+            mapNsA.put("k1-null", null);
+            mapNsA.put("k1-a", "map-k1-a");
+            reducingNsA.add(1);
+            reducingNsA.add(2);
+            aggregatingNsA.add(3);
+            aggregatingNsA.add(4);
+
+            backend.setCurrentKey(key2);
+            valueNsA.update("value-k2-ns-a");
+            listNsA.addAll(Arrays.asList("k2-a-left", "k2-a-right"));
+            mapNsA.put("k2-null", null);
+            mapNsA.put("k2-a", "map-k2-a");
+            reducingNsA.add(10);
+            reducingNsA.add(20);
+            aggregatingNsA.add(30);
+            aggregatingNsA.add(40);
+
+            ValueState<String> valueNsB = valueState(backend, "value-all", "ns-b");
+            ListState<String> listNsB = listState(backend, "list-all", "ns-b");
+            MapState<String, String> mapNsB = mapState(backend, "map-all", "ns-b");
+            ReducingState<Integer> reducingNsB = reducingState(backend, "reducing-all", "ns-b");
+            AggregatingState<Integer, String> aggregatingNsB =
+                    aggregatingState(backend, "aggregating-all", "ns-b");
+
+            backend.setCurrentKey(key1);
+            valueNsB.update("value-k1-ns-b");
+            listNsB.add("k1-b-only");
+            mapNsB.put("k1-b", "map-k1-b");
+            reducingNsB.add(5);
+            aggregatingNsB.add(11);
+
+            SavepointResources<Integer> savepointResources =
+                    ((CheckpointableKeyedStateBackend<Integer>) backend).savepoint();
+            RunnableFuture<SnapshotResult<KeyedStateHandle>> snapshotFuture =
+                    new SnapshotStrategyRunner<>(
+                                    "RocksDB canonical all-kinds savepoint",
+                                    new SavepointSnapshotStrategy<>(
+                                            savepointResources.getSnapshotResources()),
+                                    new CloseableRegistry(),
+                                    savepointResources.getPreferredSnapshotExecutionType())
+                            .snapshot(
+                                    1L,
+                                    System.currentTimeMillis(),
+                                    new MemCheckpointStreamFactory(1024 * 1024),
+                                    CheckpointOptions.alignedNoTimeout(
+                                            SavepointType.savepoint(SavepointFormatType.CANONICAL),
+                                            CheckpointStorageLocationReference.getDefault()));
+            snapshotFuture.run();
+            SnapshotResult<KeyedStateHandle> snapshotResult = snapshotFuture.get();
+            return snapshotResult.getJobManagerOwnedSnapshot();
+        } finally {
+            if (backend != null) {
+                backend.dispose();
+            }
+            environment.close();
         }
     }
 
