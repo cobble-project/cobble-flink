@@ -156,7 +156,7 @@ final class CanonicalSavepointRestoreOperation<K> {
                     recordPriorityQueueMetadata(snapshot, metadata);
                     break;
                 default:
-                    throw new UnsupportedOperationException(
+                    throw new StateMigrationException(
                             "Cobble canonical savepoint restore supports only keyed state and "
                                     + "priority queues, but found "
                                     + snapshot.getBackendStateType()
@@ -185,7 +185,7 @@ final class CanonicalSavepointRestoreOperation<K> {
                 && stateType != StateDescriptor.Type.MAP
                 && stateType != StateDescriptor.Type.REDUCING
                 && stateType != StateDescriptor.Type.AGGREGATING) {
-            throw new UnsupportedOperationException(
+            throw new StateMigrationException(
                     "Cobble canonical savepoint restore does not support "
                             + stateType
                             + " state '"
@@ -340,7 +340,7 @@ final class CanonicalSavepointRestoreOperation<K> {
     }
 
     private Map<Integer, RestoredState> createStates(List<StateMetaInfoSnapshot> snapshots)
-            throws IOException {
+            throws IOException, StateMigrationException {
         Map<Integer, RestoredState> statesById = new HashMap<>(snapshots.size());
         for (int stateId = 0; stateId < snapshots.size(); stateId++) {
             StateMetaInfoSnapshot snapshot = snapshots.get(stateId);
@@ -355,7 +355,7 @@ final class CanonicalSavepointRestoreOperation<K> {
                     state = RestoredPriorityQueueState.from(snapshot);
                     break;
                 default:
-                    throw new UnsupportedOperationException(
+                    throw new StateMigrationException(
                             "Cobble canonical savepoint restore supports only keyed state and "
                                     + "priority queues, but found "
                                     + snapshot.getBackendStateType()
@@ -432,6 +432,26 @@ final class CanonicalSavepointRestoreOperation<K> {
         state.restore(db, keyGroup, keyGroupPrefixBytes, keySerializer, entry);
     }
 
+    /**
+     * Wraps a malformed-canonical-entry failure so the surfaced {@link IOException} names the state
+     * and key group it occurred under, rather than letting a bare serializer {@code EOFException}
+     * propagate. The original exception is kept as the cause. Row-level malformed bytes are only
+     * discoverable during the import phase (the bytes must be read to be validated); the builder's
+     * failure cleanup still removes the half-imported DB, but the error message must be actionable.
+     */
+    static IOException malformedEntry(
+            String stateName, int keyGroup, String role, IOException cause) {
+        return new IOException(
+                "Malformed canonical savepoint entry for "
+                        + role
+                        + " of state '"
+                        + stateName
+                        + "' in key group "
+                        + keyGroup
+                        + ".",
+                cause);
+    }
+
     private void ensureStateColumnFamily(String stateName) throws IOException {
         Map<Integer, io.cobble.structured.Schema.ColumnType> family =
                 db.currentSchema().columnFamilies().get(stateName);
@@ -474,7 +494,8 @@ final class CanonicalSavepointRestoreOperation<K> {
             this.valueSerializer = valueSerializer;
         }
 
-        static RestoredKeyValueState from(StateMetaInfoSnapshot snapshot) {
+        static RestoredKeyValueState from(StateMetaInfoSnapshot snapshot)
+                throws StateMigrationException {
             RegisteredKeyValueStateBackendMetaInfo<?, ?> metaInfo =
                     new RegisteredKeyValueStateBackendMetaInfo<>(snapshot);
             StateDescriptor.Type stateType = metaInfo.getStateType();
@@ -483,7 +504,7 @@ final class CanonicalSavepointRestoreOperation<K> {
                     && stateType != StateDescriptor.Type.MAP
                     && stateType != StateDescriptor.Type.REDUCING
                     && stateType != StateDescriptor.Type.AGGREGATING) {
-                throw new UnsupportedOperationException(
+                throw new StateMigrationException(
                         "Cobble canonical savepoint restore does not support "
                                 + stateType
                                 + " state '"
@@ -513,8 +534,13 @@ final class CanonicalSavepointRestoreOperation<K> {
                 KeyGroupEntry entry)
                 throws IOException {
             DataInputDeserializer keyInput = new DataInputDeserializer(entry.getKey());
-            int serializedKeyGroup =
-                    CompositeKeySerializationUtils.readKeyGroup(keyGroupPrefixBytes, keyInput);
+            int serializedKeyGroup;
+            try {
+                serializedKeyGroup =
+                        CompositeKeySerializationUtils.readKeyGroup(keyGroupPrefixBytes, keyInput);
+            } catch (IOException e) {
+                throw malformedEntry(name, keyGroup, "key-group prefix", e);
+            }
             if (serializedKeyGroup != keyGroup) {
                 throw new IOException(
                         "Canonical savepoint key-group mismatch for state '"
@@ -528,12 +554,18 @@ final class CanonicalSavepointRestoreOperation<K> {
             boolean ambiguousKey =
                     CompositeKeySerializationUtils.isAmbiguousKeyPossible(
                             keySerializer, namespaceSerializer);
-            Object key =
-                    CompositeKeySerializationUtils.readKey(
-                            (TypeSerializer) keySerializer, keyInput, ambiguousKey);
-            Object namespace =
-                    CompositeKeySerializationUtils.readNamespace(
-                            (TypeSerializer) namespaceSerializer, keyInput, ambiguousKey);
+            Object key;
+            Object namespace;
+            try {
+                key =
+                        CompositeKeySerializationUtils.readKey(
+                                (TypeSerializer) keySerializer, keyInput, ambiguousKey);
+                namespace =
+                        CompositeKeySerializationUtils.readNamespace(
+                                (TypeSerializer) namespaceSerializer, keyInput, ambiguousKey);
+            } catch (IOException e) {
+                throw malformedEntry(name, keyGroup, "key/namespace", e);
+            }
 
             switch (stateType) {
                 case VALUE:
@@ -587,14 +619,23 @@ final class CanonicalSavepointRestoreOperation<K> {
                 TypeSerializer<?> keySerializer)
                 throws IOException {
             MapSerializer mapSerializer = (MapSerializer) valueSerializer;
-            Object userKey = mapSerializer.getKeySerializer().deserialize(keyInput);
+            Object userKey;
+            try {
+                userKey = mapSerializer.getKeySerializer().deserialize(keyInput);
+            } catch (IOException e) {
+                throw malformedEntry(name, keyGroup, "map user key", e);
+            }
             // Canonical MapState present-non-null values match Cobble's row-value layout:
             // leading isNull=false byte + user-value bytes. Present-null rows are looser in real
             // RocksDB canonical savepoints: after the isNull=true marker, RocksDB may keep
             // serializer-produced bytes, and its read path ignores those bytes. Cobble validates
             // that shape, imports the canonical bytes verbatim, and its decode path also ignores
             // the trailing bytes for present-null rows.
-            MapValueCodec.validate(rawValue, mapSerializer.getValueSerializer());
+            try {
+                MapValueCodec.validate(rawValue, mapSerializer.getValueSerializer());
+            } catch (IOException e) {
+                throw malformedEntry(name, keyGroup, "map value", e);
+            }
             db.put(
                     keyGroup,
                     buildMapKey(
@@ -641,15 +682,33 @@ final class CanonicalSavepointRestoreOperation<K> {
                 KeyGroupEntry entry)
                 throws IOException {
             DataInputDeserializer keyInput = new DataInputDeserializer(entry.getKey());
-            int serializedKeyGroup =
-                    CompositeKeySerializationUtils.readKeyGroup(keyGroupPrefixBytes, keyInput);
+            int serializedKeyGroup;
+            try {
+                serializedKeyGroup =
+                        CompositeKeySerializationUtils.readKeyGroup(keyGroupPrefixBytes, keyInput);
+            } catch (IOException e) {
+                throw malformedEntry(name, keyGroup, "timer key-group prefix", e);
+            }
             if (serializedKeyGroup != keyGroup) {
                 throw new IOException(
-                        "Canonical savepoint timer key-group mismatch for state '" + name + "'.");
+                        "Canonical savepoint timer key-group mismatch for state '"
+                                + name
+                                + "': iterator="
+                                + keyGroup
+                                + ", key="
+                                + serializedKeyGroup
+                                + '.');
             }
-            Object timer = ((TypeSerializer) elementSerializer).deserialize(keyInput);
-            byte[] timerBytes =
-                    CobbleStateKeySerializer.serialize((TypeSerializer) elementSerializer, timer);
+            Object timer;
+            byte[] timerBytes;
+            try {
+                timer = ((TypeSerializer) elementSerializer).deserialize(keyInput);
+                timerBytes =
+                        CobbleStateKeySerializer.serialize(
+                                (TypeSerializer) elementSerializer, timer);
+            } catch (IOException e) {
+                throw malformedEntry(name, keyGroup, "timer element", e);
+            }
             try (PriorityQueue queue =
                     db.getOrNewPriorityQueue(
                             CobblePriorityQueueSetFactory.timerQueueColumnFamilyName(name))) {

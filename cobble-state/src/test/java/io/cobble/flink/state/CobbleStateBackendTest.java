@@ -5818,6 +5818,7 @@ class CobbleStateBackendTest {
         // family / data-read stage).
         int keyGroup = 7;
         KeyGroupsSavepointStateHandle savepoint = createCanonicalFoldingSavepoint(keyGroup);
+        Path configuredLocalDir = tempDir.resolve("configured-local-dir");
 
         Exception error =
                 assertThrows(
@@ -5838,13 +5839,28 @@ class CobbleStateBackendTest {
                                 context.cobbleBackend.setCurrentKey(0);
                             }
                         });
+        // FOLDING is an unsupported state kind: the contract surfaces it as a
+        // StateMigrationException (wrapped by the builder's openDb catch), naming the rejected
+        // kind and the state name.
         assertTrue(
-                hasCause(error, UnsupportedOperationException.class),
-                "expected UnsupportedOperationException cause, got: " + error);
+                hasCause(error, org.apache.flink.util.StateMigrationException.class),
+                "expected StateMigrationException cause, got: " + error);
         String message = collectMessages(error);
         assertTrue(
                 message.contains("FOLDING"),
                 "error must mention the rejected FOLDING kind, got: " + message);
+        assertTrue(
+                message.contains("'folding'"),
+                "error must name the rejected state, got: " + message);
+
+        // A preflight rejection must not open a usable DB or leave an instance directory behind.
+        Path[] leakedInstanceDirs = listLeakedInstanceDirs(configuredLocalDir);
+        assertEquals(
+                0,
+                leakedInstanceDirs.length,
+                "FOLDING preflight rejection must not leave a backend instance directory behind. "
+                        + "Found leaked: "
+                        + Arrays.toString(leakedInstanceDirs));
     }
 
     @Test
@@ -5989,6 +6005,426 @@ class CobbleStateBackendTest {
         return new KeyGroupsSavepointStateHandle(
                 new KeyGroupRangeOffsets(range, new long[] {keyGroupOffset}),
                 new ByteStreamStateHandle("canonical-folding-savepoint", output.getCopyOfBuffer()));
+    }
+
+    // =====================================================================================
+    // Task 6 — canonical restore error contract
+    //
+    // Unsupported / incompatible inputs must fail with a stable, message-rich exception, and a
+    // failure discovered only while reading rows must not leave a half-imported but openable DB.
+    // =====================================================================================
+
+    @Test
+    void canonicalRestoreRejectsUnsupportedBackendStateTypeWithStateName(@TempDir Path tempDir)
+            throws Exception {
+        // A canonical savepoint whose metadata advertises an OPERATOR_STATE (neither KEY_VALUE nor
+        // PRIORITY_QUEUE). The preflight must reject it before any DB is opened, naming the
+        // offending backend state type and the state.
+        int keyGroup = 7;
+        KeyGroupsSavepointStateHandle savepoint =
+                createCanonicalSavepointWithUnsupportedBackendStateType(keyGroup);
+        Path configuredLocalDir = tempDir.resolve("configured-local-dir");
+
+        Exception error =
+                assertThrows(
+                        Exception.class,
+                        () ->
+                                createBackendContext(
+                                                tempDir,
+                                                false,
+                                                null,
+                                                null,
+                                                TtlTimeProvider.DEFAULT,
+                                                false,
+                                                Collections.singletonList(savepoint),
+                                                KeyGroupRange.of(keyGroup, keyGroup))
+                                        .close());
+        assertTrue(
+                hasCause(error, org.apache.flink.util.StateMigrationException.class),
+                "expected StateMigrationException cause, got: " + error);
+        String message = collectMessages(error);
+        assertTrue(
+                message.contains("OPERATOR"),
+                "error must name the unsupported backend state type, got: " + message);
+        assertTrue(
+                message.contains("'op-state'"),
+                "error must name the rejected state, got: " + message);
+
+        Path[] leakedInstanceDirs = listLeakedInstanceDirs(configuredLocalDir);
+        assertEquals(
+                0,
+                leakedInstanceDirs.length,
+                "Unsupported-backend-state-type preflight must not leave a backend instance "
+                        + "directory behind. Found leaked: "
+                        + Arrays.toString(leakedInstanceDirs));
+    }
+
+    @Test
+    void canonicalRestoreMalformedValueRowCleansPartialImport(@TempDir Path tempDir)
+            throws Exception {
+        // A VALUE-state savepoint whose first entry imports cleanly, but whose second entry has a
+        // truncated key so readKey/readKeyGroup throws mid-import. The builder's failure cleanup
+        // must remove the half-imported DB, and the error must name the state and key group.
+        int key = 42;
+        int keyGroup = KeyGroupRangeAssignment.assignToKeyGroup(key, 16);
+        KeyGroupsSavepointStateHandle savepoint =
+                createCanonicalSavepointWithMalformedValueRow(key, keyGroup);
+        Path configuredLocalDir = tempDir.resolve("configured-local-dir");
+
+        Exception error =
+                assertThrows(
+                        Exception.class,
+                        () ->
+                                createBackendContext(
+                                                tempDir,
+                                                false,
+                                                null,
+                                                null,
+                                                TtlTimeProvider.DEFAULT,
+                                                false,
+                                                Collections.singletonList(savepoint),
+                                                KeyGroupRange.of(keyGroup, keyGroup))
+                                        .close());
+        String message = collectMessages(error);
+        assertTrue(
+                message.contains("'value'"),
+                "malformed-value-row error must name the state, got: " + message);
+        assertTrue(
+                message.contains("key group " + keyGroup),
+                "malformed-value-row error must name the key group, got: " + message);
+
+        Path[] leakedInstanceDirs = listLeakedInstanceDirs(configuredLocalDir);
+        assertEquals(
+                0,
+                leakedInstanceDirs.length,
+                "Malformed VALUE row must not leave a backend instance directory behind. "
+                        + "Found leaked: "
+                        + Arrays.toString(leakedInstanceDirs));
+    }
+
+    @Test
+    void canonicalRestoreMalformedMapRowCleansPartialImport(@TempDir Path tempDir)
+            throws Exception {
+        // A MAP-state savepoint whose single entry has an empty row value, which MapValueCodec
+        // rejects during import. The error must name the state and key group, and the partial
+        // import must be cleaned up.
+        int key = 42;
+        int keyGroup = KeyGroupRangeAssignment.assignToKeyGroup(key, 16);
+        KeyGroupsSavepointStateHandle savepoint =
+                createCanonicalSavepointWithMalformedMapRow(key, keyGroup);
+        Path configuredLocalDir = tempDir.resolve("configured-local-dir");
+
+        Exception error =
+                assertThrows(
+                        Exception.class,
+                        () ->
+                                createBackendContext(
+                                                tempDir,
+                                                false,
+                                                null,
+                                                null,
+                                                TtlTimeProvider.DEFAULT,
+                                                false,
+                                                Collections.singletonList(savepoint),
+                                                KeyGroupRange.of(keyGroup, keyGroup))
+                                        .close());
+        String message = collectMessages(error);
+        assertTrue(
+                message.contains("'map'"),
+                "malformed-map-row error must name the state, got: " + message);
+        assertTrue(
+                message.contains("key group " + keyGroup),
+                "malformed-map-row error must name the key group, got: " + message);
+
+        Path[] leakedInstanceDirs = listLeakedInstanceDirs(configuredLocalDir);
+        assertEquals(
+                0,
+                leakedInstanceDirs.length,
+                "Malformed MAP row must not leave a backend instance directory behind. "
+                        + "Found leaked: "
+                        + Arrays.toString(leakedInstanceDirs));
+    }
+
+    @Test
+    void canonicalRestoreMalformedTimerRowCleansPartialImport(@TempDir Path tempDir)
+            throws Exception {
+        // A timer (PRIORITY_QUEUE) savepoint whose entry has a truncated timer key so
+        // elementSerializer.deserialize throws mid-import. The error must name the state and key
+        // group, and the partial import must be cleaned up.
+        int keyGroup = 7;
+        KeyGroupsSavepointStateHandle savepoint =
+                createCanonicalTimerSavepointWithMalformedTimer(keyGroup);
+        Path configuredLocalDir = tempDir.resolve("configured-local-dir");
+
+        Exception error =
+                assertThrows(
+                        Exception.class,
+                        () ->
+                                createBackendContext(
+                                                tempDir,
+                                                false,
+                                                null,
+                                                null,
+                                                TtlTimeProvider.DEFAULT,
+                                                false,
+                                                Collections.singletonList(savepoint),
+                                                KeyGroupRange.of(keyGroup, keyGroup))
+                                        .close());
+        String message = collectMessages(error);
+        assertTrue(
+                message.contains("'timer'"),
+                "malformed-timer-row error must name the state, got: " + message);
+        assertTrue(
+                message.contains("key group " + keyGroup),
+                "malformed-timer-row error must name the key group, got: " + message);
+
+        Path[] leakedInstanceDirs = listLeakedInstanceDirs(configuredLocalDir);
+        assertEquals(
+                0,
+                leakedInstanceDirs.length,
+                "Malformed timer row must not leave a backend instance directory behind. "
+                        + "Found leaked: "
+                        + Arrays.toString(leakedInstanceDirs));
+    }
+
+    @Test
+    void canonicalRestoreMultipleHandlesFailureDoesNotKeepEarlierImportedRows(@TempDir Path tempDir)
+            throws Exception {
+        // Handle 1 is a fully-valid VALUE savepoint that imports cleanly; handle 2 is malformed so
+        // the import fails after handle 1's rows were written. The failure cleanup must still
+        // remove the whole instance directory — no recoverable half-imported DB may survive.
+        int key = 42;
+        int keyGroup = KeyGroupRangeAssignment.assignToKeyGroup(key, 16);
+        KeyGroupsSavepointStateHandle valid = createCanonicalSavepoint(key, keyGroup);
+        KeyGroupsSavepointStateHandle malformed =
+                createCanonicalSavepointWithMalformedValueRow(key, keyGroup);
+        Path configuredLocalDir = tempDir.resolve("configured-local-dir");
+
+        assertThrows(
+                Exception.class,
+                () ->
+                        createBackendContext(
+                                        tempDir,
+                                        false,
+                                        null,
+                                        null,
+                                        TtlTimeProvider.DEFAULT,
+                                        false,
+                                        Arrays.asList(valid, malformed),
+                                        KeyGroupRange.of(keyGroup, keyGroup))
+                                .close());
+
+        Path[] leakedInstanceDirs = listLeakedInstanceDirs(configuredLocalDir);
+        assertEquals(
+                0,
+                leakedInstanceDirs.length,
+                "A later handle's failure must not leave handle 1's imported rows in a backend "
+                        + "instance directory. Found leaked: "
+                        + Arrays.toString(leakedInstanceDirs));
+    }
+
+    @Test
+    void canonicalRestoreErrorMessagesIncludeStateAndRole(@TempDir Path tempDir) throws Exception {
+        // Aggregates the serializer-mismatch contract: a runtime descriptor whose value serializer
+        // is incompatible with the canonical savepoint must fail with a message that names the
+        // state, the role (value serializer), and both the canonical and runtime serializer
+        // classes. This complements the per-state-kind mismatch tests above.
+        int key = 42;
+        int keyGroup = KeyGroupRangeAssignment.assignToKeyGroup(key, 16);
+        KeyGroupsSavepointStateHandle savepoint = createCanonicalSavepoint(key, keyGroup);
+
+        try (TestBackendContext context =
+                createBackendContext(
+                        tempDir,
+                        false,
+                        null,
+                        null,
+                        TtlTimeProvider.DEFAULT,
+                        false,
+                        Collections.singletonList(savepoint),
+                        KeyGroupRange.of(keyGroup, keyGroup))) {
+            CobbleKeyedStateBackend<Integer> backend = context.cobbleBackend;
+            backend.setCurrentKey(key);
+
+            Exception error =
+                    assertThrows(
+                            Exception.class,
+                            () ->
+                                    backend.getPartitionedState(
+                                            org.apache.flink.runtime.state.VoidNamespace.INSTANCE,
+                                            VoidNamespaceSerializer.INSTANCE,
+                                            new ValueStateDescriptor<>(
+                                                    "value", IntSerializer.INSTANCE)));
+            assertTrue(
+                    hasCause(error, org.apache.flink.util.StateMigrationException.class),
+                    "expected StateMigrationException cause, got: " + error);
+            String message = collectMessages(error);
+            assertTrue(
+                    message.contains("value serializer"),
+                    "error must name the offending role, got: " + message);
+            assertTrue(
+                    message.contains(StringSerializer.class.getName()),
+                    "error must name the canonical serializer class, got: " + message);
+            assertTrue(
+                    message.contains(IntSerializer.class.getName()),
+                    "error must name the runtime serializer class, got: " + message);
+            assertTrue(message.contains("'value'"), "error must name the state, got: " + message);
+        }
+    }
+
+    /**
+     * Builds a canonical savepoint whose single metadata entry advertises an unsupported {@code
+     * BackendStateType.OPERATOR_STATE} (neither KEY_VALUE nor PRIORITY_QUEUE). The body is empty;
+     * the failure must surface at preflight metadata-recording time.
+     */
+    private static KeyGroupsSavepointStateHandle
+            createCanonicalSavepointWithUnsupportedBackendStateType(int keyGroup) throws Exception {
+        List<StateMetaInfoSnapshot> stateMetaInfos =
+                Collections.singletonList(
+                        new StateMetaInfoSnapshot(
+                                "op-state",
+                                StateMetaInfoSnapshot.BackendStateType.OPERATOR,
+                                Collections.emptyMap(),
+                                Collections.emptyMap()));
+        DataOutputSerializer output = new DataOutputSerializer(256);
+        new KeyedBackendSerializationProxy<>(IntSerializer.INSTANCE, stateMetaInfos, false)
+                .write(output);
+
+        DataOutputSerializer body = new DataOutputSerializer(8);
+        body.writeShort(0);
+        body.writeByte(END_OF_KEY_GROUP_MARK);
+
+        long keyGroupOffset = output.length();
+        writeKeyGroupBody(output, body.getCopyOfBuffer(), false);
+
+        KeyGroupRange range = KeyGroupRange.of(keyGroup, keyGroup);
+        return new KeyGroupsSavepointStateHandle(
+                new KeyGroupRangeOffsets(range, new long[] {keyGroupOffset}),
+                new ByteStreamStateHandle(
+                        "canonical-unsupported-backend-state-type", output.getCopyOfBuffer()));
+    }
+
+    /**
+     * Builds a canonical VALUE-state savepoint whose first entry imports cleanly, but whose second
+     * entry has a truncated key (the key-group prefix is written, then the bytes run out before the
+     * key/namespace can be deserialized). The import fails mid-row after the first {@code db.put}.
+     */
+    private static KeyGroupsSavepointStateHandle createCanonicalSavepointWithMalformedValueRow(
+            int key, int keyGroup) throws Exception {
+        List<StateMetaInfoSnapshot> stateMetaInfos =
+                Collections.singletonList(
+                        new RegisteredKeyValueStateBackendMetaInfo<>(
+                                        org.apache.flink.api.common.state.StateDescriptor.Type
+                                                .VALUE,
+                                        "value",
+                                        VoidNamespaceSerializer.INSTANCE,
+                                        StringSerializer.INSTANCE)
+                                .snapshot());
+        DataOutputSerializer output = new DataOutputSerializer(512);
+        new KeyedBackendSerializationProxy<>(IntSerializer.INSTANCE, stateMetaInfos, false)
+                .write(output);
+
+        long keyGroupOffset = output.length();
+        DataOutputSerializer body = new DataOutputSerializer(128);
+        body.writeShort(0);
+        // First entry: fully-formed, so it is imported into the new DB.
+        writeCanonicalEntry(
+                body,
+                canonicalKey(keyGroup, key, null),
+                CobbleStateKeySerializer.serialize(StringSerializer.INSTANCE, "value-42"),
+                0); // following-state-id = 0 keeps the framework reading another entry
+        // Second entry: a key that is only the key-group prefix, truncated before the key bytes.
+        // readKeyGroup succeeds but readKey throws EOFException, exercising the malformed-entry
+        // wrapper that names the state and key group.
+        DataOutputSerializer truncatedKey = new DataOutputSerializer(8);
+        CompositeKeySerializationUtils.writeKeyGroup(
+                keyGroup,
+                CompositeKeySerializationUtils.computeRequiredBytesInKeyGroupPrefix(16),
+                truncatedKey);
+        writeCanonicalEntry(
+                body,
+                truncatedKey.getCopyOfBuffer(),
+                CobbleStateKeySerializer.serialize(StringSerializer.INSTANCE, "truncated"),
+                END_OF_KEY_GROUP_MARK);
+
+        output.write(body.getCopyOfBuffer());
+
+        KeyGroupRange range = KeyGroupRange.of(keyGroup, keyGroup);
+        return new KeyGroupsSavepointStateHandle(
+                new KeyGroupRangeOffsets(range, new long[] {keyGroupOffset}),
+                new ByteStreamStateHandle(
+                        "canonical-malformed-value-row", output.getCopyOfBuffer()));
+    }
+
+    /**
+     * Builds a canonical MAP-state savepoint whose single entry has an empty row value, which
+     * {@code MapValueCodec.validate} rejects during import.
+     */
+    private static KeyGroupsSavepointStateHandle createCanonicalSavepointWithMalformedMapRow(
+            int key, int keyGroup) throws Exception {
+        List<StateMetaInfoSnapshot> stateMetaInfos =
+                Collections.singletonList(
+                        new RegisteredKeyValueStateBackendMetaInfo<>(
+                                        org.apache.flink.api.common.state.StateDescriptor.Type.MAP,
+                                        "map",
+                                        VoidNamespaceSerializer.INSTANCE,
+                                        new MapSerializer<>(
+                                                StringSerializer.INSTANCE,
+                                                StringSerializer.INSTANCE))
+                                .snapshot());
+        DataOutputSerializer output = new DataOutputSerializer(512);
+        new KeyedBackendSerializationProxy<>(IntSerializer.INSTANCE, stateMetaInfos, false)
+                .write(output);
+
+        long keyGroupOffset = output.length();
+        DataOutputSerializer body = new DataOutputSerializer(128);
+        body.writeShort(0);
+        // Empty row value triggers MapValueCodec's "row value is empty" rejection.
+        writeCanonicalEntry(
+                body, canonicalKey(keyGroup, key, "map-key"), new byte[0], END_OF_KEY_GROUP_MARK);
+
+        output.write(body.getCopyOfBuffer());
+
+        KeyGroupRange range = KeyGroupRange.of(keyGroup, keyGroup);
+        return new KeyGroupsSavepointStateHandle(
+                new KeyGroupRangeOffsets(range, new long[] {keyGroupOffset}),
+                new ByteStreamStateHandle("canonical-malformed-map-row", output.getCopyOfBuffer()));
+    }
+
+    /**
+     * Builds a canonical timer (PRIORITY_QUEUE) savepoint whose entry has a truncated timer key:
+     * the key-group prefix is written, but the {@link TimerSerializer} payload is cut short so
+     * {@code elementSerializer.deserialize} throws EOFException during import.
+     */
+    private static KeyGroupsSavepointStateHandle createCanonicalTimerSavepointWithMalformedTimer(
+            int keyGroup) throws Exception {
+        TimerSerializer<Integer, org.apache.flink.runtime.state.VoidNamespace> serializer =
+                new TimerSerializer<>(IntSerializer.INSTANCE, VoidNamespaceSerializer.INSTANCE);
+        DataOutputSerializer output = new DataOutputSerializer(256);
+        new KeyedBackendSerializationProxy<>(
+                        IntSerializer.INSTANCE,
+                        Collections.singletonList(
+                                new RegisteredPriorityQueueStateBackendMetaInfo<>(
+                                                "timer", serializer)
+                                        .snapshot()),
+                        false)
+                .write(output);
+
+        long keyGroupOffset = output.length();
+        output.writeShort(0);
+        // Key-group prefix only: readKeyGroup succeeds, but elementSerializer.deserialize throws.
+        DataOutputSerializer timerKey = new DataOutputSerializer(16);
+        CompositeKeySerializationUtils.writeKeyGroup(
+                keyGroup,
+                CompositeKeySerializationUtils.computeRequiredBytesInKeyGroupPrefix(16),
+                timerKey);
+        writeCanonicalEntry(output, timerKey.getCopyOfBuffer(), new byte[0], END_OF_KEY_GROUP_MARK);
+
+        KeyGroupRange range = KeyGroupRange.of(keyGroup, keyGroup);
+        return new KeyGroupsSavepointStateHandle(
+                new KeyGroupRangeOffsets(range, new long[] {keyGroupOffset}),
+                new ByteStreamStateHandle(
+                        "canonical-malformed-timer-row", output.getCopyOfBuffer()));
     }
 
     /**
