@@ -120,7 +120,7 @@ import java.util.concurrent.RunnableFuture;
 
 /** Tests for {@link CobbleStateBackend}. */
 class CobbleStateBackendTest {
-    private static final JobVertexID TEST_JOB_VERTEX_ID =
+    static final JobVertexID TEST_JOB_VERTEX_ID =
             JobVertexID.fromHexString("11111111111111111111111111111111");
     private static final String CHECKPOINT_SCOPE = "op_test-operator";
 
@@ -4590,7 +4590,7 @@ class CobbleStateBackendTest {
 
     // -------- ReducingState test helpers --------
 
-    private static ReduceFunction<Integer> sumReducer() {
+    static ReduceFunction<Integer> sumReducer() {
         return (a, b) -> a + b;
     }
 
@@ -6122,7 +6122,7 @@ class CobbleStateBackendTest {
     // -------- AggregatingState test helpers --------
 
     /** IN=Integer, ACC=Long, OUT=String. ACC and OUT are deliberately different types. */
-    private static final class SumAggregator implements AggregateFunction<Integer, Long, String> {
+    static final class SumAggregator implements AggregateFunction<Integer, Long, String> {
         @Override
         public Long createAccumulator() {
             return 0L;
@@ -6206,7 +6206,7 @@ class CobbleStateBackendTest {
         return (InternalAggregatingState<K, N, IN, ACC, OUT>) state;
     }
 
-    private static ValueState<String> valueState(
+    static ValueState<String> valueState(
             AbstractKeyedStateBackend<Integer> backend, String name, String namespace)
             throws Exception {
         return backend.getPartitionedState(
@@ -6215,7 +6215,7 @@ class CobbleStateBackendTest {
                 new ValueStateDescriptor<>(name, StringSerializer.INSTANCE));
     }
 
-    private static ListState<String> listState(
+    static ListState<String> listState(
             AbstractKeyedStateBackend<Integer> backend, String name, String namespace)
             throws Exception {
         return backend.getPartitionedState(
@@ -6224,7 +6224,7 @@ class CobbleStateBackendTest {
                 new ListStateDescriptor<>(name, StringSerializer.INSTANCE));
     }
 
-    private static MapState<String, String> mapState(
+    static MapState<String, String> mapState(
             AbstractKeyedStateBackend<Integer> backend, String name, String namespace)
             throws Exception {
         return backend.getPartitionedState(
@@ -6234,7 +6234,7 @@ class CobbleStateBackendTest {
                         name, StringSerializer.INSTANCE, StringSerializer.INSTANCE));
     }
 
-    private static ReducingState<Integer> reducingState(
+    static ReducingState<Integer> reducingState(
             AbstractKeyedStateBackend<Integer> backend, String name, String namespace)
             throws Exception {
         return backend.getPartitionedState(
@@ -6243,7 +6243,7 @@ class CobbleStateBackendTest {
                 new ReducingStateDescriptor<>(name, sumReducer(), IntSerializer.INSTANCE));
     }
 
-    private static AggregatingState<Integer, String> aggregatingState(
+    static AggregatingState<Integer, String> aggregatingState(
             AbstractKeyedStateBackend<Integer> backend, String name, String namespace)
             throws Exception {
         return backend.getPartitionedState(
@@ -6464,7 +6464,7 @@ class CobbleStateBackendTest {
         }
     }
 
-    private TestBackendContext createBackendContext(
+    TestBackendContext createBackendContext(
             Path tempDir, boolean localDirPrimaryHighPriority, String checkpointDirectory)
             throws Exception {
         return createBackendContext(
@@ -6476,7 +6476,7 @@ class CobbleStateBackendTest {
                 false);
     }
 
-    private TestBackendContext createBackendContext(
+    TestBackendContext createBackendContext(
             Path tempDir,
             boolean localDirPrimaryHighPriority,
             String checkpointDirectory,
@@ -6491,7 +6491,7 @@ class CobbleStateBackendTest {
                 false);
     }
 
-    private TestBackendContext createBackendContext(
+    TestBackendContext createBackendContext(
             Path tempDir,
             boolean localDirPrimaryHighPriority,
             String checkpointDirectory,
@@ -6509,7 +6509,7 @@ class CobbleStateBackendTest {
                 Collections.<KeyedStateHandle>emptyList());
     }
 
-    private TestBackendContext createBackendContext(
+    TestBackendContext createBackendContext(
             Path tempDir,
             boolean localDirPrimaryHighPriority,
             String checkpointDirectory,
@@ -6530,7 +6530,7 @@ class CobbleStateBackendTest {
                 new Configuration());
     }
 
-    private TestBackendContext createBackendContext(
+    TestBackendContext createBackendContext(
             Path tempDir,
             boolean localDirPrimaryHighPriority,
             String checkpointDirectory,
@@ -6552,7 +6552,7 @@ class CobbleStateBackendTest {
                 new Configuration());
     }
 
-    private TestBackendContext createBackendContext(
+    TestBackendContext createBackendContext(
             Path tempDir,
             boolean localDirPrimaryHighPriority,
             String checkpointDirectory,
@@ -6709,13 +6709,13 @@ class CobbleStateBackendTest {
         assertEquals(expected, valueState.value());
     }
 
-    private static KeyedStateHandle runCheckpointSnapshot(
+    static KeyedStateHandle runCheckpointSnapshot(
             CobbleKeyedStateBackend<Integer> backend, long checkpointId) throws Exception {
         return runCheckpointSnapshot(
                 backend, checkpointId, new MemCheckpointStreamFactory(1024 * 1024));
     }
 
-    private static KeyedStateHandle runCheckpointSnapshot(
+    static KeyedStateHandle runCheckpointSnapshot(
             CobbleKeyedStateBackend<Integer> backend,
             long checkpointId,
             org.apache.flink.runtime.state.CheckpointStreamFactory streamFactory)
@@ -6753,7 +6753,7 @@ class CobbleStateBackendTest {
         }
     }
 
-    private KeyedStateHandle createRocksDbCanonicalAllStateKindsSavepoint(
+    KeyedStateHandle createRocksDbCanonicalAllStateKindsSavepoint(
             Path tempDir, int key1, int key2, KeyGroupRange keyGroupRange) throws Exception {
         Path rocksDbPath = tempDir.resolve("rocksdb-local-all-kinds");
         MockEnvironment environment =
@@ -7154,7 +7154,7 @@ class CobbleStateBackendTest {
         return expected;
     }
 
-    private static int findKeyForGroup(int keyGroup) {
+    static int findKeyForGroup(int keyGroup) {
         for (int candidate = 0; candidate < 100_000; candidate++) {
             if (KeyGroupRangeAssignment.assignToKeyGroup(candidate, 16) == keyGroup) {
                 return candidate;
@@ -7184,7 +7184,7 @@ class CobbleStateBackendTest {
         }
     }
 
-    private static <T> List<T> toList(Iterable<T> values) {
+    static <T> List<T> toList(Iterable<T> values) {
         if (values == null) {
             return null;
         }
@@ -7527,12 +7527,12 @@ class CobbleStateBackendTest {
         }
     }
 
-    private static final class TestBackendContext implements AutoCloseable {
-        private final MockEnvironment environment;
-        private final CobbleKeyedStateBackend<Integer> cobbleBackend;
-        private final Path configuredLocalDir;
+    static final class TestBackendContext implements AutoCloseable {
+        final MockEnvironment environment;
+        final CobbleKeyedStateBackend<Integer> cobbleBackend;
+        final Path configuredLocalDir;
 
-        private TestBackendContext(
+        TestBackendContext(
                 MockEnvironment environment,
                 CobbleKeyedStateBackend<Integer> cobbleBackend,
                 Path configuredLocalDir) {
