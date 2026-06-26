@@ -156,6 +156,13 @@ cobble.ha.delegate.type: kubernetes
 Cobble restore and rescale currently support only Flink `CLAIM` restore mode.
 `NO_CLAIM` and `LEGACY` are not supported.
 
+Cobble can also restore a job from a **RocksDB canonical savepoint**, which is
+the recommended way to migrate an existing RocksDB-backed job onto Cobble. Take
+the savepoint with `flink savepoint --type canonical`, then start the job with
+`-restoreMode CLAIM`. See the
+[state backend docs](https://cobble-project.github.io/cobble-flink/state-backend/#restore-from-a-rocksdb-canonical-savepoint)
+for the full guide.
+
 ### Flink's Sink
 
 For SQL writes, use:

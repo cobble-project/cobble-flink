@@ -207,3 +207,118 @@ have a specific operational need.
 
 - Cobble restore currently does **not** support Flink `NO_CLAIM` restore mode.
 - Use Flink `CLAIM` when restoring from checkpoints.
+
+## Restore From A RocksDB Canonical Savepoint
+
+This section explains how to migrate a stateful Flink job from the RocksDB state
+backend to the Cobble state backend by restoring from a RocksDB **canonical
+savepoint**.
+
+Cobble can **restore from** canonical savepoints, but it does **not create**
+canonical savepoints. After the restore, the job continues with regular Cobble
+checkpoints.
+
+### When to use this
+
+- You have an existing RocksDB-backed job and want to move it onto Cobble.
+- You keep the job logic and state descriptors unchanged.
+- You may also change parallelism at the same time.
+
+The restore path has been tested with real RocksDB canonical savepoints, covering
+rescale and both event-time and processing-time timers.
+
+### Create the canonical savepoint
+
+Take a canonical savepoint from the running RocksDB-backed job:
+
+```bash
+bin/flink savepoint --type canonical <job-id> <savepoint-dir>
+```
+
+`--type canonical` writes a backend-agnostic format that Cobble can import.
+Confirm your Flink version's exact savepoint command syntax if it differs.
+
+### Switch the state backend
+
+Point Flink at the Cobble state backend. Use the `flink-conf.yaml` keys described
+earlier in [Configure `flink-conf.yaml`](#configure-flink-confyaml):
+
+```yaml
+state.backend.type: io.cobble.flink.state.CobbleStateBackendFactory
+state.checkpoints.dir: hdfs:///user/you/checkpoints
+high-availability.type: io.cobble.flink.state.CobbleHighAvailabilityServicesFactory
+```
+
+Keep the job's state descriptors exactly as they were. The restored state is
+matched by state name, so renaming or retyping a descriptor prevents a match.
+
+### Restore with CLAIM
+
+Start the job from the savepoint using Flink `CLAIM` restore mode:
+
+```bash
+bin/flink run \
+  -s <savepoint-path> \
+  -restoreMode CLAIM \
+  -p <new-parallelism> \
+  <job-jar>
+```
+
+Cobble restore and rescale currently support **only** Flink `CLAIM` restore mode.
+`NO_CLAIM` and `LEGACY` are not supported.
+
+`-p` can stay the same as the original job or change. Rescale restore is
+supported: Flink narrows the canonical savepoint handles to each target
+subtask's key-group range before Cobble imports the rows. A short note on the
+mechanics — Flink assigns every key to a key group, and each subtask owns a
+range of key groups, so rescaling is just re-slicing the same key groups across
+a different number of subtasks.
+
+### Validate after restore
+
+1. Let the job process a small amount of data and confirm results look right.
+2. Wait for the first Cobble checkpoint to complete.
+3. Optional: Open the checkpoint root in the [web monitor](../web-monitor/) and inspect the
+   relevant state and timer rows.
+
+### Supported state
+
+Cobble imports the following state from a canonical savepoint:
+
+| Flink state | Canonical restore |
+| --- |-------------------|
+| `ValueState` | supported         |
+| `ReducingState` | supported         |
+| `AggregatingState` | supported         |
+| Event-time timers | supported         |
+| Processing-time timers | supported         |
+| `FoldingState` | not supported     |
+| Operator state | not supported     |
+| Broadcast state | not supported     |
+
+### Serializer compatibility
+
+Cobble accepts a restored serializer only when Flink reports it as **compatible
+as-is**. If Flink reports that migration is required, that a reconfigured
+serializer is required, or that the serializers are incompatible, Cobble rejects
+the restore. Keep serializers stable across the migration, or rework state
+before taking the savepoint.
+
+### Common restore errors
+
+Cobble detects problems as early as possible. Metadata that can be checked
+without reading rows is validated before any state is written; row-level
+corruption is caught during import. Either way, a failed restore does not leave
+a half-imported, usable Cobble database behind.
+
+- **Unsupported state type** — the savepoint contains `FoldingState`, operator
+  state, broadcast state, or an otherwise unrecognized state kind. The error
+  names the state and the rejected type.
+- **Serializer incompatibility** — a state, namespace, or timer serializer is
+  not compatible as-is. The error names the state, the role (for example value
+  serializer or timer element serializer), and the canonical and runtime
+  serializer classes.
+- **Malformed or corrupt savepoint entries** — a row or timer entry cannot be
+  decoded. The error includes the state name and key group when available.
+- **Non-CLAIM restore mode** — restoring with `NO_CLAIM` or `LEGACY` is not
+  supported. Use `CLAIM`.
