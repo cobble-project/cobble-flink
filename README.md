@@ -24,17 +24,30 @@ source if needed.
 When choosing a version, make sure it matches both your Cobble version and your
 Flink minor version.
 
-The current version naming rule is:
+The current release prefix is:
 
 ```text
-${cobble-version}-{patch-version}-flink-{flink-minor-version}
+0.2.0-1
 ```
 
-Example:
+Append the Flink compatibility suffix shown in the table below, for example:
 
 ```text
 0.2.0-1-flink-1.17
 ```
+
+Artifact versions vary when Flink breaks binary APIs. Use the matrix below to
+choose the `<version>` value for each dependency in your `pom.xml` or for the
+runtime jar you copy into Flink `lib/`:
+
+| Flink cluster version | Dist bundle jar version | State dependency version | Sink dependency version | Source dependency version |
+| --- | --- | --- | --- | --- |
+| 1.17, 1.18 | `0.2.0-1-flink-1.17` | `0.2.0-1-flink-1.17` | `0.2.0-1-flink-1.17` | `0.2.0-1-flink-1.17` |
+| 1.19, 1.20 | `0.2.0-1-flink-1.19` | `0.2.0-1-flink-1.19` | `0.2.0-1-flink-1.17` | `0.2.0-1-flink-1.17` |
+| 2.0 and above | `0.2.0-1-flink-2.0` | `0.2.0-1-flink-2.0` | `0.2.0-1-flink-2.0` | `0.2.0-1-flink-1.17` |
+
+ArtifactIds stay the same across Flink versions. Choose the artifactId from
+the section you are using, then choose the `<version>` from the table.
 
 ## Setup
 
@@ -46,47 +59,66 @@ not need both at the same time.
 
 ### Option A: use the runtime jar (recommended)
 
-Download `cobble-flink-dist` from your Maven repository and copy it into Flink
-`lib/`:
+Download the runtime jar artifact that matches your Flink version and copy it
+into Flink `lib/`. For example, on Flink 1.17 or 1.18:
 
 ```bash
-cp cobble-flink-dist-<version>.jar "$FLINK_HOME/lib/"
+cp cobble-flink-dist-0.2.0-1-flink-1.17.jar "$FLINK_HOME/lib/"
 ```
 
 If you are developing from source instead of downloading from Maven, you can
 build the distribution jar locally:
 
 ```bash
-./mvnw -DskipTests package
+./mvnw -pl :cobble-flink-dist -am package -DskipTests
 cp cobble-dist/target/cobble-flink-dist-*.jar "$FLINK_HOME/lib/"
 ```
 
+For Flink 1.19 or 1.20, build `cobble-dist-flink-1.19`:
+
+```bash
+./mvnw -pl cobble-common,cobble-state-flink-1.19,cobble-sink,cobble-source,cobble-dist-flink-1.19 \
+  package -DskipTests
+cp cobble-dist-flink-1.19/target/cobble-flink-dist-*.jar "$FLINK_HOME/lib/"
+```
+
+For Flink 2.0 and above, build `cobble-dist-flink-2.0`:
+
+```bash
+./mvnw -pl cobble-common,cobble-state-flink-2.0,cobble-sink-flink-2.0,cobble-source,cobble-dist-flink-2.0 \
+  package -DskipTests
+cp cobble-dist-flink-2.0/target/cobble-flink-dist-*.jar "$FLINK_HOME/lib/"
+```
+
+These artifacts can be built in the same reactor; no Maven profile switch is
+required.
+
 ### Option B: use job-side Maven dependencies
 
-When writing a Flink job, depend on the modules you actually use.
+When writing a Flink job, add the dependencies you actually use.
+
+The following example is for a Flink 1.19 or 1.20 job that uses all three
+parts. The state backend uses the 1.19-compatible artifact version, while sink
+and source can use the 1.17-compatible artifact version:
 
 ```xml
-<properties>
-  <cobble.flink.version>${cobble-version}-{minor-version}-flink-{flink-minor-version}</cobble.flink.version>
-</properties>
-
 <dependencies>
   <dependency>
     <groupId>io.github.cobble-project</groupId>
     <artifactId>cobble-flink-state</artifactId>
-    <version>${cobble.flink.version}</version>
+    <version>0.2.0-1-flink-1.19</version>
   </dependency>
 
   <dependency>
     <groupId>io.github.cobble-project</groupId>
     <artifactId>cobble-flink-source</artifactId>
-    <version>${cobble.flink.version}</version>
+    <version>0.2.0-1-flink-1.17</version>
   </dependency>
 
   <dependency>
     <groupId>io.github.cobble-project</groupId>
     <artifactId>cobble-flink-sink</artifactId>
-    <version>${cobble.flink.version}</version>
+    <version>0.2.0-1-flink-1.17</version>
   </dependency>
 </dependencies>
 ```

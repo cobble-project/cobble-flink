@@ -30,7 +30,8 @@ version. The current naming rule is:
 ${cobble-version}-{minor-version}-flink-{flink-minor-version}
 ```
 
-Example:
+Append the Flink compatibility suffix shown in
+[Getting Started](../getting-started/), for example:
 
 ```text
 0.2.0-1-flink-1.17

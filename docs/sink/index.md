@@ -33,12 +33,13 @@ not need both at the same time.
 
 ### Option A: use the runtime jar (recommended)
 
-Download the released `cobble-flink-dist` jar from a Maven repository and put
-it into Flink's `lib/` directory. Use the same version naming rule described in
-[Getting Started](../getting-started/):
+Download the released runtime jar from a Maven repository and put it into
+Flink's `lib/` directory. Use the version matrix in
+[Getting Started](../getting-started/) to choose the artifact that matches your
+Flink version. For example, on Flink 2.0 and above:
 
 ```bash
-cp cobble-flink-dist-<version>.jar "$FLINK_HOME/lib/"
+cp cobble-flink-dist-0.2.0-1-flink-2.0.jar "$FLINK_HOME/lib/"
 ```
 
 ### Option B: use a job-side dependency
@@ -53,6 +54,9 @@ the job itself:
   <version>${cobble.flink.version}</version>
 </dependency>
 ```
+
+Use `cobble-flink-sink` for every supported Flink version. Select the
+version value from the sink column in [Getting Started](../getting-started/).
 
 Most users do not need this if the runtime jar is already present in Flink
 `lib/`.

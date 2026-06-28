@@ -21,6 +21,20 @@ Example:
 0.2.0-1-flink-1.17
 ```
 
+Use the matrix below to choose the `<version>` value for each dependency in
+your `pom.xml` or for the runtime jar you copy into Flink `lib/`:
+
+| Flink cluster version | Dist bundle jar version | State dependency version | Sink dependency version | Source dependency version |
+| --- | --- | --- | --- | --- |
+| 1.17, 1.18 | `0.2.0-1-flink-1.17` | `0.2.0-1-flink-1.17` | `0.2.0-1-flink-1.17` | `0.2.0-1-flink-1.17` |
+| 1.19, 1.20 | `0.2.0-1-flink-1.19` | `0.2.0-1-flink-1.19` | `0.2.0-1-flink-1.17` | `0.2.0-1-flink-1.17` |
+| 2.0 and above | `0.2.0-1-flink-2.0` | `0.2.0-1-flink-2.0` | `0.2.0-1-flink-2.0` | `0.2.0-1-flink-1.17` |
+
+The dist bundle jar is a single artifact that contains all three parts, it is the recommended way to use Cobble Flink.
+The other three parts are separate artifacts that can be used as job-side Maven dependencies.
+ArtifactIds stay the same across Flink versions. Choose the artifactId from
+the section you are using, then choose the `<version>` from the table.
+
 Make sure the version matches:
 
 - the Cobble version you want to use
@@ -37,55 +51,77 @@ not need both at the same time.
 
 ### Option A: use the runtime jar (recommended)
 
-Download the released `cobble-flink-dist-<version>.jar` from a Maven
-repository and place it in the Flink distribution's `lib/` directory:
+Download the released runtime jar artifact from the table above and place it in
+the Flink distribution's `lib/` directory. For example, on Flink 1.17 or 1.18:
 
 ```bash
 export FLINK_HOME=/path/to/flink-1.17.x
-cp cobble-flink-dist-<version>.jar "$FLINK_HOME/lib/"
+cp cobble-flink-dist-0.2.0-1-flink-1.17.jar "$FLINK_HOME/lib/"
 ```
 
 If you are not using a released jar yet and want to build from source, you can
 build the distribution jar locally:
 
 ```bash
-./mvnw --batch-mode --no-transfer-progress -DskipTests package
+./mvnw --batch-mode --no-transfer-progress \
+  -pl :cobble-flink-dist -am package -DskipTests
 
 cp cobble-dist/target/cobble-flink-dist-*.jar "$FLINK_HOME/lib/"
 ```
+
+For Flink 1.19 or 1.20, build `cobble-dist-flink-1.19`:
+
+```bash
+./mvnw --batch-mode --no-transfer-progress \
+  -pl cobble-common,cobble-state-flink-1.19,cobble-sink,cobble-source,cobble-dist-flink-1.19 \
+  package -DskipTests
+
+cp cobble-dist-flink-1.19/target/cobble-flink-dist-*.jar "$FLINK_HOME/lib/"
+```
+
+For Flink 2.0 and above, build `cobble-dist-flink-2.0`:
+
+```bash
+./mvnw --batch-mode --no-transfer-progress \
+  -pl cobble-common,cobble-state-flink-2.0,cobble-sink-flink-2.0,cobble-source,cobble-dist-flink-2.0 \
+  package -DskipTests
+
+cp cobble-dist-flink-2.0/target/cobble-flink-dist-*.jar "$FLINK_HOME/lib/"
+```
+
+These runtime jar artifacts can be built in the same reactor; no Maven profile
+switch is required.
 
 For normal users, the important point is simple: the Flink cluster should use
 the bundled `dist` jar.
 
 ### Option B: use job-side Maven dependencies
 
-For your own job, depend on the modules you actually use instead of the bundled
+For your own job, add the dependencies you actually use instead of the bundled
 `dist` jar.
 
-Example `pom.xml` snippet:
+The following example is for a Flink 1.19 or 1.20 job that uses all three
+parts. The state backend uses the 1.19-compatible artifact version, while sink
+and source can use the 1.17-compatible artifact version:
 
 ```xml
-<properties>
-  <cobble.flink.version>${cobble-version}-{minor-version}-flink-{flink-minor-version}</cobble.flink.version>
-</properties>
-
 <dependencies>
   <dependency>
     <groupId>io.github.cobble-project</groupId>
     <artifactId>cobble-flink-state</artifactId>
-    <version>${cobble.flink.version}</version>
+    <version>0.2.0-1-flink-1.19</version>
   </dependency>
 
   <dependency>
     <groupId>io.github.cobble-project</groupId>
     <artifactId>cobble-flink-source</artifactId>
-    <version>${cobble.flink.version}</version>
+    <version>0.2.0-1-flink-1.17</version>
   </dependency>
 
   <dependency>
     <groupId>io.github.cobble-project</groupId>
     <artifactId>cobble-flink-sink</artifactId>
-    <version>${cobble.flink.version}</version>
+    <version>0.2.0-1-flink-1.17</version>
   </dependency>
 </dependencies>
 ```
@@ -95,7 +131,7 @@ Common choices:
 - stateful DataStream job: `cobble-flink-state`
 - SQL read job: `cobble-flink-source`
 - SQL write job: `cobble-flink-sink`
-- mixed usage: add multiple modules
+- mixed usage: add multiple dependencies
 
 ### Configure Flink if you use the state backend
 
