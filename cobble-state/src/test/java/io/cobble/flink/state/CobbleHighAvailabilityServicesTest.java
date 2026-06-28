@@ -697,7 +697,9 @@ class CobbleHighAvailabilityServicesTest {
                 new CobbleHighAvailabilityServicesFactory()
                         .createHAServices(configuration, Runnable::run);
         try {
-            assertInstanceOf(CobbleHighAvailabilityServices.class, services);
+            assertTrue(
+                    java.lang.reflect.Proxy.isProxyClass(services.getClass()),
+                    "Cobble HA wrapper should use a version-adaptive proxy");
             assertInstanceOf(
                     CobbleCheckpointRecoveryFactory.class, services.getCheckpointRecoveryFactory());
             assertInstanceOf(
@@ -721,7 +723,9 @@ class CobbleHighAvailabilityServicesTest {
                 new CobbleHighAvailabilityServicesFactory()
                         .createHAServices(configuration, Runnable::run);
         try {
-            assertInstanceOf(CobbleHighAvailabilityServices.class, services);
+            assertTrue(
+                    java.lang.reflect.Proxy.isProxyClass(services.getClass()),
+                    "Cobble HA wrapper should use a version-adaptive proxy");
             assertFalse(
                     services.getResourceManagerLeaderRetriever()
                             instanceof StandaloneLeaderRetrievalService);

@@ -12,7 +12,12 @@
     </parent>
 
     <artifactId>cobble-flink-sink</artifactId>
-    <name>cobble-flink-sink</name>
+    <version>0.2.0-1-flink-2.0-SNAPSHOT</version>
+    <name>cobble-flink-sink (Flink 2.0)</name>
+
+    <properties>
+        <flink.version>2.0.2</flink.version>
+    </properties>
 
     <dependencies>
         <dependency>
@@ -53,7 +58,7 @@
         <dependency>
             <groupId>io.github.cobble-project</groupId>
             <artifactId>cobble-flink-common</artifactId>
-            <version>${project.version}</version>
+            <version>${project.parent.version}</version>
         </dependency>
         <dependency>
             <groupId>org.junit.jupiter</groupId>

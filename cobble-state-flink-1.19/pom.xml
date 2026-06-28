@@ -11,8 +11,13 @@
         <relativePath>../pom.xml</relativePath>
     </parent>
 
-    <artifactId>cobble-flink-sink</artifactId>
-    <name>cobble-flink-sink</name>
+    <artifactId>cobble-flink-state</artifactId>
+    <version>0.2.0-1-flink-1.19-SNAPSHOT</version>
+    <name>cobble-flink-state (Flink 1.19)</name>
+
+    <properties>
+        <flink.version>1.19.3</flink.version>
+    </properties>
 
     <dependencies>
         <dependency>
@@ -28,24 +33,6 @@
             <scope>provided</scope>
         </dependency>
         <dependency>
-            <groupId>org.apache.flink</groupId>
-            <artifactId>flink-table-common</artifactId>
-            <version>${flink.version}</version>
-            <scope>provided</scope>
-        </dependency>
-        <dependency>
-            <groupId>org.apache.flink</groupId>
-            <artifactId>flink-table-api-java-bridge</artifactId>
-            <version>${flink.version}</version>
-            <scope>provided</scope>
-        </dependency>
-        <dependency>
-            <groupId>org.apache.flink</groupId>
-            <artifactId>flink-table-runtime</artifactId>
-            <version>${flink.version}</version>
-            <scope>provided</scope>
-        </dependency>
-        <dependency>
             <groupId>io.github.cobble-project</groupId>
             <artifactId>cobble</artifactId>
             <version>${cobble.java.version}</version>
@@ -53,7 +40,7 @@
         <dependency>
             <groupId>io.github.cobble-project</groupId>
             <artifactId>cobble-flink-common</artifactId>
-            <version>${project.version}</version>
+            <version>${project.parent.version}</version>
         </dependency>
         <dependency>
             <groupId>org.junit.jupiter</groupId>
@@ -93,6 +80,18 @@
             <version>${flink.version}</version>
             <scope>test</scope>
         </dependency>
+        <dependency>
+            <groupId>org.apache.flink</groupId>
+            <artifactId>flink-table-runtime</artifactId>
+            <version>${flink.version}</version>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.apache.flink</groupId>
+            <artifactId>flink-statebackend-rocksdb</artifactId>
+            <version>${flink.version}</version>
+            <scope>test</scope>
+        </dependency>
     </dependencies>
 
     <build>
@@ -103,14 +102,14 @@
                 <version>3.6.0</version>
                 <executions>
                     <execution>
-                        <id>add-common-sink-sources</id>
+                        <id>add-common-state-sources</id>
                         <phase>generate-sources</phase>
                         <goals>
                             <goal>add-source</goal>
                         </goals>
                         <configuration>
                             <sources>
-                                <source>../cobble-sink-common/src/main/java</source>
+                                <source>../cobble-state-common/src/main/java</source>
                             </sources>
                         </configuration>
                     </execution>

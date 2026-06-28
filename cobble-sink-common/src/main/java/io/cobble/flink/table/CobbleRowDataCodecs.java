@@ -61,7 +61,9 @@ final class CobbleRowDataCodecs {
         RuntimeFieldEncoder(CobbleDynamicTableSink.SerializableField field) {
             this.name = field.name;
             this.structuredColumnIndex = field.structuredColumnIndex;
-            LogicalType logicalType = LogicalTypeParser.parse(field.logicalType);
+            LogicalType logicalType =
+                    LogicalTypeParser.parse(
+                            field.logicalType, CobbleRowDataCodecs.class.getClassLoader());
             this.serializer = InternalSerializers.create(logicalType);
             this.fieldGetter = RowData.createFieldGetter(logicalType, field.rowIndex);
             this.outputSerializer = new DataOutputSerializer(64);

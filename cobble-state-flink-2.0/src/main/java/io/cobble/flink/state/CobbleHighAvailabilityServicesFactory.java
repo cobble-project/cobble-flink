@@ -92,8 +92,7 @@ public final class CobbleHighAvailabilityServicesFactory
     }
 
     private static Configuration createDelegateConfiguration(Configuration configuration) {
-        String delegateType =
-                configuration.getString(CobbleHighAvailabilityOptions.DELEGATE_HA_TYPE);
+        String delegateType = configuration.get(CobbleHighAvailabilityOptions.DELEGATE_HA_TYPE);
         if (delegateType == null || delegateType.trim().isEmpty()) {
             throw new IllegalConfigurationException(
                     "Missing required Cobble HA delegate type: "
@@ -107,7 +106,7 @@ public final class CobbleHighAvailabilityServicesFactory
         }
 
         Configuration delegateConfiguration = new Configuration(configuration);
-        delegateConfiguration.setString(HighAvailabilityOptions.HA_MODE, delegateType.trim());
+        delegateConfiguration.setString(HighAvailabilityOptions.HA_MODE.key(), delegateType.trim());
         return delegateConfiguration;
     }
 
@@ -164,8 +163,7 @@ public final class CobbleHighAvailabilityServicesFactory
         STANDALONE;
 
         private static DelegateNoneMode fromConfiguration(Configuration configuration) {
-            String rawValue =
-                    configuration.getString(CobbleHighAvailabilityOptions.DELEGATE_NONE_MODE);
+            String rawValue = configuration.get(CobbleHighAvailabilityOptions.DELEGATE_NONE_MODE);
             try {
                 return DelegateNoneMode.valueOf(rawValue.trim().toUpperCase(Locale.ROOT));
             } catch (IllegalArgumentException e) {

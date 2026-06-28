@@ -33,7 +33,7 @@ final class CobbleHighAvailabilityServices implements InvocationHandler {
         }
         if (CHECKPOINT_RECOVERY_FACTORY_METHOD.equals(method.getName())
                 && method.getParameterCount() == 0) {
-            return new CobbleCheckpointRecoveryFactory(delegate.getCheckpointRecoveryFactory());
+            return CobbleCheckpointRecoveryFactory.wrap(delegate.getCheckpointRecoveryFactory());
         }
         try {
             return method.invoke(delegate, args);
