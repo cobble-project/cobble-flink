@@ -145,8 +145,7 @@ final class CobbleSqlSink
                 return;
             }
             endOfInputCommittable = snapshotCommittable();
-            CobbleSinkPaths.markEndOfInputSnapshot(
-                    config, endOfInputCommittable.shardSnapshot.dbId);
+            CobbleSinkPaths.markEndOfInputSnapshot(config, endOfInputCommittable);
         }
 
         @Override
@@ -592,16 +591,17 @@ final class CobbleSqlSink
 
         private List<ShardSnapshot> collectEndOfInputLatestShards(
                 Map<String, String> writerPathByDbId) throws IOException {
-            List<String> dbIds = CobbleSinkPaths.listEndOfInputMarkerDbIds(config);
+            List<CobbleShardCommittable> markerCommittables =
+                    CobbleSinkPaths.listEndOfInputCommittables(config);
             List<ShardSnapshot> refreshed =
-                    new ArrayList<>(Math.min(dbIds.size(), config.sinkParallelism));
-            for (String dbId : dbIds) {
-                ShardSnapshot latestShard = loadLatestShardSnapshot(dbId, writerPathByDbId, null);
-                if (latestShard != null) {
-                    refreshed.add(latestShard);
-                    if (refreshed.size() >= config.sinkParallelism) {
-                        break;
-                    }
+                    new ArrayList<>(Math.min(markerCommittables.size(), config.sinkParallelism));
+            for (CobbleShardCommittable committable : markerCommittables) {
+                if (committable.shardSnapshot != null) {
+                    writerPathByDbId.put(committable.shardSnapshot.dbId, committable.writerPath);
+                    refreshed.add(committable.shardSnapshot);
+                }
+                if (refreshed.size() >= config.sinkParallelism) {
+                    break;
                 }
             }
             if (refreshed.size() < config.sinkParallelism) {
@@ -618,26 +618,27 @@ final class CobbleSqlSink
         private ShardSnapshot loadLatestShardSnapshot(
                 String dbId, Map<String, String> writerPathByDbId, ShardSnapshot fallback)
                 throws IOException {
-            String writerPath =
-                    writerPathByDbId.computeIfAbsent(
-                            dbId,
-                            ignored -> CobbleSinkPaths.tableRootPath(config).getAbsolutePath());
             long deadlineNanos = System.nanoTime() + TimeUnit.SECONDS.toNanos(5L);
             while (true) {
-                try (Db db =
-                        Db.resume(
-                                CobbleSinkPaths.createWriterConfigForWriterPath(config, writerPath),
-                                dbId)) {
-                    ShardSnapshot latestShard = db.getShardSnapshot(-1L);
-                    if (latestShard != null) {
-                        return latestShard;
-                    }
-                } catch (IllegalArgumentException e) {
-                    if (e.getMessage() == null
-                            || !e.getMessage().contains("snapshotId out of range")) {
-                        throw new IOException(
-                                "Failed to refresh end-of-input shard snapshot for dbId " + dbId,
-                                e);
+                for (String writerPath : candidateWriterPaths(dbId, writerPathByDbId)) {
+                    try (Db db =
+                            Db.resume(
+                                    CobbleSinkPaths.createWriterConfigForWriterPath(
+                                            config, writerPath),
+                                    dbId)) {
+                        ShardSnapshot latestShard = loadLatestShardSnapshot(db, writerPath);
+                        if (latestShard != null) {
+                            writerPathByDbId.put(dbId, writerPath);
+                            return latestShard;
+                        }
+                    } catch (IllegalArgumentException e) {
+                        if (e.getMessage() == null
+                                || !e.getMessage().contains("snapshotId out of range")) {
+                            throw new IOException(
+                                    "Failed to refresh end-of-input shard snapshot for dbId "
+                                            + dbId,
+                                    e);
+                        }
                     }
                 }
                 if (System.nanoTime() >= deadlineNanos) {
@@ -653,6 +654,70 @@ final class CobbleSqlSink
                             e);
                 }
             }
+        }
+
+        private List<String> candidateWriterPaths(
+                String dbId, Map<String, String> writerPathByDbId) {
+            String indexedWriterPath = writerPathByDbId.get(dbId);
+            if (indexedWriterPath != null) {
+                return Collections.singletonList(indexedWriterPath);
+            }
+            File tableRoot = CobbleSinkPaths.tableRootPath(config);
+            List<String> candidates = new ArrayList<>(2);
+            candidates.add(new File(tableRoot, dbId).getAbsolutePath());
+            candidates.add(tableRoot.getAbsolutePath());
+            return candidates;
+        }
+
+        private ShardSnapshot loadLatestShardSnapshot(Db db, String writerPath) {
+            ShardSnapshot latestShard = getShardSnapshotIfExists(db, -1L);
+            if (latestShard != null) {
+                return latestShard;
+            }
+            for (Long snapshotId : snapshotIdsFromFiles(writerPath)) {
+                ShardSnapshot shardSnapshot = getShardSnapshotIfExists(db, snapshotId.longValue());
+                if (shardSnapshot != null) {
+                    return shardSnapshot;
+                }
+            }
+            return null;
+        }
+
+        private ShardSnapshot getShardSnapshotIfExists(Db db, long snapshotId) {
+            try {
+                return db.getShardSnapshot(snapshotId);
+            } catch (IllegalArgumentException e) {
+                if (e.getMessage() != null && e.getMessage().contains("snapshotId out of range")) {
+                    return null;
+                }
+                throw e;
+            } catch (IllegalStateException e) {
+                if (e.getMessage() != null && e.getMessage().contains("No such file")) {
+                    return null;
+                }
+                throw e;
+            }
+        }
+
+        private List<Long> snapshotIdsFromFiles(String writerPath) {
+            File snapshotDirectory = new File(writerPath, "snapshot");
+            File[] snapshots =
+                    snapshotDirectory.listFiles(
+                            (dir, name) -> name != null && name.startsWith("SNAPSHOT-"));
+            if (snapshots == null || snapshots.length == 0) {
+                return Collections.emptyList();
+            }
+            List<Long> snapshotIds = new ArrayList<>(snapshots.length);
+            for (File snapshot : snapshots) {
+                String suffix = snapshot.getName().substring("SNAPSHOT-".length());
+                try {
+                    snapshotIds.add(Long.valueOf(Long.parseLong(suffix)));
+                } catch (NumberFormatException ignored) {
+                    // Ignore unrelated files under the snapshot directory.
+                }
+            }
+            snapshotIds.sort(Collections.reverseOrder());
+            return snapshotIds;
         }
     }
 

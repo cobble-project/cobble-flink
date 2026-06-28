@@ -121,13 +121,13 @@ final class CobbleSinkPaths {
     }
 
     static void markEndOfInputSnapshot(
-            CobbleDynamicTableSink.SerializableConfig config, String dbId) throws IOException {
+            CobbleDynamicTableSink.SerializableConfig config, CobbleShardCommittable committable)
+            throws IOException {
         File markerDir = endOfInputMarkerDirectory(config);
         Files.createDirectories(markerDir.toPath());
-        File marker = new File(markerDir, dbId + ".marker");
-        if (!marker.exists()) {
-            Files.createFile(marker.toPath());
-        }
+        File marker = new File(markerDir, committable.shardSnapshot.dbId + ".marker");
+        Files.write(
+                marker.toPath(), new CobbleShardCommittable.Serializer().serialize(committable));
     }
 
     static boolean hasEndOfInputMarkers(CobbleDynamicTableSink.SerializableConfig config) {
@@ -152,20 +152,22 @@ final class CobbleSinkPaths {
         }
     }
 
-    static List<String> listEndOfInputMarkerDbIds(
-            CobbleDynamicTableSink.SerializableConfig config) {
+    static List<CobbleShardCommittable> listEndOfInputCommittables(
+            CobbleDynamicTableSink.SerializableConfig config) throws IOException {
         File markerDir = endOfInputMarkerDirectory(config);
         File[] files = markerDir.listFiles((dir, name) -> name.endsWith(".marker"));
-        List<String> dbIds = new ArrayList<>();
+        List<CobbleShardCommittable> committables = new ArrayList<>();
         if (files == null) {
-            return dbIds;
+            return committables;
         }
         Arrays.sort(files, Comparator.comparingLong(File::lastModified).reversed());
+        CobbleShardCommittable.Serializer serializer = new CobbleShardCommittable.Serializer();
         for (File file : files) {
-            String name = file.getName();
-            dbIds.add(name.substring(0, name.length() - ".marker".length()));
+            committables.add(
+                    serializer.deserialize(
+                            serializer.getVersion(), Files.readAllBytes(file.toPath())));
         }
-        return dbIds;
+        return committables;
     }
 
     private static File endOfInputMarkerDirectory(
