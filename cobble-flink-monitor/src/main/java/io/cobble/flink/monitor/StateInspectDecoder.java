@@ -549,7 +549,10 @@ final class StateInspectDecoder {
         } else if (type.kind() == StateInspectTypeKind.ROW) {
             GenericRowData row = new GenericRowData(fields.size());
             for (int index = 0; index < fields.size(); index++) {
-                LogicalType logicalType = LogicalTypeParser.parse(fields.get(index).logicalType());
+                LogicalType logicalType =
+                        LogicalTypeParser.parse(
+                                fields.get(index).logicalType(),
+                                StateInspectDecoder.class.getClassLoader());
                 row.setField(
                         index, SinkInspectDecoder.parseFieldInput(logicalType, values.get(index)));
             }
@@ -729,7 +732,10 @@ final class StateInspectDecoder {
             StateInspectField field = type.fields().get(index);
             Object value = null;
             if (row != null) {
-                LogicalType logicalType = LogicalTypeParser.parse(field.type().logicalType());
+                LogicalType logicalType =
+                        LogicalTypeParser.parse(
+                                field.type().logicalType(),
+                                StateInspectDecoder.class.getClassLoader());
                 value = RowData.createFieldGetter(logicalType, index).getFieldOrNull(row);
             }
             output.add(semanticFieldToJson(field, value));

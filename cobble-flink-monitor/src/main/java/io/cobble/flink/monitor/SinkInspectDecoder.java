@@ -163,7 +163,9 @@ final class SinkInspectDecoder {
 
     private static Object decodeField(SinkInspectField field, byte[] bytes) throws IOException {
         try {
-            LogicalType logicalType = LogicalTypeParser.parse(field.logicalType());
+            LogicalType logicalType =
+                    LogicalTypeParser.parse(
+                            field.logicalType(), SinkInspectDecoder.class.getClassLoader());
             @SuppressWarnings("unchecked")
             TypeSerializer<Object> serializer =
                     (TypeSerializer<Object>) InternalSerializers.create(logicalType);
@@ -183,7 +185,9 @@ final class SinkInspectDecoder {
 
     private static byte[] encodeField(SinkInspectField field, String text) throws IOException {
         try {
-            LogicalType logicalType = LogicalTypeParser.parse(field.logicalType());
+            LogicalType logicalType =
+                    LogicalTypeParser.parse(
+                            field.logicalType(), SinkInspectDecoder.class.getClassLoader());
             @SuppressWarnings("unchecked")
             TypeSerializer<Object> serializer =
                     (TypeSerializer<Object>) InternalSerializers.create(logicalType);

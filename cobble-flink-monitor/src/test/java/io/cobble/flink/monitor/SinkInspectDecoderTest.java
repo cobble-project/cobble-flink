@@ -182,7 +182,9 @@ class SinkInspectDecoderTest {
 
     @SuppressWarnings("unchecked")
     private static byte[] field(String logicalTypeText, Object value) throws Exception {
-        LogicalType logicalType = LogicalTypeParser.parse(logicalTypeText);
+        LogicalType logicalType =
+                LogicalTypeParser.parse(
+                        logicalTypeText, SinkInspectDecoderTest.class.getClassLoader());
         TypeSerializer<Object> serializer =
                 (TypeSerializer<Object>) InternalSerializers.create(logicalType);
         Object normalized = value;

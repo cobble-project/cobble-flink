@@ -83,7 +83,9 @@ final class CobbleRowDataDecoders {
         RuntimeFieldDecoder(CobbleDynamicTableSource.SerializableField field) {
             this.rowIndex = field.rowIndex;
             this.structuredColumnIndex = field.structuredColumnIndex;
-            LogicalType logicalType = LogicalTypeParser.parse(field.logicalType);
+            LogicalType logicalType =
+                    LogicalTypeParser.parse(
+                            field.logicalType, CobbleRowDataDecoders.class.getClassLoader());
             this.serializer = InternalSerializers.create(logicalType);
         }
 

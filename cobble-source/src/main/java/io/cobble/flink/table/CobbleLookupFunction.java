@@ -127,7 +127,9 @@ public final class CobbleLookupFunction extends LookupFunction {
         private RuntimeLookupFieldEncoder(
                 CobbleDynamicTableSource.SerializableField field, int lookupKeyPosition) {
             this.name = field.name;
-            LogicalType logicalType = LogicalTypeParser.parse(field.logicalType);
+            LogicalType logicalType =
+                    LogicalTypeParser.parse(
+                            field.logicalType, CobbleLookupFunction.class.getClassLoader());
             this.serializer = InternalSerializers.create(logicalType);
             this.fieldGetter = RowData.createFieldGetter(logicalType, lookupKeyPosition);
             this.valueOutput = new DataOutputSerializer(64);
