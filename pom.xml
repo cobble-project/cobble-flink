@@ -34,7 +34,7 @@
         <maven.compiler.target>8</maven.compiler.target>
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
         <flink.version>1.17.2</flink.version>
-        <cobble.java.version>0.2.0-SNAPSHOT</cobble.java.version>
+        <cobble.java.version>0.2.1</cobble.java.version>
         <junit.version>5.10.2</junit.version>
         <surefire.test.jvm.args></surefire.test.jvm.args>
     </properties>
