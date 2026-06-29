@@ -49,6 +49,15 @@
                             <createDependencyReducedPom>false</createDependencyReducedPom>
                             <transformers>
                                 <transformer implementation="org.apache.maven.plugins.shade.resource.ServicesResourceTransformer"/>
+                                <!--
+                                    Make the dist bundle executable with `java -jar`.
+                                    The entrypoint is provided by the bundled cobble-java artifact and
+                                    forwards arguments to cobble-cli, so the same Flink runtime jar can
+                                    also start tools such as `remote-compactor`.
+                                -->
+                                <transformer implementation="org.apache.maven.plugins.shade.resource.ManifestResourceTransformer">
+                                    <mainClass>io.cobble.Main</mainClass>
+                                </transformer>
                             </transformers>
                         </configuration>
                     </execution>

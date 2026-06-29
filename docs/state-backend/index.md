@@ -183,6 +183,10 @@ backend.
 | `state.backend.cobble.memory.memtable-buffer-count` | `2` | Number of in-memory memtable buffers. |
 | `state.backend.cobble.memtable.type` | `hash` | Memtable implementation. Supported values are `hash`, `skiplist`, and `vec`. |
 | `state.backend.cobble.compaction.policy` | `round_robin` | Compaction policy. Supported values are `round_robin`, `min_overlap`, and `score_priority`. |
+| `state.backend.cobble.compaction.read-ahead.enabled` | `true` | Whether Cobble compaction read-ahead is enabled. |
+| `state.backend.cobble.compaction.remote.addr` | none | Address (`host:port`) of a Cobble remote compactor. When unset, compaction runs locally in the TaskManager. |
+| `state.backend.cobble.compaction.remote.timeout` | `300s` | Timeout for a single remote compaction request. |
+| `state.backend.cobble.compaction.threads` | `4` | Number of Cobble compaction worker threads on the writer (TaskManager) side. When compaction runs locally this is the local compaction thread pool; when remote compaction is enabled this sizes the writer's remote-compaction submission runtime. The remote compactor process has its own worker pool, configured by `compaction_threads` in its Cobble config (see [Remote Compaction](#remote-compaction)). |
 | `state.backend.cobble.sst.bloom-filter.enabled` | `false` | Whether SST bloom filters are enabled. |
 | `state.backend.cobble.sst.bloom-filter.bits-per-key` | `10` | Bloom-filter density used when bloom filters are enabled. |
 | `state.backend.cobble.sst.partitioned-index.enabled` | `false` | Whether partitioned SST index/filter blocks are enabled. |
@@ -211,6 +215,85 @@ have a specific operational need.
 
 - Cobble restore currently does **not** support Flink `NO_CLAIM` restore mode.
 - Use Flink `CLAIM` when restoring from checkpoints.
+
+## Remote Compaction
+
+By default, Cobble runs compaction in the TaskManager process. You can offload
+compaction CPU and I/O to a separate remote compactor by setting
+`state.backend.cobble.compaction.remote.addr`.
+
+### Start a compactor
+
+The compactor needs a Cobble config file that points at the same storage used by
+the TaskManagers. For a local test this can be a shared filesystem path. For
+object storage or HDFS, configure the same volume endpoints and credentials that
+the Flink job uses.
+
+You can start the compactor from Rust:
+
+```rust
+use cobble::{Config, RemoteCompactionServer};
+
+fn main() -> cobble::Result<()> {
+    let config = Config::from_path("cobble-compactor.yaml")?;
+    let server = RemoteCompactionServer::new(config)?;
+    server.serve("0.0.0.0:18888")
+}
+```
+
+You can also start it from the [cobble-java](https://repo1.maven.org/maven2/io/github/cobble-project/cobble/0.2.1/) artifact, which bundles
+`cobble-cli`:
+
+```bash
+java -jar cobble-0.2.1.jar remote-compactor \
+  --config ./cobble-compactor.yaml \
+  --bind 0.0.0.0:18888
+```
+
+If you already use a Cobble Flink dist bundle, the same bundled CLI entrypoint
+is available there too. Pick the dist jar that matches your Flink version:
+
+```bash
+java -jar cobble-flink-dist-0.2.0-1-flink-1.17.jar remote-compactor \
+  --config ./cobble-compactor.yaml \
+  --bind 0.0.0.0:18888
+```
+
+Or start the bundled CLI from Java code:
+
+```java
+import io.cobble.CobbleCli;
+import io.cobble.CobbleCliProcess;
+import java.nio.file.Paths;
+
+try (CobbleCliProcess process =
+        CobbleCli.startRemoteCompactor(Paths.get("cobble-compactor.yaml"), "0.0.0.0:18888")) {
+    process.waitFor();
+}
+```
+
+### Configure TaskManagers
+
+Point the Flink state backend to the compactor address:
+
+```yaml
+state.backend.cobble.compaction.remote.addr: 127.0.0.1:18888
+state.backend.cobble.compaction.remote.timeout: 30s
+state.backend.cobble.compaction.threads: 2
+state.backend.cobble.compaction.read-ahead.enabled: true
+```
+
+Leave `state.backend.cobble.compaction.remote.addr` unset to keep compaction
+local in each TaskManager. A blank value is treated the same as unset.
+
+`state.backend.cobble.compaction.threads` is a TaskManager-side setting. When
+remote compaction is disabled, it sizes the local compaction pool. When remote
+compaction is enabled, it sizes the TaskManager's remote-submission runtime. The
+compactor process has its own worker pool, configured by `compaction_threads` in
+the compactor's Cobble config.
+
+Use the same Cobble version for the compactor and the TaskManagers. Upgrade them
+together when changing Cobble versions.
 
 ## Restore From A RocksDB Canonical Savepoint
 

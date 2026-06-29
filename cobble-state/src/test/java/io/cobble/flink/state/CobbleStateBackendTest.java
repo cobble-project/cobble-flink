@@ -2123,6 +2123,94 @@ class CobbleStateBackendTest {
     }
 
     @Test
+    void createKeyedStateBackendAppliesRemoteCompactionOptionsFromFlinkConfig(@TempDir Path tempDir)
+            throws Exception {
+        Configuration overrides = new Configuration();
+        overrides.set(CobbleOptions.COMPACTION_READ_AHEAD_ENABLED, false);
+        overrides.set(CobbleOptions.COMPACTION_REMOTE_ADDR, "127.0.0.1:18888");
+        overrides.set(CobbleOptions.COMPACTION_REMOTE_TIMEOUT, java.time.Duration.ofSeconds(45));
+        overrides.set(CobbleOptions.COMPACTION_THREADS, 2);
+
+        // Remote compaction mapping is verified directly against the mapper because opening a
+        // Cobble
+        // DB with a remote compaction address immediately attempts to contact the compactor. The
+        // full createKeyedStateBackend path is exercised by the negative tests below and the E2E
+        // remote-compactor validation.
+        Config config = new Config();
+        CobbleFlinkConfigMapper.applyExposedOptions(config, overrides);
+
+        assertFalse(config.compactionReadAheadEnabled);
+        assertEquals("127.0.0.1:18888", config.compactionRemoteAddr);
+        assertEquals(45_000L, config.compactionRemoteTimeoutMs.longValue());
+        assertEquals(2, config.compactionThreads.intValue());
+    }
+
+    @Test
+    void blankRemoteCompactionAddrLeavesConfigFieldUnset(@TempDir Path tempDir) throws Exception {
+        Configuration overrides = new Configuration();
+        overrides.set(CobbleOptions.COMPACTION_REMOTE_ADDR, "   ");
+
+        try (TestBackendContext context =
+                createBackendContext(
+                        tempDir,
+                        false,
+                        null,
+                        null,
+                        TtlTimeProvider.DEFAULT,
+                        false,
+                        Collections.emptyList(),
+                        KeyGroupRange.of(0, 15),
+                        overrides)) {
+            Config config = context.cobbleBackend.getCobbleConfig();
+            assertNull(
+                    config.compactionRemoteAddr,
+                    "blank remote addr must disable remote compaction");
+        }
+    }
+
+    @Test
+    void nonPositiveCompactionThreadsIsRejectedBeforeDbOpen(@TempDir Path tempDir) {
+        Configuration overrides = new Configuration();
+        overrides.set(CobbleOptions.COMPACTION_THREADS, 0);
+
+        assertThrows(
+                Exception.class,
+                () ->
+                        createBackendContext(
+                                        tempDir,
+                                        false,
+                                        null,
+                                        null,
+                                        TtlTimeProvider.DEFAULT,
+                                        false,
+                                        Collections.emptyList(),
+                                        KeyGroupRange.of(0, 15),
+                                        overrides)
+                                .close());
+    }
+
+    @Test
+    void nonPositiveRemoteCompactionTimeoutIsRejectedBeforeDbOpen(@TempDir Path tempDir) {
+        Configuration overrides = new Configuration();
+        overrides.set(CobbleOptions.COMPACTION_REMOTE_TIMEOUT, java.time.Duration.ZERO);
+
+        assertThrows(
+                Exception.class,
+                () ->
+                        createBackendContext(
+                                        tempDir,
+                                        false,
+                                        null,
+                                        null,
+                                        TtlTimeProvider.DEFAULT,
+                                        false,
+                                        Collections.emptyList(),
+                                        KeyGroupRange.of(0, 15),
+                                        overrides)
+                                .close());
+    }
+
+    @Test
     void shardSnapshotCheckpointUploadsMetadataIntoKeyedStateHandle(@TempDir Path tempDir)
             throws Exception {
         try (TestBackendContext context = createBackendContext(tempDir, false, null)) {

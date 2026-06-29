@@ -5,6 +5,8 @@ import org.apache.flink.configuration.ConfigOption;
 import org.apache.flink.configuration.ConfigOptions;
 import org.apache.flink.configuration.MemorySize;
 
+import java.time.Duration;
+
 /** Configuration options for the Cobble state backend. */
 public final class CobbleOptions {
 
@@ -74,6 +76,56 @@ public final class CobbleOptions {
                     .defaultValue("round_robin")
                     .withDescription(
                             "The compaction policy used by Cobble. Supported values: round_robin, min_overlap, score_priority.");
+
+    /**
+     * Whether Cobble compaction read-ahead is enabled. Mirrors Cobble's
+     * {@code compaction_read_ahead_enabled}.
+     */
+    public static final ConfigOption<Boolean> COMPACTION_READ_AHEAD_ENABLED =
+            ConfigOptions.key("state.backend.cobble.compaction.read-ahead.enabled")
+                    .booleanType()
+                    .defaultValue(true)
+                    .withDescription(
+                            "Whether Cobble should enable compaction read-ahead. Defaults to true.");
+
+    /**
+     * Address (host:port) of a Cobble remote compactor. When blank, compaction runs locally in the
+     * TaskManager. Mirrors Cobble's {@code compaction_remote_addr}.
+     */
+    public static final ConfigOption<String> COMPACTION_REMOTE_ADDR =
+            ConfigOptions.key("state.backend.cobble.compaction.remote.addr")
+                    .stringType()
+                    .noDefaultValue()
+                    .withDescription(
+                            "Address (host:port) of a Cobble remote compactor. When unset, "
+                                    + "compaction runs locally in the TaskManager.");
+
+    /**
+     * Timeout for a single remote compaction request. Mirrors Cobble's
+     * {@code compaction_remote_timeout_ms} (converted from duration to millis).
+     */
+    public static final ConfigOption<Duration> COMPACTION_REMOTE_TIMEOUT =
+            ConfigOptions.key("state.backend.cobble.compaction.remote.timeout")
+                    .durationType()
+                    .defaultValue(Duration.ofSeconds(300))
+                    .withDescription(
+                            "Timeout for a single remote compaction request. Defaults to 300s.");
+
+    /**
+     * Number of Cobble compaction worker threads on the writer (TaskManager) side. When compaction
+     * runs locally this is the local compaction thread pool; when remote compaction is enabled
+     * this sizes the writer's remote-compaction submission runtime. The remote compactor process
+     * has its own worker pool, configured by {@code compaction_threads} in its Cobble config.
+     * Mirrors Cobble's {@code compaction_threads}.
+     */
+    public static final ConfigOption<Integer> COMPACTION_THREADS =
+            ConfigOptions.key("state.backend.cobble.compaction.threads")
+                    .intType()
+                    .defaultValue(4)
+                    .withDescription(
+                            "Number of Cobble compaction worker threads on the writer "
+                                    + "(TaskManager) side. Defaults to 4. The remote compactor "
+                                    + "process uses its own compaction_threads setting.");
 
     /** Whether Cobble should enable SST bloom filters. */
     public static final ConfigOption<Boolean> SST_BLOOM_FILTER_ENABLED =

@@ -51,6 +51,23 @@ final class CobbleFlinkConfigMapper {
                 toPositiveIntBytes(
                         CobbleOptions.VALUE_SEPARATION_THRESHOLD.key(),
                         flinkConfig.get(CobbleOptions.VALUE_SEPARATION_THRESHOLD));
+        // Remote compaction options. The remote address is optional: a blank value leaves
+        // compaction running locally in the TaskManager.
+        config.compactionReadAheadEnabled =
+                flinkConfig.get(CobbleOptions.COMPACTION_READ_AHEAD_ENABLED);
+        config.compactionThreads =
+                requirePositive(
+                        CobbleOptions.COMPACTION_THREADS.key(),
+                        flinkConfig.get(CobbleOptions.COMPACTION_THREADS));
+        config.compactionRemoteTimeoutMs =
+                requirePositiveMillis(
+                        CobbleOptions.COMPACTION_REMOTE_TIMEOUT.key(),
+                        flinkConfig.get(CobbleOptions.COMPACTION_REMOTE_TIMEOUT));
+        String remoteAddr =
+                normalizeOptionalString(flinkConfig.get(CobbleOptions.COMPACTION_REMOTE_ADDR));
+        if (remoteAddr != null) {
+            config.compactionRemoteAddr = remoteAddr;
+        }
         // Flink already owns keyed-state shard assignment, restore, and rescale routing, so the
         // TaskManager-side Cobble DB should not also publish filesystem governance manifests.
         config.governanceMode = Config.GovernanceMode.NOOP;
@@ -308,5 +325,21 @@ final class CobbleFlinkConfigMapper {
             throw new IllegalConfigurationException(optionKey + " must be > 0");
         }
         return value;
+    }
+
+    private static long requirePositiveMillis(String optionKey, java.time.Duration duration) {
+        long millis = duration.toMillis();
+        if (millis <= 0L) {
+            throw new IllegalConfigurationException(optionKey + " must be a positive duration");
+        }
+        return millis;
+    }
+
+    private static String normalizeOptionalString(String value) {
+        if (value == null) {
+            return null;
+        }
+        String trimmed = value.trim();
+        return trimmed.isEmpty() ? null : trimmed;
     }
 }
