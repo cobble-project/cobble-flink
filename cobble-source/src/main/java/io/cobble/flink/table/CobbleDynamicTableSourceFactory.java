@@ -50,6 +50,9 @@ public final class CobbleDynamicTableSourceFactory implements DynamicTableSource
         options.add(CobbleSourceTableOptions.SCAN_MODE);
         options.add(CobbleSourceTableOptions.SCAN_POLL_INTERVAL_MS);
         options.add(CobbleSourceTableOptions.SOURCE_BLOCK_CACHE_MEMORY);
+        options.add(CobbleSourceTableOptions.STATE_NAME);
+        options.add(CobbleSourceTableOptions.STATE_OPERATOR_ID);
+        options.add(CobbleSourceTableOptions.STATE_KIND);
         return options;
     }
 
@@ -93,16 +96,20 @@ public final class CobbleDynamicTableSourceFactory implements DynamicTableSource
                 CobbleSourceKindDetector.detect(
                         pathUri, requestedKind, isSinkShaped(resolvedSchema));
         if (resolvedSource.kind() == CobbleSourceKind.STATE) {
-            // Reviewer preference for Step 1: detect state paths but fail in the factory, because
-            // there is no state source runtime yet. Sink key/value codecs are intentionally not
-            // instantiated on this path.
-            throw new ValidationException(
-                    "Cobble state source was detected, but state source runtime is not implemented"
-                            + " in this step. "
-                            + resolvedSource.diagnostics());
+            return createStateSource(
+                    context,
+                    options,
+                    resolvedSource,
+                    pathUri,
+                    checkpointId,
+                    bucketCount,
+                    resolvedSchema);
         }
 
         // Resolved as a Cobble sink table: existing sink source behavior, unchanged.
+        // Reject state.* options here so a misspelled source.kind (or a stray state option) on a
+        // sink table fails loudly instead of being silently ignored.
+        StateSourceOptions.rejectStateOptionsForSink(options);
         UniqueConstraint primaryKey =
                 resolvedSchema
                         .getPrimaryKey()
@@ -171,6 +178,48 @@ public final class CobbleDynamicTableSourceFactory implements DynamicTableSource
                         keyFields,
                         valueFields);
         return new CobbleDynamicTableSource(
+                config, context.getObjectIdentifier().asSummaryString());
+    }
+
+    /**
+     * Builds a state source: rejects a single operator root, parses {@code state.*} options,
+     * resolves and validates the DDL against the inspect-schema registry, and returns a planning-
+     * only {@link CobbleStateDynamicTableSource}. The data-reading runtime is not implemented yet
+     * and fails when a scan/lookup runtime provider is requested.
+     */
+    private static DynamicTableSource createStateSource(
+            Context context,
+            ReadableConfig options,
+            CobbleResolvedSource resolvedSource,
+            String pathUri,
+            String checkpointId,
+            int bucketCount,
+            ResolvedSchema resolvedSchema) {
+        StateSourceConfig detected = resolvedSource.stateConfig();
+        if (detected.layout() == StateSourceConfig.Layout.OPERATOR_ROOT) {
+            throw new ValidationException(
+                    "Cobble state source requires the checkpoint root path, not a single operator"
+                            + " root. Point 'path' at the directory that contains chk-* and"
+                            + " cobble/<operator-id>/.");
+        }
+
+        StateSourceOptions stateOptions = StateSourceOptions.parseForState(options);
+        StateSourceResolvedSchema resolved =
+                StateSourceSchemaResolver.resolve(
+                        pathUri, stateOptions, checkpointId, resolvedSchema);
+
+        StateSourceConfig config =
+                new StateSourceConfig(
+                        pathUri,
+                        detected.layout(),
+                        resolved.operatorId(),
+                        resolved.stateName(),
+                        resolved.stateKind().wireName(),
+                        checkpointId,
+                        resolved.schemaCheckpointId(),
+                        bucketCount,
+                        resolved.outputFields());
+        return new CobbleStateDynamicTableSource(
                 config, context.getObjectIdentifier().asSummaryString());
     }
 
