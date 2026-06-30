@@ -19,6 +19,15 @@ final class CobbleSourceTableOptions {
                     .noDefaultValue()
                     .withDescription("Total bucket count for the Cobble table.");
 
+    static final ConfigOption<String> SOURCE_KIND =
+            ConfigOptions.key("source.kind")
+                    .stringType()
+                    .defaultValue("auto")
+                    .withDescription(
+                            "Kind of Cobble path to read. Supported values are 'auto', 'sink' and"
+                                    + " 'state'. 'auto' detects sink table roots and Flink state"
+                                    + " checkpoint roots from on-disk layout.");
+
     static final ConfigOption<String> SCAN_CHECKPOINT_ID =
             ConfigOptions.key("scan.checkpoint-id")
                     .stringType()

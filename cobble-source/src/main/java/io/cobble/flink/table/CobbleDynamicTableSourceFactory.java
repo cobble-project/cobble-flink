@@ -44,6 +44,7 @@ public final class CobbleDynamicTableSourceFactory implements DynamicTableSource
     @Override
     public Set<ConfigOption<?>> optionalOptions() {
         Set<ConfigOption<?>> options = new HashSet<>();
+        options.add(CobbleSourceTableOptions.SOURCE_KIND);
         options.add(CobbleSourceTableOptions.BUCKET);
         options.add(CobbleSourceTableOptions.SCAN_CHECKPOINT_ID);
         options.add(CobbleSourceTableOptions.SCAN_MODE);
@@ -85,6 +86,23 @@ public final class CobbleDynamicTableSourceFactory implements DynamicTableSource
         }
 
         ResolvedSchema resolvedSchema = context.getCatalogTable().getResolvedSchema();
+
+        CobbleSourceKind requestedKind =
+                CobbleSourceKind.fromUserOption(options.get(CobbleSourceTableOptions.SOURCE_KIND));
+        CobbleResolvedSource resolvedSource =
+                CobbleSourceKindDetector.detect(
+                        pathUri, requestedKind, isSinkShaped(resolvedSchema));
+        if (resolvedSource.kind() == CobbleSourceKind.STATE) {
+            // Reviewer preference for Step 1: detect state paths but fail in the factory, because
+            // there is no state source runtime yet. Sink key/value codecs are intentionally not
+            // instantiated on this path.
+            throw new ValidationException(
+                    "Cobble state source was detected, but state source runtime is not implemented"
+                            + " in this step. "
+                            + resolvedSource.diagnostics());
+        }
+
+        // Resolved as a Cobble sink table: existing sink source behavior, unchanged.
         UniqueConstraint primaryKey =
                 resolvedSchema
                         .getPrimaryKey()
@@ -154,6 +172,20 @@ public final class CobbleDynamicTableSourceFactory implements DynamicTableSource
                         valueFields);
         return new CobbleDynamicTableSource(
                 config, context.getObjectIdentifier().asSummaryString());
+    }
+
+    /**
+     * Returns whether the table schema is sink-shaped: it declares a primary key and has at least
+     * one non-primary-key column. This lets {@code auto} keep treating an ambiguous path as a sink
+     * source, preserving existing behavior for sink tables without an inspect-schema sidecar.
+     */
+    private static boolean isSinkShaped(ResolvedSchema resolvedSchema) {
+        if (!resolvedSchema.getPrimaryKey().isPresent()) {
+            return false;
+        }
+        RowType physicalRowType = (RowType) resolvedSchema.toPhysicalRowDataType().getLogicalType();
+        int primaryKeyColumnCount = resolvedSchema.getPrimaryKey().get().getColumns().size();
+        return physicalRowType.getFieldCount() - primaryKeyColumnCount >= 1;
     }
 
     private static void validateTypeSupported(RowType.RowField field) {
