@@ -31,6 +31,7 @@ const state = {
 
 const MAX_VALUE_DISPLAY_LENGTH = 300
 const LIST_VALUE_PAGE_SIZE = 100
+const COPY_POPOVER_MS = 1400
 
 const $ = (id) => document.getElementById(id)
 
@@ -77,6 +78,9 @@ function setLoading(loading) {
   })
   $('prev-page-button').disabled = loading || state.previousPageCursors.length === 0
   $('next-page-button').disabled = loading || !state.nextPageCursor
+  document.querySelectorAll('[data-overview-copy-sql]').forEach((element) => {
+    element.disabled = loading
+  })
 }
 
 async function refresh() {
@@ -114,6 +118,7 @@ function renderMeta() {
   renderStateFilterControls()
   renderActiveResult()
   renderPager()
+  renderOverview()
 }
 
 function selectedCheckpointEntry() {
@@ -1800,6 +1805,330 @@ function truncateText(value, maxLength = MAX_VALUE_DISPLAY_LENGTH) {
   return text.length > maxLength ? `${text.slice(0, maxLength)}...` : text
 }
 
+function renderOverview() {
+  const empty = $('overview-empty')
+  const list = $('overview-list')
+  if (!state.meta?.source_open) {
+    empty.textContent = 'Open a datasource first.'
+    empty.classList.remove('hidden')
+    list.innerHTML = ''
+    return
+  }
+  const items = overviewItems(state.meta)
+  if (items.length === 0) {
+    empty.textContent = 'No Cobble states or sink schema found for this selection.'
+    empty.classList.remove('hidden')
+    list.innerHTML = ''
+    return
+  }
+  empty.classList.add('hidden')
+  list.innerHTML = items.map(renderOverviewItem).join('')
+  list.querySelectorAll('[data-overview-copy-sql]').forEach((button) => {
+    button.addEventListener('click', async () => {
+      await copyText(button.dataset.overviewCopySql || '')
+      showCopyPopover(button)
+    })
+  })
+}
+
+function overviewItems(meta = state.meta) {
+  const targets = meta?.inspect_targets || []
+  return targets
+    .filter((target) => target?.kind === 'sink' || target?.kind === 'state' || target?.kind === 'timer')
+    .map((target) => (
+      target.kind === 'sink'
+        ? sinkOverviewItem(target, meta)
+        : stateOverviewItem(target, meta)
+    ))
+}
+
+function sinkOverviewItem(target, meta) {
+  const keyFields = target.key_fields || []
+  const valueFields = target.value_fields || []
+  return {
+    id: target.id || 'sink',
+    title: 'sink',
+    kind: 'Sink',
+    detail: 'Cobble SQL sink snapshot',
+    fields: [
+      ...keyFields.map((field) => ({ role: 'Primary key', name: field.name, type: field.logical_type })),
+      ...valueFields.map((field) => ({ role: 'Column', name: field.name, type: field.logical_type })),
+    ],
+    sql: sinkSourceSql(target, meta),
+    note: sinkSourceNote(keyFields),
+  }
+}
+
+function stateOverviewItem(target, meta) {
+  const groups = stateOverviewGroups(target)
+  return {
+    id: target.id || target.name,
+    title: target.name || target.id,
+    kind: target.kind === 'timer' ? 'Timer' : (target.state_kind || 'State'),
+    detail: target.kind === 'timer'
+      ? 'Cobble-backed Flink timer queue'
+      : `${target.state_kind || 'Raw'} keyed state`,
+    fields: groups.flatMap((group) => (
+      group.fields.map((field) => ({ role: group.label, name: field.name, type: field.logical_type }))
+    )),
+    sql: null,
+    sqlHeading: 'Flink SQL source unavailable',
+    note: 'This is Flink keyed state inside a checkpoint. The current Cobble SQL source reads Cobble sink tables; consuming keyed state needs a dedicated state source connector.',
+  }
+}
+
+function stateOverviewGroups(target) {
+  const parts = target?.semantic_parts || target?.semanticParts || {}
+  const valuePartLabel = target?.value_part_label || target?.valuePartLabel || 'Value'
+  const groups = [
+    { id: 'state_key', label: 'State key', type: parts.state_key },
+    { id: 'namespace', label: 'Namespace', type: parts.namespace },
+    { id: 'map_key', label: 'Map key', type: parts.map_key },
+    { id: 'value', label: valuePartLabel, type: parts.value },
+    { id: 'list_element', label: 'List element', type: parts.list_element },
+    { id: 'map_value', label: 'Map value', type: parts.map_value },
+  ]
+  const semanticGroups = groups
+    .filter((group) => group.type)
+    .filter((group) => group.id !== 'namespace' || !isVoidNamespaceTarget(target))
+    .map((group) => ({ ...group, fields: overviewFieldsFromType(group.id, group.type) }))
+    .filter((group) => group.fields.length > 0)
+  return semanticGroups.length > 0 ? semanticGroups : rawStateOverviewGroups(target)
+}
+
+function rawStateOverviewGroups(target) {
+  const groups = [
+    { id: 'state_key', label: 'State key', fields: [{ name: 'state_key', logical_type: 'BYTES' }] },
+  ]
+  if (!isVoidNamespaceTarget(target)) {
+    groups.push({
+      id: 'namespace',
+      label: 'Namespace',
+      fields: [{ name: 'namespace', logical_type: 'BYTES' }],
+    })
+  }
+  if (target?.state_kind === 'MAP') {
+    groups.push({
+      id: 'map_key',
+      label: 'Map key',
+      fields: [{ name: 'map_key', logical_type: 'BYTES' }],
+    })
+    groups.push({
+      id: 'map_value',
+      label: 'Map value',
+      fields: [{ name: 'map_value', logical_type: 'BYTES' }],
+    })
+  } else if (target?.state_kind === 'LIST') {
+    groups.push({
+      id: 'list_element',
+      label: 'List element',
+      fields: [{ name: 'element', logical_type: 'BYTES' }],
+    })
+  } else if (target?.kind === 'timer' || target?.state_kind === 'TIMER') {
+    groups.push({
+      id: 'timestamp',
+      label: 'Timestamp',
+      fields: [{ name: 'timestamp', logical_type: 'BIGINT' }],
+    })
+  } else {
+    groups.push({
+      id: 'value',
+      label: target?.state_kind === 'AGGREGATING' ? 'Accumulator' : 'Value',
+      fields: [{ name: 'value', logical_type: 'BYTES' }],
+    })
+  }
+  return groups
+}
+
+function overviewFieldsFromType(groupId, type) {
+  if (!type || type.kind === 'UNKNOWN') {
+    return [{ name: overviewFallbackFieldName(groupId), logical_type: 'BYTES' }]
+  }
+  if (Array.isArray(type.fields) && type.fields.length > 0) {
+    return type.fields.map((field, index) => ({
+      name: field?.name || `f${index}`,
+      logical_type: field?.type?.logical_type || overviewNestedTypeLabel(field?.type),
+    }))
+  }
+  if (type.kind === 'LIST' && type.element_type) {
+    return [{
+      name: overviewFallbackFieldName(groupId),
+      logical_type: `ARRAY<${overviewTypeLabel(type.element_type)}>`,
+    }]
+  }
+  return [{
+    name: overviewFallbackFieldName(groupId),
+    logical_type: type.logical_type || overviewTypeLabel(type),
+  }]
+}
+
+function overviewFallbackFieldName(groupId) {
+  const names = {
+    state_key: 'state_key',
+    namespace: 'namespace',
+    map_key: 'map_key',
+    value: 'value',
+    list_element: 'element',
+    map_value: 'map_value',
+    timestamp: 'timestamp',
+  }
+  return names[groupId] || 'value'
+}
+
+function overviewTypeLabel(type) {
+  if (!type || type.kind === 'UNKNOWN') return 'BYTES'
+  if (type.logical_type) return type.logical_type
+  if (Array.isArray(type.fields) && type.fields.length > 0) {
+    return `ROW<${type.fields.map((field, index) => (
+      `${quoteSqlIdentifier(field?.name || `f${index}`)} ${overviewTypeLabel(field?.type)}`
+    )).join(', ')}>`
+  }
+  if (type.kind === 'LIST' && type.element_type) {
+    return `ARRAY<${overviewTypeLabel(type.element_type)}>`
+  }
+  return 'BYTES'
+}
+
+function overviewNestedTypeLabel(type) {
+  return type && type.kind !== 'UNKNOWN' ? overviewTypeLabel(type) : 'BYTES'
+}
+
+function renderOverviewItem(item) {
+  return `
+    <article class="overview-item">
+      <div class="overview-item-header">
+        <div>
+          <h3>${escapeHtml(item.title)}</h3>
+          <p>${escapeHtml(item.detail)}</p>
+        </div>
+        <span class="pill">${escapeHtml(item.kind)}</span>
+      </div>
+      <div class="overview-item-body">
+        <div>
+          <h4>Fields</h4>
+          ${renderOverviewFields(item.fields)}
+        </div>
+        <div>
+          ${renderOverviewSql(item)}
+        </div>
+      </div>
+    </article>
+  `
+}
+
+function renderOverviewSql(item) {
+  if (!item.sql) {
+    return `
+      <h4>${escapeHtml(item.sqlHeading || 'Flink SQL source')}</h4>
+      <div class="overview-note">${escapeHtml(item.note || 'No SQL source definition is available for this entry.')}</div>
+    `
+  }
+  return `
+    <div class="overview-sql-header">
+      <h4>Flink SQL source</h4>
+      <span class="copy-button-wrap">
+        <button type="button" data-overview-copy-sql="${escapeHtml(item.sql)}">Copy SQL</button>
+        <span class="copy-popover" role="status" aria-live="polite">Copied</span>
+      </span>
+    </div>
+    ${item.note ? `<div class="overview-note">${escapeHtml(item.note)}</div>` : ''}
+    <pre class="overview-sql"><code>${escapeHtml(item.sql)}</code></pre>
+  `
+}
+
+function showCopyPopover(button) {
+  const wrapper = button.closest('.copy-button-wrap')
+  if (!wrapper) return
+  wrapper.classList.add('copied')
+  if (button._copyPopoverTimer) {
+    window.clearTimeout(button._copyPopoverTimer)
+  }
+  button._copyPopoverTimer = window.setTimeout(() => {
+    wrapper.classList.remove('copied')
+    button._copyPopoverTimer = null
+  }, COPY_POPOVER_MS)
+}
+
+function renderOverviewFields(fields) {
+  if (!fields.length) {
+    return '<div class="overview-field-list"><div class="muted-text">Raw bytes only.</div></div>'
+  }
+  return `
+    <div class="overview-field-list">
+      ${fields.map((field) => `
+        <div class="overview-field">
+          <span>${escapeHtml(field.role)}</span>
+          <strong>${escapeHtml(field.name)}</strong>
+          <code>${escapeHtml(field.type || 'BYTES')}</code>
+        </div>
+      `).join('')}
+    </div>
+  `
+}
+
+function sinkSourceNote(keyFields) {
+  if (!keyFields.length) {
+    return 'Use this source table for scan queries. Lookup joins require primary-key metadata, which is not available here.'
+  }
+  const keys = keyFields.map((field) => quoteSqlIdentifier(field.name)).join(', ')
+  return `Use this same source table for scan queries and temporal lookup joins. Lookup joins require equality predicates for every primary-key column: ${keys}.`
+}
+
+function sinkSourceSql(target, meta = state.meta) {
+  const keyFields = target.key_fields || []
+  const valueFields = target.value_fields || []
+  const fields = [...keyFields, ...valueFields]
+  const tableName = quoteSqlIdentifier(sourceTableName('cobble_source', meta?.source_path))
+  const columnLines = fields.map((field) => (
+    `  ${quoteSqlIdentifier(field.name)} ${field.logical_type || 'BYTES'}`
+  ))
+  const primaryKey = keyFields.map((field) => quoteSqlIdentifier(field.name)).join(', ')
+  if (primaryKey) {
+    columnLines.push(`  PRIMARY KEY (${primaryKey}) NOT ENFORCED`)
+  }
+  return [
+    `CREATE TABLE ${tableName} (`,
+    columnLines.join(',\n'),
+    `) WITH (`,
+    `  'connector' = 'cobble',`,
+    `  'path' = '${escapeSqlString(meta?.source_path || '')}',`,
+    `  'scan.checkpoint-id' = '${escapeSqlString(selectedCheckpointForSql(meta))}',`,
+    `  'scan.mode' = 'batch'`,
+    `);`,
+  ].join('\n')
+}
+
+function sourceTableName(fallback, path) {
+  const name = String(path || '')
+    .split(/[/?#]/)
+    .filter(Boolean)
+    .pop()
+  return sanitizeSqlIdentifier(name || fallback || 'cobble_source')
+}
+
+function sanitizeSqlIdentifier(value) {
+  const sanitized = String(value || '')
+    .replace(/[^A-Za-z0-9_]/g, '_')
+    .replace(/^_+|_+$/g, '')
+  const normalized = sanitized || 'field'
+  return /^[0-9]/.test(normalized) ? `_${normalized}` : normalized
+}
+
+function quoteSqlIdentifier(value) {
+  return `\`${String(value).replaceAll('`', '``')}\``
+}
+
+function escapeSqlString(value) {
+  return String(value == null ? '' : value).replaceAll("'", "''")
+}
+
+function selectedCheckpointForSql(meta = state.meta) {
+  if (!meta) return 'latest'
+  return meta.selected_checkpoint === 'latest'
+    ? 'latest'
+    : String(meta.selected_checkpoint_id || meta.selected_checkpoint || 'latest')
+}
+
 function splitLines(value) {
   return value.split(/\r?\n/).map((line) => line.trim()).filter(Boolean)
 }
@@ -1818,10 +2147,18 @@ function showView(view) {
   })
   $('inspect-view').classList.toggle('hidden', view !== 'inspect')
   $('datasource-view').classList.toggle('hidden', view !== 'datasource')
-  $('page-title').textContent = view === 'inspect' ? 'Inspect' : 'Datasource'
-  $('page-subtitle').textContent = view === 'inspect'
-    ? 'Read raw key/value rows from a Cobble Flink snapshot.'
-    : 'Choose latest or a concrete checkpoint/snapshot.'
+  $('overview-view').classList.toggle('hidden', view !== 'overview')
+  if (view === 'inspect') {
+    $('page-title').textContent = 'Inspect'
+    $('page-subtitle').textContent = 'Read raw key/value rows from a Cobble Flink snapshot.'
+  } else if (view === 'overview') {
+    $('page-title').textContent = 'Overview'
+    $('page-subtitle').textContent = 'Review states, sink schema, and source table definitions.'
+    renderOverview()
+  } else {
+    $('page-title').textContent = 'Datasource'
+    $('page-subtitle').textContent = 'Choose latest or a concrete checkpoint/snapshot.'
+  }
 }
 
 function toggleSinkKeyHelp() {
