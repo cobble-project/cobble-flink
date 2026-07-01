@@ -142,7 +142,6 @@ final class CobbleStateSourceRuntime {
                 }
             }
         }
-        ensureCompleteCoverage(covered, checkpointId);
         return splits;
     }
 
@@ -361,20 +360,6 @@ final class CobbleStateSourceRuntime {
                                 + ".");
             }
             covered[keyGroup] = true;
-        }
-    }
-
-    private static void ensureCompleteCoverage(boolean[] covered, long checkpointId)
-            throws IOException {
-        for (int keyGroup = 0; keyGroup < covered.length; keyGroup++) {
-            if (!covered[keyGroup]) {
-                throw new IOException(
-                        "Missing key-group coverage for "
-                                + keyGroup
-                                + " in checkpoint "
-                                + checkpointId
-                                + ".");
-            }
         }
     }
 

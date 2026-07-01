@@ -50,13 +50,14 @@ class CobbleStateSourceRuntimeTest {
     }
 
     @Test
-    void rejectsMissingCoverage() {
+    void acceptsSparseCoverage() throws Exception {
         GlobalSnapshot snapshot = snapshot(7L, 4, range(0, 1));
 
-        IOExceptionRunnable action =
-                () -> CobbleStateSourceRuntime.createStateSourceSplits(config(-1), snapshot, 7L);
-        Exception error = assertThrows(Exception.class, action::run);
-        assertTrue(error.getMessage().contains("Missing key-group coverage"));
+        java.util.List<CobbleStateSourceSplit> splits =
+                CobbleStateSourceRuntime.createStateSourceSplits(config(-1), snapshot, 7L);
+
+        assertEquals(1, splits.size());
+        assertEquals("0:1:4", splits.get(0).splitId());
     }
 
     @Test

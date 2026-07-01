@@ -5,6 +5,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import io.cobble.flink.common.inspect.InspectSchemaRegistryLayout;
+import io.cobble.flink.common.inspect.StateInspectSchemaStore;
 import io.cobble.flink.state.CobbleHighAvailabilityServicesFactory;
 import io.cobble.flink.state.CobbleOptions;
 import io.cobble.flink.state.CobbleStateBackend;
@@ -26,6 +27,7 @@ import org.apache.flink.api.common.state.ReducingStateDescriptor;
 import org.apache.flink.api.common.state.ValueState;
 import org.apache.flink.api.common.state.ValueStateDescriptor;
 import org.apache.flink.api.common.typeinfo.BasicTypeInfo;
+import org.apache.flink.api.common.typeutils.base.StringSerializer;
 import org.apache.flink.configuration.CheckpointingOptions;
 import org.apache.flink.configuration.Configuration;
 import org.apache.flink.configuration.HighAvailabilityOptions;
@@ -38,6 +40,9 @@ import org.apache.flink.runtime.testutils.MiniClusterResourceConfiguration;
 import org.apache.flink.streaming.api.environment.CheckpointConfig;
 import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
 import org.apache.flink.streaming.api.functions.source.RichParallelSourceFunction;
+import org.apache.flink.streaming.api.operators.AbstractStreamOperator;
+import org.apache.flink.streaming.api.operators.OneInputStreamOperator;
+import org.apache.flink.streaming.runtime.streamrecord.StreamRecord;
 import org.apache.flink.table.api.TableResult;
 import org.apache.flink.table.api.bridge.java.StreamTableEnvironment;
 import org.apache.flink.test.util.MiniClusterWithClientResource;
@@ -46,10 +51,13 @@ import org.apache.flink.util.CloseableIterator;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
+import java.net.URI;
+import java.nio.file.DirectoryStream;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Duration;
 import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Set;
@@ -142,6 +150,39 @@ class CobbleStateSourceSqlITTest {
                         true));
         assertEquals(
                 expectedSums(), rowSet(tableEnv, "SELECT `key`, `value` FROM state_aggregating"));
+
+        CheckpointInfo namespacedCheckpoint =
+                checkpoint.withOperatorId(
+                        operatorIdForState(checkpoint.rootUri, "namespaced-value-state"));
+        tableEnv.executeSql(
+                stateDdl(
+                        "state_namespaced_values_latest",
+                        "key INT, namespace STRING, `value` INT",
+                        namespacedCheckpoint,
+                        "namespaced-value-state",
+                        "value",
+                        "latest",
+                        true));
+        assertEquals(
+                expectedNamespacedRows(),
+                rowSet(
+                        tableEnv,
+                        "SELECT `key`, namespace, `value` FROM state_namespaced_values_latest"));
+
+        tableEnv.executeSql(
+                stateDdl(
+                        "state_namespaced_values_by_id",
+                        "key INT, namespace STRING, `value` INT",
+                        namespacedCheckpoint,
+                        "namespaced-value-state",
+                        "value",
+                        Long.toString(namespacedCheckpoint.checkpointId),
+                        true));
+        assertEquals(
+                expectedNamespacedRows(),
+                rowSet(
+                        tableEnv,
+                        "SELECT `key`, namespace, `value` FROM state_namespaced_values_by_id"));
     }
 
     private CheckpointInfo runStatefulJob() throws Exception {
@@ -199,6 +240,13 @@ class CobbleStateSourceSqlITTest {
                     .map(new StatefulMapper())
                     .name("sql-proof-stateful")
                     .uid("sql-proof-stateful")
+                    .keyBy(value -> value % PARALLELISM)
+                    .transform(
+                            "sql-proof-namespaced-stateful",
+                            BasicTypeInfo.INT_TYPE_INFO,
+                            new NamespacedStateOperator())
+                    .name("sql-proof-namespaced-stateful")
+                    .uid("sql-proof-namespaced-stateful")
                     .setMaxParallelism(128);
 
             JobGraph jobGraph = env.getStreamGraph().getJobGraph();
@@ -336,6 +384,15 @@ class CobbleStateSourceSqlITTest {
         return rows;
     }
 
+    private static Set<String> expectedNamespacedRows() {
+        Set<String> rows = new LinkedHashSet<>();
+        for (int key = 0; key < PARALLELISM; key++) {
+            rows.add(key + "|ns-a|" + expectedSum(key));
+            rows.add(key + "|ns-b|" + (expectedSum(key) + VALUES_PER_KEY * 100));
+        }
+        return rows;
+    }
+
     private static int expectedSum(int key) {
         int sum = 0;
         for (int offset = 0; offset < VALUES_PER_KEY; offset++) {
@@ -381,9 +438,64 @@ class CobbleStateSourceSqlITTest {
         assertTrue(latestCheckpointId > 0, "no chk-* checkpoint found");
         assertTrue(root != null, "could not resolve checkpoint root");
 
+        operatorId = operatorIdForState(root.toUri().toString(), "value-state");
         long schemaCheckpointId = resolveSchemaCheckpointId(root.toUri().toString(), operatorId);
         assertTrue(schemaCheckpointId > 0, "no inspect-schema event found");
         return new CheckpointInfo(root.toUri().toString(), operatorId, latestCheckpointId);
+    }
+
+    private static String operatorIdForState(String checkpointRootUri, String stateName)
+            throws Exception {
+        Path cobbleRoot = java.nio.file.Paths.get(URI.create(checkpointRootUri)).resolve("cobble");
+        assertTrue(Files.isDirectory(cobbleRoot), "no cobble inspect-schema root at " + cobbleRoot);
+
+        try (DirectoryStream<Path> operators = Files.newDirectoryStream(cobbleRoot)) {
+            for (Path operatorRoot : operators) {
+                if (!Files.isDirectory(operatorRoot)) {
+                    continue;
+                }
+                Path schemaRoot = operatorRoot.resolve("inspect-schema");
+                Path eventsDir = schemaRoot.resolve("events");
+                Path blobsDir = schemaRoot.resolve("blobs");
+                if (!Files.isDirectory(eventsDir) || !Files.isDirectory(blobsDir)) {
+                    continue;
+                }
+                List<InspectSchemaRegistryLayout.SchemaEvent> events = new ArrayList<>();
+                try (DirectoryStream<Path> eventFiles = Files.newDirectoryStream(eventsDir)) {
+                    for (Path eventFile : eventFiles) {
+                        InspectSchemaRegistryLayout.SchemaEvent event =
+                                InspectSchemaRegistryLayout.parseEventFileName(
+                                        eventFile.getFileName().toString());
+                        if (event != null) {
+                            events.add(event);
+                        }
+                    }
+                }
+                events.sort(
+                        Comparator.comparingLong(
+                                        InspectSchemaRegistryLayout.SchemaEvent::checkpointId)
+                                .reversed());
+                for (InspectSchemaRegistryLayout.SchemaEvent event : events) {
+                    Path blob =
+                            blobsDir.resolve(
+                                    InspectSchemaRegistryLayout.blobFileName(event.hash()));
+                    if (!Files.isRegularFile(blob)) {
+                        continue;
+                    }
+                    StateInspectSchemaStore store =
+                            StateInspectSchemaStore.fromBytes(Files.readAllBytes(blob));
+                    if (store.byStateName().containsKey(stateName)) {
+                        return operatorRoot.getFileName().toString();
+                    }
+                }
+            }
+        }
+        throw new AssertionError(
+                "Could not find operator inspect schema for state '"
+                        + stateName
+                        + "' under "
+                        + cobbleRoot
+                        + ".");
     }
 
     private static long resolveSchemaCheckpointId(String checkpointRootUri, String operatorId)
@@ -526,6 +638,35 @@ class CobbleStateSourceSqlITTest {
         }
     }
 
+    private static final class NamespacedStateOperator extends AbstractStreamOperator<Integer>
+            implements OneInputStreamOperator<Integer, Integer> {
+
+        private transient ValueStateDescriptor<Integer> descriptor;
+
+        @Override
+        public void open() throws Exception {
+            super.open();
+            descriptor =
+                    new ValueStateDescriptor<>(
+                            "namespaced-value-state", BasicTypeInfo.INT_TYPE_INFO);
+        }
+
+        @Override
+        public void processElement(StreamRecord<Integer> element) throws Exception {
+            Integer value = element.getValue();
+            addToNamespace("ns-a", value);
+            addToNamespace("ns-b", value + 100);
+            output.collect(element);
+        }
+
+        private void addToNamespace(String namespace, int value) throws Exception {
+            ValueState<Integer> state =
+                    getPartitionedState(namespace, StringSerializer.INSTANCE, descriptor);
+            Integer current = state.value();
+            state.update(current == null ? value : current + value);
+        }
+    }
+
     private static final class SumReducer implements ReduceFunction<Integer> {
         @Override
         public Integer reduce(Integer left, Integer right) {
@@ -565,6 +706,10 @@ class CobbleStateSourceSqlITTest {
             this.rootUri = rootUri;
             this.operatorId = operatorId;
             this.checkpointId = checkpointId;
+        }
+
+        private CheckpointInfo withOperatorId(String operatorId) {
+            return new CheckpointInfo(rootUri, operatorId, checkpointId);
         }
     }
 }
