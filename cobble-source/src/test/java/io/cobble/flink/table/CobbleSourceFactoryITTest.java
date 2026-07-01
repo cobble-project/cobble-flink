@@ -247,6 +247,33 @@ class CobbleSourceFactoryITTest {
     }
 
     @Test
+    void stateLookupRuntimeFailsClearly() {
+        StateSourceConfig config =
+                new StateSourceConfig(
+                        "file:///tmp/checkpoints",
+                        StateSourceConfig.Layout.CHECKPOINT_ROOT,
+                        "operator-1",
+                        "orders",
+                        "value",
+                        "latest",
+                        "batch",
+                        7L,
+                        -1,
+                        0L,
+                        Collections.singletonList(
+                                new StateSourceField(
+                                        "key", "INT", StateSourceField.Group.STATE_KEY, 0)));
+        CobbleStateDynamicTableSource source =
+                new CobbleStateDynamicTableSource(config, "default_catalog.default_database.t");
+
+        Exception error =
+                assertThrows(Exception.class, () -> source.getLookupRuntimeProvider(null));
+        assertTrue(
+                messageChain(error).contains("lookup runtime is not implemented"),
+                "expected lookup-unsupported message but got: " + messageChain(error));
+    }
+
+    @Test
     void invalidSourceKindFailsDuringPlanning() throws Exception {
         Path root = sinkRoot("invalid-kind");
         StreamTableEnvironment tableEnv = newTableEnv();

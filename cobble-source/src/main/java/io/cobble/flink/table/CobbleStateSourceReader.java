@@ -265,9 +265,18 @@ final class CobbleStateSourceReader implements SourceReader<RowData, CobbleState
      * wrote no data for the state). Such key-groups are genuinely empty and must be skipped rather
      * than failing the scan.
      */
-    private static boolean isUnknownColumnFamily(RuntimeException e) {
+    static boolean isUnknownColumnFamily(RuntimeException e) {
         String message = e.getMessage();
-        return message != null && message.contains("Unknown column family");
+        if (message == null) {
+            return false;
+        }
+        if (message.startsWith("IO error: ")) {
+            message = message.substring("IO error: ".length());
+        }
+        return message.equals("Unknown column family")
+                || message.startsWith("Unknown column family:")
+                || message.startsWith("Unknown column family ")
+                || message.startsWith("Unknown column family '");
     }
 
     /** Runtime holder for one assigned key-group split. */

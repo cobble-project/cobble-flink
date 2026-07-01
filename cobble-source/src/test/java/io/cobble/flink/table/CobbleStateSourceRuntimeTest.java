@@ -1,6 +1,7 @@
 package io.cobble.flink.table;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -56,6 +57,22 @@ class CobbleStateSourceRuntimeTest {
                 () -> CobbleStateSourceRuntime.createStateSourceSplits(config(-1), snapshot, 7L);
         Exception error = assertThrows(Exception.class, action::run);
         assertTrue(error.getMessage().contains("Missing key-group coverage"));
+    }
+
+    @Test
+    void unknownColumnFamilyMatcherIsNarrow() {
+        assertTrue(
+                CobbleStateSourceReader.isUnknownColumnFamily(
+                        new RuntimeException("Unknown column family: cf")));
+        assertTrue(
+                CobbleStateSourceReader.isUnknownColumnFamily(
+                        new RuntimeException("Unknown column family cf")));
+        assertTrue(
+                CobbleStateSourceReader.isUnknownColumnFamily(
+                        new RuntimeException("IO error: Unknown column family 'cf'")));
+        assertFalse(
+                CobbleStateSourceReader.isUnknownColumnFamily(
+                        new RuntimeException("Failed to open shard: Unknown column family: cf")));
     }
 
     private static StateSourceConfig config(int bucketCount) {

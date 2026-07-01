@@ -193,6 +193,44 @@ class StateSourceSchemaResolverTest {
     }
 
     @Test
+    void coarseVarcharSemanticTypeMatchesDdlString() throws Exception {
+        Path root = tempDir.resolve("coarse-varchar");
+        StateInspectSchema schema =
+                StateInspectSchema.forMap(
+                        "counters",
+                        "cf",
+                        false,
+                        IntSerializer.INSTANCE,
+                        VoidNamespaceSerializer.INSTANCE,
+                        IntSerializer.INSTANCE,
+                        StringSerializer.INSTANCE);
+        writeRegistry(
+                root,
+                "op-a",
+                100L,
+                store(
+                        schema,
+                        "counters",
+                        StateInspectSemanticSchema.forMap(
+                                scalar("INT"), unknown(), scalar("INT"), scalar("VARCHAR"))));
+
+        StateSourceResolvedSchema resolved =
+                StateSourceSchemaResolver.resolve(
+                        uri(root),
+                        opts("counters", null, null),
+                        "latest",
+                        schema(
+                                physical("key", DataTypes.INT()),
+                                physical("map_key", DataTypes.INT()),
+                                physical("map_value", DataTypes.STRING())));
+
+        assertEquals(
+                Arrays.asList(
+                        "key:INT:STATE_KEY", "map_key:INT:MAP_KEY", "map_value:VARCHAR:MAP_VALUE"),
+                describe(resolved.outputFields()));
+    }
+
+    @Test
     void resolvesListState() throws Exception {
         Path root = tempDir.resolve("list");
         StateInspectSchema schema =

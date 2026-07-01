@@ -185,9 +185,9 @@ public final class CobbleDynamicTableSourceFactory implements DynamicTableSource
 
     /**
      * Builds a state source: rejects a single operator root, parses {@code state.*} options,
-     * resolves and validates the DDL against the inspect-schema registry, and returns a planning-
-     * only {@link CobbleStateDynamicTableSource}. The data-reading runtime is not implemented yet
-     * and fails when a scan/lookup runtime provider is requested.
+     * resolves and validates the DDL against the inspect-schema registry, and returns a {@link
+     * CobbleStateDynamicTableSource} backed by a batch scan runtime. Lookup and streaming are still
+     * unsupported and fail when their runtime provider is requested.
      */
     private static DynamicTableSource createStateSource(
             Context context,

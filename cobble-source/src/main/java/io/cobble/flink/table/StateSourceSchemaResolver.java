@@ -598,18 +598,29 @@ final class StateSourceSchemaResolver {
     }
 
     /**
-     * Compares an expected type (an inspect logical-type string) with a DDL column type, ignoring
-     * only nullability. Both are parsed and re-serialized as nullable so equivalent declarations
-     * (for example {@code INT} vs {@code INT NOT NULL}) compare equal.
+     * Compares an expected type (an inspect logical-type string) with a DDL column type.
+     * Nullability is ignored. Coarse semantic {@code VARCHAR} is accepted for concrete DDL {@code
+     * VARCHAR(...)} because some Flink TypeInformation serializers do not retain string precision.
      */
     private static boolean typesMatch(String expectedLogicalType, LogicalType actualType) {
+        String actualSerializable = actualType.copy(true).asSerializableString();
+        if ("VARCHAR".equals(expectedLogicalType) && actualSerializable.startsWith("VARCHAR")) {
+            return true;
+        }
         try {
             LogicalType expected =
                     LogicalTypeParser.parse(
                             expectedLogicalType, StateSourceSchemaResolver.class.getClassLoader());
-            return expected.copy(true)
-                    .asSerializableString()
-                    .equals(actualType.copy(true).asSerializableString());
+            String expectedString = expected.copy(true).asSerializableString();
+            String actualString = actualSerializable;
+            if (expectedString.equals(actualString)) {
+                return true;
+            }
+            // Some Flink TypeInformation serializers expose only the coarse SQL family (for example
+            // BasicTypeInfo.STRING_TYPE_INFO -> VARCHAR) while DDL STRING is represented as
+            // VARCHAR(2147483647). Treat the unparameterized family as compatible with any concrete
+            // VARCHAR length.
+            return "VARCHAR".equals(expectedString) && actualString.startsWith("VARCHAR(");
         } catch (RuntimeException e) {
             // Fall back to a strict string compare when the inspect type is not parseable.
             return expectedLogicalType.equals(actualType.asSerializableString());

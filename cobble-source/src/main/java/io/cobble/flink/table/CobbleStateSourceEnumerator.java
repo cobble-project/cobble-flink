@@ -10,9 +10,11 @@ import java.util.Collection;
 import java.util.Collections;
 import java.util.Comparator;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 /** Bounded enumerator that plans and assigns checkpoint key-group ranges. */
 final class CobbleStateSourceEnumerator
@@ -22,9 +24,9 @@ final class CobbleStateSourceEnumerator
     private final SplitEnumeratorContext<CobbleStateSourceSplit> context;
     private final Map<String, CobbleStateSourceSplit> pendingSplitsById = new LinkedHashMap<>();
     private final Map<String, Integer> preferredReaderBySplit = new LinkedHashMap<>();
+    private final Set<Integer> noMoreSplitsSignaledReaders = new HashSet<>();
     private long checkpointId;
     private boolean started;
-    private boolean noMoreSplitsSignaled;
 
     CobbleStateSourceEnumerator(
             StateSourceConfig config,
@@ -127,14 +129,15 @@ final class CobbleStateSourceEnumerator
     }
 
     private void signalNoMoreSplitsIfDone() {
-        if (noMoreSplitsSignaled || !pendingSplitsById.isEmpty()) {
+        if (!pendingSplitsById.isEmpty()) {
             return;
         }
         Collection<Integer> readers = context.registeredReaders().keySet();
         for (Integer readerId : readers) {
-            context.signalNoMoreSplits(readerId.intValue());
+            if (noMoreSplitsSignaledReaders.add(readerId)) {
+                context.signalNoMoreSplits(readerId.intValue());
+            }
         }
-        noMoreSplitsSignaled = true;
     }
 
     private Integer selectReaderForSplit(String splitId, Map<Integer, Integer> loadByReader) {
