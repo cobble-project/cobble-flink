@@ -43,8 +43,10 @@ final class StateSourceConfig implements Serializable {
     private final String stateName;
     private final String stateKind;
     private final String scanCheckpointId;
+    private final String scanMode;
     private final long schemaCheckpointId;
     private final int bucketCount;
+    private final long sourceBlockCacheMemoryBytes;
     private final List<StateSourceField> outputFields;
 
     /** Detection-only placeholder: layout is known, schema is not yet resolved. */
@@ -55,8 +57,10 @@ final class StateSourceConfig implements Serializable {
         this.stateName = null;
         this.stateKind = null;
         this.scanCheckpointId = null;
+        this.scanMode = null;
         this.schemaCheckpointId = -1L;
         this.bucketCount = -1;
+        this.sourceBlockCacheMemoryBytes = 0L;
         this.outputFields = Collections.emptyList();
     }
 
@@ -68,8 +72,10 @@ final class StateSourceConfig implements Serializable {
             String stateName,
             String stateKind,
             String scanCheckpointId,
+            String scanMode,
             long schemaCheckpointId,
             int bucketCount,
+            long sourceBlockCacheMemoryBytes,
             List<StateSourceField> outputFields) {
         this.pathUri = pathUri;
         this.layout = layout;
@@ -77,8 +83,10 @@ final class StateSourceConfig implements Serializable {
         this.stateName = stateName;
         this.stateKind = stateKind;
         this.scanCheckpointId = scanCheckpointId;
+        this.scanMode = scanMode;
         this.schemaCheckpointId = schemaCheckpointId;
         this.bucketCount = bucketCount;
+        this.sourceBlockCacheMemoryBytes = sourceBlockCacheMemoryBytes;
         this.outputFields = Collections.unmodifiableList(new ArrayList<>(outputFields));
     }
 
@@ -107,6 +115,10 @@ final class StateSourceConfig implements Serializable {
         return scanCheckpointId;
     }
 
+    String scanMode() {
+        return scanMode;
+    }
+
     /** Checkpoint id of the schema-registry event the schema was read from. */
     long schemaCheckpointId() {
         return schemaCheckpointId;
@@ -114,6 +126,10 @@ final class StateSourceConfig implements Serializable {
 
     int bucketCount() {
         return bucketCount;
+    }
+
+    long sourceBlockCacheMemoryBytes() {
+        return sourceBlockCacheMemoryBytes;
     }
 
     List<StateSourceField> outputFields() {

@@ -97,7 +97,7 @@ class CobbleSourceFactoryITTest {
     }
 
     @Test
-    void validStateDdlPlansAndFailsOnlyAtRuntime() throws Exception {
+    void validStateDdlPlans() throws Exception {
         Path root = stateCheckpointRoot("state-valid");
         StreamTableEnvironment tableEnv = newTableEnv();
         // No PRIMARY KEY: state mode must not require a sink primary key.
@@ -114,12 +114,7 @@ class CobbleSourceFactoryITTest {
                         + " 'state.name' = 'orders'"
                         + ")");
 
-        Exception error =
-                assertThrows(
-                        Exception.class, () -> tableEnv.explainSql("SELECT * FROM t_state_valid"));
-        assertTrue(
-                messageChain(error).contains("state source runtime is not implemented yet"),
-                "expected not-implemented message but got: " + messageChain(error));
+        assertDoesNotThrow(() -> tableEnv.explainSql("SELECT * FROM t_state_valid"));
     }
 
     @Test
@@ -139,12 +134,7 @@ class CobbleSourceFactoryITTest {
                         + " 'state.name' = 'orders'"
                         + ")");
 
-        Exception error =
-                assertThrows(
-                        Exception.class, () -> tableEnv.explainSql("SELECT * FROM t_state_auto"));
-        assertTrue(
-                messageChain(error).contains("state source runtime is not implemented yet"),
-                "expected not-implemented message but got: " + messageChain(error));
+        assertDoesNotThrow(() -> tableEnv.explainSql("SELECT * FROM t_state_auto"));
     }
 
     @Test
@@ -227,6 +217,33 @@ class CobbleSourceFactoryITTest {
                 messageChain(error).contains("column at position 0")
                         && messageChain(error).contains("expects 'key'"),
                 "expected position-order message but got: " + messageChain(error));
+    }
+
+    @Test
+    void stateStreamingScanModeFailsClearly() throws Exception {
+        Path root = stateCheckpointRoot("state-streaming");
+        StreamTableEnvironment tableEnv = newTableEnv();
+        tableEnv.executeSql(
+                "CREATE TABLE t_state_streaming ("
+                        + " `key` INT,"
+                        + " `value` INT"
+                        + ") WITH ("
+                        + " 'connector' = 'cobble',"
+                        + " 'path' = '"
+                        + escape(root)
+                        + "',"
+                        + " 'source.kind' = 'state',"
+                        + " 'scan.mode' = 'streaming',"
+                        + " 'state.name' = 'orders'"
+                        + ")");
+
+        Exception error =
+                assertThrows(
+                        Exception.class,
+                        () -> tableEnv.explainSql("SELECT * FROM t_state_streaming"));
+        assertTrue(
+                messageChain(error).contains("supports only scan.mode='batch'"),
+                "expected streaming-unsupported message but got: " + messageChain(error));
     }
 
     @Test

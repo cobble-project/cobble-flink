@@ -4,20 +4,20 @@ import org.apache.flink.table.connector.ChangelogMode;
 import org.apache.flink.table.connector.source.DynamicTableSource;
 import org.apache.flink.table.connector.source.LookupTableSource;
 import org.apache.flink.table.connector.source.ScanTableSource;
+import org.apache.flink.table.connector.source.SourceProvider;
 
 /**
- * Cobble state source whose DDL schema has been resolved and validated at planning time, but whose
- * data-reading runtime is not implemented yet.
+ * Cobble state source whose DDL schema has been resolved and validated at planning time.
  *
- * <p>Planning succeeds (so valid state DDL can be created and explained), but requesting a scan or
- * lookup runtime provider fails clearly. This keeps the state path separate from the sink source so
- * sink key/value codecs are never instantiated for state.
+ * <p>Batch scans use the state checkpoint runtime. Lookup is intentionally still rejected until the
+ * state lookup source path is implemented.
  */
 final class CobbleStateDynamicTableSource implements ScanTableSource, LookupTableSource {
 
-    private static final String RUNTIME_NOT_IMPLEMENTED =
-            "Cobble state source schema is resolved, but state source runtime is not implemented"
-                    + " yet.";
+    private static final String STREAMING_NOT_SUPPORTED =
+            "Cobble state source currently supports only scan.mode='batch'.";
+    private static final String LOOKUP_NOT_IMPLEMENTED =
+            "Cobble state source lookup runtime is not implemented yet.";
 
     private final StateSourceConfig config;
     private final String summary;
@@ -34,12 +34,15 @@ final class CobbleStateDynamicTableSource implements ScanTableSource, LookupTabl
 
     @Override
     public ScanRuntimeProvider getScanRuntimeProvider(ScanContext runtimeProviderContext) {
-        throw new UnsupportedOperationException(RUNTIME_NOT_IMPLEMENTED);
+        if (!"batch".equals(config.scanMode())) {
+            throw new UnsupportedOperationException(STREAMING_NOT_SUPPORTED);
+        }
+        return SourceProvider.of(new CobbleStateSource(config));
     }
 
     @Override
     public LookupRuntimeProvider getLookupRuntimeProvider(LookupContext context) {
-        throw new UnsupportedOperationException(RUNTIME_NOT_IMPLEMENTED);
+        throw new UnsupportedOperationException(LOOKUP_NOT_IMPLEMENTED);
     }
 
     @Override

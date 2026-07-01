@@ -102,7 +102,9 @@ public final class CobbleDynamicTableSourceFactory implements DynamicTableSource
                     resolvedSource,
                     pathUri,
                     checkpointId,
+                    scanMode,
                     bucketCount,
+                    sourceBlockCacheMemory,
                     resolvedSchema);
         }
 
@@ -193,7 +195,9 @@ public final class CobbleDynamicTableSourceFactory implements DynamicTableSource
             CobbleResolvedSource resolvedSource,
             String pathUri,
             String checkpointId,
+            String scanMode,
             int bucketCount,
+            MemorySize sourceBlockCacheMemory,
             ResolvedSchema resolvedSchema) {
         StateSourceConfig detected = resolvedSource.stateConfig();
         if (detected.layout() == StateSourceConfig.Layout.OPERATOR_ROOT) {
@@ -216,8 +220,10 @@ public final class CobbleDynamicTableSourceFactory implements DynamicTableSource
                         resolved.stateName(),
                         resolved.stateKind().wireName(),
                         checkpointId,
+                        scanMode,
                         resolved.schemaCheckpointId(),
                         bucketCount,
+                        sourceBlockCacheMemory.getBytes(),
                         resolved.outputFields());
         return new CobbleStateDynamicTableSource(
                 config, context.getObjectIdentifier().asSummaryString());
