@@ -119,6 +119,35 @@ public final class CobbleDynamicTableSourceFactory implements DynamicTableSource
                                 new ValidationExceptionSupplier(
                                         "The initial Cobble source requires a PRIMARY KEY."));
 
+        SinkSourceResolvedSchema sinkSidecar =
+                SinkSourceSchemaResolver.resolve(pathUri, checkpointId, resolvedSchema);
+        List<CobbleDynamicTableSource.SerializableField> keyFields;
+        List<CobbleDynamicTableSource.SerializableField> valueFields;
+        if (sinkSidecar.present()) {
+            keyFields = sinkSidecar.keyFields();
+            valueFields = sinkSidecar.valueFields();
+        } else {
+            SinkDdlSchema ddlSchema = deriveSinkFieldsFromDdl(resolvedSchema, primaryKey);
+            keyFields = ddlSchema.keyFields;
+            valueFields = ddlSchema.valueFields;
+        }
+
+        CobbleDynamicTableSource.SerializableConfig config =
+                new CobbleDynamicTableSource.SerializableConfig(
+                        pathUri,
+                        bucketCount,
+                        checkpointId,
+                        scanMode,
+                        pollIntervalMillis,
+                        sourceBlockCacheMemory.getBytes(),
+                        keyFields,
+                        valueFields);
+        return new CobbleDynamicTableSource(
+                config, context.getObjectIdentifier().asSummaryString());
+    }
+
+    private static SinkDdlSchema deriveSinkFieldsFromDdl(
+            ResolvedSchema resolvedSchema, UniqueConstraint primaryKey) {
         DataType physicalDataType = resolvedSchema.toPhysicalRowDataType();
         RowType physicalRowType = (RowType) physicalDataType.getLogicalType();
         List<RowType.RowField> physicalFields = physicalRowType.getFields();
@@ -168,19 +197,7 @@ public final class CobbleDynamicTableSourceFactory implements DynamicTableSource
             throw new ValidationException(
                     "The initial Cobble source requires at least one non-primary-key column.");
         }
-
-        CobbleDynamicTableSource.SerializableConfig config =
-                new CobbleDynamicTableSource.SerializableConfig(
-                        pathUri,
-                        bucketCount,
-                        checkpointId,
-                        scanMode,
-                        pollIntervalMillis,
-                        sourceBlockCacheMemory.getBytes(),
-                        keyFields,
-                        valueFields);
-        return new CobbleDynamicTableSource(
-                config, context.getObjectIdentifier().asSummaryString());
+        return new SinkDdlSchema(keyFields, valueFields);
     }
 
     /**
@@ -289,6 +306,18 @@ public final class CobbleDynamicTableSourceFactory implements DynamicTableSource
         throw new ValidationException(
                 CobbleSourceTableOptions.SCAN_MODE.key()
                         + " must be one of ['batch', 'streaming'].");
+    }
+
+    private static final class SinkDdlSchema {
+        private final List<CobbleDynamicTableSource.SerializableField> keyFields;
+        private final List<CobbleDynamicTableSource.SerializableField> valueFields;
+
+        private SinkDdlSchema(
+                List<CobbleDynamicTableSource.SerializableField> keyFields,
+                List<CobbleDynamicTableSource.SerializableField> valueFields) {
+            this.keyFields = keyFields;
+            this.valueFields = valueFields;
+        }
     }
 
     private static final class ValidationExceptionSupplier
