@@ -515,13 +515,9 @@ final class StateSourceSchemaResolver {
      */
     private static void validateDdl(
             String stateName, List<StateSourceField> expected, ResolvedSchema ddlSchema) {
-        if (ddlSchema.getPrimaryKey().isPresent()) {
-            throw new ValidationException(
-                    "Cobble state source does not support a PRIMARY KEY. Remove the PRIMARY KEY"
-                            + " from the table definition for state '"
-                            + stateName
-                            + "'.");
-        }
+        // A DDL PRIMARY KEY is now an optional lookup contract (validated separately in
+        // StateSourceLookupKeyContract). Scan output order is still the semantic order produced by
+        // deriveOutputFields(...), so the PK is intentionally not used to reorder columns here.
 
         RowType physicalRowType = (RowType) ddlSchema.toPhysicalRowDataType().getLogicalType();
         List<RowType.RowField> actualFields = physicalRowType.getFields();

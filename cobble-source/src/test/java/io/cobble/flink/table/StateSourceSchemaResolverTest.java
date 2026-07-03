@@ -524,7 +524,9 @@ class StateSourceSchemaResolverTest {
     // ------------------------------------------------------------------------------------------
 
     @Test
-    void primaryKeyIsRejected() throws Exception {
+    void primaryKeyIsAcceptedForScan() throws Exception {
+        // A DDL PRIMARY KEY is now an optional lookup contract, not a scan error. Scan output order
+        // is still the semantic order, so the PK must not reorder columns.
         Path root = tempDir.resolve("pk");
         writeRegistry(root, "op-a", 100L, valueStore("orders"));
 
@@ -538,15 +540,13 @@ class StateSourceSchemaResolverTest {
                         Collections.emptyList(),
                         UniqueConstraint.primaryKey("pk", Collections.singletonList("key")));
 
-        ValidationException error =
-                assertThrows(
-                        ValidationException.class,
-                        () ->
-                                StateSourceSchemaResolver.resolve(
-                                        uri(root), opts("orders", null, null), "latest", withPk));
-        assertTrue(
-                error.getMessage().contains("does not support a PRIMARY KEY"),
-                "expected PK-rejection message but got: " + error.getMessage());
+        StateSourceResolvedSchema resolved =
+                StateSourceSchemaResolver.resolve(
+                        uri(root), opts("orders", null, null), "latest", withPk);
+
+        assertEquals(
+                Arrays.asList("key:INT:STATE_KEY", "value:INT:VALUE"),
+                describe(resolved.outputFields()));
     }
 
     @Test

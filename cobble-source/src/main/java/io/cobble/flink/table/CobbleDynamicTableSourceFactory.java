@@ -229,6 +229,13 @@ public final class CobbleDynamicTableSourceFactory implements DynamicTableSource
                 StateSourceSchemaResolver.resolve(
                         pathUri, stateOptions, checkpointId, resolvedSchema);
 
+        StateSourceLookupKeyContract lookupKeyContract =
+                StateSourceLookupKeyContract.derive(
+                        resolved.stateName(),
+                        resolved.stateKind(),
+                        resolved.outputFields(),
+                        resolvedSchema);
+
         StateSourceConfig config =
                 new StateSourceConfig(
                         pathUri,
@@ -241,7 +248,8 @@ public final class CobbleDynamicTableSourceFactory implements DynamicTableSource
                         resolved.schemaCheckpointId(),
                         bucketCount,
                         sourceBlockCacheMemory.getBytes(),
-                        resolved.outputFields());
+                        resolved.outputFields(),
+                        lookupKeyContract);
         return new CobbleStateDynamicTableSource(
                 config, context.getObjectIdentifier().asSummaryString());
     }

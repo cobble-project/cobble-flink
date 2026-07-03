@@ -19,7 +19,7 @@ import java.util.List;
  */
 final class StateSourceConfig implements Serializable {
 
-    private static final long serialVersionUID = 2L;
+    private static final long serialVersionUID = 3L;
 
     /** Shape of the detected state path. */
     enum Layout {
@@ -48,6 +48,7 @@ final class StateSourceConfig implements Serializable {
     private final int bucketCount;
     private final long sourceBlockCacheMemoryBytes;
     private final List<StateSourceField> outputFields;
+    private final StateSourceLookupKeyContract lookupKeyContract;
 
     /** Detection-only placeholder: layout is known, schema is not yet resolved. */
     StateSourceConfig(String pathUri, Layout layout) {
@@ -62,6 +63,7 @@ final class StateSourceConfig implements Serializable {
         this.bucketCount = -1;
         this.sourceBlockCacheMemoryBytes = 0L;
         this.outputFields = Collections.emptyList();
+        this.lookupKeyContract = StateSourceLookupKeyContract.absent();
     }
 
     /** Fully-resolved config ready for the Step 3 runtime. */
@@ -77,6 +79,35 @@ final class StateSourceConfig implements Serializable {
             int bucketCount,
             long sourceBlockCacheMemoryBytes,
             List<StateSourceField> outputFields) {
+        this(
+                pathUri,
+                layout,
+                operatorId,
+                stateName,
+                stateKind,
+                scanCheckpointId,
+                scanMode,
+                schemaCheckpointId,
+                bucketCount,
+                sourceBlockCacheMemoryBytes,
+                outputFields,
+                StateSourceLookupKeyContract.absent());
+    }
+
+    /** Fully-resolved config carrying an optional exact-key lookup contract. */
+    StateSourceConfig(
+            String pathUri,
+            Layout layout,
+            String operatorId,
+            String stateName,
+            String stateKind,
+            String scanCheckpointId,
+            String scanMode,
+            long schemaCheckpointId,
+            int bucketCount,
+            long sourceBlockCacheMemoryBytes,
+            List<StateSourceField> outputFields,
+            StateSourceLookupKeyContract lookupKeyContract) {
         this.pathUri = pathUri;
         this.layout = layout;
         this.operatorId = operatorId;
@@ -88,6 +119,10 @@ final class StateSourceConfig implements Serializable {
         this.bucketCount = bucketCount;
         this.sourceBlockCacheMemoryBytes = sourceBlockCacheMemoryBytes;
         this.outputFields = Collections.unmodifiableList(new ArrayList<>(outputFields));
+        this.lookupKeyContract =
+                lookupKeyContract == null
+                        ? StateSourceLookupKeyContract.absent()
+                        : lookupKeyContract;
     }
 
     String pathUri() {
@@ -134,5 +169,10 @@ final class StateSourceConfig implements Serializable {
 
     List<StateSourceField> outputFields() {
         return outputFields;
+    }
+
+    /** The exact-key lookup contract derived from the DDL primary key (absent when no PK). */
+    StateSourceLookupKeyContract lookupKeyContract() {
+        return lookupKeyContract;
     }
 }

@@ -17,12 +17,16 @@ import org.apache.flink.api.common.typeutils.base.IntSerializer;
 import org.apache.flink.runtime.state.VoidNamespaceSerializer;
 import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
 import org.apache.flink.table.api.bridge.java.StreamTableEnvironment;
+import org.apache.flink.table.connector.source.DynamicTableSource;
+import org.apache.flink.table.connector.source.LookupTableSource;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.Arrays;
 import java.util.Collections;
+import java.util.List;
 
 /**
  * Factory wiring tests proving source-kind detection drives validation: sink roots keep the
@@ -219,6 +223,57 @@ class CobbleSourceFactoryITTest {
     }
 
     @Test
+    void stateScanWithPrimaryKeyPlans() throws Exception {
+        Path root = stateCheckpointRoot("state-pk-scan");
+        StreamTableEnvironment tableEnv = newTableEnv();
+        // A DDL PRIMARY KEY is now an optional lookup contract; scan must still plan.
+        tableEnv.executeSql(
+                "CREATE TABLE t_state_pk_scan ("
+                        + " `key` INT,"
+                        + " `value` INT,"
+                        + " PRIMARY KEY (`key`) NOT ENFORCED"
+                        + ") WITH ("
+                        + " 'connector' = 'cobble',"
+                        + " 'path' = '"
+                        + escape(root)
+                        + "',"
+                        + " 'source.kind' = 'state',"
+                        + " 'state.name' = 'orders'"
+                        + ")");
+
+        assertDoesNotThrow(() -> tableEnv.explainSql("SELECT * FROM t_state_pk_scan"));
+    }
+
+    @Test
+    void stateScanWithPrimaryKeyStillRejectsReorderedPhysicalColumns() throws Exception {
+        Path root = stateCheckpointRoot("state-pk-reorder");
+        StreamTableEnvironment tableEnv = newTableEnv();
+        // Even with a correct PK, physical columns must stay in semantic order.
+        tableEnv.executeSql(
+                "CREATE TABLE t_state_pk_reorder ("
+                        + " `value` INT,"
+                        + " `key` INT,"
+                        + " PRIMARY KEY (`key`) NOT ENFORCED"
+                        + ") WITH ("
+                        + " 'connector' = 'cobble',"
+                        + " 'path' = '"
+                        + escape(root)
+                        + "',"
+                        + " 'source.kind' = 'state',"
+                        + " 'state.name' = 'orders'"
+                        + ")");
+
+        Exception error =
+                assertThrows(
+                        Exception.class,
+                        () -> tableEnv.explainSql("SELECT * FROM t_state_pk_reorder"));
+        assertTrue(
+                messageChain(error).contains("column at position 0")
+                        && messageChain(error).contains("expects 'key'"),
+                "expected position-order message but got: " + messageChain(error));
+    }
+
+    @Test
     void autoDetectedStateWithValidDdlReachesStateBranch() throws Exception {
         Path root = stateCheckpointRoot("state-auto");
         StreamTableEnvironment tableEnv = newTableEnv();
@@ -349,6 +404,8 @@ class CobbleSourceFactoryITTest {
 
     @Test
     void stateLookupRuntimeFailsClearly() {
+        // No DDL PRIMARY KEY => contract absent => lookup must fail with the "requires PRIMARY KEY"
+        // message, not the not-implemented boundary.
         StateSourceConfig config =
                 new StateSourceConfig(
                         "file:///tmp/checkpoints",
@@ -370,8 +427,147 @@ class CobbleSourceFactoryITTest {
         Exception error =
                 assertThrows(Exception.class, () -> source.getLookupRuntimeProvider(null));
         assertTrue(
-                messageChain(error).contains("lookup runtime is not implemented"),
-                "expected lookup-unsupported message but got: " + messageChain(error));
+                messageChain(error).contains("requires a DDL PRIMARY KEY"),
+                "expected requires-PK message but got: " + messageChain(error));
+    }
+
+    @Test
+    void stateLookupWithValuePrimaryKeyReachesNotImplementedBoundary() {
+        // Contract present (value state PK = key), LookupContext provides the single key column at
+        // physical position 0 => validation passes => lookup runtime fails not-implemented.
+        StateSourceConfig config =
+                stateConfigWithContract(
+                        "orders",
+                        "value",
+                        Collections.singletonList(
+                                new StateSourceField(
+                                        "key", "INT", StateSourceField.Group.STATE_KEY, 0)),
+                        Collections.singletonList(
+                                new StateSourceField(
+                                        "key", "INT", StateSourceField.Group.STATE_KEY, 0)),
+                        new int[] {0});
+        CobbleStateDynamicTableSource source =
+                new CobbleStateDynamicTableSource(config, "default_catalog.default_database.t");
+
+        Exception error =
+                assertThrows(
+                        Exception.class,
+                        () -> source.getLookupRuntimeProvider(lookupContext(new int[] {0})));
+        assertTrue(
+                messageChain(error).contains("exact lookup runtime is not implemented"),
+                "expected not-implemented boundary but got: " + messageChain(error));
+    }
+
+    @Test
+    void stateLookupWithPartialLookupContextFailsBeforeNotImplemented() {
+        // Contract requires one key column at position 0, but the planner provides a different
+        // position => must fail validation, not reach the not-implemented boundary.
+        StateSourceConfig config =
+                stateConfigWithContract(
+                        "orders",
+                        "value",
+                        Collections.singletonList(
+                                new StateSourceField(
+                                        "key", "INT", StateSourceField.Group.STATE_KEY, 0)),
+                        Collections.singletonList(
+                                new StateSourceField(
+                                        "key", "INT", StateSourceField.Group.STATE_KEY, 0)),
+                        new int[] {0});
+        CobbleStateDynamicTableSource source =
+                new CobbleStateDynamicTableSource(config, "default_catalog.default_database.t");
+
+        Exception error =
+                assertThrows(
+                        Exception.class,
+                        () -> source.getLookupRuntimeProvider(lookupContext(new int[] {1})));
+        assertTrue(
+                messageChain(error).contains("lookup key at position 0")
+                        && messageChain(error).contains("requires physical column 0"),
+                "expected lookup-key mismatch message but got: " + messageChain(error));
+    }
+
+    @Test
+    void stateLookupWithWrongKeyCountFailsBeforeNotImplemented() {
+        StateSourceConfig config =
+                stateConfigWithContract(
+                        "orders",
+                        "value",
+                        Collections.singletonList(
+                                new StateSourceField(
+                                        "key", "INT", StateSourceField.Group.STATE_KEY, 0)),
+                        Collections.singletonList(
+                                new StateSourceField(
+                                        "key", "INT", StateSourceField.Group.STATE_KEY, 0)),
+                        new int[] {0});
+        CobbleStateDynamicTableSource source =
+                new CobbleStateDynamicTableSource(config, "default_catalog.default_database.t");
+
+        Exception error =
+                assertThrows(
+                        Exception.class,
+                        () ->
+                                source.getLookupRuntimeProvider(
+                                        lookupContext(new int[] {0}, new int[] {1})));
+        assertTrue(
+                messageChain(error).contains("equality conditions for all 1 PRIMARY KEY column(s)"),
+                "expected key-count mismatch message but got: " + messageChain(error));
+    }
+
+    @Test
+    void stateLookupForListFailsAsUnsupportedEvenWithContract() {
+        StateSourceConfig config =
+                stateConfigWithContract(
+                        "orders",
+                        "list",
+                        Arrays.asList(
+                                new StateSourceField(
+                                        "key", "INT", StateSourceField.Group.STATE_KEY, 0),
+                                new StateSourceField(
+                                        "value", "INT", StateSourceField.Group.LIST_ELEMENT, 0)),
+                        Collections.singletonList(
+                                new StateSourceField(
+                                        "key", "INT", StateSourceField.Group.STATE_KEY, 0)),
+                        new int[] {0});
+        CobbleStateDynamicTableSource source =
+                new CobbleStateDynamicTableSource(config, "default_catalog.default_database.t");
+
+        Exception error =
+                assertThrows(
+                        Exception.class,
+                        () -> source.getLookupRuntimeProvider(lookupContext(new int[] {0})));
+        assertTrue(
+                messageChain(error).contains("list lookup is not supported"),
+                "expected list-lookup unsupported message but got: " + messageChain(error));
+    }
+
+    @Test
+    void stateLookupForTimerFailsAsUnsupported() {
+        StateSourceConfig config =
+                stateConfigWithContract(
+                        "orders",
+                        "timer",
+                        Arrays.asList(
+                                new StateSourceField(
+                                        "key", "INT", StateSourceField.Group.STATE_KEY, 0),
+                                new StateSourceField(
+                                        "timestamp",
+                                        "BIGINT",
+                                        StateSourceField.Group.TIMER_TIMESTAMP,
+                                        0)),
+                        Collections.singletonList(
+                                new StateSourceField(
+                                        "key", "INT", StateSourceField.Group.STATE_KEY, 0)),
+                        new int[] {0});
+        CobbleStateDynamicTableSource source =
+                new CobbleStateDynamicTableSource(config, "default_catalog.default_database.t");
+
+        Exception error =
+                assertThrows(
+                        Exception.class,
+                        () -> source.getLookupRuntimeProvider(lookupContext(new int[] {0})));
+        assertTrue(
+                messageChain(error).contains("timer lookup is not supported"),
+                "expected timer-lookup unsupported message but got: " + messageChain(error));
     }
 
     @Test
@@ -396,6 +592,66 @@ class CobbleSourceFactoryITTest {
         StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment();
         env.setParallelism(1);
         return StreamTableEnvironment.create(env);
+    }
+
+    /** Builds a resolved state config carrying an explicit present lookup contract. */
+    private static StateSourceConfig stateConfigWithContract(
+            String stateName,
+            String stateKind,
+            List<StateSourceField> outputFields,
+            List<StateSourceField> requiredFields,
+            int[] requiredPositions) {
+        StateSourceLookupKeyContract contract =
+                StateSourceLookupKeyContract.present(requiredFields, requiredPositions);
+        return new StateSourceConfig(
+                "file:///tmp/checkpoints",
+                StateSourceConfig.Layout.CHECKPOINT_ROOT,
+                "operator-1",
+                stateName,
+                stateKind,
+                "latest",
+                "batch",
+                7L,
+                -1,
+                0L,
+                outputFields,
+                contract);
+    }
+
+    /** Minimal {@link LookupTableSource.LookupContext} exposing explicit physical key positions. */
+    private static LookupTableSource.LookupContext lookupContext(int[]... keys) {
+        return new TestLookupContext(keys);
+    }
+
+    private static final class TestLookupContext implements LookupTableSource.LookupContext {
+        private final int[][] keys;
+
+        private TestLookupContext(int[][] keys) {
+            this.keys = keys;
+        }
+
+        @Override
+        public int[][] getKeys() {
+            return keys;
+        }
+
+        @Override
+        public <T> org.apache.flink.api.common.typeinfo.TypeInformation<T> createTypeInformation(
+                org.apache.flink.table.types.DataType dataType) {
+            throw new UnsupportedOperationException("not used by Step 1 lookup contract tests");
+        }
+
+        @Override
+        public <T> org.apache.flink.api.common.typeinfo.TypeInformation<T> createTypeInformation(
+                org.apache.flink.table.types.logical.LogicalType logicalType) {
+            throw new UnsupportedOperationException("not used by Step 1 lookup contract tests");
+        }
+
+        @Override
+        public DynamicTableSource.DataStructureConverter createDataStructureConverter(
+                org.apache.flink.table.types.DataType dataType) {
+            throw new UnsupportedOperationException("not used by Step 1 lookup contract tests");
+        }
     }
 
     private static String sinkDdl(String tableName, Path root, String sourceKind) {
