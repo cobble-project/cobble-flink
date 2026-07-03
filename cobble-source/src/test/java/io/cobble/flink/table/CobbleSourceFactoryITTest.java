@@ -1,6 +1,7 @@
 package io.cobble.flink.table;
 
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -432,9 +433,9 @@ class CobbleSourceFactoryITTest {
     }
 
     @Test
-    void stateLookupWithValuePrimaryKeyReachesNotImplementedBoundary() {
+    void stateLookupWithValuePrimaryKeyReturnsProvider() {
         // Contract present (value state PK = key), LookupContext provides the single key column at
-        // physical position 0 => validation passes => lookup runtime fails not-implemented.
+        // physical position 0 => validation passes => provider returns a lookup function.
         StateSourceConfig config =
                 stateConfigWithContract(
                         "orders",
@@ -449,13 +450,42 @@ class CobbleSourceFactoryITTest {
         CobbleStateDynamicTableSource source =
                 new CobbleStateDynamicTableSource(config, "default_catalog.default_database.t");
 
+        LookupTableSource.LookupRuntimeProvider provider =
+                assertDoesNotThrow(
+                        () -> source.getLookupRuntimeProvider(lookupContext(new int[] {0})));
+        assertNotNull(provider, "expected a non-null LookupRuntimeProvider for value state lookup");
+    }
+
+    @Test
+    void stateLookupForMapFailsAsUnsupportedEvenWithContract() {
+        // Map state has a full-entry PK, but map lookup is not supported yet.
+        StateSourceConfig config =
+                stateConfigWithContract(
+                        "orders",
+                        "map",
+                        Arrays.asList(
+                                new StateSourceField(
+                                        "key", "INT", StateSourceField.Group.STATE_KEY, 0),
+                                new StateSourceField(
+                                        "map_key", "INT", StateSourceField.Group.MAP_KEY, 0),
+                                new StateSourceField(
+                                        "map_value", "INT", StateSourceField.Group.MAP_VALUE, 0)),
+                        Arrays.asList(
+                                new StateSourceField(
+                                        "key", "INT", StateSourceField.Group.STATE_KEY, 0),
+                                new StateSourceField(
+                                        "map_key", "INT", StateSourceField.Group.MAP_KEY, 0)),
+                        new int[] {0, 1});
+        CobbleStateDynamicTableSource source =
+                new CobbleStateDynamicTableSource(config, "default_catalog.default_database.t");
+
         Exception error =
                 assertThrows(
                         Exception.class,
-                        () -> source.getLookupRuntimeProvider(lookupContext(new int[] {0})));
+                        () -> source.getLookupRuntimeProvider(lookupContext(new int[] {0, 1})));
         assertTrue(
-                messageChain(error).contains("exact lookup runtime is not implemented"),
-                "expected not-implemented boundary but got: " + messageChain(error));
+                messageChain(error).contains("map lookup is not supported"),
+                "expected map-lookup unsupported message but got: " + messageChain(error));
     }
 
     @Test

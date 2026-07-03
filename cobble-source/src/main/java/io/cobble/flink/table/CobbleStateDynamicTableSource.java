@@ -6,21 +6,22 @@ import org.apache.flink.table.connector.source.DynamicTableSource;
 import org.apache.flink.table.connector.source.LookupTableSource;
 import org.apache.flink.table.connector.source.ScanTableSource;
 import org.apache.flink.table.connector.source.SourceProvider;
+import org.apache.flink.table.connector.source.lookup.LookupFunctionProvider;
 
 /**
  * Cobble state source whose DDL schema has been resolved and validated at planning time.
  *
  * <p>Batch scans use the state checkpoint runtime. Lookup is an exact full-key contract: an
- * optional DDL {@code PRIMARY KEY} declares the full logical lookup key. The lookup
- * <em>runtime</em> is still not implemented, so after validating the contract and planner lookup
- * keys the provider fails with a clear not-implemented boundary.
+ * optional DDL {@code PRIMARY KEY} declares the full logical lookup key. Value-like states
+ * (value/reducing/aggregating) support exact lookup via {@link CobbleStateLookupFunction};
+ * map/list/timer are rejected with a clear message.
  */
 final class CobbleStateDynamicTableSource implements ScanTableSource, LookupTableSource {
 
     private static final String STREAMING_NOT_SUPPORTED =
             "Cobble state source currently supports only scan.mode='batch'.";
-    private static final String LOOKUP_NOT_IMPLEMENTED =
-            "Cobble state exact lookup runtime is not implemented yet.";
+    private static final String MAP_LOOKUP_UNSUPPORTED =
+            "Cobble state source map lookup is not supported yet.";
     private static final String LIST_LOOKUP_UNSUPPORTED =
             "Cobble state source list lookup is not supported yet.";
     private static final String TIMER_LOOKUP_UNSUPPORTED =
@@ -63,12 +64,30 @@ final class CobbleStateDynamicTableSource implements ScanTableSource, LookupTabl
         if ("list".equals(config.stateKind())) {
             throw new ValidationException(LIST_LOOKUP_UNSUPPORTED);
         }
+        if ("map".equals(config.stateKind())) {
+            throw new ValidationException(MAP_LOOKUP_UNSUPPORTED);
+        }
         validateLookupKeys(context, contract);
-        // The exact-key contract and planner lookup keys are now fully validated. The lookup
-        // runtime
-        // itself is implemented in a later step; fail here so the planner never silently requests a
-        // partial/prefix lookup.
-        throw new UnsupportedOperationException(LOOKUP_NOT_IMPLEMENTED);
+        int[] lookupKeyPositions = resolveLookupKeyPositions(context, contract);
+        return LookupFunctionProvider.of(new CobbleStateLookupFunction(config, lookupKeyPositions));
+    }
+
+    /**
+     * Extracts the lookup-row field positions from the planner {@link LookupContext}, aligned with
+     * the required-field order in the {@link StateSourceLookupKeyContract}.
+     *
+     * <p>Current validation requires planner lookup keys in the same order as required fields, so
+     * this returns {@code [0, 1, ...]}. Kept as a separate method so a future order-independent
+     * planner mapping can replace it without changing the lookup function.
+     */
+    private static int[] resolveLookupKeyPositions(
+            LookupContext context, StateSourceLookupKeyContract contract) {
+        int[][] keys = context.getKeys();
+        int[] positions = new int[keys.length];
+        for (int i = 0; i < keys.length; i++) {
+            positions[i] = i;
+        }
+        return positions;
     }
 
     private static void validateLookupKeys(

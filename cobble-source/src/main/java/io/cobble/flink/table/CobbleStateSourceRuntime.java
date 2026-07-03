@@ -2,6 +2,7 @@ package io.cobble.flink.table;
 
 import io.cobble.Config;
 import io.cobble.GlobalSnapshot;
+import io.cobble.ReadOptions;
 import io.cobble.Reader;
 import io.cobble.ScanOptions;
 import io.cobble.ShardSnapshot;
@@ -228,6 +229,19 @@ final class CobbleStateSourceRuntime {
 
     static ScanOptions scanOptions(String columnFamily, int maxRows) {
         ScanOptions options = new ScanOptions().maxRows(maxRows).columns(0);
+        if (columnFamily != null) {
+            options.columnFamily(columnFamily);
+        }
+        return options;
+    }
+
+    /**
+     * Builds {@link ReadOptions} for a single-key point lookup, selecting column 0 in the state
+     * column family. Mirrors {@link #scanOptions(String, int)} but for {@link
+     * Reader#getWithOptions(int, byte[], ReadOptions)}.
+     */
+    static ReadOptions readOptions(String columnFamily, int columnIndex) {
+        ReadOptions options = new ReadOptions().columns(columnIndex);
         if (columnFamily != null) {
             options.columnFamily(columnFamily);
         }
