@@ -19,6 +19,8 @@ import org.apache.flink.api.common.functions.RichMapFunction;
 import org.apache.flink.api.common.restartstrategy.RestartStrategies;
 import org.apache.flink.api.common.state.AggregatingState;
 import org.apache.flink.api.common.state.AggregatingStateDescriptor;
+import org.apache.flink.api.common.state.MapState;
+import org.apache.flink.api.common.state.MapStateDescriptor;
 import org.apache.flink.api.common.state.ReducingState;
 import org.apache.flink.api.common.state.ReducingStateDescriptor;
 import org.apache.flink.api.common.state.ValueState;
@@ -270,6 +272,341 @@ class CobbleStateLookupFunctionTest {
         lookup.close();
         Set<String> after = cobbleStateSourceTempDirs();
         assertEquals(before, after, "temporary reader workspace not cleaned after close()");
+    }
+
+    // ------------------------------------------------------------------------------------------
+    //  MapState lookup tests
+    // ------------------------------------------------------------------------------------------
+
+    @Test
+    void mapLookupReturnsOneRowForHit() throws Exception {
+        Path checkpointRoot = tempDir.resolve("checkpoints-map");
+        Path localState = tempDir.resolve("local-state-map");
+        Files.createDirectories(checkpointRoot);
+        Files.createDirectories(localState);
+        Tuple2<String, Long> discovered =
+                runStatefulJob(checkpointRoot, localState, MapStateMapper::new);
+        String operatorId = discovered.f0.split("@", 2)[0];
+        String checkpointRootUri = discovered.f0.split("@", 2)[1];
+
+        // Scan to discover a real (state key, map key, map value) triple.
+        StateSourceConfig scanConfig =
+                stateSourceConfig(
+                        checkpointRootUri,
+                        operatorId,
+                        "map-state",
+                        "map",
+                        Arrays.asList(
+                                new StateSourceField(
+                                        "key", "INT", StateSourceField.Group.STATE_KEY, 0),
+                                new StateSourceField(
+                                        "map_key", "INT", StateSourceField.Group.MAP_KEY, 0),
+                                new StateSourceField(
+                                        "map_value", "INT", StateSourceField.Group.MAP_VALUE, 0)),
+                        discovered.f1,
+                        "latest",
+                        "batch");
+        List<RowData> scanRows = drainStateRows(scanConfig);
+        assertFalse(scanRows.isEmpty(), "expected at least one map-state row from scan");
+        RowData firstRow = scanRows.get(0);
+        int knownKey = firstRow.getInt(0);
+        int knownMapKey = firstRow.getInt(1);
+        int knownMapValue = firstRow.getInt(2);
+
+        // Lookup config: PK = (key, map_key) — full map-entry key.
+        StateSourceConfig lookupConfig =
+                stateSourceConfigWithContract(
+                        checkpointRootUri,
+                        operatorId,
+                        "map-state",
+                        "map",
+                        Arrays.asList(
+                                new StateSourceField(
+                                        "key", "INT", StateSourceField.Group.STATE_KEY, 0),
+                                new StateSourceField(
+                                        "map_key", "INT", StateSourceField.Group.MAP_KEY, 0),
+                                new StateSourceField(
+                                        "map_value", "INT", StateSourceField.Group.MAP_VALUE, 0)),
+                        Arrays.asList(
+                                new StateSourceField(
+                                        "key", "INT", StateSourceField.Group.STATE_KEY, 0),
+                                new StateSourceField(
+                                        "map_key", "INT", StateSourceField.Group.MAP_KEY, 0)),
+                        new int[] {0, 1},
+                        String.valueOf(discovered.f1),
+                        "batch");
+
+        CobbleStateLookupFunction lookup =
+                new CobbleStateLookupFunction(lookupConfig, new int[] {0, 1});
+        try {
+            lookup.open(new FunctionContext(null));
+            Collection<RowData> result = lookup.lookup(twoIntRow(knownKey, knownMapKey));
+            assertEquals(1, result.size(), "expected exactly one row for a map-state hit");
+            RowData hit = result.iterator().next();
+            assertEquals(knownKey, hit.getInt(0), "key column mismatch");
+            assertEquals(knownMapKey, hit.getInt(1), "map_key column mismatch");
+            assertEquals(knownMapValue, hit.getInt(2), "map_value column mismatch");
+        } finally {
+            lookup.close();
+        }
+    }
+
+    @Test
+    void mapLookupReturnsEmptyForMissingMapKey() throws Exception {
+        Path checkpointRoot = tempDir.resolve("checkpoints-map-miss");
+        Path localState = tempDir.resolve("local-state-map-miss");
+        Files.createDirectories(checkpointRoot);
+        Files.createDirectories(localState);
+        Tuple2<String, Long> discovered =
+                runStatefulJob(checkpointRoot, localState, MapStateMapper::new);
+        String operatorId = discovered.f0.split("@", 2)[0];
+        String checkpointRootUri = discovered.f0.split("@", 2)[1];
+
+        StateSourceConfig lookupConfig =
+                stateSourceConfigWithContract(
+                        checkpointRootUri,
+                        operatorId,
+                        "map-state",
+                        "map",
+                        Arrays.asList(
+                                new StateSourceField(
+                                        "key", "INT", StateSourceField.Group.STATE_KEY, 0),
+                                new StateSourceField(
+                                        "map_key", "INT", StateSourceField.Group.MAP_KEY, 0),
+                                new StateSourceField(
+                                        "map_value", "INT", StateSourceField.Group.MAP_VALUE, 0)),
+                        Arrays.asList(
+                                new StateSourceField(
+                                        "key", "INT", StateSourceField.Group.STATE_KEY, 0),
+                                new StateSourceField(
+                                        "map_key", "INT", StateSourceField.Group.MAP_KEY, 0)),
+                        new int[] {0, 1},
+                        String.valueOf(discovered.f1),
+                        "batch");
+
+        CobbleStateLookupFunction lookup =
+                new CobbleStateLookupFunction(lookupConfig, new int[] {0, 1});
+        try {
+            lookup.open(new FunctionContext(null));
+            // Key 0 exists (value % 4 = 0), but map key 999_999 was never written.
+            Collection<RowData> result = lookup.lookup(twoIntRow(0, 999_999));
+            assertTrue(result.isEmpty(), "expected empty collection for a missing map key");
+        } finally {
+            lookup.close();
+        }
+    }
+
+    @Test
+    void mapLookupReturnsEmptyForMissingStateKey() throws Exception {
+        Path checkpointRoot = tempDir.resolve("checkpoints-map-miss-key");
+        Path localState = tempDir.resolve("local-state-map-miss-key");
+        Files.createDirectories(checkpointRoot);
+        Files.createDirectories(localState);
+        Tuple2<String, Long> discovered =
+                runStatefulJob(checkpointRoot, localState, MapStateMapper::new);
+        String operatorId = discovered.f0.split("@", 2)[0];
+        String checkpointRootUri = discovered.f0.split("@", 2)[1];
+
+        StateSourceConfig lookupConfig =
+                stateSourceConfigWithContract(
+                        checkpointRootUri,
+                        operatorId,
+                        "map-state",
+                        "map",
+                        Arrays.asList(
+                                new StateSourceField(
+                                        "key", "INT", StateSourceField.Group.STATE_KEY, 0),
+                                new StateSourceField(
+                                        "map_key", "INT", StateSourceField.Group.MAP_KEY, 0),
+                                new StateSourceField(
+                                        "map_value", "INT", StateSourceField.Group.MAP_VALUE, 0)),
+                        Arrays.asList(
+                                new StateSourceField(
+                                        "key", "INT", StateSourceField.Group.STATE_KEY, 0),
+                                new StateSourceField(
+                                        "map_key", "INT", StateSourceField.Group.MAP_KEY, 0)),
+                        new int[] {0, 1},
+                        String.valueOf(discovered.f1),
+                        "batch");
+
+        CobbleStateLookupFunction lookup =
+                new CobbleStateLookupFunction(lookupConfig, new int[] {0, 1});
+        try {
+            lookup.open(new FunctionContext(null));
+            // State key 999_999 was never written (keys are 0..3).
+            Collection<RowData> result = lookup.lookup(twoIntRow(999_999, 0));
+            assertTrue(result.isEmpty(), "expected empty collection for a missing state key");
+        } finally {
+            lookup.close();
+        }
+    }
+
+    @Test
+    void mapLookupRejectsNullStateKey() throws Exception {
+        Path checkpointRoot = tempDir.resolve("checkpoints-map-null-key");
+        Path localState = tempDir.resolve("local-state-map-null-key");
+        Files.createDirectories(checkpointRoot);
+        Files.createDirectories(localState);
+        Tuple2<String, Long> discovered =
+                runStatefulJob(checkpointRoot, localState, MapStateMapper::new);
+        String operatorId = discovered.f0.split("@", 2)[0];
+        String checkpointRootUri = discovered.f0.split("@", 2)[1];
+
+        StateSourceConfig lookupConfig =
+                stateSourceConfigWithContract(
+                        checkpointRootUri,
+                        operatorId,
+                        "map-state",
+                        "map",
+                        Arrays.asList(
+                                new StateSourceField(
+                                        "key", "INT", StateSourceField.Group.STATE_KEY, 0),
+                                new StateSourceField(
+                                        "map_key", "INT", StateSourceField.Group.MAP_KEY, 0),
+                                new StateSourceField(
+                                        "map_value", "INT", StateSourceField.Group.MAP_VALUE, 0)),
+                        Arrays.asList(
+                                new StateSourceField(
+                                        "key", "INT", StateSourceField.Group.STATE_KEY, 0),
+                                new StateSourceField(
+                                        "map_key", "INT", StateSourceField.Group.MAP_KEY, 0)),
+                        new int[] {0, 1},
+                        String.valueOf(discovered.f1),
+                        "batch");
+
+        CobbleStateLookupFunction lookup =
+                new CobbleStateLookupFunction(lookupConfig, new int[] {0, 1});
+        try {
+            lookup.open(new FunctionContext(null));
+            GenericRowData nullKeyRow = new GenericRowData(2);
+            nullKeyRow.setField(0, null);
+            nullKeyRow.setField(1, 0);
+            IOException error = assertThrows(IOException.class, () -> lookup.lookup(nullKeyRow));
+            assertTrue(error.getMessage().contains("'key'"), error.getMessage());
+        } finally {
+            lookup.close();
+        }
+    }
+
+    @Test
+    void mapLookupRejectsNullMapKey() throws Exception {
+        Path checkpointRoot = tempDir.resolve("checkpoints-map-null-mk");
+        Path localState = tempDir.resolve("local-state-map-null-mk");
+        Files.createDirectories(checkpointRoot);
+        Files.createDirectories(localState);
+        Tuple2<String, Long> discovered =
+                runStatefulJob(checkpointRoot, localState, MapStateMapper::new);
+        String operatorId = discovered.f0.split("@", 2)[0];
+        String checkpointRootUri = discovered.f0.split("@", 2)[1];
+
+        StateSourceConfig lookupConfig =
+                stateSourceConfigWithContract(
+                        checkpointRootUri,
+                        operatorId,
+                        "map-state",
+                        "map",
+                        Arrays.asList(
+                                new StateSourceField(
+                                        "key", "INT", StateSourceField.Group.STATE_KEY, 0),
+                                new StateSourceField(
+                                        "map_key", "INT", StateSourceField.Group.MAP_KEY, 0),
+                                new StateSourceField(
+                                        "map_value", "INT", StateSourceField.Group.MAP_VALUE, 0)),
+                        Arrays.asList(
+                                new StateSourceField(
+                                        "key", "INT", StateSourceField.Group.STATE_KEY, 0),
+                                new StateSourceField(
+                                        "map_key", "INT", StateSourceField.Group.MAP_KEY, 0)),
+                        new int[] {0, 1},
+                        String.valueOf(discovered.f1),
+                        "batch");
+
+        CobbleStateLookupFunction lookup =
+                new CobbleStateLookupFunction(lookupConfig, new int[] {0, 1});
+        try {
+            lookup.open(new FunctionContext(null));
+            GenericRowData nullMapKeyRow = new GenericRowData(2);
+            nullMapKeyRow.setField(0, 0);
+            nullMapKeyRow.setField(1, null);
+            IOException error = assertThrows(IOException.class, () -> lookup.lookup(nullMapKeyRow));
+            assertTrue(error.getMessage().contains("'map_key'"), error.getMessage());
+        } finally {
+            lookup.close();
+        }
+    }
+
+    @Test
+    void mapLookupReturnsOneRowWithNullValueForPresentNullEntry() throws Exception {
+        Path checkpointRoot = tempDir.resolve("checkpoints-map-present-null");
+        Path localState = tempDir.resolve("local-state-map-present-null");
+        Files.createDirectories(checkpointRoot);
+        Files.createDirectories(localState);
+        // Use the NullValueMapStateMapper which writes mapState.put(mapKey, null).
+        Tuple2<String, Long> discovered =
+                runStatefulJob(checkpointRoot, localState, NullValueMapStateMapper::new);
+        String operatorId = discovered.f0.split("@", 2)[0];
+        String checkpointRootUri = discovered.f0.split("@", 2)[1];
+
+        // Scan to discover a real (state key, map key) pair. The map value should be null.
+        StateSourceConfig scanConfig =
+                stateSourceConfig(
+                        checkpointRootUri,
+                        operatorId,
+                        "map-state",
+                        "map",
+                        Arrays.asList(
+                                new StateSourceField(
+                                        "key", "INT", StateSourceField.Group.STATE_KEY, 0),
+                                new StateSourceField(
+                                        "map_key", "INT", StateSourceField.Group.MAP_KEY, 0),
+                                new StateSourceField(
+                                        "map_value", "INT", StateSourceField.Group.MAP_VALUE, 0)),
+                        discovered.f1,
+                        "latest",
+                        "batch");
+        List<RowData> scanRows = drainStateRows(scanConfig);
+        assertFalse(scanRows.isEmpty(), "expected at least one map-state row from scan");
+        RowData firstRow = scanRows.get(0);
+        int knownKey = firstRow.getInt(0);
+        int knownMapKey = firstRow.getInt(1);
+        assertTrue(
+                firstRow.isNullAt(2), "scan row should have null map_value for present-null entry");
+
+        StateSourceConfig lookupConfig =
+                stateSourceConfigWithContract(
+                        checkpointRootUri,
+                        operatorId,
+                        "map-state",
+                        "map",
+                        Arrays.asList(
+                                new StateSourceField(
+                                        "key", "INT", StateSourceField.Group.STATE_KEY, 0),
+                                new StateSourceField(
+                                        "map_key", "INT", StateSourceField.Group.MAP_KEY, 0),
+                                new StateSourceField(
+                                        "map_value", "INT", StateSourceField.Group.MAP_VALUE, 0)),
+                        Arrays.asList(
+                                new StateSourceField(
+                                        "key", "INT", StateSourceField.Group.STATE_KEY, 0),
+                                new StateSourceField(
+                                        "map_key", "INT", StateSourceField.Group.MAP_KEY, 0)),
+                        new int[] {0, 1},
+                        String.valueOf(discovered.f1),
+                        "batch");
+
+        CobbleStateLookupFunction lookup =
+                new CobbleStateLookupFunction(lookupConfig, new int[] {0, 1});
+        try {
+            lookup.open(new FunctionContext(null));
+            Collection<RowData> result = lookup.lookup(twoIntRow(knownKey, knownMapKey));
+            assertEquals(1, result.size(), "expected exactly one row for a present-null map entry");
+            RowData hit = result.iterator().next();
+            assertEquals(knownKey, hit.getInt(0), "key column mismatch");
+            assertEquals(knownMapKey, hit.getInt(1), "map_key column mismatch");
+            assertTrue(hit.isNullAt(2), "map_value should be null for present-null entry");
+        } finally {
+            lookup.close();
+        }
     }
 
     /**
@@ -709,6 +1046,13 @@ class CobbleStateLookupFunctionTest {
         return row;
     }
 
+    private static RowData twoIntRow(int first, int second) {
+        GenericRowData row = new GenericRowData(2);
+        row.setField(0, first);
+        row.setField(1, second);
+        return row;
+    }
+
     private static final class ContinuousIntegerSource extends RichParallelSourceFunction<Integer> {
         private volatile boolean running = true;
 
@@ -814,6 +1158,56 @@ class CobbleStateLookupFunctionTest {
         @Override
         public Integer merge(Integer a, Integer b) {
             return a + b;
+        }
+    }
+
+    /**
+     * Writes {@code mapState.put(value, value * 10)} keyed by {@code value % PARALLELISM}. The
+     * state key is {@code value % 4} (0..3), and the map user key is the raw input value.
+     */
+    private static final class MapStateMapper extends RichMapFunction<Integer, Integer> {
+        private transient MapState<Integer, Integer> mapState;
+
+        @Override
+        public void open(Configuration parameters) throws Exception {
+            mapState =
+                    getRuntimeContext()
+                            .getMapState(
+                                    new MapStateDescriptor<>(
+                                            "map-state",
+                                            BasicTypeInfo.INT_TYPE_INFO,
+                                            BasicTypeInfo.INT_TYPE_INFO));
+        }
+
+        @Override
+        public Integer map(Integer value) throws Exception {
+            mapState.put(value, value * 10);
+            return value;
+        }
+    }
+
+    /**
+     * Writes {@code mapState.put(value, null)} to produce present-null map entries. The Cobble
+     * backend supports present-null encoding, so the entry exists with a null value.
+     */
+    private static final class NullValueMapStateMapper extends RichMapFunction<Integer, Integer> {
+        private transient MapState<Integer, Integer> mapState;
+
+        @Override
+        public void open(Configuration parameters) throws Exception {
+            mapState =
+                    getRuntimeContext()
+                            .getMapState(
+                                    new MapStateDescriptor<>(
+                                            "map-state",
+                                            BasicTypeInfo.INT_TYPE_INFO,
+                                            BasicTypeInfo.INT_TYPE_INFO));
+        }
+
+        @Override
+        public Integer map(Integer value) throws Exception {
+            mapState.put(value, null);
+            return value;
         }
     }
 }

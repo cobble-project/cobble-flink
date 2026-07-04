@@ -13,15 +13,13 @@ import org.apache.flink.table.connector.source.lookup.LookupFunctionProvider;
  *
  * <p>Batch scans use the state checkpoint runtime. Lookup is an exact full-key contract: an
  * optional DDL {@code PRIMARY KEY} declares the full logical lookup key. Value-like states
- * (value/reducing/aggregating) support exact lookup via {@link CobbleStateLookupFunction};
- * map/list/timer are rejected with a clear message.
+ * (value/reducing/aggregating) and map states support exact lookup via {@link
+ * CobbleStateLookupFunction}; list/timer are rejected with a clear message.
  */
 final class CobbleStateDynamicTableSource implements ScanTableSource, LookupTableSource {
 
     private static final String STREAMING_NOT_SUPPORTED =
             "Cobble state source currently supports only scan.mode='batch'.";
-    private static final String MAP_LOOKUP_UNSUPPORTED =
-            "Cobble state source map lookup is not supported yet.";
     private static final String LIST_LOOKUP_UNSUPPORTED =
             "Cobble state source list lookup is not supported yet.";
     private static final String TIMER_LOOKUP_UNSUPPORTED =
@@ -63,9 +61,6 @@ final class CobbleStateDynamicTableSource implements ScanTableSource, LookupTabl
         }
         if ("list".equals(config.stateKind())) {
             throw new ValidationException(LIST_LOOKUP_UNSUPPORTED);
-        }
-        if ("map".equals(config.stateKind())) {
-            throw new ValidationException(MAP_LOOKUP_UNSUPPORTED);
         }
         validateLookupKeys(context, contract);
         int[] lookupKeyPositions = resolveLookupKeyPositions(context, contract);

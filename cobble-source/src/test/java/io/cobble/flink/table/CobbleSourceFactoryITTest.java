@@ -457,8 +457,8 @@ class CobbleSourceFactoryITTest {
     }
 
     @Test
-    void stateLookupForMapFailsAsUnsupportedEvenWithContract() {
-        // Map state has a full-entry PK, but map lookup is not supported yet.
+    void stateLookupWithMapPrimaryKeyReturnsProvider() {
+        // Map state with a full-entry PK (key + map_key) => provider returns a lookup function.
         StateSourceConfig config =
                 stateConfigWithContract(
                         "orders",
@@ -479,13 +479,12 @@ class CobbleSourceFactoryITTest {
         CobbleStateDynamicTableSource source =
                 new CobbleStateDynamicTableSource(config, "default_catalog.default_database.t");
 
-        Exception error =
-                assertThrows(
-                        Exception.class,
-                        () -> source.getLookupRuntimeProvider(lookupContext(new int[] {0, 1})));
-        assertTrue(
-                messageChain(error).contains("map lookup is not supported"),
-                "expected map-lookup unsupported message but got: " + messageChain(error));
+        LookupTableSource.LookupRuntimeProvider provider =
+                assertDoesNotThrow(
+                        () ->
+                                source.getLookupRuntimeProvider(
+                                        lookupContext(new int[] {0}, new int[] {1})));
+        assertNotNull(provider, "expected a non-null LookupRuntimeProvider for map state lookup");
     }
 
     @Test

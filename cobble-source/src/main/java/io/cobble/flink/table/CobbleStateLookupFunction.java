@@ -14,7 +14,7 @@ import java.util.List;
 
 /**
  * Lookup function that resolves Cobble state rows by exact full key for value-like states
- * (ValueState / ReducingState / AggregatingState).
+ * (ValueState / ReducingState / AggregatingState) and MapState (one full map entry).
  *
  * <p>It is the runtime companion of {@link CobbleStateLookupKeyEncoder} and {@link
  * CobbleStateRowDecoder}: the encoder turns the lookup {@link RowData} into Cobble row-key bytes
@@ -130,12 +130,11 @@ final class CobbleStateLookupFunction extends LookupFunction {
         }
         if (rows.size() > 1) {
             throw new IOException(
-                    "Cobble state lookup for value-like state '"
+                    "Cobble state lookup for state '"
                             + config.stateName()
                             + "' returned "
                             + rows.size()
-                            + " rows for a single key; expected at most one. This indicates an"
-                            + " accidental list/map state lookup.");
+                            + " rows for a single key; expected at most one.");
         }
         return Collections.singletonList(rows.get(0));
     }

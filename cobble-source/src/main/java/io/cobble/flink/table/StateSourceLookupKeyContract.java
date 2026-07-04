@@ -35,7 +35,7 @@ final class StateSourceLookupKeyContract implements Serializable {
         PRESENT
     }
 
-    /** State kinds whose exact lookup is planned for v1 (value-like). */
+    /** Whether the DDL declares a valid exact lookup key for this state source. */
     private final Status status;
 
     private final List<StateSourceField> requiredFields;
