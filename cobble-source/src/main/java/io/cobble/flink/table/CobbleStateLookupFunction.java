@@ -26,7 +26,7 @@ import java.util.List;
  * batch scan semantics. Streaming state lookup is rejected because checkpoint-root materialization
  * (manifest/shard copy into a unified temp volume) is checkpoint-specific.
  */
-final class CobbleStateLookupFunction extends LookupFunction {
+public final class CobbleStateLookupFunction extends LookupFunction {
 
     private static final String STREAMING_LOOKUP_NOT_SUPPORTED =
             "Cobble state source lookup currently supports only scan.mode='batch'.";
