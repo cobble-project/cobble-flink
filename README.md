@@ -222,14 +222,17 @@ CREATE TABLE sink_tbl (
 ### Flink's Source
 
 Cobble source lets Flink SQL read data that is already stored in Cobble. There
-are two common source kinds:
+are three source kinds:
 
 - `source.kind='sink'` reads a Cobble table written by the Cobble SQL sink.
 - `source.kind='state'` reads keyed state from a Flink checkpoint written by the
   Cobble state backend.
+- `source.kind='raw'` reads any standard Cobble table root as raw bytes, without
+  depending on sink or state schema. Useful for debugging and interoperability.
 
 Use `source.kind='auto'` when the path layout is unambiguous, or set the kind
-explicitly in production DDL.
+explicitly in production DDL. `auto` never selects `raw`; it must be set
+explicitly.
 
 For reading a Cobble sink table, use:
 
@@ -308,6 +311,36 @@ SELECT p.`key`, d.`value`
 FROM probes AS p
 LEFT JOIN state_values FOR SYSTEM_TIME AS OF p.pt AS d
 ON p.`key` = d.`key`;
+```
+
+For reading any Cobble table root as raw bytes (no sink or state schema), use:
+
+- `connector='cobble'`
+- `path`
+- `source.kind='raw'`
+- `raw.columns` (required, e.g. `'0,1'`)
+- `scan.checkpoint-id`
+- `scan.mode`
+
+The raw source requires a fixed two-column DDL: `key BYTES` and `columns
+ARRAY<BYTES>`. It emits the raw Cobble row key and the selected structured value
+columns as raw bytes, preserving nulls and arbitrary binary content. Lookup is
+not supported.
+
+```sql
+CREATE TABLE raw_cobble (
+  `key` BYTES,
+  `columns` ARRAY<BYTES>
+) WITH (
+  'connector' = 'cobble',
+  'source.kind' = 'raw',
+  'path' = 'hdfs:///tmp/cobble-table',
+  'raw.columns' = '0,1',
+  'scan.checkpoint-id' = 'latest',
+  'scan.mode' = 'batch'
+);
+
+SELECT `key`, `columns` FROM raw_cobble;
 ```
 
 ## License

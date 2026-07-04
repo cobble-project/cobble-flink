@@ -53,6 +53,7 @@ public final class CobbleDynamicTableSourceFactory implements DynamicTableSource
         options.add(CobbleSourceTableOptions.STATE_NAME);
         options.add(CobbleSourceTableOptions.STATE_OPERATOR_ID);
         options.add(CobbleSourceTableOptions.STATE_KIND);
+        options.add(CobbleSourceTableOptions.RAW_COLUMNS);
         return options;
     }
 
@@ -96,6 +97,7 @@ public final class CobbleDynamicTableSourceFactory implements DynamicTableSource
                 CobbleSourceKindDetector.detect(
                         pathUri, requestedKind, isSinkShaped(resolvedSchema));
         if (resolvedSource.kind() == CobbleSourceKind.STATE) {
+            RawSourceOptions.rejectRawOptionsForNonRaw(options);
             return createStateSource(
                     context,
                     options,
@@ -107,11 +109,24 @@ public final class CobbleDynamicTableSourceFactory implements DynamicTableSource
                     sourceBlockCacheMemory,
                     resolvedSchema);
         }
+        if (resolvedSource.kind() == CobbleSourceKind.RAW) {
+            StateSourceOptions.rejectStateOptionsForSink(options);
+            return createRawSource(
+                    context,
+                    options,
+                    pathUri,
+                    checkpointId,
+                    scanMode,
+                    bucketCount,
+                    pollIntervalMillis,
+                    resolvedSchema);
+        }
 
         // Resolved as a Cobble sink table: existing sink source behavior, unchanged.
-        // Reject state.* options here so a misspelled source.kind (or a stray state option) on a
-        // sink table fails loudly instead of being silently ignored.
+        // Reject state.* and raw.* options here so a misspelled source.kind (or a stray option)
+        // on a sink table fails loudly instead of being silently ignored.
         StateSourceOptions.rejectStateOptionsForSink(options);
+        RawSourceOptions.rejectRawOptionsForNonRaw(options);
         UniqueConstraint primaryKey =
                 resolvedSchema
                         .getPrimaryKey()
@@ -251,6 +266,34 @@ public final class CobbleDynamicTableSourceFactory implements DynamicTableSource
                         resolved.outputFields(),
                         lookupKeyContract);
         return new CobbleStateDynamicTableSource(
+                config, context.getObjectIdentifier().asSummaryString());
+    }
+
+    /**
+     * Builds a raw source: validates the fixed DDL schema, parses {@code raw.columns}, and returns
+     * a {@link CobbleRawDynamicTableSource} backed by the same scan runtime as the sink source.
+     */
+    private static DynamicTableSource createRawSource(
+            Context context,
+            ReadableConfig options,
+            String pathUri,
+            String checkpointId,
+            String scanMode,
+            int bucketCount,
+            long pollIntervalMillis,
+            ResolvedSchema resolvedSchema) {
+        RawSourceSchemaResolver.validate(resolvedSchema);
+        RawSourceOptions rawOptions = RawSourceOptions.parseForRaw(options);
+
+        RawSourceConfig config =
+                new RawSourceConfig(
+                        pathUri,
+                        bucketCount,
+                        checkpointId,
+                        scanMode,
+                        pollIntervalMillis,
+                        rawOptions.selectedColumns());
+        return new CobbleRawDynamicTableSource(
                 config, context.getObjectIdentifier().asSummaryString());
     }
 

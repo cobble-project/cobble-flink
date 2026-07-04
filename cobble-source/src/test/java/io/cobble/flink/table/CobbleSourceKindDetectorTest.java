@@ -187,6 +187,97 @@ class CobbleSourceKindDetectorTest {
     }
 
     // ------------------------------------------------------------------------------------------
+    //  Raw source detector tests
+    // ------------------------------------------------------------------------------------------
+
+    @Test
+    void explicitRawAcceptsTableRootFromSinkSignal() throws Exception {
+        Path root = sinkRoot("raw-on-sink-root");
+
+        CobbleResolvedSource resolved =
+                CobbleSourceKindDetector.detect(uri(root), CobbleSourceKind.RAW, NOT_SINK_SHAPED);
+
+        assertEquals(CobbleSourceKind.RAW, resolved.kind());
+    }
+
+    @Test
+    void explicitRawAcceptsAmbiguousRoot() throws Exception {
+        Path root = ambiguousRoot("raw-on-ambiguous-root");
+
+        CobbleResolvedSource resolved =
+                CobbleSourceKindDetector.detect(uri(root), CobbleSourceKind.RAW, NOT_SINK_SHAPED);
+
+        assertEquals(CobbleSourceKind.RAW, resolved.kind());
+    }
+
+    @Test
+    void explicitRawRejectsCheckpointRoot() throws Exception {
+        Path root = checkpointRoot("raw-on-checkpoint-root");
+
+        ValidationException error =
+                assertThrows(
+                        ValidationException.class,
+                        () ->
+                                CobbleSourceKindDetector.detect(
+                                        uri(root), CobbleSourceKind.RAW, NOT_SINK_SHAPED));
+        assertTrue(
+                error.getMessage().contains("source.kind='raw' expects a Cobble table root"),
+                "expected raw-on-checkpoint rejection but got: " + error.getMessage());
+    }
+
+    @Test
+    void explicitRawRejectsStateOperatorRoot() throws Exception {
+        Path root = stateOperatorRoot("raw-on-state-operator-root");
+
+        ValidationException error =
+                assertThrows(
+                        ValidationException.class,
+                        () ->
+                                CobbleSourceKindDetector.detect(
+                                        uri(root), CobbleSourceKind.RAW, NOT_SINK_SHAPED));
+        assertTrue(
+                error.getMessage().contains("source.kind='raw' expects a Cobble table root"),
+                "expected raw-on-state-operator rejection but got: " + error.getMessage());
+    }
+
+    @Test
+    void explicitRawRejectsUnknownPath() throws Exception {
+        Path root = tempDir.resolve("raw-on-unknown");
+        Files.createDirectories(root);
+
+        ValidationException error =
+                assertThrows(
+                        ValidationException.class,
+                        () ->
+                                CobbleSourceKindDetector.detect(
+                                        uri(root), CobbleSourceKind.RAW, NOT_SINK_SHAPED));
+        assertTrue(
+                error.getMessage().contains("does not appear to be a Cobble table root"),
+                "expected unknown-path rejection but got: " + error.getMessage());
+    }
+
+    @Test
+    void autoNeverSelectsRawEvenOnAmbiguousRoot() throws Exception {
+        Path root = ambiguousRoot("auto-never-raw");
+
+        // With a sink-shaped DDL, auto falls back to sink — never raw.
+        CobbleResolvedSource resolvedSinkShaped =
+                CobbleSourceKindDetector.detect(uri(root), CobbleSourceKind.AUTO, SINK_SHAPED);
+        assertEquals(CobbleSourceKind.SINK, resolvedSinkShaped.kind());
+
+        // Without a sink-shaped DDL, auto fails — never falls back to raw.
+        ValidationException error =
+                assertThrows(
+                        ValidationException.class,
+                        () ->
+                                CobbleSourceKindDetector.detect(
+                                        uri(root), CobbleSourceKind.AUTO, NOT_SINK_SHAPED));
+        assertTrue(
+                error.getMessage().contains("Unable to auto-detect"),
+                "expected ambiguous failure, not raw fallback: " + error.getMessage());
+    }
+
+    // ------------------------------------------------------------------------------------------
     //  Fixtures
     // ------------------------------------------------------------------------------------------
 

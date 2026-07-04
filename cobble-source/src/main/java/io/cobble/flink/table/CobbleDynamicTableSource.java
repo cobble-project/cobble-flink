@@ -82,7 +82,7 @@ final class CobbleDynamicTableSource implements ScanTableSource, LookupTableSour
     }
 
     /** Serializable source runtime config. */
-    static final class SerializableConfig implements Serializable {
+    static final class SerializableConfig implements CobbleTableScanConfig {
         private static final long serialVersionUID = 1L;
 
         final String pathUri;
@@ -125,16 +125,63 @@ final class CobbleDynamicTableSource implements ScanTableSource, LookupTableSour
                     valueFields);
         }
 
-        boolean isStreamingLatest() {
+        @Override
+        public String pathUri() {
+            return pathUri;
+        }
+
+        @Override
+        public int bucketCount() {
+            return bucketCount;
+        }
+
+        @Override
+        public String scanCheckpointId() {
+            return scanCheckpointId;
+        }
+
+        @Override
+        public String scanMode() {
+            return scanMode;
+        }
+
+        @Override
+        public long pollIntervalMillis() {
+            return pollIntervalMillis;
+        }
+
+        @Override
+        public boolean isStreamingLatest() {
             return "streaming".equals(scanMode) && "latest".equals(scanCheckpointId);
         }
 
-        boolean hasConfiguredBucketCount() {
+        @Override
+        public boolean hasConfiguredBucketCount() {
             return bucketCount > 0;
         }
 
-        Boundedness boundedness() {
+        @Override
+        public Boundedness boundedness() {
             return isStreamingLatest() ? Boundedness.CONTINUOUS_UNBOUNDED : Boundedness.BOUNDED;
+        }
+
+        @Override
+        public int scanColumnCount() {
+            return valueFields.size();
+        }
+
+        @Override
+        public int[] projectedColumnIndexes() {
+            int[] indexes = new int[valueFields.size()];
+            for (int i = 0; i < valueFields.size(); i++) {
+                indexes[i] = valueFields.get(i).structuredColumnIndex;
+            }
+            return indexes;
+        }
+
+        @Override
+        public ScannedRowDecoder createDecoder() {
+            return new CobbleRowDataDecoders.RuntimeRowDecoder(this);
         }
 
         int totalFieldCount() {

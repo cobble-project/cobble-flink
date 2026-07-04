@@ -7,9 +7,9 @@ import java.util.Locale;
 /**
  * Kind of Cobble path a SQL source can consume.
  *
- * <p>{@link #RAW_RESERVED} is an internal placeholder for a future "arbitrary raw Cobble source"
- * feature. It is never produced from user configuration and the {@code raw} option value is
- * rejected at planning time.
+ * <p>{@link #RAW} selects the schema-less raw source: it reads a standard Cobble table root and
+ * emits raw key bytes plus selected value columns as {@code ARRAY<BYTES>}, without depending on
+ * sink sidecar schema, state inspect schema, or Flink serializers.
  */
 enum CobbleSourceKind {
 
@@ -22,16 +22,18 @@ enum CobbleSourceKind {
     /** A Flink state checkpoint root or state operator root. */
     STATE,
 
-    /** Reserved for future raw Cobble source support; not selectable by users. */
-    RAW_RESERVED;
+    /**
+     * A standard Cobble table root read as raw bytes, without typed schema resolution. Never chosen
+     * by {@code auto}; users must set {@code source.kind='raw'} explicitly.
+     */
+    RAW;
 
     /**
      * Parses a user-supplied {@code source.kind} option value.
      *
      * <ul>
      *   <li>{@code null} or blank resolves to {@link #AUTO}.
-     *   <li>{@code auto}, {@code sink}, {@code state} are accepted case-insensitively.
-     *   <li>{@code raw} is rejected as reserved.
+     *   <li>{@code auto}, {@code sink}, {@code state}, {@code raw} are accepted case-insensitively.
      *   <li>any other value is rejected with the list of valid values.
      * </ul>
      */
@@ -51,16 +53,14 @@ enum CobbleSourceKind {
             case "state":
                 return STATE;
             case "raw":
-                throw new ValidationException(
-                        "source.kind='raw' is reserved for future raw Cobble source support and is"
-                                + " not available yet.");
+                return RAW;
             default:
                 throw new ValidationException(
                         "Invalid "
                                 + CobbleSourceTableOptions.SOURCE_KIND.key()
                                 + " '"
                                 + trimmed
-                                + "'. Valid values are: auto, sink, state.");
+                                + "'. Valid values are: auto, sink, state, raw.");
         }
     }
 }

@@ -27,16 +27,9 @@ class CobbleSourceKindTest {
         assertEquals(CobbleSourceKind.SINK, CobbleSourceKind.fromUserOption("Sink"));
         assertEquals(CobbleSourceKind.SINK, CobbleSourceKind.fromUserOption(" sink "));
         assertEquals(CobbleSourceKind.STATE, CobbleSourceKind.fromUserOption("STATE"));
-    }
-
-    @Test
-    void rawIsRejectedAsReserved() {
-        ValidationException error =
-                assertThrows(
-                        ValidationException.class, () -> CobbleSourceKind.fromUserOption("raw"));
-        assertTrue(
-                error.getMessage().contains("reserved"),
-                "expected reserved message but got: " + error.getMessage());
+        assertEquals(CobbleSourceKind.RAW, CobbleSourceKind.fromUserOption("raw"));
+        assertEquals(CobbleSourceKind.RAW, CobbleSourceKind.fromUserOption("RAW"));
+        assertEquals(CobbleSourceKind.RAW, CobbleSourceKind.fromUserOption(" Raw "));
     }
 
     @Test
@@ -45,7 +38,7 @@ class CobbleSourceKindTest {
                 assertThrows(
                         ValidationException.class, () -> CobbleSourceKind.fromUserOption("bogus"));
         assertTrue(
-                error.getMessage().contains("auto, sink, state"),
+                error.getMessage().contains("auto, sink, state, raw"),
                 "expected valid values list but got: " + error.getMessage());
     }
 }

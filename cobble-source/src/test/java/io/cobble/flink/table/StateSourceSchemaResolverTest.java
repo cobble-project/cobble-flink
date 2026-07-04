@@ -635,8 +635,8 @@ class StateSourceSchemaResolverTest {
         Path root = tempDir.resolve("reorder");
         writeRegistry(root, "op-a", 100L, valueStore("orders"));
 
-        // Semantic order is key, value; swapping them must fail because the Step 3 runtime emits
-        // in semantic order and Flink reads in DDL order.
+        // Semantic order is key, value; swapping them must fail because the runtime emits in
+        // semantic order and Flink reads in DDL order.
         ValidationException error =
                 assertThrows(
                         ValidationException.class,

@@ -24,9 +24,10 @@ final class CobbleSourceTableOptions {
                     .stringType()
                     .defaultValue("auto")
                     .withDescription(
-                            "Kind of Cobble path to read. Supported values are 'auto', 'sink' and"
-                                    + " 'state'. 'auto' detects sink table roots and Flink state"
-                                    + " checkpoint roots from on-disk layout.");
+                            "Kind of Cobble path to read. Supported values are 'auto', 'sink',"
+                                    + " 'state', and 'raw'. 'auto' detects sink table roots and"
+                                    + " Flink state checkpoint roots from on-disk layout; 'raw'"
+                                    + " never auto-selected.");
 
     static final ConfigOption<String> SCAN_CHECKPOINT_ID =
             ConfigOptions.key("scan.checkpoint-id")
@@ -81,6 +82,15 @@ final class CobbleSourceTableOptions {
                             "Optional state-kind validation hint. One of 'value', 'list', 'map',"
                                     + " 'reducing', 'aggregating', 'timer'. When set it must match"
                                     + " the resolved inspect-schema state kind.");
+
+    static final ConfigOption<String> RAW_COLUMNS =
+            ConfigOptions.key("raw.columns")
+                    .stringType()
+                    .noDefaultValue()
+                    .withDescription(
+                            "Comma-separated structured column indexes to read for"
+                                    + " source.kind='raw' (e.g. '0,1' or '0,2'). Required; 'all'"
+                                    + " is not supported yet.");
 
     private CobbleSourceTableOptions() {}
 }

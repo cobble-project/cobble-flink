@@ -609,8 +609,139 @@ class CobbleSourceFactoryITTest {
                 assertThrows(
                         Exception.class, () -> tableEnv.explainSql("SELECT * FROM t_invalid_kind"));
         assertTrue(
-                messageChain(error).contains("auto, sink, state"),
+                messageChain(error).contains("auto, sink, state, raw"),
                 "expected valid-values message but got: " + messageChain(error));
+    }
+
+    // ------------------------------------------------------------------------------------------
+    //  Raw source factory tests
+    // ------------------------------------------------------------------------------------------
+
+    @Test
+    void rawSourcePlansOnTableRoot() throws Exception {
+        Path root = ambiguousRoot("raw-planning");
+        StreamTableEnvironment tableEnv = newTableEnv();
+        tableEnv.executeSql(rawDdl("t_raw_plan", root, "0,1"));
+
+        assertDoesNotThrow(() -> tableEnv.explainSql("SELECT * FROM t_raw_plan"));
+    }
+
+    @Test
+    void rawSourceMissingColumnsFailsDuringPlanning() throws Exception {
+        Path root = ambiguousRoot("raw-no-columns");
+        StreamTableEnvironment tableEnv = newTableEnv();
+        tableEnv.executeSql(rawDdl("t_raw_no_cols", root, null));
+
+        Exception error =
+                assertThrows(
+                        Exception.class, () -> tableEnv.explainSql("SELECT * FROM t_raw_no_cols"));
+        assertTrue(
+                messageChain(error).contains("'raw.columns' is required"),
+                "expected required message but got: " + messageChain(error));
+    }
+
+    @Test
+    void sinkSourceWithRawColumnsFailsDuringPlanning() throws Exception {
+        Path root = sinkRoot("sink-with-raw-columns");
+        StreamTableEnvironment tableEnv = newTableEnv();
+        tableEnv.executeSql(
+                "CREATE TABLE t_sink_raw_opt ("
+                        + " id BIGINT,"
+                        + " name STRING,"
+                        + " PRIMARY KEY (id) NOT ENFORCED"
+                        + ") WITH ("
+                        + " 'connector' = 'cobble',"
+                        + " 'source.kind' = 'sink',"
+                        + " 'bucket' = '2',"
+                        + " 'raw.columns' = '0,1',"
+                        + " 'path' = '"
+                        + escape(root)
+                        + "'"
+                        + ")");
+
+        Exception error =
+                assertThrows(
+                        Exception.class, () -> tableEnv.explainSql("SELECT * FROM t_sink_raw_opt"));
+        assertTrue(
+                messageChain(error).contains("'raw.columns' is only valid when source.kind='raw'"),
+                "expected raw-option rejection but got: " + messageChain(error));
+    }
+
+    @Test
+    void stateSourceWithRawColumnsFailsDuringPlanning() throws Exception {
+        Path root = stateCheckpointRoot("state-with-raw-columns");
+        StreamTableEnvironment tableEnv = newTableEnv();
+        tableEnv.executeSql(
+                "CREATE TABLE t_state_raw_opt ("
+                        + " `key` INT,"
+                        + " `value` INT"
+                        + ") WITH ("
+                        + " 'connector' = 'cobble',"
+                        + " 'path' = '"
+                        + escape(root)
+                        + "',"
+                        + " 'source.kind' = 'state',"
+                        + " 'state.name' = 'orders',"
+                        + " 'raw.columns' = '0'"
+                        + ")");
+
+        Exception error =
+                assertThrows(
+                        Exception.class,
+                        () -> tableEnv.explainSql("SELECT * FROM t_state_raw_opt"));
+        assertTrue(
+                messageChain(error).contains("'raw.columns' is only valid when source.kind='raw'"),
+                "expected raw-option rejection but got: " + messageChain(error));
+    }
+
+    @Test
+    void rawSourceRejectsPrimaryKey() throws Exception {
+        Path root = ambiguousRoot("raw-with-pk");
+        StreamTableEnvironment tableEnv = newTableEnv();
+        tableEnv.executeSql(
+                "CREATE TABLE t_raw_pk ("
+                        + " `key` BYTES,"
+                        + " `columns` ARRAY<BYTES>,"
+                        + " PRIMARY KEY (`key`) NOT ENFORCED"
+                        + ") WITH ("
+                        + " 'connector' = 'cobble',"
+                        + " 'source.kind' = 'raw',"
+                        + " 'raw.columns' = '0',"
+                        + " 'path' = '"
+                        + escape(root)
+                        + "'"
+                        + ")");
+
+        Exception error =
+                assertThrows(Exception.class, () -> tableEnv.explainSql("SELECT * FROM t_raw_pk"));
+        assertTrue(
+                messageChain(error).contains("does not support a PRIMARY KEY"),
+                "expected PK rejection but got: " + messageChain(error));
+    }
+
+    @Test
+    void rawSourceRejectsWrongColumnCount() throws Exception {
+        Path root = ambiguousRoot("raw-wrong-cols");
+        StreamTableEnvironment tableEnv = newTableEnv();
+        tableEnv.executeSql(
+                "CREATE TABLE t_raw_wrong_cols ("
+                        + " `key` BYTES"
+                        + ") WITH ("
+                        + " 'connector' = 'cobble',"
+                        + " 'source.kind' = 'raw',"
+                        + " 'raw.columns' = '0',"
+                        + " 'path' = '"
+                        + escape(root)
+                        + "'"
+                        + ")");
+
+        Exception error =
+                assertThrows(
+                        Exception.class,
+                        () -> tableEnv.explainSql("SELECT * FROM t_raw_wrong_cols"));
+        assertTrue(
+                messageChain(error).contains("two columns"),
+                "expected column-count message but got: " + messageChain(error));
     }
 
     // ------------------------------------------------------------------------------------------
@@ -667,19 +798,19 @@ class CobbleSourceFactoryITTest {
         @Override
         public <T> org.apache.flink.api.common.typeinfo.TypeInformation<T> createTypeInformation(
                 org.apache.flink.table.types.DataType dataType) {
-            throw new UnsupportedOperationException("not used by Step 1 lookup contract tests");
+            throw new UnsupportedOperationException("not used by lookup-context tests");
         }
 
         @Override
         public <T> org.apache.flink.api.common.typeinfo.TypeInformation<T> createTypeInformation(
                 org.apache.flink.table.types.logical.LogicalType logicalType) {
-            throw new UnsupportedOperationException("not used by Step 1 lookup contract tests");
+            throw new UnsupportedOperationException("not used by lookup-context tests");
         }
 
         @Override
         public DynamicTableSource.DataStructureConverter createDataStructureConverter(
                 org.apache.flink.table.types.DataType dataType) {
-            throw new UnsupportedOperationException("not used by Step 1 lookup contract tests");
+            throw new UnsupportedOperationException("not used by lookup-context tests");
         }
     }
 
@@ -696,6 +827,24 @@ class CobbleSourceFactoryITTest {
                 + " 'connector' = 'cobble',"
                 + sourceKindClause
                 + " 'bucket' = '2',"
+                + " 'path' = '"
+                + escape(root)
+                + "'"
+                + ")";
+    }
+
+    private static String rawDdl(String tableName, Path root, String rawColumns) {
+        String rawColumnsClause =
+                rawColumns == null ? "" : " 'raw.columns' = '" + rawColumns + "',";
+        return "CREATE TABLE "
+                + tableName
+                + " ("
+                + " `key` BYTES,"
+                + " `columns` ARRAY<BYTES>"
+                + ") WITH ("
+                + " 'connector' = 'cobble',"
+                + " 'source.kind' = 'raw',"
+                + rawColumnsClause
                 + " 'path' = '"
                 + escape(root)
                 + "'"

@@ -20,17 +20,15 @@ final class CobbleSourceRuntime {
 
     private CobbleSourceRuntime() {}
 
-    static GlobalSnapshot loadConfiguredSnapshot(CobbleDynamicTableSource.SerializableConfig config)
-            throws IOException {
-        if ("latest".equals(config.scanCheckpointId)) {
+    static GlobalSnapshot loadConfiguredSnapshot(CobbleTableScanConfig config) throws IOException {
+        if ("latest".equals(config.scanCheckpointId())) {
             return loadLatestSnapshot(config);
         }
-        return loadSnapshotById(config, Long.parseLong(config.scanCheckpointId));
+        return loadSnapshotById(config, Long.parseLong(config.scanCheckpointId()));
     }
 
     static GlobalSnapshot loadLatestSnapshotIfNewer(
-            CobbleDynamicTableSource.SerializableConfig config, long currentSnapshotId)
-            throws IOException {
+            CobbleTableScanConfig config, long currentSnapshotId) throws IOException {
         GlobalSnapshot latest = loadLatestSnapshot(config);
         if (latest == null || latest.id <= currentSnapshotId) {
             return null;
@@ -38,8 +36,7 @@ final class CobbleSourceRuntime {
         return latest;
     }
 
-    static GlobalSnapshot loadSnapshotById(
-            CobbleDynamicTableSource.SerializableConfig config, long snapshotId)
+    static GlobalSnapshot loadSnapshotById(CobbleTableScanConfig config, long snapshotId)
             throws IOException {
         try (DbCoordinator coordinator = DbCoordinator.open(createCoordinatorConfig(config))) {
             GlobalSnapshot snapshot = coordinator.getGlobalSnapshot(snapshotId);
@@ -53,8 +50,7 @@ final class CobbleSourceRuntime {
     }
 
     static List<CobbleSourceSplit> createSourceSplits(
-            CobbleDynamicTableSource.SerializableConfig config, GlobalSnapshot snapshot)
-            throws IOException {
+            CobbleTableScanConfig config, GlobalSnapshot snapshot) throws IOException {
         int bucketCount = validateSnapshot(config, snapshot);
         boolean[] coveredBuckets = new boolean[bucketCount];
         List<CobbleSourceSplit> splits = new ArrayList<>();
@@ -74,8 +70,7 @@ final class CobbleSourceRuntime {
         return splits;
     }
 
-    static ScanSplit resolveSourceSplit(
-            CobbleDynamicTableSource.SerializableConfig config, CobbleSourceSplit split)
+    static ScanSplit resolveSourceSplit(CobbleTableScanConfig config, CobbleSourceSplit split)
             throws IOException {
         GlobalSnapshot snapshot = loadSnapshotById(config, split.snapshotId);
         int bucketCount = validateSnapshot(config, snapshot);
@@ -167,17 +162,16 @@ final class CobbleSourceRuntime {
         }
     }
 
-    static Config createSourceScanConfig(
-            CobbleDynamicTableSource.SerializableConfig config, int totalBuckets)
+    static Config createSourceScanConfig(CobbleTableScanConfig config, int totalBuckets)
             throws IOException {
         Config scanConfig =
-                new Config().numColumns(config.valueFields.size()).totalBuckets(totalBuckets);
+                new Config().numColumns(config.scanColumnCount()).totalBuckets(totalBuckets);
         applyReadMemoryPolicy(scanConfig);
         scanConfig.governanceMode = Config.GovernanceMode.NOOP;
         scanConfig.logConsole = false;
 
         Config.VolumeDescriptor volume = new Config.VolumeDescriptor();
-        volume.baseDir = config.pathUri;
+        volume.baseDir = config.pathUri();
         volume.kinds =
                 Arrays.asList(
                         Config.VolumeUsageKind.PRIMARY_DATA_PRIORITY_HIGH,
@@ -212,8 +206,8 @@ final class CobbleSourceRuntime {
         return readerConfig;
     }
 
-    private static GlobalSnapshot loadLatestSnapshot(
-            CobbleDynamicTableSource.SerializableConfig config) throws IOException {
+    private static GlobalSnapshot loadLatestSnapshot(CobbleTableScanConfig config)
+            throws IOException {
         try (DbCoordinator coordinator = DbCoordinator.open(createCoordinatorConfig(config))) {
             GlobalSnapshot snapshot = coordinator.loadCurrentGlobalSnapshot();
             if (snapshot != null) {
@@ -223,8 +217,7 @@ final class CobbleSourceRuntime {
         }
     }
 
-    private static int validateSnapshot(
-            CobbleDynamicTableSource.SerializableConfig config, GlobalSnapshot snapshot)
+    private static int validateSnapshot(CobbleTableScanConfig config, GlobalSnapshot snapshot)
             throws IOException {
         if (snapshot == null) {
             throw new IOException("Cobble source snapshot is missing.");
@@ -237,10 +230,10 @@ final class CobbleSourceRuntime {
                             + snapshot.totalBuckets
                             + '.');
         }
-        if (config.hasConfiguredBucketCount() && snapshot.totalBuckets != config.bucketCount) {
+        if (config.hasConfiguredBucketCount() && snapshot.totalBuckets != config.bucketCount()) {
             throw new IOException(
                     "Cobble source bucket count mismatch. Source expects "
-                            + config.bucketCount
+                            + config.bucketCount()
                             + " buckets, but snapshot "
                             + snapshot.id
                             + " has "
@@ -250,17 +243,16 @@ final class CobbleSourceRuntime {
         return snapshot.totalBuckets;
     }
 
-    private static Config createCoordinatorConfig(
-            CobbleDynamicTableSource.SerializableConfig config) {
+    private static Config createCoordinatorConfig(CobbleTableScanConfig config) {
         Config coordinatorConfig = new Config();
         if (config.hasConfiguredBucketCount()) {
-            coordinatorConfig.totalBuckets(config.bucketCount);
+            coordinatorConfig.totalBuckets(config.bucketCount());
         }
         coordinatorConfig.governanceMode = Config.GovernanceMode.NOOP;
         coordinatorConfig.logConsole = false;
 
         Config.VolumeDescriptor volume = new Config.VolumeDescriptor();
-        volume.baseDir = config.pathUri;
+        volume.baseDir = config.pathUri();
         volume.kinds = Arrays.asList(Config.VolumeUsageKind.META, Config.VolumeUsageKind.SNAPSHOT);
         coordinatorConfig.addVolume(volume);
         return coordinatorConfig;

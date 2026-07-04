@@ -13,9 +13,9 @@ import org.apache.flink.table.data.RowData;
 final class CobbleSource
         implements Source<RowData, CobbleSourceSplit, CobbleSourceEnumeratorState> {
 
-    private final CobbleDynamicTableSource.SerializableConfig config;
+    private final CobbleTableScanConfig config;
 
-    CobbleSource(CobbleDynamicTableSource.SerializableConfig config) {
+    CobbleSource(CobbleTableScanConfig config) {
         this.config = config;
     }
 

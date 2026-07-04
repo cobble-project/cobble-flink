@@ -6,7 +6,9 @@ package io.cobble.flink.table;
  * <p>For {@link CobbleSourceKind#SINK} the existing sink source runtime config ({@link
  * CobbleDynamicTableSource.SerializableConfig}) is built by the factory from the table schema, so
  * this type only carries detection metadata. For {@link CobbleSourceKind#STATE} it carries a {@link
- * StateSourceConfig} placeholder describing the detected layout.
+ * StateSourceConfig} placeholder describing the detected layout. For {@link CobbleSourceKind#RAW}
+ * it carries no extra config — the raw source is schema-less and its config is built directly by
+ * the factory from the parsed options.
  */
 final class CobbleResolvedSource {
 
@@ -27,6 +29,10 @@ final class CobbleResolvedSource {
 
     static CobbleResolvedSource state(StateSourceConfig stateConfig, String diagnostics) {
         return new CobbleResolvedSource(CobbleSourceKind.STATE, stateConfig, diagnostics);
+    }
+
+    static CobbleResolvedSource raw(String diagnostics) {
+        return new CobbleResolvedSource(CobbleSourceKind.RAW, null, diagnostics);
     }
 
     CobbleSourceKind kind() {

@@ -19,7 +19,7 @@ import java.util.Map;
 /** Enumerator that assigns stable raw scan splits and refreshes them for newer snapshots. */
 final class CobbleSourceEnumerator
         implements SplitEnumerator<CobbleSourceSplit, CobbleSourceEnumeratorState> {
-    private final CobbleDynamicTableSource.SerializableConfig config;
+    private final CobbleTableScanConfig config;
     private final SplitEnumeratorContext<CobbleSourceSplit> context;
     /**
      * Splits that still need coordinator assignment or need to be re-pushed after a replacement.
@@ -45,7 +45,7 @@ final class CobbleSourceEnumerator
     private boolean noMoreSplitsSignaled;
 
     CobbleSourceEnumerator(
-            CobbleDynamicTableSource.SerializableConfig config,
+            CobbleTableScanConfig config,
             SplitEnumeratorContext<CobbleSourceSplit> context,
             CobbleSourceEnumeratorState checkpoint)
             throws Exception {
@@ -164,9 +164,9 @@ final class CobbleSourceEnumerator
         if (initial == null) {
             throw new IOException(
                     "Cobble source could not resolve checkpoint "
-                            + config.scanCheckpointId
+                            + config.scanCheckpointId()
                             + " for path "
-                            + config.pathUri
+                            + config.pathUri()
                             + ".");
         }
         currentSnapshotId = initial.id;
@@ -291,7 +291,7 @@ final class CobbleSourceEnumerator
                         throw new RuntimeException("Failed to refresh Cobble source splits.", e);
                     }
                 },
-                config.pollIntervalMillis,
-                config.pollIntervalMillis);
+                config.pollIntervalMillis(),
+                config.pollIntervalMillis());
     }
 }

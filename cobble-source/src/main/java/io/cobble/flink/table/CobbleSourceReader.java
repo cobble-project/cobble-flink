@@ -30,11 +30,11 @@ import java.util.concurrent.CompletableFuture;
 final class CobbleSourceReader implements SourceReader<RowData, CobbleSourceSplit> {
     private static final Logger LOG = LoggerFactory.getLogger(CobbleSourceReader.class);
 
-    private final CobbleDynamicTableSource.SerializableConfig config;
+    private final CobbleTableScanConfig config;
     private final SourceReaderContext context;
     private final Map<String, SourceSplitState> ownedStatesBySplit = new HashMap<>();
     private final ArrayDeque<SourceSplitState> runnableStates = new ArrayDeque<>();
-    private final CobbleRowDataDecoders.RuntimeRowDecoder rowDecoder;
+    private final ScannedRowDecoder rowDecoder;
     private final int[] projectedColumnIndexes;
     private CompletableFuture<Void> availability = new CompletableFuture<>();
     private SourceSplitState currentState;
@@ -42,12 +42,11 @@ final class CobbleSourceReader implements SourceReader<RowData, CobbleSourceSpli
     private boolean noMoreSplits;
     private boolean closed;
 
-    CobbleSourceReader(
-            CobbleDynamicTableSource.SerializableConfig config, SourceReaderContext context) {
+    CobbleSourceReader(CobbleTableScanConfig config, SourceReaderContext context) {
         this.config = config;
         this.context = context;
-        this.rowDecoder = new CobbleRowDataDecoders.RuntimeRowDecoder(config);
-        this.projectedColumnIndexes = projectedColumnIndexes(config);
+        this.rowDecoder = config.createDecoder();
+        this.projectedColumnIndexes = config.projectedColumnIndexes();
     }
 
     @Override
@@ -292,7 +291,7 @@ final class CobbleSourceReader implements SourceReader<RowData, CobbleSourceSpli
             this.checkpointKeyExclusive = null;
             this.restoredFromCheckpoint = split.startBucket >= 0 && split.startKeyExclusive != null;
             if (config.hasConfiguredBucketCount()) {
-                this.resolvedTotalBuckets = config.bucketCount;
+                this.resolvedTotalBuckets = config.bucketCount();
             }
             if (this.scanState == CobbleSourceSplit.ScanState.IDLE) {
                 clearStartBoundary();
@@ -429,14 +428,5 @@ final class CobbleSourceReader implements SourceReader<RowData, CobbleSourceSpli
         private byte[] currentBoundaryKeyExclusive() {
             return checkpointKeyExclusive != null ? checkpointKeyExclusive : startKeyExclusive;
         }
-    }
-
-    private static int[] projectedColumnIndexes(
-            CobbleDynamicTableSource.SerializableConfig config) {
-        int[] indexes = new int[config.valueFields.size()];
-        for (int i = 0; i < config.valueFields.size(); i++) {
-            indexes[i] = config.valueFields.get(i).structuredColumnIndex;
-        }
-        return indexes;
     }
 }

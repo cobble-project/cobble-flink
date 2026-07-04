@@ -6,8 +6,8 @@ nav_order: 6
 # Source
 
 Use the Cobble source when you want to read existing Cobble data from Flink
-SQL. The source can read Cobble sink table snapshots, and it can also read
-Flink keyed state written by the Cobble state backend.
+SQL. The source can read Cobble sink table snapshots, Flink keyed state written
+by the Cobble state backend, or any standard Cobble table root as raw bytes.
 
 ## Why Use Cobble Source
 
@@ -63,18 +63,20 @@ matrix in [Getting Started](../getting-started/).
 
 ### Choose the source kind
 
-The same connector name is used for both source kinds:
+The same connector name is used for all source kinds:
 
 - `connector = 'cobble'`
 - a required `path`
-- `source.kind = 'sink'`, `source.kind = 'state'`, or the default
-  `source.kind = 'auto'`
+- `source.kind = 'sink'`, `source.kind = 'state'`, `source.kind = 'raw'`, or
+  the default `source.kind = 'auto'`
 
 Use `sink` when the path is a Cobble table written by the Cobble SQL sink. Use
 `state` when the path is a Flink checkpoint root or a concrete `chk-*`
-directory written with Cobble as the state backend. `auto` works for the common
-on-disk layouts, but setting the kind explicitly makes production DDL easier to
-read.
+directory written with Cobble as the state backend. Use `raw` when the path is
+any standard Cobble table root and you want raw bytes without typed schema
+resolution — for debugging or interoperability with data not written by
+Cobble Flink. `auto` works for the common on-disk layouts, but never selects
+`raw`; setting the kind explicitly makes production DDL easier to read.
 
 ## Semantic Columns
 
@@ -282,12 +284,24 @@ This section lists the main configuration keys for the Cobble source.
 | `state.kind` | Optional validation hint: `value`, `list`, `map`, `reducing`, `aggregating`, or `timer` |
 | `PRIMARY KEY` | Required only for lookup joins |
 
+### Raw Table Requirements
+
+| Item | Requirement |
+| --- | --- |
+| `connector` | Must be `cobble` |
+| `path` | Standard Cobble table root path |
+| `source.kind` | Must be `raw` (never auto-selected) |
+| `raw.columns` | Required — comma-separated column indexes, e.g. `0,1` or `0,2` |
+| DDL columns | Exactly two: `key BYTES` and `columns ARRAY<BYTES>` |
+| `PRIMARY KEY` | Not allowed |
+| Lookup | Not supported |
+
 ### Source Options
 
 | Key | Default | Description |
 | --- | --- | --- |
 | `path` | none | Cobble table root path, checkpoint root path, or concrete `chk-*` path. Relative paths are normalized to absolute `file://` URIs. |
-| `source.kind` | `auto` | Source kind: `auto`, `sink`, or `state`. |
+| `source.kind` | `auto` | Source kind: `auto`, `sink`, `state`, or `raw`. |
 | `bucket` | inferred from snapshot metadata | Total bucket count or key-group count. Usually optional. |
 | `scan.checkpoint-id` | `latest` | Snapshot to read. Use `latest` or a positive numeric checkpoint id. |
 | `scan.mode` | `batch` | Read mode. Supported values are `batch` and `streaming`. |
@@ -296,6 +310,7 @@ This section lists the main configuration keys for the Cobble source.
 | `state.name` | none | State name to read when `source.kind = 'state'`. |
 | `state.operator-id` | inferred when possible | Cobble operator id to read when `source.kind = 'state'`. |
 | `state.kind` | inferred from metadata | Optional state-kind validation hint. |
+| `raw.columns` | none | Comma-separated column indexes to read when `source.kind = 'raw'` (e.g. `0,1`). Required; `all` is not supported yet. |
 
 ## Usage Notes
 

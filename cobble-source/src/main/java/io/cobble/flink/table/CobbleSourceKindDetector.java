@@ -117,9 +117,22 @@ final class CobbleSourceKindDetector {
                                     + " sink table.");
                 }
                 return resolveState(pathUri, layoutFor(probe));
+            case RAW:
+                if (probe == Probe.STATE_CHECKPOINT || probe == Probe.STATE_OPERATOR) {
+                    throw new ValidationException(
+                            "source.kind='raw' expects a Cobble table root. For Cobble Flink keyed"
+                                    + " state, use source.kind='state'.");
+                }
+                if (probe == Probe.UNKNOWN) {
+                    throw new ValidationException(
+                            "source.kind='raw' expects a Cobble table root, but path "
+                                    + pathUri
+                                    + " does not appear to be a Cobble table root"
+                                    + " (no snapshot/CURRENT or writer-paths.properties found).");
+                }
+                return CobbleResolvedSource.raw(rawDiagnostics(pathUri, probe));
             case AUTO:
                 return resolveAuto(pathUri, probe, sinkShapedSchema);
-            case RAW_RESERVED:
             default:
                 throw new IllegalStateException("Unexpected source kind: " + requestedKind);
         }
@@ -152,8 +165,7 @@ final class CobbleSourceKindDetector {
         return new ValidationException(
                 "Unable to auto-detect Cobble source kind for path "
                         + pathUri
-                        + ". Set source.kind='sink' or source.kind='state'. Raw Cobble"
-                        + " source is reserved for future support.");
+                        + ". Set source.kind='sink', source.kind='state', or source.kind='raw'.");
     }
 
     private static CobbleResolvedSource resolveState(
@@ -201,6 +213,26 @@ final class CobbleSourceKindDetector {
                         + pathUri
                         + ", but the on-disk state layout could not be confirmed.";
         }
+    }
+
+    private static String rawDiagnostics(String pathUri, Probe probe) {
+        String signal;
+        switch (probe) {
+            case SINK:
+                signal = "inspect-schema sidecar (CSNK)";
+                break;
+            case AMBIGUOUS:
+                signal = "snapshot/CURRENT or writer-paths.properties";
+                break;
+            default:
+                signal = "Cobble table root";
+                break;
+        }
+        return "Resolved Cobble raw source for "
+                + pathUri
+                + " from "
+                + signal
+                + "; reading raw bytes without typed schema.";
     }
 
     // ------------------------------------------------------------------------------------------

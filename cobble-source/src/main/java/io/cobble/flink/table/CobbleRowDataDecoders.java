@@ -20,7 +20,7 @@ final class CobbleRowDataDecoders {
 
     private CobbleRowDataDecoders() {}
 
-    static final class RuntimeRowDecoder {
+    static final class RuntimeRowDecoder implements ScannedRowDecoder {
         private final List<RuntimeFieldDecoder> keyFields;
         private final List<RuntimeFieldDecoder> valueFields;
         private final int fieldCount;
@@ -41,7 +41,8 @@ final class CobbleRowDataDecoders {
             return decode(row.getKey(), extractColumns(row));
         }
 
-        RowData decode(byte[] key, byte[][] columns) throws IOException {
+        @Override
+        public RowData decode(byte[] key, byte[][] columns) throws IOException {
             GenericRowData decoded = new GenericRowData(RowKind.INSERT, fieldCount);
 
             DataInputDeserializer keyInput = new DataInputDeserializer(key);
