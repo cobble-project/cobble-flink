@@ -375,6 +375,8 @@ Cobble imports the following state from a canonical savepoint:
 | Flink state | Canonical restore |
 | --- |-------------------|
 | `ValueState` | supported         |
+| `ListState` | supported         |
+| `MapState` | supported, including present-null values |
 | `ReducingState` | supported         |
 | `AggregatingState` | supported         |
 | Event-time timers | supported         |

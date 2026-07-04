@@ -7,8 +7,8 @@ import java.util.Objects;
  * One physical SQL output column derived from a Cobble state inspect semantic schema.
  *
  * <p>Each field records which logical part of the state row it comes from ({@link Group}) and its
- * position within that part's flattened scalar fields, so the Step 3 runtime can map a decoded
- * state row onto the SQL output row without re-deriving the schema.
+ * position within that part's flattened scalar fields, so scan and lookup runtimes can map a
+ * decoded state row onto the SQL output row without re-deriving the schema.
  */
 final class StateSourceField implements Serializable {
 

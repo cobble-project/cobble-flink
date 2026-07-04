@@ -264,7 +264,7 @@ final class CobbleStateLookupKeyEncoder {
      * Builds the serializer object for one logical group (state key / namespace / map key) from
      * flattened lookup {@link RowData} fields, then serializes it.
      *
-     * <p>Supported semantic shapes in Step 2:
+     * <p>Supported semantic shapes:
      *
      * <ul>
      *   <li>{@code SCALAR}: one field, passed through a {@link RowData.FieldGetter}.

@@ -254,7 +254,7 @@ PRIMARY KEY (customer_id, namespace, order_id) NOT ENFORCED
 | `AggregatingState` | supported | supported | state key, plus namespace when present |
 | `MapState` | supported | supported | state key, plus namespace when present, plus map key |
 | `ListState` | supported | not supported | none |
-| Timer state | supported | not supported | none |
+| Timer state | not supported | not supported | none |
 
 ## Complete Configuration Reference
 

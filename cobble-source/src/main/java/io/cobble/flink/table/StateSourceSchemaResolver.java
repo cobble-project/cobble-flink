@@ -509,9 +509,9 @@ final class StateSourceSchemaResolver {
     /**
      * Validates the DDL against the derived output fields. Columns are matched position by
      * position: the DDL column order must equal the state output order (key, [namespace],
-     * value/...). This matters because the Step 3 runtime will emit rows in the semantic output
-     * order, and Flink interprets them in the DDL physical order — a reordered DDL would silently
-     * swap columns.
+     * value/...). This matters because the runtime emits rows in the semantic output order, and
+     * Flink interprets them in the DDL physical order — a reordered DDL would silently swap
+     * columns.
      */
     private static void validateDdl(
             String stateName, List<StateSourceField> expected, ResolvedSchema ddlSchema) {

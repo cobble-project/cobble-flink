@@ -24,7 +24,7 @@ import java.util.Map;
  * lookup key.
  *
  * <p>This is a planning-time contract only. It does not encode row-key bytes or runtime state; the
- * Step 1 lookup provider still fails with "not implemented" after validating this contract.
+ * lookup runtime consumes it later to validate planner keys and encode the Cobble row key.
  */
 final class StateSourceLookupKeyContract implements Serializable {
 

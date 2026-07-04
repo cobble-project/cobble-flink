@@ -8,11 +8,11 @@ import java.util.List;
 /**
  * Configuration for the Cobble state source.
  *
- * <p>Detection (Step 1) produces a placeholder carrying only the detected {@code pathUri} and
- * {@link Layout}. Planning (Step 2) produces a fully-resolved, serializable config that the Step 3
- * runtime will consume: it adds the selected operator, state name/kind, the schema-registry
- * checkpoint id, the requested {@code scan.checkpoint-id}, the bucket count, and the resolved SQL
- * output columns.
+ * <p>Detection produces a placeholder carrying only the detected {@code pathUri} and {@link
+ * Layout}. Planning produces a fully-resolved, serializable config consumed by scan and lookup
+ * runtimes: it adds the selected operator, state name/kind, the schema-registry checkpoint id, the
+ * requested {@code scan.checkpoint-id}, the bucket count, the resolved SQL output columns, and the
+ * optional exact-lookup key contract.
  *
  * <p>It deliberately does <em>not</em> hold sink key/value field mappings: state decoding uses the
  * state inspect schema registry instead.
@@ -66,7 +66,7 @@ final class StateSourceConfig implements Serializable {
         this.lookupKeyContract = StateSourceLookupKeyContract.absent();
     }
 
-    /** Fully-resolved config ready for the Step 3 runtime. */
+    /** Fully-resolved config ready for state scan and lookup runtimes. */
     StateSourceConfig(
             String pathUri,
             Layout layout,
