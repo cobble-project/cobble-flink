@@ -46,6 +46,19 @@
                         </goals>
                         <configuration>
                             <createDependencyReducedPom>false</createDependencyReducedPom>
+                            <!--
+                                Relocate gson away from its original package so the dist jar does not
+                                leak com.google.gson onto the Flink lib/ classpath (Flink ships its own
+                                gson inside flink-dist). The cobble-java artifact already relocates
+                                gson to io.cobble.shaded.gson; this matches that target so the bundled
+                                cobble-java classes continue to resolve.
+                            -->
+                            <relocations>
+                                <relocation>
+                                    <pattern>com.google.gson</pattern>
+                                    <shadedPattern>io.cobble.shaded.gson</shadedPattern>
+                                </relocation>
+                            </relocations>
                             <transformers>
                                 <transformer implementation="org.apache.maven.plugins.shade.resource.ServicesResourceTransformer"/>
                                 <!--
