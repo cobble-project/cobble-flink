@@ -221,14 +221,25 @@ CREATE TABLE sink_tbl (
 
 ### Flink's Source
 
-For SQL reads, use:
+Cobble source lets Flink SQL read data that is already stored in Cobble. There
+are two common source kinds:
+
+- `source.kind='sink'` reads a Cobble table written by the Cobble SQL sink.
+- `source.kind='state'` reads keyed state from a Flink checkpoint written by the
+  Cobble state backend.
+
+Use `source.kind='auto'` when the path layout is unambiguous, or set the kind
+explicitly in production DDL.
+
+For reading a Cobble sink table, use:
 
 - `connector='cobble'`
 - `path`
+- `source.kind='sink'`
 - `scan.checkpoint-id`
 - `scan.mode`
 
-Example:
+Sink tables require a primary key and can also be used in temporal lookup joins:
 
 ```sql
 CREATE TABLE source_tbl (
@@ -238,6 +249,7 @@ CREATE TABLE source_tbl (
   PRIMARY KEY (phase, id) NOT ENFORCED
 ) WITH (
   'connector' = 'cobble',
+  'source.kind' = 'sink',
   'path' = 'hdfs:///tmp/cobble-table',
   'scan.checkpoint-id' = 'latest',
   'scan.mode' = 'batch'
@@ -251,6 +263,51 @@ SELECT o.order_id, o.id, d.name, d.score
 FROM orders AS o
 LEFT JOIN source_tbl FOR SYSTEM_TIME AS OF o.pt AS d
 ON o.id = d.id;
+```
+
+For reading Cobble state backend checkpoints, use:
+
+- `connector='cobble'`
+- `path` pointing at the checkpoint root or a concrete `chk-*` directory
+- `source.kind='state'`
+- `state.name`
+- `state.operator-id` when the checkpoint has more than one Cobble operator
+- `state.kind` when you want an explicit validation hint
+- `scan.checkpoint-id`
+- `scan.mode`
+
+State scan does not require a primary key. State lookup joins require a primary
+key that contains the full exact lookup key. For `ValueState`, `ReducingState`,
+and `AggregatingState`, that means the state key plus namespace when present.
+For `MapState`, it means state key, namespace when present, and map key.
+
+When the Cobble data was produced by Flink SQL, Cobble records schema metadata
+so the source can expose semantic columns instead of raw key/value bytes. For
+example, a SQL join state can be read with columns such as `customer_id`,
+`order_id`, and `amount`, and a Cobble sink table can be read with its original
+primary-key and value columns. See [Source](docs/source/) for the full DDL
+patterns.
+
+```sql
+CREATE TABLE state_values (
+  `key` INT,
+  `value` INT,
+  PRIMARY KEY (`key`) NOT ENFORCED
+) WITH (
+  'connector' = 'cobble',
+  'source.kind' = 'state',
+  'path' = 'hdfs:///tmp/flink-checkpoints',
+  'state.operator-id' = '<operator-id>',
+  'state.name' = 'value-state',
+  'state.kind' = 'value',
+  'scan.checkpoint-id' = 'latest',
+  'scan.mode' = 'batch'
+);
+
+SELECT p.`key`, d.`value`
+FROM probes AS p
+LEFT JOIN state_values FOR SYSTEM_TIME AS OF p.pt AS d
+ON p.`key` = d.`key`;
 ```
 
 ## License
