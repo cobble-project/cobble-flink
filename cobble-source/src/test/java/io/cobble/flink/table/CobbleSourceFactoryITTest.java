@@ -488,9 +488,9 @@ class CobbleSourceFactoryITTest {
     }
 
     @Test
-    void stateLookupWithPartialLookupContextFailsBeforeNotImplemented() {
-        // Contract requires one key column at position 0, but the planner provides a different
-        // position => must fail validation, not reach the not-implemented boundary.
+    void stateLookupWithUnrelatedPhysicalPositionFails() {
+        // Contract requires one key column at position 0, but the planner provides position 1
+        // (unrelated) => must fail validation with a clear missing-key or not-part-of-PK message.
         StateSourceConfig config =
                 stateConfigWithContract(
                         "orders",
@@ -509,10 +509,11 @@ class CobbleSourceFactoryITTest {
                 assertThrows(
                         Exception.class,
                         () -> source.getLookupRuntimeProvider(lookupContext(new int[] {1})));
+        String chain = messageChain(error);
         assertTrue(
-                messageChain(error).contains("lookup key at position 0")
-                        && messageChain(error).contains("requires physical column 0"),
-                "expected lookup-key mismatch message but got: " + messageChain(error));
+                chain.contains("missing a lookup key for column 'key'")
+                        || chain.contains("not part of the PRIMARY KEY"),
+                "expected missing-key or unrelated-key message but got: " + chain);
     }
 
     @Test
@@ -597,6 +598,302 @@ class CobbleSourceFactoryITTest {
         assertTrue(
                 messageChain(error).contains("timer lookup is not supported"),
                 "expected timer-lookup unsupported message but got: " + messageChain(error));
+    }
+
+    // ------------------------------------------------------------------------------------------
+    //  Order-independent state lookup tests
+    // ------------------------------------------------------------------------------------------
+
+    @Test
+    void stateLookupMapStateAcceptsReversedPlannerKeys() {
+        // Required: (key, map_key) at physical positions [0, 1].
+        // Planner provides keys in reversed order: [[1], [0]] — map_key first, then key.
+        StateSourceConfig config =
+                stateConfigWithContract(
+                        "orders",
+                        "map",
+                        Arrays.asList(
+                                new StateSourceField(
+                                        "key", "INT", StateSourceField.Group.STATE_KEY, 0),
+                                new StateSourceField(
+                                        "map_key", "INT", StateSourceField.Group.MAP_KEY, 0),
+                                new StateSourceField(
+                                        "map_value", "INT", StateSourceField.Group.MAP_VALUE, 0)),
+                        Arrays.asList(
+                                new StateSourceField(
+                                        "key", "INT", StateSourceField.Group.STATE_KEY, 0),
+                                new StateSourceField(
+                                        "map_key", "INT", StateSourceField.Group.MAP_KEY, 0)),
+                        new int[] {0, 1});
+        CobbleStateDynamicTableSource source =
+                new CobbleStateDynamicTableSource(config, "default_catalog.default_database.t");
+
+        LookupTableSource.LookupRuntimeProvider provider =
+                assertDoesNotThrow(
+                        () ->
+                                source.getLookupRuntimeProvider(
+                                        lookupContext(new int[] {1}, new int[] {0})));
+        assertNotNull(provider, "expected provider for reversed map state keys");
+    }
+
+    @Test
+    void stateLookupNamespacedMapAcceptsFullyScrambledPlannerKeys() {
+        // Required: (key, namespace, map_key) at physical positions [0, 1, 2].
+        // Planner provides fully scrambled: [[2], [0], [1]] — map_key, key, namespace.
+        StateSourceConfig config =
+                stateConfigWithContract(
+                        "orders",
+                        "map",
+                        Arrays.asList(
+                                new StateSourceField(
+                                        "key", "INT", StateSourceField.Group.STATE_KEY, 0),
+                                new StateSourceField(
+                                        "namespace", "INT", StateSourceField.Group.NAMESPACE, 0),
+                                new StateSourceField(
+                                        "map_key", "INT", StateSourceField.Group.MAP_KEY, 0),
+                                new StateSourceField(
+                                        "map_value", "INT", StateSourceField.Group.MAP_VALUE, 0)),
+                        Arrays.asList(
+                                new StateSourceField(
+                                        "key", "INT", StateSourceField.Group.STATE_KEY, 0),
+                                new StateSourceField(
+                                        "namespace", "INT", StateSourceField.Group.NAMESPACE, 0),
+                                new StateSourceField(
+                                        "map_key", "INT", StateSourceField.Group.MAP_KEY, 0)),
+                        new int[] {0, 1, 2});
+        CobbleStateDynamicTableSource source =
+                new CobbleStateDynamicTableSource(config, "default_catalog.default_database.t");
+
+        LookupTableSource.LookupRuntimeProvider provider =
+                assertDoesNotThrow(
+                        () ->
+                                source.getLookupRuntimeProvider(
+                                        lookupContext(
+                                                new int[] {2}, new int[] {0}, new int[] {1})));
+        assertNotNull(provider, "expected provider for scrambled namespaced map state keys");
+    }
+
+    @Test
+    void stateLookupMissingKeyFails() {
+        // Required: (key, map_key) at [0, 1]. Planner provides only key: [[0]].
+        StateSourceConfig config =
+                stateConfigWithContract(
+                        "orders",
+                        "map",
+                        Arrays.asList(
+                                new StateSourceField(
+                                        "key", "INT", StateSourceField.Group.STATE_KEY, 0),
+                                new StateSourceField(
+                                        "map_key", "INT", StateSourceField.Group.MAP_KEY, 0),
+                                new StateSourceField(
+                                        "map_value", "INT", StateSourceField.Group.MAP_VALUE, 0)),
+                        Arrays.asList(
+                                new StateSourceField(
+                                        "key", "INT", StateSourceField.Group.STATE_KEY, 0),
+                                new StateSourceField(
+                                        "map_key", "INT", StateSourceField.Group.MAP_KEY, 0)),
+                        new int[] {0, 1});
+        CobbleStateDynamicTableSource source =
+                new CobbleStateDynamicTableSource(config, "default_catalog.default_database.t");
+
+        Exception error =
+                assertThrows(
+                        Exception.class,
+                        () -> source.getLookupRuntimeProvider(lookupContext(new int[] {0})));
+        assertTrue(
+                messageChain(error).contains("equality conditions for all 2"),
+                "expected key-count mismatch but got: " + messageChain(error));
+    }
+
+    @Test
+    void stateLookupExtraKeyFails() {
+        // Required: (key) at [0]. Planner provides key + extra: [[0], [1]].
+        StateSourceConfig config =
+                stateConfigWithContract(
+                        "orders",
+                        "value",
+                        Collections.singletonList(
+                                new StateSourceField(
+                                        "key", "INT", StateSourceField.Group.STATE_KEY, 0)),
+                        Collections.singletonList(
+                                new StateSourceField(
+                                        "key", "INT", StateSourceField.Group.STATE_KEY, 0)),
+                        new int[] {0});
+        CobbleStateDynamicTableSource source =
+                new CobbleStateDynamicTableSource(config, "default_catalog.default_database.t");
+
+        Exception error =
+                assertThrows(
+                        Exception.class,
+                        () ->
+                                source.getLookupRuntimeProvider(
+                                        lookupContext(new int[] {0}, new int[] {1})));
+        assertTrue(
+                messageChain(error).contains("equality conditions for all 1"),
+                "expected key-count mismatch but got: " + messageChain(error));
+    }
+
+    @Test
+    void stateLookupDuplicatePhysicalPositionFails() {
+        // Required: (key, map_key) at [0, 1]. Planner provides [[0], [0]] — duplicate.
+        StateSourceConfig config =
+                stateConfigWithContract(
+                        "orders",
+                        "map",
+                        Arrays.asList(
+                                new StateSourceField(
+                                        "key", "INT", StateSourceField.Group.STATE_KEY, 0),
+                                new StateSourceField(
+                                        "map_key", "INT", StateSourceField.Group.MAP_KEY, 0),
+                                new StateSourceField(
+                                        "map_value", "INT", StateSourceField.Group.MAP_VALUE, 0)),
+                        Arrays.asList(
+                                new StateSourceField(
+                                        "key", "INT", StateSourceField.Group.STATE_KEY, 0),
+                                new StateSourceField(
+                                        "map_key", "INT", StateSourceField.Group.MAP_KEY, 0)),
+                        new int[] {0, 1});
+        CobbleStateDynamicTableSource source =
+                new CobbleStateDynamicTableSource(config, "default_catalog.default_database.t");
+
+        Exception error =
+                assertThrows(
+                        Exception.class,
+                        () ->
+                                source.getLookupRuntimeProvider(
+                                        lookupContext(new int[] {0}, new int[] {0})));
+        assertTrue(
+                messageChain(error).contains("duplicate"),
+                "expected duplicate-key message but got: " + messageChain(error));
+    }
+
+    @Test
+    void stateLookupNestedKeyFails() {
+        // Required: (key) at [0]. Planner provides a nested key path: [[0, 1]].
+        StateSourceConfig config =
+                stateConfigWithContract(
+                        "orders",
+                        "value",
+                        Collections.singletonList(
+                                new StateSourceField(
+                                        "key", "INT", StateSourceField.Group.STATE_KEY, 0)),
+                        Collections.singletonList(
+                                new StateSourceField(
+                                        "key", "INT", StateSourceField.Group.STATE_KEY, 0)),
+                        new int[] {0});
+        CobbleStateDynamicTableSource source =
+                new CobbleStateDynamicTableSource(config, "default_catalog.default_database.t");
+
+        Exception error =
+                assertThrows(
+                        Exception.class,
+                        () -> source.getLookupRuntimeProvider(lookupContext(new int[] {0, 1})));
+        assertTrue(
+                messageChain(error).contains("top-level"),
+                "expected nested-key rejection but got: " + messageChain(error));
+    }
+
+    @Test
+    void stateLookupUnrelatedPhysicalPositionFailsWithThreeFields() {
+        // Required: (key, map_key) at [0, 1]. Planner provides [[0], [3]] — position 3 unrelated.
+        StateSourceConfig config =
+                stateConfigWithContract(
+                        "orders",
+                        "map",
+                        Arrays.asList(
+                                new StateSourceField(
+                                        "key", "INT", StateSourceField.Group.STATE_KEY, 0),
+                                new StateSourceField(
+                                        "map_key", "INT", StateSourceField.Group.MAP_KEY, 0),
+                                new StateSourceField(
+                                        "map_value", "INT", StateSourceField.Group.MAP_VALUE, 0)),
+                        Arrays.asList(
+                                new StateSourceField(
+                                        "key", "INT", StateSourceField.Group.STATE_KEY, 0),
+                                new StateSourceField(
+                                        "map_key", "INT", StateSourceField.Group.MAP_KEY, 0)),
+                        new int[] {0, 1});
+        CobbleStateDynamicTableSource source =
+                new CobbleStateDynamicTableSource(config, "default_catalog.default_database.t");
+
+        Exception error =
+                assertThrows(
+                        Exception.class,
+                        () ->
+                                source.getLookupRuntimeProvider(
+                                        lookupContext(new int[] {0}, new int[] {3})));
+        String chain = messageChain(error);
+        assertTrue(
+                chain.contains("missing a lookup key for column 'map_key'")
+                        || chain.contains("not part of the PRIMARY KEY"),
+                "expected missing-key or unrelated-key message but got: " + chain);
+    }
+
+    // ------------------------------------------------------------------------------------------
+    //  Sink lookup order-independent regression tests
+    // ------------------------------------------------------------------------------------------
+
+    @Test
+    void sinkLookupCompositePrimaryKeyAcceptsReversedPlannerKeys() {
+        // Sink DDL: PRIMARY KEY (phase, id). keyFields carry rowIndex 0 and 1.
+        // Planner provides keys reversed: [[1], [0]] — id first, then phase.
+        List<CobbleDynamicTableSource.SerializableField> keyFields =
+                Arrays.asList(
+                        new CobbleDynamicTableSource.SerializableField(
+                                "phase", "VARCHAR(2147483647)", 0, -1),
+                        new CobbleDynamicTableSource.SerializableField("id", "BIGINT", 1, -1));
+        List<CobbleDynamicTableSource.SerializableField> valueFields =
+                Collections.singletonList(
+                        new CobbleDynamicTableSource.SerializableField("amount", "BIGINT", 2, 0));
+        CobbleDynamicTableSource.SerializableConfig config =
+                new CobbleDynamicTableSource.SerializableConfig(
+                        "file:///tmp/sink-lookup",
+                        2,
+                        "latest",
+                        "batch",
+                        50L,
+                        0L,
+                        keyFields,
+                        valueFields);
+        CobbleDynamicTableSource source = new CobbleDynamicTableSource(config, "t_sink_lookup");
+
+        LookupTableSource.LookupRuntimeProvider provider =
+                assertDoesNotThrow(
+                        () ->
+                                source.getLookupRuntimeProvider(
+                                        lookupContext(new int[] {1}, new int[] {0})));
+        assertNotNull(provider, "expected provider for reversed sink composite PK keys");
+    }
+
+    @Test
+    void sinkLookupCompositePrimaryKeyRejectsWrongKeyCount() {
+        List<CobbleDynamicTableSource.SerializableField> keyFields =
+                Arrays.asList(
+                        new CobbleDynamicTableSource.SerializableField(
+                                "phase", "VARCHAR(2147483647)", 0, -1),
+                        new CobbleDynamicTableSource.SerializableField("id", "BIGINT", 1, -1));
+        List<CobbleDynamicTableSource.SerializableField> valueFields =
+                Collections.singletonList(
+                        new CobbleDynamicTableSource.SerializableField("amount", "BIGINT", 2, 0));
+        CobbleDynamicTableSource.SerializableConfig config =
+                new CobbleDynamicTableSource.SerializableConfig(
+                        "file:///tmp/sink-lookup",
+                        2,
+                        "latest",
+                        "batch",
+                        50L,
+                        0L,
+                        keyFields,
+                        valueFields);
+        CobbleDynamicTableSource source = new CobbleDynamicTableSource(config, "t_sink_lookup");
+
+        Exception error =
+                assertThrows(
+                        Exception.class,
+                        () -> source.getLookupRuntimeProvider(lookupContext(new int[] {0})));
+        assertTrue(
+                messageChain(error).contains("equality conditions for all PRIMARY KEY columns"),
+                "expected key-count mismatch but got: " + messageChain(error));
     }
 
     @Test

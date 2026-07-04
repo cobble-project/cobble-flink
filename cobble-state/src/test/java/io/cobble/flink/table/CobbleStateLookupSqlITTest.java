@@ -415,6 +415,104 @@ class CobbleStateLookupSqlITTest {
     }
 
     // ------------------------------------------------------------------------------------------
+    //  Tests — order-independent planner key mapping
+    //
+    // These reuse the same state fixtures and probe rows as the forward tests above, but write the
+    // JOIN ON conditions in reverse order relative to the DDL PRIMARY KEY. If the Flink planner
+    // passes LookupContext.getKeys() in ON-condition order, the provider's order-independent
+    // resolver must remap them. If the planner normalizes to PK order, these tests still serve as
+    // regression coverage for the same correct results.
+    // ------------------------------------------------------------------------------------------
+
+    @Test
+    void mapStateLookupJoinAcceptsReversedOnConditions() throws Exception {
+        CheckpointInfo checkpoint = runStatefulJob();
+        StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment();
+        StreamTableEnvironment tableEnv = newTableEnv(env);
+
+        tableEnv.executeSql(
+                stateLookupDdl(
+                        "map_dim_rev",
+                        "`key` INT, map_key INT, map_value INT",
+                        "PRIMARY KEY (`key`, map_key) NOT ENFORCED",
+                        checkpoint,
+                        "map-state",
+                        "map"));
+        // Same probes and expected results as mapStateLookupJoinReturnsHitAndMiss, but the ON
+        // conditions are reversed: map_key first, then key.
+        registerProbe(
+                env,
+                tableEnv,
+                "probes",
+                Arrays.asList(
+                        Row.ofKind(RowKind.INSERT, 0, 0),
+                        Row.ofKind(RowKind.INSERT, 1, 1),
+                        Row.ofKind(RowKind.INSERT, 2, 2),
+                        Row.ofKind(RowKind.INSERT, 3, 3),
+                        Row.ofKind(RowKind.INSERT, 0, 999)),
+                Types.ROW_NAMED(new String[] {"key", "map_key"}, Types.INT, Types.INT));
+
+        String query =
+                "SELECT p.key, p.map_key, d.map_value "
+                        + "FROM probes AS p "
+                        + "LEFT JOIN map_dim_rev FOR SYSTEM_TIME AS OF p.pt AS d "
+                        + "ON p.map_key = d.map_key AND p.key = d.`key`";
+        assertTrue(
+                tableEnv.explainSql(query).contains("LookupJoin"),
+                "Expected Flink to plan the map-state dimension as a LookupJoin.");
+        assertEquals(
+                Arrays.asList("0,0,0", "0,999,null", "1,1,10", "2,2,20", "3,3,30"),
+                collectRows(tableEnv, query));
+    }
+
+    @Test
+    void namespacedMapStateLookupJoinAcceptsReversedOnConditions() throws Exception {
+        CheckpointInfo checkpoint = runStatefulJob();
+        checkpoint =
+                checkpoint.withOperatorId(
+                        operatorIdForState(checkpoint.rootUri, "namespaced-map-state"));
+        StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment();
+        StreamTableEnvironment tableEnv = newTableEnv(env);
+
+        tableEnv.executeSql(
+                stateLookupDdl(
+                        "ns_map_dim_rev",
+                        "`key` INT, namespace STRING, map_key INT, map_value INT",
+                        "PRIMARY KEY (`key`, namespace, map_key) NOT ENFORCED",
+                        checkpoint,
+                        "namespaced-map-state",
+                        "map"));
+        // Same probes and expected results as namespacedMapStateLookupJoinIsolatesNamespaces, but
+        // the ON conditions are fully reversed: map_key, namespace, key.
+        registerProbe(
+                env,
+                tableEnv,
+                "probes",
+                Arrays.asList(
+                        Row.ofKind(RowKind.INSERT, 0, "ns-a", 4),
+                        Row.ofKind(RowKind.INSERT, 0, "ns-b", 4),
+                        Row.ofKind(RowKind.INSERT, 1, "ns-a", 5),
+                        Row.ofKind(RowKind.INSERT, 1, "ns-b", 5)),
+                Types.ROW_NAMED(
+                        new String[] {"key", "namespace", "map_key"},
+                        Types.INT,
+                        Types.STRING,
+                        Types.INT));
+
+        String query =
+                "SELECT p.key, p.namespace, p.map_key, d.map_value "
+                        + "FROM probes AS p "
+                        + "LEFT JOIN ns_map_dim_rev FOR SYSTEM_TIME AS OF p.pt AS d "
+                        + "ON p.map_key = d.map_key AND p.namespace = d.namespace AND p.key = d.`key`";
+        assertTrue(
+                tableEnv.explainSql(query).contains("LookupJoin"),
+                "Expected Flink to plan the namespaced-map-state dimension as a LookupJoin.");
+        assertEquals(
+                Arrays.asList("0,ns-a,4,40", "0,ns-b,4,400", "1,ns-a,5,50", "1,ns-b,5,500"),
+                collectRows(tableEnv, query));
+    }
+
+    // ------------------------------------------------------------------------------------------
     //  MiniCluster fixture
     // ------------------------------------------------------------------------------------------
 

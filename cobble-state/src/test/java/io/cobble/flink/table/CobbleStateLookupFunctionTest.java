@@ -3,6 +3,7 @@ package io.cobble.flink.table;
 import static org.apache.flink.runtime.testutils.CommonTestUtils.waitForAllTaskRunning;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -26,6 +27,7 @@ import org.apache.flink.api.common.state.ReducingStateDescriptor;
 import org.apache.flink.api.common.state.ValueState;
 import org.apache.flink.api.common.state.ValueStateDescriptor;
 import org.apache.flink.api.common.typeinfo.BasicTypeInfo;
+import org.apache.flink.api.common.typeutils.base.StringSerializer;
 import org.apache.flink.api.java.tuple.Tuple2;
 import org.apache.flink.configuration.CheckpointingOptions;
 import org.apache.flink.configuration.Configuration;
@@ -36,8 +38,15 @@ import org.apache.flink.runtime.testutils.MiniClusterResourceConfiguration;
 import org.apache.flink.streaming.api.environment.CheckpointConfig;
 import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
 import org.apache.flink.streaming.api.functions.source.RichParallelSourceFunction;
+import org.apache.flink.streaming.api.operators.AbstractStreamOperator;
+import org.apache.flink.streaming.api.operators.OneInputStreamOperator;
+import org.apache.flink.streaming.runtime.streamrecord.StreamRecord;
+import org.apache.flink.table.connector.source.DynamicTableSource;
+import org.apache.flink.table.connector.source.LookupTableSource;
+import org.apache.flink.table.connector.source.lookup.LookupFunctionProvider;
 import org.apache.flink.table.data.GenericRowData;
 import org.apache.flink.table.data.RowData;
+import org.apache.flink.table.data.StringData;
 import org.apache.flink.table.functions.FunctionContext;
 import org.apache.flink.test.util.MiniClusterWithClientResource;
 import org.junit.jupiter.api.Test;
@@ -609,6 +618,224 @@ class CobbleStateLookupFunctionTest {
         }
     }
 
+    // ------------------------------------------------------------------------------------------
+    //  Order-independent key-mapping tests
+    //
+    // These tests prove the resolver produces a non-identity mapping AND that the mapping reaches
+    // CobbleStateLookupKeyEncoder at runtime. They obtain the lookup function via the production
+    // entry point (CobbleStateDynamicTableSource.getLookupRuntimeProvider) with a scrambled
+    // LookupContext, then call lookup(...) with a scrambled RowData whose field order matches the
+    // scrambled context. If the resolver wrongly returned an identity mapping, the lookup would
+    // read the wrong fields and either miss or hit the wrong entry.
+    // ------------------------------------------------------------------------------------------
+
+    /**
+     * Map state with required (key, map_key) at positions [0, 1]. The planner provides keys in
+     * reversed order [[1], [0]] — map_key first, then key. The lookup RowData is therefore
+     * (map_key, key). The resolver must produce [1, 0] and the encoder must read key from position
+     * 1 and map_key from position 0.
+     */
+    @Test
+    void mapLookupWithReversedPlannerKeysHitsRealState() throws Exception {
+        Path checkpointRoot = tempDir.resolve("checkpoints-map-rev");
+        Path localState = tempDir.resolve("local-state-map-rev");
+        Files.createDirectories(checkpointRoot);
+        Files.createDirectories(localState);
+        Tuple2<String, Long> discovered =
+                runStatefulJob(checkpointRoot, localState, MapStateMapper::new);
+        String operatorId = discovered.f0.split("@", 2)[0];
+        String checkpointRootUri = discovered.f0.split("@", 2)[1];
+
+        // Scan to discover a real (state key, map key, map value) triple.
+        StateSourceConfig scanConfig =
+                stateSourceConfig(
+                        checkpointRootUri,
+                        operatorId,
+                        "map-state",
+                        "map",
+                        Arrays.asList(
+                                new StateSourceField(
+                                        "key", "INT", StateSourceField.Group.STATE_KEY, 0),
+                                new StateSourceField(
+                                        "map_key", "INT", StateSourceField.Group.MAP_KEY, 0),
+                                new StateSourceField(
+                                        "map_value", "INT", StateSourceField.Group.MAP_VALUE, 0)),
+                        discovered.f1,
+                        "latest",
+                        "batch");
+        List<RowData> scanRows = drainStateRows(scanConfig);
+        assertFalse(scanRows.isEmpty(), "expected at least one map-state row from scan");
+        RowData firstRow = scanRows.get(0);
+        int knownKey = firstRow.getInt(0);
+        int knownMapKey = firstRow.getInt(1);
+        int knownMapValue = firstRow.getInt(2);
+
+        // Lookup config: PK = (key, map_key), required positions [0, 1].
+        StateSourceConfig lookupConfig =
+                stateSourceConfigWithContract(
+                        checkpointRootUri,
+                        operatorId,
+                        "map-state",
+                        "map",
+                        Arrays.asList(
+                                new StateSourceField(
+                                        "key", "INT", StateSourceField.Group.STATE_KEY, 0),
+                                new StateSourceField(
+                                        "map_key", "INT", StateSourceField.Group.MAP_KEY, 0),
+                                new StateSourceField(
+                                        "map_value", "INT", StateSourceField.Group.MAP_VALUE, 0)),
+                        Arrays.asList(
+                                new StateSourceField(
+                                        "key", "INT", StateSourceField.Group.STATE_KEY, 0),
+                                new StateSourceField(
+                                        "map_key", "INT", StateSourceField.Group.MAP_KEY, 0)),
+                        new int[] {0, 1},
+                        String.valueOf(discovered.f1),
+                        "batch");
+
+        // Go through the production entry point with a scrambled LookupContext: [[1], [0]]
+        // (map_key first, then key). The resolver must return [1, 0].
+        CobbleStateDynamicTableSource source =
+                new CobbleStateDynamicTableSource(lookupConfig, "test.map-rev");
+        LookupTableSource.LookupRuntimeProvider provider =
+                source.getLookupRuntimeProvider(
+                        new TestLookupContext(new int[] {1}, new int[] {0}));
+        assertNotNull(provider, "expected a non-null provider for reversed map state keys");
+        CobbleStateLookupFunction lookup =
+                (CobbleStateLookupFunction)
+                        ((LookupFunctionProvider) provider).createLookupFunction();
+
+        try {
+            lookup.open(new FunctionContext(null));
+            // The lookup row field order matches the scrambled context: field 0 = map_key,
+            // field 1 = key. If the resolver returned identity [0, 1], the encoder would read
+            // key from field 0 (map_key value) and map_key from field 1 (key value) — producing
+            // a wrong composite key that misses.
+            Collection<RowData> result = lookup.lookup(twoIntRow(knownMapKey, knownKey));
+            assertEquals(1, result.size(), "expected exactly one row for reversed-key map hit");
+            RowData hit = result.iterator().next();
+            assertEquals(knownKey, hit.getInt(0), "key column mismatch");
+            assertEquals(knownMapKey, hit.getInt(1), "map_key column mismatch");
+            assertEquals(knownMapValue, hit.getInt(2), "map_value column mismatch");
+        } finally {
+            lookup.close();
+        }
+    }
+
+    /**
+     * Namespaced map state with required (key, namespace, map_key) at positions [0, 1, 2]. The
+     * planner provides fully scrambled keys [[2], [0], [1]] — map_key, key, namespace. The lookup
+     * RowData is therefore (map_key, key, namespace). The resolver must produce [1, 2, 0].
+     */
+    @Test
+    void namespacedMapLookupWithScrambledPlannerKeysHitsRealState() throws Exception {
+        Path checkpointRoot = tempDir.resolve("checkpoints-ns-map-scrambled");
+        Path localState = tempDir.resolve("local-state-ns-map-scrambled");
+        Files.createDirectories(checkpointRoot);
+        Files.createDirectories(localState);
+        Tuple2<String, Long> discovered = runNamespacedStatefulJob(checkpointRoot, localState);
+        String operatorId = discovered.f0.split("@", 2)[0];
+        String checkpointRootUri = discovered.f0.split("@", 2)[1];
+
+        // Scan to discover a real (key, namespace, map_key, map_value) row.
+        StateSourceConfig scanConfig =
+                stateSourceConfig(
+                        checkpointRootUri,
+                        operatorId,
+                        "namespaced-map-state",
+                        "map",
+                        Arrays.asList(
+                                new StateSourceField(
+                                        "key", "INT", StateSourceField.Group.STATE_KEY, 0),
+                                new StateSourceField(
+                                        "namespace",
+                                        "VARCHAR(2147483647)",
+                                        StateSourceField.Group.NAMESPACE,
+                                        0),
+                                new StateSourceField(
+                                        "map_key", "INT", StateSourceField.Group.MAP_KEY, 0),
+                                new StateSourceField(
+                                        "map_value", "INT", StateSourceField.Group.MAP_VALUE, 0)),
+                        discovered.f1,
+                        "latest",
+                        "batch");
+        List<RowData> scanRows = drainStateRows(scanConfig);
+        assertFalse(scanRows.isEmpty(), "expected at least one namespaced-map-state row from scan");
+        RowData firstRow = scanRows.get(0);
+        int knownKey = firstRow.getInt(0);
+        StringData knownNamespace = (StringData) firstRow.getString(1);
+        int knownMapKey = firstRow.getInt(2);
+        int knownMapValue = firstRow.getInt(3);
+
+        // Lookup config: PK = (key, namespace, map_key), required positions [0, 1, 2].
+        StateSourceConfig lookupConfig =
+                stateSourceConfigWithContract(
+                        checkpointRootUri,
+                        operatorId,
+                        "namespaced-map-state",
+                        "map",
+                        Arrays.asList(
+                                new StateSourceField(
+                                        "key", "INT", StateSourceField.Group.STATE_KEY, 0),
+                                new StateSourceField(
+                                        "namespace",
+                                        "VARCHAR(2147483647)",
+                                        StateSourceField.Group.NAMESPACE,
+                                        0),
+                                new StateSourceField(
+                                        "map_key", "INT", StateSourceField.Group.MAP_KEY, 0),
+                                new StateSourceField(
+                                        "map_value", "INT", StateSourceField.Group.MAP_VALUE, 0)),
+                        Arrays.asList(
+                                new StateSourceField(
+                                        "key", "INT", StateSourceField.Group.STATE_KEY, 0),
+                                new StateSourceField(
+                                        "namespace",
+                                        "VARCHAR(2147483647)",
+                                        StateSourceField.Group.NAMESPACE,
+                                        0),
+                                new StateSourceField(
+                                        "map_key", "INT", StateSourceField.Group.MAP_KEY, 0)),
+                        new int[] {0, 1, 2},
+                        String.valueOf(discovered.f1),
+                        "batch");
+
+        // Scrambled LookupContext: [[2], [0], [1]] — map_key, key, namespace.
+        // The resolver must return [1, 2, 0].
+        CobbleStateDynamicTableSource source =
+                new CobbleStateDynamicTableSource(lookupConfig, "test.ns-map-scrambled");
+        LookupTableSource.LookupRuntimeProvider provider =
+                source.getLookupRuntimeProvider(
+                        new TestLookupContext(new int[] {2}, new int[] {0}, new int[] {1}));
+        assertNotNull(provider, "expected a non-null provider for scrambled namespaced map keys");
+        CobbleStateLookupFunction lookup =
+                (CobbleStateLookupFunction)
+                        ((LookupFunctionProvider) provider).createLookupFunction();
+
+        try {
+            lookup.open(new FunctionContext(null));
+            // Lookup row order matches the scrambled context:
+            //   field 0 = map_key, field 1 = key, field 2 = namespace.
+            // If the resolver returned identity [0, 1, 2], the encoder would read key from
+            // field 0 (map_key), namespace from field 1 (key as StringData — wrong type), and
+            // map_key from field 2 (namespace) — producing a wrong key that misses or throws.
+            Collection<RowData> result =
+                    lookup.lookup(threeFieldRow(knownMapKey, knownKey, knownNamespace));
+            assertEquals(
+                    1,
+                    result.size(),
+                    "expected exactly one row for scrambled-key namespaced map hit");
+            RowData hit = result.iterator().next();
+            assertEquals(knownKey, hit.getInt(0), "key column mismatch");
+            assertEquals(
+                    knownNamespace.toString(), hit.getString(1).toString(), "namespace mismatch");
+            assertEquals(knownMapKey, hit.getInt(2), "map_key column mismatch");
+            assertEquals(knownMapValue, hit.getInt(3), "map_value column mismatch");
+        } finally {
+            lookup.close();
+        }
+    }
+
     /**
      * Returns the set of {@code cobble-state-source-*} directory names currently in java.io.tmpdir.
      */
@@ -820,6 +1047,91 @@ class CobbleStateLookupFunctionTest {
                     .map(mapperFactory.get())
                     .name("lookup-stateful")
                     .uid("lookup-stateful")
+                    .setMaxParallelism(128);
+
+            JobGraph jobGraph = env.getStreamGraph().getJobGraph();
+            JobID jobId = jobGraph.getJobID();
+            cluster.getClusterClient().submitJob(jobGraph).get(30, TimeUnit.SECONDS);
+            waitForAllTaskRunning(cluster.getMiniCluster(), jobId, false);
+            cluster.getMiniCluster().triggerCheckpoint(jobId).get(30, TimeUnit.SECONDS);
+            waitForCompletedCheckpoint(cluster.getMiniCluster(), jobId, 1, Duration.ofSeconds(60));
+            Thread.sleep(2_000L);
+            try {
+                cluster.getClusterClient().cancel(jobId).get(30, TimeUnit.SECONDS);
+            } catch (Exception ignored) {
+                // The job may have already finished; the checkpoint artifacts are already on disk.
+            }
+        } finally {
+            cluster.after();
+        }
+
+        return discoverOperatorAndCheckpoint(checkpointRoot);
+    }
+
+    /**
+     * Runs a job that writes namespaced map state via a {@link NamespacedMapStateOperator}. The
+     * operator is attached as a {@code .transform(...)} after a keyBy, mirroring the SQL E2E
+     * fixture so that {@code getPartitionedState(namespace, ...)} works.
+     */
+    private Tuple2<String, Long> runNamespacedStatefulJob(Path checkpointRoot, Path localState)
+            throws Exception {
+        org.apache.flink.configuration.Configuration clusterConfiguration =
+                new org.apache.flink.configuration.Configuration();
+        clusterConfiguration.setString(
+                org.apache.flink.configuration.HighAvailabilityOptions.HA_MODE,
+                io.cobble.flink.state.CobbleHighAvailabilityServicesFactory.class.getName());
+        clusterConfiguration.setString("cobble.ha.delegate.type", "NONE");
+        clusterConfiguration.setString(
+                org.apache.flink.configuration.JobManagerOptions.ADDRESS, "localhost");
+        clusterConfiguration.setInteger(
+                org.apache.flink.configuration.JobManagerOptions.PORT, 6123);
+        clusterConfiguration.setString(
+                org.apache.flink.configuration.RestOptions.ADDRESS, "localhost");
+        clusterConfiguration.setInteger(org.apache.flink.configuration.RestOptions.PORT, 0);
+        clusterConfiguration.set(
+                org.apache.flink.configuration.CheckpointingOptions.CHECKPOINTS_DIRECTORY,
+                checkpointRoot.toUri().toString());
+
+        MiniClusterWithClientResource cluster =
+                new MiniClusterWithClientResource(
+                        new MiniClusterResourceConfiguration.Builder()
+                                .setConfiguration(clusterConfiguration)
+                                .setNumberTaskManagers(2)
+                                .setNumberSlotsPerTaskManager(2)
+                                .build());
+        cluster.before();
+        try {
+            Configuration jobConfig = new Configuration();
+            jobConfig.set(
+                    CheckpointingOptions.CHECKPOINTS_DIRECTORY, checkpointRoot.toUri().toString());
+            jobConfig.set(CobbleOptions.LOCAL_DIRECTORIES, localState.toString());
+            jobConfig.set(CobbleOptions.MEMTABLE_BUFFER_RATIO, 0.25d);
+            jobConfig.set(CobbleOptions.MEMTABLE_BUFFER_COUNT, 4);
+            jobConfig.set(CobbleOptions.DIRECT_IO_BUFFER_SIZE, MemorySize.parse("8kb"));
+            jobConfig.set(CobbleOptions.DIRECT_IO_BUFFER_POOL_MAX_SIZE, 128);
+
+            StreamExecutionEnvironment env =
+                    StreamExecutionEnvironment.getExecutionEnvironment(jobConfig);
+            env.setParallelism(PARALLELISM);
+            env.enableCheckpointing(5_000L);
+            env.getCheckpointConfig().setCheckpointTimeout(180_000L);
+            env.getCheckpointConfig()
+                    .setExternalizedCheckpointCleanup(
+                            CheckpointConfig.ExternalizedCheckpointCleanup.RETAIN_ON_CANCELLATION);
+            env.setRestartStrategy(RestartStrategies.noRestart());
+            env.setStateBackend(
+                    new CobbleStateBackend().configure(jobConfig, getClass().getClassLoader()));
+
+            env.addSource(new ContinuousIntegerSource())
+                    .name("lookup-source")
+                    .uid("lookup-source")
+                    .keyBy(value -> value % PARALLELISM)
+                    .transform(
+                            "lookup-namespaced",
+                            BasicTypeInfo.INT_TYPE_INFO,
+                            new NamespacedMapStateOperator())
+                    .name("lookup-namespaced")
+                    .uid("lookup-namespaced")
                     .setMaxParallelism(128);
 
             JobGraph jobGraph = env.getStreamGraph().getJobGraph();
@@ -1053,6 +1365,46 @@ class CobbleStateLookupFunctionTest {
         return row;
     }
 
+    private static RowData threeFieldRow(int first, int second, StringData third) {
+        GenericRowData row = new GenericRowData(3);
+        row.setField(0, first);
+        row.setField(1, second);
+        row.setField(2, third);
+        return row;
+    }
+
+    /** Minimal {@link LookupTableSource.LookupContext} exposing explicit physical key positions. */
+    private static final class TestLookupContext implements LookupTableSource.LookupContext {
+        private final int[][] keys;
+
+        private TestLookupContext(int[]... keys) {
+            this.keys = keys;
+        }
+
+        @Override
+        public int[][] getKeys() {
+            return keys;
+        }
+
+        @Override
+        public <T> org.apache.flink.api.common.typeinfo.TypeInformation<T> createTypeInformation(
+                org.apache.flink.table.types.DataType dataType) {
+            throw new UnsupportedOperationException("not used by lookup-context tests");
+        }
+
+        @Override
+        public <T> org.apache.flink.api.common.typeinfo.TypeInformation<T> createTypeInformation(
+                org.apache.flink.table.types.logical.LogicalType logicalType) {
+            throw new UnsupportedOperationException("not used by lookup-context tests");
+        }
+
+        @Override
+        public DynamicTableSource.DataStructureConverter createDataStructureConverter(
+                org.apache.flink.table.types.DataType dataType) {
+            throw new UnsupportedOperationException("not used by lookup-context tests");
+        }
+    }
+
     private static final class ContinuousIntegerSource extends RichParallelSourceFunction<Integer> {
         private volatile boolean running = true;
 
@@ -1208,6 +1560,43 @@ class CobbleStateLookupFunctionTest {
         public Integer map(Integer value) throws Exception {
             mapState.put(value, null);
             return value;
+        }
+    }
+
+    /**
+     * Writes namespaced map state ({@code "namespaced-map-state"}) under two String namespaces
+     * ({@code ns-a}, {@code ns-b}). Under {@code ns-a} the map value is {@code value * 10}; under
+     * {@code ns-b} it is {@code value * 100}. Uses {@code getPartitionedState(namespace, ...)} to
+     * set the active namespace per write, mirroring the SQL E2E fixture.
+     */
+    private static final class NamespacedMapStateOperator extends AbstractStreamOperator<Integer>
+            implements OneInputStreamOperator<Integer, Integer> {
+
+        private transient MapStateDescriptor<Integer, Integer> mapDescriptor;
+
+        @Override
+        public void open() throws Exception {
+            super.open();
+            mapDescriptor =
+                    new MapStateDescriptor<>(
+                            "namespaced-map-state",
+                            BasicTypeInfo.INT_TYPE_INFO,
+                            BasicTypeInfo.INT_TYPE_INFO);
+        }
+
+        @Override
+        public void processElement(StreamRecord<Integer> element) throws Exception {
+            Integer value = element.getValue();
+            // ns-a: map value = value*10; ns-b: map value = value*100.
+            putMapNamespace("ns-a", value, value * 10);
+            putMapNamespace("ns-b", value, value * 100);
+            output.collect(element);
+        }
+
+        private void putMapNamespace(String namespace, int mapKey, int mapValue) throws Exception {
+            MapState<Integer, Integer> state =
+                    getPartitionedState(namespace, StringSerializer.INSTANCE, mapDescriptor);
+            state.put(mapKey, mapValue);
         }
     }
 }

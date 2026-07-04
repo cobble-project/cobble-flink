@@ -8,6 +8,12 @@ import org.apache.flink.table.connector.source.ScanTableSource;
 import org.apache.flink.table.connector.source.SourceProvider;
 import org.apache.flink.table.connector.source.lookup.LookupFunctionProvider;
 
+import java.util.HashMap;
+import java.util.HashSet;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
+
 /**
  * Cobble state source whose DDL schema has been resolved and validated at planning time.
  *
@@ -62,58 +68,114 @@ final class CobbleStateDynamicTableSource implements ScanTableSource, LookupTabl
         if ("list".equals(config.stateKind())) {
             throw new ValidationException(LIST_LOOKUP_UNSUPPORTED);
         }
-        validateLookupKeys(context, contract);
         int[] lookupKeyPositions = resolveLookupKeyPositions(context, contract);
         return LookupFunctionProvider.of(new CobbleStateLookupFunction(config, lookupKeyPositions));
     }
 
     /**
-     * Extracts the lookup-row field positions from the planner {@link LookupContext}, aligned with
-     * the required-field order in the {@link StateSourceLookupKeyContract}.
+     * Resolves the lookup-row field positions from the planner {@link LookupContext}, mapped to the
+     * required-field order in the {@link StateSourceLookupKeyContract}.
      *
-     * <p>Current validation requires planner lookup keys in the same order as required fields, so
-     * this returns {@code [0, 1, ...]}. Kept as a separate method so a future order-independent
-     * planner mapping can replace it without changing the lookup function.
+     * <p>This is order-independent: the planner may pass {@code context.getKeys()} in any order.
+     * For each required field (identified by its physical column position), the resolver scans the
+     * planner keys to find the matching lookup-row position. The returned array satisfies:
+     *
+     * <pre>{@code
+     * lookupKeyPositionsByRequiredField[requiredFieldIndex] = lookupRowPosition
+     * }</pre>
+     *
+     * <p>Validation rules enforced:
+     *
+     * <ol>
+     *   <li>Key count must match the required-field count.
+     *   <li>Each planner key must be a top-level column (path length 1).
+     *   <li>Planner key physical positions must not be duplicated.
+     *   <li>Every required physical position must be present in the planner keys.
+     *   <li>Every planner key physical position must be part of the required set.
+     * </ol>
      */
-    private static int[] resolveLookupKeyPositions(
-            LookupContext context, StateSourceLookupKeyContract contract) {
-        int[][] keys = context.getKeys();
-        int[] positions = new int[keys.length];
-        for (int i = 0; i < keys.length; i++) {
-            positions[i] = i;
-        }
-        return positions;
-    }
-
-    private static void validateLookupKeys(
+    private int[] resolveLookupKeyPositions(
             LookupContext context, StateSourceLookupKeyContract contract) {
         int[][] keys = context.getKeys();
         int[] requiredPositions = contract.requiredPhysicalPositions();
+        List<StateSourceField> requiredFields = contract.requiredFields();
+
         if (keys.length != requiredPositions.length) {
             throw new ValidationException(
-                    "Cobble state source lookup requires equality conditions for all "
+                    "Cobble state source lookup for state '"
+                            + config.stateName()
+                            + "' requires equality conditions for all "
                             + requiredPositions.length
                             + " PRIMARY KEY column(s), but the lookup provided "
                             + keys.length
                             + ".");
         }
+
+        // Validate that all planner keys are top-level (no nested paths) and detect duplicates.
+        Set<Integer> plannerPhysicalPositions = new HashSet<>();
         for (int i = 0; i < keys.length; i++) {
             int[] lookupKey = keys[i];
             if (lookupKey.length != 1) {
                 throw new ValidationException(
-                        "Cobble state source lookup supports only top-level PRIMARY KEY columns.");
+                        "Cobble state source lookup for state '"
+                                + config.stateName()
+                                + "' supports only top-level PRIMARY KEY columns.");
             }
-            if (lookupKey[0] != requiredPositions[i]) {
+            int physicalPos = lookupKey[0];
+            if (!plannerPhysicalPositions.add(physicalPos)) {
                 throw new ValidationException(
-                        "Cobble state source lookup key at position "
-                                + i
-                                + " targets physical column "
-                                + lookupKey[0]
-                                + " but the lookup contract requires physical column "
-                                + requiredPositions[i]
+                        "Cobble state source lookup for state '"
+                                + config.stateName()
+                                + "' has a duplicate lookup key for physical column "
+                                + physicalPos
                                 + ".");
             }
         }
+
+        // Build a lookup from physical position → planner key index for fast reverse lookup.
+        Map<Integer, Integer> plannerIndexByPhysicalPos = new HashMap<>();
+        for (int i = 0; i < keys.length; i++) {
+            plannerIndexByPhysicalPos.put(keys[i][0], i);
+        }
+
+        // For each required field, find the matching planner key by physical position.
+        int[] result = new int[requiredPositions.length];
+        Set<Integer> requiredPosSet = new HashSet<>();
+        for (int pos : requiredPositions) {
+            requiredPosSet.add(pos);
+        }
+        for (int requiredIndex = 0; requiredIndex < requiredPositions.length; requiredIndex++) {
+            int targetPos = requiredPositions[requiredIndex];
+            Integer plannerIndex = plannerIndexByPhysicalPos.get(targetPos);
+            if (plannerIndex == null) {
+                throw new ValidationException(
+                        "Cobble state source lookup for state '"
+                                + config.stateName()
+                                + "' is missing a lookup key for column '"
+                                + requiredFields.get(requiredIndex).name()
+                                + "' (physical position "
+                                + targetPos
+                                + ").");
+            }
+            result[requiredIndex] = plannerIndex;
+        }
+
+        // Check for extra/unrelated planner keys targeting columns not in the required set.
+        for (int i = 0; i < keys.length; i++) {
+            int physicalPos = keys[i][0];
+            if (!requiredPosSet.contains(physicalPos)) {
+                throw new ValidationException(
+                        "Cobble state source lookup for state '"
+                                + config.stateName()
+                                + "' has a lookup key at position "
+                                + i
+                                + " targeting physical column "
+                                + physicalPos
+                                + " which is not part of the PRIMARY KEY.");
+            }
+        }
+
+        return result;
     }
 
     @Override
