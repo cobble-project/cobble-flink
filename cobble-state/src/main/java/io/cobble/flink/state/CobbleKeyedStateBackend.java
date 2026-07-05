@@ -92,6 +92,7 @@ final class CobbleKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
     private final CobbleSnapshotStrategy snapshotStrategy;
     private final AtomicBoolean resourcesClosed;
     private final boolean manualTtlTimeProviderForTests;
+    private final CobbleCanonicalSavepointMetadata canonicalMetadata;
 
     CobbleKeyedStateBackend(
             TaskKvStateRegistry kvStateRegistry,
@@ -156,6 +157,7 @@ final class CobbleKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
                         this::buildSchemaStore);
         this.resourcesClosed = new AtomicBoolean(false);
         this.manualTtlTimeProviderForTests = manualTtlTimeProviderForTests;
+        this.canonicalMetadata = new CobbleCanonicalSavepointMetadata();
     }
 
     @Override
@@ -216,6 +218,15 @@ final class CobbleKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
         // incompatible serializer rejection never partially mutates the backend's schema.
         validateCanonicalKeyValueMetadata(stateDesc, namespaceSerializer);
         ensureStateColumnFamily(stateDesc);
+
+        // Register canonical savepoint metadata at registration time — not from live state wrappers
+        // at savepoint time — so kvStateId ordering and serializer snapshots are stable.
+        canonicalMetadata.registerKeyValueState(
+                stateDesc.getName(),
+                stateDesc.getType(),
+                namespaceSerializer,
+                stateDesc.getSerializer(),
+                stateDesc.getName());
 
         String stateName = stateDesc.getName();
         boolean ttlEnabled =
@@ -391,6 +402,10 @@ final class CobbleKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
             return queue;
         }
         registerTimerSchema(stateName, byteOrderedElementSerializer);
+        canonicalMetadata.registerPriorityQueueState(
+                stateName,
+                byteOrderedElementSerializer,
+                CobblePriorityQueueSetFactory.timerQueueColumnFamilyName(stateName));
         KeyGroupedInternalPriorityQueue<T> queue =
                 priorityQueueFactory.create(
                         stateName, byteOrderedElementSerializer, allowFutureMetadataUpdates);
@@ -749,6 +764,31 @@ final class CobbleKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
     private boolean hasCobblePriorityQueues() {
         return priorityQueueFactory instanceof CobblePriorityQueueSetFactory
                 && ((CobblePriorityQueueSetFactory) priorityQueueFactory).hasQueues();
+    }
+
+    /**
+     * Returns whether the backend is configured with heap-backed timers that have registered
+     * queues. Canonical savepoint creation does not yet support heap timers and must fail clearly
+     * rather than silently skip them.
+     */
+    boolean hasHeapTimers() {
+        return heapPriorityQueuesManager != null
+                && !heapPriorityQueuesManager.getRegisteredPQStates().isEmpty();
+    }
+
+    /**
+     * Produces an immutable snapshot of the canonical savepoint metadata for all registered states.
+     *
+     * @throws UnsupportedOperationException if heap-backed timers are present (not yet supported)
+     */
+    CobbleCanonicalSavepointMetadataSnapshot canonicalMetadataSnapshot() {
+        if (hasHeapTimers()) {
+            throw new UnsupportedOperationException(
+                    "Cobble canonical savepoint does not yet support heap-backed timers. Configure '"
+                            + CobbleOptions.TIMER_SERVICE_FACTORY.key()
+                            + "' to COBBLE.");
+        }
+        return canonicalMetadata.snapshot();
     }
 
     private PriorityQueueSetFactory createPriorityQueueFactory(
