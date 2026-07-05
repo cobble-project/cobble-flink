@@ -2,8 +2,6 @@ package io.cobble.flink.state;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
-import static org.junit.jupiter.api.Assertions.assertNull;
-import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import org.apache.flink.api.common.state.MapState;
 import org.apache.flink.configuration.Configuration;
@@ -17,7 +15,6 @@ import org.junit.jupiter.api.io.TempDir;
 import java.nio.file.Path;
 import java.util.Arrays;
 import java.util.Collections;
-import java.util.List;
 
 /**
  * Rescale-restore integration tests for canonical RocksDB savepoints. Verifies that a RocksDB
@@ -64,7 +61,7 @@ class CobbleCanonicalRescaleTest {
         try (CobbleStateBackendTest.TestBackendContext ctx =
                 subtaskBackend(tempDir, "subtask-0", subtask0Handle, 0, 7)) {
             // keyLeft (group 2) is in [0,7] — present with all state kinds.
-            assertAllStateKindsPresent(
+            CobbleStateBackendTest.assertAllStateKindsPresent(
                     ctx.cobbleBackend,
                     keyLeft,
                     "ns-a",
@@ -75,7 +72,7 @@ class CobbleCanonicalRescaleTest {
                     "k1-null",
                     3,
                     "sum=7");
-            assertAllStateKindsPresent(
+            CobbleStateBackendTest.assertAllStateKindsPresent(
                     ctx.cobbleBackend,
                     keyLeft,
                     "ns-b",
@@ -90,14 +87,14 @@ class CobbleCanonicalRescaleTest {
             // We cannot setCurrentKey to an out-of-range key, so we verify absence with an
             // in-range key that was never seeded.
             int unseededInRange = CobbleStateBackendTest.findKeyForGroup(5);
-            assertKeyAbsent(ctx.cobbleBackend, unseededInRange);
+            CobbleStateBackendTest.assertKeyAbsent(ctx.cobbleBackend, unseededInRange);
         }
 
         // Subtask 1: range [8,15].
         KeyedStateHandle subtask1Handle = canonical.getIntersection(KeyGroupRange.of(8, 15));
         try (CobbleStateBackendTest.TestBackendContext ctx =
                 subtaskBackend(tempDir, "subtask-1", subtask1Handle, 8, 15)) {
-            assertAllStateKindsPresent(
+            CobbleStateBackendTest.assertAllStateKindsPresent(
                     ctx.cobbleBackend,
                     keyRight,
                     "ns-a",
@@ -110,7 +107,7 @@ class CobbleCanonicalRescaleTest {
                     "sum=70");
             // keyLeft (group 2) is outside [8,15]; verify absence with an in-range unseeded key.
             int unseededInRange = CobbleStateBackendTest.findKeyForGroup(12);
-            assertKeyAbsent(ctx.cobbleBackend, unseededInRange);
+            CobbleStateBackendTest.assertKeyAbsent(ctx.cobbleBackend, unseededInRange);
         }
     }
 
@@ -134,7 +131,7 @@ class CobbleCanonicalRescaleTest {
                         canonical.getIntersection(KeyGroupRange.of(0, 3)),
                         0,
                         3)) {
-            assertAllStateKindsPresent(
+            CobbleStateBackendTest.assertAllStateKindsPresent(
                     ctx.cobbleBackend,
                     keyA,
                     "ns-a",
@@ -146,7 +143,8 @@ class CobbleCanonicalRescaleTest {
                     3,
                     "sum=7");
             // keyB (group 9) is outside [0,3]; verify with an unseeded in-range key.
-            assertKeyAbsent(ctx.cobbleBackend, CobbleStateBackendTest.findKeyForGroup(2));
+            CobbleStateBackendTest.assertKeyAbsent(
+                    ctx.cobbleBackend, CobbleStateBackendTest.findKeyForGroup(2));
         }
 
         // Subtask 1: [4,7] — neither keyA (group 1) nor keyB (group 9) is in range.
@@ -157,7 +155,8 @@ class CobbleCanonicalRescaleTest {
                         canonical.getIntersection(KeyGroupRange.of(4, 7)),
                         4,
                         7)) {
-            assertKeyAbsent(ctx.cobbleBackend, CobbleStateBackendTest.findKeyForGroup(5));
+            CobbleStateBackendTest.assertKeyAbsent(
+                    ctx.cobbleBackend, CobbleStateBackendTest.findKeyForGroup(5));
         }
 
         // Subtask 2: [8,11] — should see keyB (group 9) only.
@@ -168,7 +167,7 @@ class CobbleCanonicalRescaleTest {
                         canonical.getIntersection(KeyGroupRange.of(8, 11)),
                         8,
                         11)) {
-            assertAllStateKindsPresent(
+            CobbleStateBackendTest.assertAllStateKindsPresent(
                     ctx.cobbleBackend,
                     keyB,
                     "ns-a",
@@ -179,7 +178,8 @@ class CobbleCanonicalRescaleTest {
                     "k2-null",
                     30,
                     "sum=70");
-            assertKeyAbsent(ctx.cobbleBackend, CobbleStateBackendTest.findKeyForGroup(10));
+            CobbleStateBackendTest.assertKeyAbsent(
+                    ctx.cobbleBackend, CobbleStateBackendTest.findKeyForGroup(10));
         }
 
         // Subtask 3: [12,15] — neither key is in range.
@@ -190,7 +190,8 @@ class CobbleCanonicalRescaleTest {
                         canonical.getIntersection(KeyGroupRange.of(12, 15)),
                         12,
                         15)) {
-            assertKeyAbsent(ctx.cobbleBackend, CobbleStateBackendTest.findKeyForGroup(13));
+            CobbleStateBackendTest.assertKeyAbsent(
+                    ctx.cobbleBackend, CobbleStateBackendTest.findKeyForGroup(13));
         }
     }
 
@@ -229,7 +230,7 @@ class CobbleCanonicalRescaleTest {
                         KeyGroupRange.of(0, 15),
                         EMPTY_CONFIG)) {
             // Both keys' state should be present after merging two handles into one backend.
-            assertAllStateKindsPresent(
+            CobbleStateBackendTest.assertAllStateKindsPresent(
                     ctx.cobbleBackend,
                     keyLeft,
                     "ns-a",
@@ -240,7 +241,7 @@ class CobbleCanonicalRescaleTest {
                     "k1-null",
                     3,
                     "sum=7");
-            assertAllStateKindsPresent(
+            CobbleStateBackendTest.assertAllStateKindsPresent(
                     ctx.cobbleBackend,
                     keyLeft,
                     "ns-b",
@@ -251,7 +252,7 @@ class CobbleCanonicalRescaleTest {
                     null,
                     5,
                     "sum=11");
-            assertAllStateKindsPresent(
+            CobbleStateBackendTest.assertAllStateKindsPresent(
                     ctx.cobbleBackend,
                     keyRight,
                     "ns-a",
@@ -262,7 +263,7 @@ class CobbleCanonicalRescaleTest {
                     "k1-null",
                     3,
                     "sum=7");
-            assertAllStateKindsPresent(
+            CobbleStateBackendTest.assertAllStateKindsPresent(
                     ctx.cobbleBackend,
                     keyRight,
                     "ns-b",
@@ -316,7 +317,7 @@ class CobbleCanonicalRescaleTest {
                         KeyGroupRange.of(0, 15),
                         EMPTY_CONFIG)) {
             for (int i = 0; i < 4; i++) {
-                assertAllStateKindsPresent(
+                CobbleStateBackendTest.assertAllStateKindsPresent(
                         ctx.cobbleBackend,
                         keys[i],
                         "ns-a",
@@ -327,7 +328,7 @@ class CobbleCanonicalRescaleTest {
                         "k1-null",
                         3,
                         "sum=7");
-                assertAllStateKindsPresent(
+                CobbleStateBackendTest.assertAllStateKindsPresent(
                         ctx.cobbleBackend,
                         keys[i],
                         "ns-b",
@@ -540,68 +541,5 @@ class CobbleCanonicalRescaleTest {
                 EMPTY_CONFIG);
     }
 
-    /**
-     * Asserts all 5 state kinds are present for the given key+namespace with the expected values,
-     * including present-null MapState semantics.
-     *
-     * @param nullMapKey the map key whose value should be present-null, or {@code null} to skip the
-     *     present-null check (e.g. for ns-b which has no null entry)
-     */
-    private void assertAllStateKindsPresent(
-            CobbleKeyedStateBackend<Integer> backend,
-            int key,
-            String namespace,
-            String expectedValue,
-            List<String> expectedList,
-            String mapKey,
-            String expectedMapValue,
-            String nullMapKey,
-            int expectedReducing,
-            String expectedAggregating)
-            throws Exception {
-        backend.setCurrentKey(key);
-
-        assertEquals(
-                expectedValue,
-                CobbleStateBackendTest.valueState(backend, "value-all", namespace).value());
-        assertEquals(
-                expectedList,
-                CobbleStateBackendTest.toList(
-                        CobbleStateBackendTest.listState(backend, "list-all", namespace).get()));
-
-        MapState<String, String> map =
-                CobbleStateBackendTest.mapState(backend, "map-all", namespace);
-        if (nullMapKey != null) {
-            assertTrue(
-                    map.contains(nullMapKey),
-                    "present-null map key '" + nullMapKey + "' should exist");
-            assertNull(map.get(nullMapKey), "present-null map value should be null");
-        }
-        assertTrue(map.contains(mapKey));
-        assertEquals(expectedMapValue, map.get(mapKey));
-
-        assertEquals(
-                Integer.valueOf(expectedReducing),
-                CobbleStateBackendTest.reducingState(backend, "reducing-all", namespace).get());
-        assertEquals(
-                expectedAggregating,
-                CobbleStateBackendTest.aggregatingState(backend, "aggregating-all", namespace)
-                        .get());
-    }
-
-    /**
-     * Asserts that an in-range key has no state at all (all state kinds return null/empty/absent).
-     * The key must belong to the backend's KeyGroupRange.
-     */
-    private void assertKeyAbsent(CobbleKeyedStateBackend<Integer> backend, int key)
-            throws Exception {
-        backend.setCurrentKey(key);
-        assertNull(CobbleStateBackendTest.valueState(backend, "value-all", "ns-a").value());
-        assertNull(CobbleStateBackendTest.listState(backend, "list-all", "ns-a").get());
-        assertFalse(CobbleStateBackendTest.mapState(backend, "map-all", "ns-a").contains("k1-a"));
-        assertFalse(CobbleStateBackendTest.mapState(backend, "map-all", "ns-a").contains("k2-a"));
-        assertNull(CobbleStateBackendTest.reducingState(backend, "reducing-all", "ns-a").get());
-        assertNull(
-                CobbleStateBackendTest.aggregatingState(backend, "aggregating-all", "ns-a").get());
-    }
+    // assertAllStateKindsPresent and assertKeyAbsent are now shared via CobbleStateBackendTest.
 }

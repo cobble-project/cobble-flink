@@ -86,7 +86,9 @@ import org.apache.flink.runtime.state.SnapshotResult;
 import org.apache.flink.runtime.state.SnapshotStrategyRunner;
 import org.apache.flink.runtime.state.TestTaskStateManagerBuilder;
 import org.apache.flink.runtime.state.VoidNamespaceSerializer;
+import org.apache.flink.runtime.state.heap.HeapKeyedStateBackendBuilder;
 import org.apache.flink.runtime.state.heap.HeapPriorityQueueElement;
+import org.apache.flink.runtime.state.heap.HeapPriorityQueueSetFactory;
 import org.apache.flink.runtime.state.internal.InternalAggregatingState;
 import org.apache.flink.runtime.state.internal.InternalKvState;
 import org.apache.flink.runtime.state.internal.InternalReducingState;
@@ -7533,8 +7535,19 @@ class CobbleStateBackendTest {
                 throws Exception;
     }
 
+    /**
+     * Callback for {@link #createCobbleCanonicalTimerSavepoint} to seed timers via the PQ queue.
+     */
+    @FunctionalInterface
+    interface CobbleTimerRegistrar<N> {
+        void register(
+                AbstractKeyedStateBackend<Integer> backend,
+                KeyGroupedInternalPriorityQueue<TimerHeapInternalTimer<Integer, N>> queue)
+                throws Exception;
+    }
+
     /** A no-op {@link Triggerable} so the timer service can be constructed without firing. */
-    private static final class NoOpTriggerable<N> implements Triggerable<Integer, N> {
+    static final class NoOpTriggerable<N> implements Triggerable<Integer, N> {
         @Override
         public void onEventTime(
                 org.apache.flink.streaming.api.operators.InternalTimer<Integer, N> timer) {}
@@ -8236,6 +8249,345 @@ class CobbleStateBackendTest {
         public void close() throws Exception {
             try {
                 cobbleBackend.close();
+            } finally {
+                environment.close();
+            }
+        }
+    }
+
+    // =====================================================================================
+    //  Canonical savepoint helpers (shared by cross-backend and rescale tests)
+    // =====================================================================================
+
+    /**
+     * Runs a canonical savepoint from the given Cobble backend and returns the job-manager-owned
+     * {@link KeyedStateHandle}. Returns {@code null} for an empty backend (matching {@code
+     * SnapshotResult.empty()}).
+     */
+    static KeyedStateHandle runCobbleSavepoint(CobbleKeyedStateBackend<Integer> backend)
+            throws Exception {
+        SavepointResources<Integer> savepointResources =
+                ((CheckpointableKeyedStateBackend<Integer>) backend).savepoint();
+        RunnableFuture<SnapshotResult<KeyedStateHandle>> snapshotFuture =
+                new SnapshotStrategyRunner<>(
+                                "Cobble canonical savepoint",
+                                new SavepointSnapshotStrategy<>(
+                                        savepointResources.getSnapshotResources()),
+                                new CloseableRegistry(),
+                                savepointResources.getPreferredSnapshotExecutionType())
+                        .snapshot(
+                                1L,
+                                System.currentTimeMillis(),
+                                new MemCheckpointStreamFactory(1024 * 1024),
+                                CheckpointOptions.alignedNoTimeout(
+                                        SavepointType.savepoint(SavepointFormatType.CANONICAL),
+                                        CheckpointStorageLocationReference.getDefault()));
+        snapshotFuture.run();
+        SnapshotResult<KeyedStateHandle> snapshotResult = snapshotFuture.get();
+        return snapshotResult.getJobManagerOwnedSnapshot();
+    }
+
+    /**
+     * Creates a canonical savepoint from a Cobble backend with all 5 state kinds (VALUE, LIST, MAP,
+     * REDUCING, AGGREGATING) across 2 keys × 2 namespaces. Seeds the exact same values as {@link
+     * #createRocksDbCanonicalAllStateKindsSavepoint} so the two are interchangeable.
+     */
+    KeyedStateHandle createCobbleCanonicalAllStateKindsSavepoint(
+            Path tempDir, int key1, int key2, KeyGroupRange keyGroupRange) throws Exception {
+        try (TestBackendContext ctx =
+                createBackendContext(
+                        tempDir.resolve("cobble-canonical-all-kinds"),
+                        false,
+                        null,
+                        null,
+                        TtlTimeProvider.DEFAULT,
+                        false,
+                        Collections.emptyList(),
+                        keyGroupRange,
+                        new Configuration())) {
+            CobbleKeyedStateBackend<Integer> backend = ctx.cobbleBackend;
+
+            ValueState<String> valueNsA = valueState(backend, "value-all", "ns-a");
+            ListState<String> listNsA = listState(backend, "list-all", "ns-a");
+            MapState<String, String> mapNsA = mapState(backend, "map-all", "ns-a");
+            ReducingState<Integer> reducingNsA = reducingState(backend, "reducing-all", "ns-a");
+            AggregatingState<Integer, String> aggregatingNsA =
+                    aggregatingState(backend, "aggregating-all", "ns-a");
+
+            backend.setCurrentKey(key1);
+            valueNsA.update("value-k1-ns-a");
+            listNsA.addAll(Arrays.asList("k1-a-left", "k1-a-right"));
+            mapNsA.put("k1-null", null);
+            mapNsA.put("k1-a", "map-k1-a");
+            reducingNsA.add(1);
+            reducingNsA.add(2);
+            aggregatingNsA.add(3);
+            aggregatingNsA.add(4);
+
+            backend.setCurrentKey(key2);
+            valueNsA.update("value-k2-ns-a");
+            listNsA.addAll(Arrays.asList("k2-a-left", "k2-a-right"));
+            mapNsA.put("k2-null", null);
+            mapNsA.put("k2-a", "map-k2-a");
+            reducingNsA.add(10);
+            reducingNsA.add(20);
+            aggregatingNsA.add(30);
+            aggregatingNsA.add(40);
+
+            ValueState<String> valueNsB = valueState(backend, "value-all", "ns-b");
+            ListState<String> listNsB = listState(backend, "list-all", "ns-b");
+            MapState<String, String> mapNsB = mapState(backend, "map-all", "ns-b");
+            ReducingState<Integer> reducingNsB = reducingState(backend, "reducing-all", "ns-b");
+            AggregatingState<Integer, String> aggregatingNsB =
+                    aggregatingState(backend, "aggregating-all", "ns-b");
+
+            backend.setCurrentKey(key1);
+            valueNsB.update("value-k1-ns-b");
+            listNsB.add("k1-b-only");
+            mapNsB.put("k1-b", "map-k1-b");
+            reducingNsB.add(5);
+            aggregatingNsB.add(11);
+
+            return runCobbleSavepoint(backend);
+        }
+    }
+
+    /**
+     * Creates a canonical savepoint from a Cobble backend containing event-time timers. Mirrors the
+     * timer seeding pattern from {@code CobbleCanonicalSavepointTest.roundTripTimerState}: creates
+     * the timer queue directly via {@code backend.create()}, adds {@link TimerHeapInternalTimer}
+     * objects, and calls {@code peek()} to trigger overlay loading before the savepoint.
+     *
+     * <p>This avoids the double-registration issue that occurs when both {@code
+     * InternalTimeServiceManagerImpl.getInternalTimerService} and {@code backend.create()} try to
+     * register the same priority queue state.
+     *
+     * @param timerServiceName the base name; the event-time queue name is derived as {@code
+     *     _timer_state/event_<timerServiceName>}.
+     * @param registrar a callback that receives the event-time queue and should add timers for
+     *     specific keys by calling {@code backend.setCurrentKey(...)} then {@code queue.add(...)}.
+     */
+    <N> KeyedStateHandle createCobbleCanonicalTimerSavepoint(
+            Path tempDir,
+            KeyGroupRange keyGroupRange,
+            String timerServiceName,
+            TypeSerializer<N> namespaceSerializer,
+            CobbleTimerRegistrar<N> registrar)
+            throws Exception {
+        try (TestBackendContext ctx =
+                createBackendContext(
+                        tempDir.resolve("cobble-canonical-timers"),
+                        false,
+                        null,
+                        null,
+                        TtlTimeProvider.DEFAULT,
+                        false,
+                        Collections.emptyList(),
+                        keyGroupRange,
+                        new Configuration())) {
+            CobbleKeyedStateBackend<Integer> backend = ctx.cobbleBackend;
+
+            String etQueueName = "_timer_state/event_" + timerServiceName;
+            TimerSerializer<Integer, N> timerSerializer =
+                    new TimerSerializer<>(IntSerializer.INSTANCE, namespaceSerializer);
+
+            @SuppressWarnings("unchecked")
+            KeyGroupedInternalPriorityQueue<TimerHeapInternalTimer<Integer, N>> etQueue =
+                    (KeyGroupedInternalPriorityQueue<TimerHeapInternalTimer<Integer, N>>)
+                            backend.create(etQueueName, timerSerializer);
+
+            registrar.register(backend, etQueue);
+
+            // Trigger overlay loading by peeking. This moves timers from native storage into the
+            // in-memory overlay, ensuring the savepoint captures both native and overlay entries.
+            etQueue.peek();
+
+            return runCobbleSavepoint(backend);
+        }
+    }
+
+    /** VoidNamespace overload of {@link #createCobbleCanonicalTimerSavepoint}. */
+    KeyedStateHandle createCobbleCanonicalTimerSavepoint(
+            Path tempDir,
+            KeyGroupRange keyGroupRange,
+            String timerServiceName,
+            CobbleTimerRegistrar<org.apache.flink.runtime.state.VoidNamespace> registrar)
+            throws Exception {
+        return createCobbleCanonicalTimerSavepoint(
+                tempDir,
+                keyGroupRange,
+                timerServiceName,
+                VoidNamespaceSerializer.INSTANCE,
+                registrar);
+    }
+
+    /**
+     * Builds a RocksDB keyed state backend with the given restore handles. Returns a context that
+     * manages the backend and environment lifecycle — callers should use try-with-resources.
+     */
+    RocksDbBackendContext createRocksDbBackendForRestore(
+            Path tempDir, KeyGroupRange keyGroupRange, Collection<KeyedStateHandle> stateHandles)
+            throws Exception {
+        Path rocksDbPath = tempDir.resolve("rocksdb-restore");
+        MockEnvironment environment =
+                new MockEnvironmentBuilder()
+                        .setTaskName("rocksdb-restore")
+                        .setJobVertexID(TEST_JOB_VERTEX_ID)
+                        .setManagedMemorySize(MemorySize.ofMebiBytes(128).getBytes())
+                        .setTaskManagerRuntimeInfo(
+                                new TestingTaskManagerRuntimeInfo(
+                                        new Configuration(),
+                                        tempDir.resolve("rocksdb-restore-tm").toFile()))
+                        .setTaskStateManager(new TestTaskStateManagerBuilder().build())
+                        .build();
+        RocksDBStateBackend rocksDbBackend = new RocksDBStateBackend(rocksDbPath.toUri());
+        AbstractKeyedStateBackend<Integer> backend =
+                rocksDbBackend.createKeyedStateBackend(
+                        environment,
+                        environment.getJobID(),
+                        "rocksdb-restore",
+                        IntSerializer.INSTANCE,
+                        16,
+                        keyGroupRange,
+                        environment.getTaskKvStateRegistry(),
+                        TtlTimeProvider.DEFAULT,
+                        environment.getMetricGroup(),
+                        stateHandles,
+                        new CloseableRegistry(),
+                        0.5d);
+        return new RocksDbBackendContext(environment, backend);
+    }
+
+    /**
+     * Builds a Heap keyed state backend with the given restore handles. Returns a context that
+     * manages the backend and environment lifecycle — callers should use try-with-resources.
+     */
+    HeapBackendContext createHeapBackendForRestore(
+            KeyGroupRange keyGroupRange, Collection<KeyedStateHandle> stateHandles)
+            throws Exception {
+        MockEnvironment environment =
+                new MockEnvironmentBuilder()
+                        .setTaskName("heap-restore")
+                        .setJobVertexID(TEST_JOB_VERTEX_ID)
+                        .setManagedMemorySize(MemorySize.ofMebiBytes(128).getBytes())
+                        .setTaskStateManager(new TestTaskStateManagerBuilder().build())
+                        .build();
+        HeapPriorityQueueSetFactory pqFactory =
+                new HeapPriorityQueueSetFactory(keyGroupRange, 16, 128);
+        AbstractKeyedStateBackend<Integer> backend =
+                new HeapKeyedStateBackendBuilder<Integer>(
+                                environment.getTaskKvStateRegistry(),
+                                IntSerializer.INSTANCE,
+                                getClass().getClassLoader(),
+                                16,
+                                keyGroupRange,
+                                new org.apache.flink.api.common.ExecutionConfig(),
+                                TtlTimeProvider.DEFAULT,
+                                org.apache.flink.runtime.state.metrics.LatencyTrackingStateConfig
+                                        .disabled(),
+                                stateHandles,
+                                org.apache.flink.runtime.state
+                                        .UncompressedStreamCompressionDecorator.INSTANCE,
+                                new org.apache.flink.runtime.state.LocalRecoveryConfig(null),
+                                pqFactory,
+                                true,
+                                new CloseableRegistry())
+                        .build();
+        return new HeapBackendContext(environment, backend);
+    }
+
+    /**
+     * Asserts all 5 state kinds are present for the given key+namespace with the expected values,
+     * including present-null MapState semantics. Shared between rescale and cross-backend tests.
+     *
+     * @param backend the restored backend (RocksDB, Heap, or Cobble)
+     * @param nullMapKey the map key whose value should be present-null, or {@code null} to skip
+     */
+    static void assertAllStateKindsPresent(
+            AbstractKeyedStateBackend<Integer> backend,
+            int key,
+            String namespace,
+            String expectedValue,
+            List<String> expectedList,
+            String mapKey,
+            String expectedMapValue,
+            String nullMapKey,
+            int expectedReducing,
+            String expectedAggregating)
+            throws Exception {
+        backend.setCurrentKey(key);
+
+        assertEquals(expectedValue, valueState(backend, "value-all", namespace).value());
+        assertEquals(expectedList, toList(listState(backend, "list-all", namespace).get()));
+
+        MapState<String, String> map = mapState(backend, "map-all", namespace);
+        if (nullMapKey != null) {
+            assertTrue(
+                    map.contains(nullMapKey),
+                    "present-null map key '" + nullMapKey + "' should exist");
+            assertNull(map.get(nullMapKey), "present-null map value should be null");
+        }
+        assertTrue(map.contains(mapKey));
+        assertEquals(expectedMapValue, map.get(mapKey));
+
+        assertEquals(
+                Integer.valueOf(expectedReducing),
+                reducingState(backend, "reducing-all", namespace).get());
+        assertEquals(
+                expectedAggregating, aggregatingState(backend, "aggregating-all", namespace).get());
+    }
+
+    /**
+     * Asserts that an in-range key has no state at all (all state kinds return null/empty/absent).
+     * Shared between rescale and cross-backend tests.
+     */
+    static void assertKeyAbsent(AbstractKeyedStateBackend<Integer> backend, int key)
+            throws Exception {
+        backend.setCurrentKey(key);
+        assertNull(valueState(backend, "value-all", "ns-a").value());
+        assertNull(listState(backend, "list-all", "ns-a").get());
+        assertFalse(mapState(backend, "map-all", "ns-a").contains("k1-a"));
+        assertFalse(mapState(backend, "map-all", "ns-a").contains("k2-a"));
+        assertNull(reducingState(backend, "reducing-all", "ns-a").get());
+        assertNull(aggregatingState(backend, "aggregating-all", "ns-a").get());
+    }
+
+    /** Context holding a non-Cobble backend and its environment for cleanup. */
+    static final class RocksDbBackendContext implements AutoCloseable {
+        final MockEnvironment environment;
+        final AbstractKeyedStateBackend<Integer> backend;
+
+        RocksDbBackendContext(
+                MockEnvironment environment, AbstractKeyedStateBackend<Integer> backend) {
+            this.environment = environment;
+            this.backend = backend;
+        }
+
+        @Override
+        public void close() throws Exception {
+            try {
+                backend.dispose();
+            } finally {
+                environment.close();
+            }
+        }
+    }
+
+    /** Context holding a Heap backend and its environment for cleanup. */
+    static final class HeapBackendContext implements AutoCloseable {
+        final MockEnvironment environment;
+        final AbstractKeyedStateBackend<Integer> backend;
+
+        HeapBackendContext(
+                MockEnvironment environment, AbstractKeyedStateBackend<Integer> backend) {
+            this.environment = environment;
+            this.backend = backend;
+        }
+
+        @Override
+        public void close() throws Exception {
+            try {
+                backend.dispose();
             } finally {
                 environment.close();
             }

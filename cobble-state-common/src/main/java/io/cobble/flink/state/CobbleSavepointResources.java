@@ -15,6 +15,9 @@ import org.apache.flink.runtime.state.metainfo.StateMetaInfoSnapshot;
 import javax.annotation.Nonnull;
 
 import java.io.IOException;
+import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
 import java.util.Collections;
 import java.util.List;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -37,8 +40,8 @@ import java.util.concurrent.atomic.AtomicBoolean;
  * {@link #createKVStateIterator()} fails after the shard snapshot was retained.
  *
  * <p>After the async writer completes (or fails), {@link #release()} closes the reader, expires the
- * global snapshot on the coordinator, closes the coordinator, and expires the retained shard
- * snapshot — each exactly once.
+ * global snapshot on the coordinator (only if this resource successfully materialized it), closes
+ * the coordinator, and expires the retained shard snapshot — each exactly once.
  *
  * <p>The empty-backend optimization: when no state has been registered ({@code stateCount == 0}),
  * {@link #empty(...)} returns a resources object with an empty metadata list. {@code
@@ -70,6 +73,13 @@ final class CobbleSavepointResources<K> implements FullSnapshotResources<K> {
     private volatile Reader reader;
     private volatile DbCoordinator coordinator;
     private volatile long globalSnapshotId;
+
+    /**
+     * Tracks whether {@link #createKVStateIterator()} successfully materialized the global snapshot.
+     * Only if this is true will {@link #release()} expire the global snapshot — preventing
+     * accidental deletion of a pre-existing global snapshot that happens to have a colliding ID.
+     */
+    private volatile boolean globalSnapshotMaterialized;
 
     CobbleSavepointResources(
             Config cobbleConfig,
@@ -124,13 +134,30 @@ final class CobbleSavepointResources<K> implements FullSnapshotResources<K> {
         // reader pinned to it. The reader is a read-only proxy — it does not create a second DB
         // instance on the same volume.
         coordinator = DbCoordinator.open(cobbleConfig);
-        globalSnapshotId = shardSnapshotId;
+        // Use a unique global snapshot ID to avoid collisions when multiple subtasks share the
+        // same coordinator volume (e.g. in a cluster). The shard snapshot ID alone is not unique
+        // across subtasks — each subtask's DB starts its snapshot chain from 1. We derive a
+        // unique ID by hashing dbId + snapshotId + manifestPath into a positive 63-bit value.
+        globalSnapshotId = deriveUniqueGlobalSnapshotId(shardSnapshotId, shardSnapshot);
         coordinator.materializeGlobalSnapshot(
                 totalBuckets, globalSnapshotId, Collections.singletonList(shardSnapshot));
+        // Mark as materialized so release() knows it is safe to expire this global snapshot.
+        globalSnapshotMaterialized = true;
         if (!coordinator.retainSnapshot(globalSnapshotId)) {
-            // The coordinator could not retain the global snapshot — clean up and fail fast so the
-            // shard snapshot is not leaked.
-            release();
+            // The coordinator could not retain the global snapshot — clean up what we created
+            // (the materialized global snapshot and the coordinator), then fail fast. We do NOT
+            // call release() here because release() also expires the shard snapshot, which is
+            // the responsibility of Flink's outer cleanup.
+            try {
+                coordinator.expireSnapshot(globalSnapshotId);
+            } catch (RuntimeException ignored) {
+                // best effort
+            }
+            try {
+                coordinator.close();
+            } catch (RuntimeException ignored) {
+                // best effort
+            }
             throw new IOException(
                     "Failed to retain global snapshot " + globalSnapshotId + " on coordinator.");
         }
@@ -173,13 +200,22 @@ final class CobbleSavepointResources<K> implements FullSnapshotResources<K> {
                 // best effort cleanup
             }
         }
-        // Expire the global snapshot on the coordinator.
-        if (coordinator != null && globalSnapshotId >= 0) {
+        // Expire the global snapshot on the coordinator — only if we successfully materialized it.
+        // This prevents accidental deletion of a pre-existing global snapshot with a colliding ID
+        // when materializeGlobalSnapshot() failed before creating our snapshot.
+        if (coordinator != null && globalSnapshotMaterialized) {
             try {
                 coordinator.expireSnapshot(globalSnapshotId);
             } catch (RuntimeException ignored) {
                 // best effort cleanup
             }
+            try {
+                coordinator.close();
+            } catch (RuntimeException ignored) {
+                // best effort cleanup
+            }
+        } else if (coordinator != null) {
+            // materializeGlobalSnapshot failed or was never called — still close the coordinator.
             try {
                 coordinator.close();
             } catch (RuntimeException ignored) {
@@ -193,6 +229,50 @@ final class CobbleSavepointResources<K> implements FullSnapshotResources<K> {
             } catch (RuntimeException ignored) {
                 // best effort cleanup
             }
+        }
+    }
+
+    // ------------------------------------------------------------------------------------------
+    // Helpers
+    // ------------------------------------------------------------------------------------------
+
+    /**
+     * Derives a coordinator-unique global snapshot ID by hashing the shard snapshot's identity
+     * (dbId, snapshotId, manifestPath) into a positive 63-bit value. This is necessary because
+     * multiple subtasks in the same JVM may share the same coordinator volume, and each subtask's
+     * DB starts its snapshot chain from the same IDs (1, 2, ...).
+     *
+     * <p>The hash is SHA-256 of {@code "dbId:snapshotId:manifestPath"}, truncated to 8 bytes and
+     * forced into a positive 63-bit value by masking the sign bit. This provides stronger uniqueness
+     * guarantees than a 28-bit {@code hashCode()} truncation, and is stable across JVM restarts
+     * (unlike {@code hashCode()} which can vary between JVM instances for strings longer than 32
+     * characters in Java 9+).
+     */
+    private static long deriveUniqueGlobalSnapshotId(
+            long shardSnapshotId, ShardSnapshot shardSnapshot) {
+        String dbId = shardSnapshot != null && shardSnapshot.dbId != null
+                ? shardSnapshot.dbId
+                : "unknown";
+        String manifestPath = shardSnapshot != null && shardSnapshot.manifestPath != null
+                ? shardSnapshot.manifestPath
+                : "";
+        String identity = dbId + ":" + shardSnapshotId + ":" + manifestPath;
+        try {
+            MessageDigest digest = MessageDigest.getInstance("SHA-256");
+            byte[] hash = digest.digest(identity.getBytes(StandardCharsets.UTF_8));
+            // Take the first 8 bytes and mask the sign bit to produce a positive 63-bit value.
+            long value = 0;
+            for (int i = 0; i < 8; i++) {
+                value = (value << 8) | (hash[i] & 0xFFL);
+            }
+            // Ensure positive (Cobble requires non-negative snapshot IDs) and non-zero.
+            value &= Long.MAX_VALUE;
+            return value == 0 ? 1 : value;
+        } catch (NoSuchAlgorithmException e) {
+            // SHA-256 is guaranteed to be available on all Java platforms. If somehow missing,
+            // fall back to a simple hash that is still better than raw shardSnapshotId.
+            long fallback = (long) (identity.hashCode() & 0x7FFFFFFFL);
+            return fallback == 0 ? 1 : fallback;
         }
     }
 }
