@@ -35,6 +35,7 @@ import org.apache.flink.runtime.state.Keyed;
 import org.apache.flink.runtime.state.KeyedStateHandle;
 import org.apache.flink.runtime.state.PriorityComparable;
 import org.apache.flink.runtime.state.PriorityQueueSetFactory;
+import org.apache.flink.runtime.state.RegisteredPriorityQueueStateBackendMetaInfo;
 import org.apache.flink.runtime.state.SavepointResources;
 import org.apache.flink.runtime.state.SnapshotExecutionType;
 import org.apache.flink.runtime.state.SnapshotResult;
@@ -175,11 +176,80 @@ final class CobbleKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
         snapshotStrategy.notifyCheckpointSubsumed(checkpointId);
     }
 
-    /** Savepoints remain unsupported until real snapshot support is implemented. */
+    /**
+     * Produces a canonical savepoint by scanning a stable snapshot view of the Cobble DB.
+     *
+     * <p>The synchronous phase starts an async Cobble snapshot, waits for the {@link
+     * io.cobble.ShardSnapshot}, retains it, and serializes all in-memory timer overlay elements
+     * into an immutable {@link CobbleTimerOverlaySnapshot}. The asynchronous phase (inside {@link
+     * CobbleSavepointResources#createKVStateIterator()}) materializes a global snapshot via {@link
+     * io.cobble.DbCoordinator}, then opens a lightweight {@link io.cobble.Reader} pinned to that
+     * global snapshot. All state scans read through the reader — a read-only proxy, not a second DB
+     * instance on the same volume.
+     *
+     * <p>When no state has been registered, an empty resources object is returned and {@code
+     * SavepointSnapshotStrategy} short-circuits to {@code SnapshotResult.empty()} without starting
+     * a native snapshot.
+     */
     @Nonnull
     @Override
     public SavepointResources<K> savepoint() {
-        throw unsupported("savepoint");
+        CobbleCanonicalSavepointMetadataSnapshot metadataSnapshot = canonicalMetadataSnapshot();
+
+        if (metadataSnapshot.stateCount() == 0) {
+            return new SavepointResources<>(
+                    CobbleSavepointResources.empty(metadataSnapshot, keySerializer, keyGroupRange),
+                    SnapshotExecutionType.ASYNCHRONOUS);
+        }
+
+        io.cobble.PendingSnapshot<io.cobble.ShardSnapshot> pending = cobbleDb.startAsyncSnapshot();
+        long snapshotId = pending.snapshotId();
+        io.cobble.ShardSnapshot shardSnapshot;
+        try {
+            shardSnapshot = pending.future().get();
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            cobbleDb.cancelSnapshot(snapshotId);
+            throw new IllegalStateException(
+                    "Interrupted while waiting for Cobble snapshot for savepoint.", e);
+        } catch (java.util.concurrent.ExecutionException e) {
+            cobbleDb.cancelSnapshot(snapshotId);
+            Throwable cause = e.getCause() == null ? e : e.getCause();
+            throw new IllegalStateException("Cobble snapshot for savepoint failed.", cause);
+        }
+
+        if (!cobbleDb.retainSnapshot(snapshotId)) {
+            cobbleDb.expireSnapshot(snapshotId);
+            throw new IllegalStateException(
+                    "Failed to retain Cobble snapshot " + snapshotId + " for savepoint.");
+        }
+
+        // Capture overlay timers in the sync phase so the async writer sees a consistent snapshot.
+        // If this throws, we must expire the retained shard snapshot before propagating.
+        CobbleTimerOverlaySnapshot timerOverlay;
+        try {
+            timerOverlay = captureTimerOverlaySnapshot(metadataSnapshot);
+        } catch (RuntimeException e) {
+            cobbleDb.expireSnapshot(snapshotId);
+            throw e;
+        }
+
+        // The cleanup callback expires the retained shard snapshot on the live Db. It is called
+        // exactly once by CobbleSavepointResources.release() after the async writer completes (or
+        // fails).
+        Runnable shardSnapshotCleanup = () -> cobbleDb.expireSnapshot(snapshotId);
+        CobbleSavepointResources<K> resources =
+                new CobbleSavepointResources<>(
+                        cobbleConfig,
+                        snapshotId,
+                        shardSnapshot,
+                        numberOfKeyGroups,
+                        metadataSnapshot,
+                        keySerializer,
+                        keyGroupRange,
+                        timerOverlay,
+                        shardSnapshotCleanup);
+        return new SavepointResources<>(resources, SnapshotExecutionType.ASYNCHRONOUS);
     }
 
     /** Counting all entries efficiently is out of scope for the current implementation. */
@@ -793,6 +863,58 @@ final class CobbleKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
                             + "' to COBBLE.");
         }
         return canonicalMetadata.snapshot();
+    }
+
+    /**
+     * Captures all in-memory timer overlay elements as an immutable {@link
+     * CobbleTimerOverlaySnapshot}. Called in the sync phase of {@link #savepoint()} so the async
+     * writer sees a consistent timer set — even if the job polls or adds timers between the sync
+     * and async phases.
+     *
+     * <p>For each priority-queue state in the metadata snapshot, iterates the local key-group range
+     * and serializes each overlay element via the live element serializer. The serialized key bytes
+     * are stored in the snapshot; the async iterator uses them directly without accessing the live
+     * queue.
+     */
+    @SuppressWarnings({"unchecked", "rawtypes"})
+    private CobbleTimerOverlaySnapshot captureTimerOverlaySnapshot(
+            CobbleCanonicalSavepointMetadataSnapshot metadataSnapshot) {
+        if (!(priorityQueueFactory instanceof CobblePriorityQueueSetFactory)) {
+            return CobbleTimerOverlaySnapshot.empty();
+        }
+        CobblePriorityQueueSetFactory cobblePqFactory =
+                (CobblePriorityQueueSetFactory) priorityQueueFactory;
+        CobbleTimerOverlaySnapshot.Builder builder = CobbleTimerOverlaySnapshot.builder();
+        for (CobbleCanonicalStateMeta meta : metadataSnapshot.entries()) {
+            if (!meta.priorityQueue()) {
+                continue;
+            }
+            CobbleTimerPriorityQueue<?> queue = cobblePqFactory.timerQueueFor(meta.stateName());
+            if (queue == null) {
+                continue;
+            }
+            // Reconstruct the element serializer from the frozen metadata snapshot so we don't hold
+            // a live reference to the queue's potentially mutable serializer.
+            RegisteredPriorityQueueStateBackendMetaInfo<?> pqMeta =
+                    new RegisteredPriorityQueueStateBackendMetaInfo<>(meta.metaInfoSnapshot());
+            TypeSerializer<?> elementSerializer = pqMeta.getElementSerializer();
+            CobbleTimerSerializationContext ctx =
+                    new CobbleTimerSerializationContext(elementSerializer);
+            for (int keyGroup : keyGroupRange) {
+                java.util.Set<?> overlayElements = queue.getSubsetForKeyGroup(keyGroup);
+                if (overlayElements.isEmpty()) {
+                    continue;
+                }
+                List<byte[]> serializedKeys = new ArrayList<>(overlayElements.size());
+                for (Object element : overlayElements) {
+                    CobbleTimerSerializationContext.SerializedKey serialized =
+                            ctx.serializeElementKey(element);
+                    serializedKeys.add(serialized.heapBytes);
+                }
+                builder.addOverlayKeys(meta.stateName(), keyGroup, serializedKeys);
+            }
+        }
+        return builder.build();
     }
 
     private PriorityQueueSetFactory createPriorityQueueFactory(

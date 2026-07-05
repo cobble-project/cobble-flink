@@ -132,6 +132,14 @@ final class CobblePriorityQueueSetFactory implements PriorityQueueSetFactory {
         return !queues.isEmpty();
     }
 
+    /**
+     * Returns the timer priority queue registered for the given state name, or {@code null} if none
+     * is registered. Used by the canonical savepoint iterator to access in-memory overlay timers.
+     */
+    CobbleTimerPriorityQueue<?> timerQueueFor(String stateName) {
+        return queues.get(stateName);
+    }
+
     void close() throws IOException {
         IOException error = null;
         for (Map.Entry<String, CobbleTimerPriorityQueue<?>> entry : queues.entrySet()) {

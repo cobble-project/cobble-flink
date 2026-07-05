@@ -65,6 +65,15 @@ public final class CobbleCanonicalStateMeta {
         return priorityQueue;
     }
 
+    /**
+     * Whether this state uses map-style row keys (requires user-key deserialization during
+     * canonical encoding). Returns {@code true} only for KV states whose {@link #stateType()} is
+     * {@link StateDescriptor.Type#MAP}.
+     */
+    public boolean isMapState() {
+        return stateType == StateDescriptor.Type.MAP;
+    }
+
     /** The Cobble column family that stores this state's rows. */
     public String columnFamily() {
         return columnFamily;
