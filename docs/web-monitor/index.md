@@ -21,6 +21,7 @@ The web monitor is useful when you want to:
 - check which checkpoints or Cobble snapshots are available
 - follow `latest` while a job is still producing checkpoints
 - keep a small set of rows tracked while newer snapshots appear
+- generate Flink SQL source DDL from the selected Cobble state or sink schema
 - inspect Cobble state by state name, verify decoded state keys, MapState keys, ListState values, and timer entries
 - inspect Cobble sink rows, primary keys, and value columns
 
@@ -113,6 +114,21 @@ Use `Refresh` to rescan the path. If old checkpoints have been removed, they
 are removed from the list on refresh.
 
 ![Datasource page](../assets/images/web-monitor-datasource.png)
+
+## Overview Page
+
+The `Overview` page shows the states or sink schema in the selected datasource
+and generates Flink SQL `CREATE TABLE` DDL for each.
+
+For checkpoint datasources, each state card shows the decoded key, namespace,
+MapState key, and value fields. The generated DDL uses
+`source.kind = 'state'` and includes a `PRIMARY KEY` when the state can be used
+as a lookup table. For sink datasources, the page generates the matching
+`source.kind = 'sink'` DDL.
+
+Use `Copy SQL` to copy a table definition into a SQL client or job.
+
+![Overview page](../assets/images/web-monitor-overview-state.png)
 
 ## Inspect Datasources
 

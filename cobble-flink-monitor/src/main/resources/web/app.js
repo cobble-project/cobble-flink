@@ -1861,6 +1861,7 @@ function sinkOverviewItem(target, meta) {
 
 function stateOverviewItem(target, meta) {
   const groups = stateOverviewGroups(target)
+  const sql = stateSourceSql(target, meta, groups)
   return {
     id: target.id || target.name,
     title: target.name || target.id,
@@ -1871,9 +1872,9 @@ function stateOverviewItem(target, meta) {
     fields: groups.flatMap((group) => (
       group.fields.map((field) => ({ role: group.label, name: field.name, type: field.logical_type }))
     )),
-    sql: null,
-    sqlHeading: 'Flink SQL source unavailable',
-    note: 'This is Flink keyed state inside a checkpoint. The current Cobble SQL source reads Cobble sink tables; consuming keyed state needs a dedicated state source connector.',
+    sql,
+    sqlHeading: sql ? 'Flink SQL source' : 'Flink SQL source unavailable',
+    note: stateSourceNote(target, groups, Boolean(sql)),
   }
 }
 
@@ -2096,6 +2097,150 @@ function sinkSourceSql(target, meta = state.meta) {
     `  'scan.mode' = 'batch'`,
     `);`,
   ].join('\n')
+}
+
+function stateSourceNote(target, groups, hasSql) {
+  if (!hasSql) {
+    if (!(target?.kind === 'timer' || normalizedStateKind(target) === 'TIMER')) {
+      return 'This state can be inspected in the monitor, but its semantic metadata is not complete enough to derive a Cobble SQL state source DDL.'
+    }
+    return 'Timer state is visible in the monitor, but the Cobble SQL state source does not read timer queues yet.'
+  }
+  if (!stateLookupSupportedKind(target)) {
+    return 'Use this state source table for batch scan queries. Lookup joins are not available for this state kind yet.'
+  }
+  const keys = stateSourcePrimaryKeyFields(target, groups)
+    .map((field) => quoteSqlIdentifier(field.name))
+    .join(', ')
+  return `Use this state source table for batch scan queries and exact-key temporal lookup joins. Lookup joins require equality predicates for every primary-key column: ${keys}.`
+}
+
+function stateSourceSql(target, meta = state.meta, groups = stateOverviewGroups(target)) {
+  if (target?.kind === 'timer' || normalizedStateKind(target) === 'TIMER') {
+    return null
+  }
+  if (!stateSourceSemanticReady(target)) {
+    return null
+  }
+  const fields = stateSourceFields(groups)
+  if (fields.length === 0) return null
+  if (hasDuplicateStateSourceFieldNames(fields)) return null
+  const tableName = quoteSqlIdentifier(sourceTableName(target?.name || target?.id || 'cobble_state', null))
+  const columnLines = fields.map((field) => (
+    `  ${quoteSqlIdentifier(field.name)} ${field.logical_type || 'BYTES'}`
+  ))
+  const primaryKeyFields = stateLookupSupportedKind(target)
+    ? stateSourcePrimaryKeyFields(target, groups)
+    : []
+  if (primaryKeyFields.length > 0) {
+    columnLines.push(
+      `  PRIMARY KEY (${primaryKeyFields.map((field) => quoteSqlIdentifier(field.name)).join(', ')}) NOT ENFORCED`,
+    )
+  }
+  const optionLines = [
+    `  'connector' = 'cobble'`,
+    `  'source.kind' = 'state'`,
+    `  'path' = '${escapeSqlString(stateSourcePathForSql(meta))}'`,
+  ]
+  const operatorId = target?.operator_id || target?.operatorId || meta?.selected_operator_id
+  if (operatorId) {
+    optionLines.push(`  'state.operator-id' = '${escapeSqlString(operatorId)}'`)
+  }
+  optionLines.push(
+    `  'state.name' = '${escapeSqlString(target?.name || target?.id || '')}'`,
+    `  'state.kind' = '${escapeSqlString(normalizedStateKind(target).toLowerCase())}'`,
+    `  'scan.checkpoint-id' = '${escapeSqlString(selectedCheckpointForSql(meta))}'`,
+    `  'scan.mode' = 'batch'`,
+  )
+  return [
+    `CREATE TABLE ${tableName} (`,
+    columnLines.join(',\n'),
+    `) WITH (`,
+    optionLines.join(',\n'),
+    `);`,
+  ].join('\n')
+}
+
+function stateSourcePathForSql(meta = state.meta) {
+  return checkpointRootFromDirectory(
+    meta?.selected_checkpoint_directory
+      || meta?.selectedCheckpointDirectory
+      || '',
+  )
+    || meta?.checkpoint_root
+    || meta?.checkpointRoot
+    || meta?.source_path
+    || ''
+}
+
+function checkpointRootFromDirectory(directory) {
+  const text = String(directory || '').replace(/\/+$/, '')
+  return /\/chk-\d+$/.test(text) ? text.replace(/\/chk-\d+$/, '') : text
+}
+
+function stateSourceFields(groups) {
+  return groups.flatMap((group) => group.fields.map((field) => ({
+    ...field,
+    groupId: group.id,
+  })))
+}
+
+function hasDuplicateStateSourceFieldNames(fields) {
+  const seen = new Set()
+  for (const field of fields) {
+    if (seen.has(field.name)) return true
+    seen.add(field.name)
+  }
+  return false
+}
+
+function stateSourcePrimaryKeyFields(target, groups) {
+  const keyGroupIds = normalizedStateKind(target) === 'MAP'
+    ? ['state_key', 'namespace', 'map_key']
+    : ['state_key', 'namespace']
+  return stateSourceFields(groups).filter((field) => keyGroupIds.includes(field.groupId))
+}
+
+function stateLookupSupportedKind(target) {
+  return ['VALUE', 'REDUCING', 'AGGREGATING', 'MAP'].includes(normalizedStateKind(target))
+}
+
+function normalizedStateKind(target) {
+  return String(target?.state_kind || target?.stateKind || target?.kind || '').toUpperCase()
+}
+
+function stateSourceSemanticReady(target) {
+  const parts = target?.semantic_parts || target?.semanticParts
+  if (!parts) return false
+  const requiredPartIds = stateSourceRequiredPartIds(target)
+  if (requiredPartIds.length === 0) return false
+  if (!isVoidNamespaceTarget(target)) {
+    requiredPartIds.splice(1, 0, 'namespace')
+  }
+  return requiredPartIds.every((partId) => stateSourceTypeUsable(parts[partId]))
+}
+
+function stateSourceRequiredPartIds(target) {
+  switch (normalizedStateKind(target)) {
+    case 'VALUE':
+    case 'REDUCING':
+    case 'AGGREGATING':
+      return ['state_key', 'value']
+    case 'LIST':
+      return ['state_key', 'list_element']
+    case 'MAP':
+      return ['state_key', 'map_key', 'map_value']
+    default:
+      return []
+  }
+}
+
+function stateSourceTypeUsable(type) {
+  if (!type || type.kind === 'UNKNOWN' || type.kind === 'LIST') return false
+  if (Array.isArray(type.fields)) {
+    return type.fields.every((field) => field?.type && field.type.kind === 'SCALAR')
+  }
+  return true
 }
 
 function sourceTableName(fallback, path) {
