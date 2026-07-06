@@ -16,16 +16,22 @@ public final class StateInspectType {
     private final String logicalType;
     private final List<StateInspectField> fields;
     private final StateInspectType elementType;
+    private final StateInspectType keyType;
+    private final StateInspectType valueType;
 
     private StateInspectType(
             StateInspectTypeKind kind,
             String logicalType,
             List<StateInspectField> fields,
-            StateInspectType elementType) {
+            StateInspectType elementType,
+            StateInspectType keyType,
+            StateInspectType valueType) {
         this.kind = Objects.requireNonNull(kind, "kind");
         this.logicalType = logicalType;
         this.fields = immutableCopy(fields);
         this.elementType = elementType;
+        this.keyType = keyType;
+        this.valueType = valueType;
     }
 
     public static StateInspectType scalar(String logicalType) {
@@ -33,7 +39,12 @@ public final class StateInspectType {
             throw new IllegalArgumentException("Scalar logical type must not be empty");
         }
         return new StateInspectType(
-                StateInspectTypeKind.SCALAR, logicalType, Collections.emptyList(), null);
+                StateInspectTypeKind.SCALAR,
+                logicalType,
+                Collections.emptyList(),
+                null,
+                null,
+                null);
     }
 
     public static StateInspectType row(List<StateInspectField> fields) {
@@ -49,12 +60,24 @@ public final class StateInspectType {
                 StateInspectTypeKind.LIST,
                 null,
                 Collections.emptyList(),
-                Objects.requireNonNull(elementType, "elementType"));
+                Objects.requireNonNull(elementType, "elementType"),
+                null,
+                null);
+    }
+
+    public static StateInspectType map(StateInspectType keyType, StateInspectType valueType) {
+        return new StateInspectType(
+                StateInspectTypeKind.MAP,
+                null,
+                Collections.emptyList(),
+                null,
+                Objects.requireNonNull(keyType, "keyType"),
+                Objects.requireNonNull(valueType, "valueType"));
     }
 
     public static StateInspectType unknown() {
         return new StateInspectType(
-                StateInspectTypeKind.UNKNOWN, null, Collections.emptyList(), null);
+                StateInspectTypeKind.UNKNOWN, null, Collections.emptyList(), null, null, null);
     }
 
     private static StateInspectType structured(
@@ -62,7 +85,7 @@ public final class StateInspectType {
         if (fields == null || fields.isEmpty()) {
             throw new IllegalArgumentException(kind + " state inspect type requires fields");
         }
-        return new StateInspectType(kind, null, fields, null);
+        return new StateInspectType(kind, null, fields, null, null, null);
     }
 
     public StateInspectTypeKind kind() {
@@ -81,6 +104,14 @@ public final class StateInspectType {
         return elementType;
     }
 
+    public StateInspectType keyType() {
+        return keyType;
+    }
+
+    public StateInspectType valueType() {
+        return valueType;
+    }
+
     void write(DataOutputView output) throws IOException {
         output.writeInt(kind.ordinal());
         switch (kind) {
@@ -96,6 +127,10 @@ public final class StateInspectType {
                 break;
             case LIST:
                 elementType.write(output);
+                break;
+            case MAP:
+                keyType.write(output);
+                valueType.write(output);
                 break;
             case UNKNOWN:
                 break;
@@ -113,6 +148,8 @@ public final class StateInspectType {
                 return tuple(readFields(input));
             case LIST:
                 return list(read(input));
+            case MAP:
+                return map(read(input), read(input));
             case UNKNOWN:
                 return unknown();
             default:
@@ -159,11 +196,13 @@ public final class StateInspectType {
         return kind == that.kind
                 && Objects.equals(logicalType, that.logicalType)
                 && Objects.equals(fields, that.fields)
-                && Objects.equals(elementType, that.elementType);
+                && Objects.equals(elementType, that.elementType)
+                && Objects.equals(keyType, that.keyType)
+                && Objects.equals(valueType, that.valueType);
     }
 
     @Override
     public int hashCode() {
-        return Objects.hash(kind, logicalType, fields, elementType);
+        return Objects.hash(kind, logicalType, fields, elementType, keyType, valueType);
     }
 }
