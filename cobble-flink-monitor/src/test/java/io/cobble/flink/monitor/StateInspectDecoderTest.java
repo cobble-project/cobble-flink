@@ -1219,8 +1219,13 @@ class StateInspectDecoderTest {
             throws Exception {
         Constructor<SerializerInspectSchema> constructor =
                 SerializerInspectSchema.class.getDeclaredConstructor(
-                        String.class, int.class, byte[].class, byte[].class);
+                        String.class,
+                        int.class,
+                        String.class,
+                        byte[].class,
+                        StateInspectType.class,
+                        byte[].class);
         constructor.setAccessible(true);
-        return constructor.newInstance(className, lengthTag, null, null);
+        return constructor.newInstance(className, lengthTag, null, null, null, null);
     }
 }

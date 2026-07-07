@@ -106,6 +106,19 @@ class CobbleStateSourceProofITTest {
     private Tuple2<String, Long> runStatefulJob() throws Exception {
         Path checkpointRoot = java.nio.file.Paths.get(".tmp/proof/checkpoints");
         Path localState = java.nio.file.Paths.get(".tmp/proof/local-state");
+        // Clean up any stale checkpoints from previous test runs — schema format may have changed.
+        if (java.nio.file.Files.exists(checkpointRoot)) {
+            try (Stream<Path> walk = java.nio.file.Files.walk(checkpointRoot)) {
+                walk.sorted(java.util.Comparator.reverseOrder())
+                        .forEach(
+                                p -> {
+                                    try {
+                                        java.nio.file.Files.deleteIfExists(p);
+                                    } catch (java.io.IOException ignored) {
+                                    }
+                                });
+            }
+        }
         java.nio.file.Files.createDirectories(checkpointRoot);
         java.nio.file.Files.createDirectories(localState);
         return runStatefulJob(checkpointRoot, localState);

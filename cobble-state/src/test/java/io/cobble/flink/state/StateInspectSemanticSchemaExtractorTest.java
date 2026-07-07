@@ -3,6 +3,7 @@ package io.cobble.flink.state;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 
+import io.cobble.flink.common.inspect.SerializerInspectSchema;
 import io.cobble.flink.common.inspect.StateInspectSemanticSchema;
 import io.cobble.flink.common.inspect.StateInspectType;
 import io.cobble.flink.common.inspect.StateInspectTypeKind;
@@ -25,8 +26,12 @@ import org.apache.flink.table.types.logical.RowType;
 import org.apache.flink.table.types.logical.VarCharType;
 import org.junit.jupiter.api.Test;
 
+import java.util.List;
+
 /** Tests SQL type extraction without requiring a running Table planner. */
 class StateInspectSemanticSchemaExtractorTest {
+
+    private static final ExecutionConfig CONFIG = new ExecutionConfig();
 
     @Test
     void valueStatePreservesNamedRowDataAndUsesUnnamedStateKeyFields() {
@@ -34,11 +39,14 @@ class StateInspectSemanticSchemaExtractorTest {
         InternalTypeInfo<RowData> stateKeyType =
                 InternalTypeInfo.of(RowType.of(new LogicalType[] {new BigIntType(false)}));
 
+        ValueStateDescriptor<RowData> desc = new ValueStateDescriptor<>("left-records", recordType);
+        desc.initializeSerializerUnlessSet(CONFIG);
         StateInspectSemanticSchema schema =
                 StateInspectSemanticSchemaExtractor.forValue(
-                        stateKeyType.createSerializer(new ExecutionConfig()),
-                        VoidNamespaceSerializer.INSTANCE,
-                        new ValueStateDescriptor<>("left-records", recordType));
+                        schemaFrom(stateKeyType.createSerializer(CONFIG)),
+                        schemaFrom(VoidNamespaceSerializer.INSTANCE),
+                        schemaFrom(desc.getSerializer()),
+                        desc);
 
         assertRow(schema.stateKey(), "f0");
         assertRow(schema.value(), "order_id", "region");
@@ -54,16 +62,22 @@ class StateInspectSemanticSchemaExtractorTest {
         TupleTypeInfo<Tuple2<RowData, Integer>> outerValueType =
                 new TupleTypeInfo<>(recordType, Types.INT);
 
+        MapStateDescriptor<RowData, Tuple2<RowData, Integer>> desc =
+                new MapStateDescriptor<>("right-records", uniqueKeyType, outerValueType);
+        desc.initializeSerializerUnlessSet(CONFIG);
         StateInspectSemanticSchema schema =
                 StateInspectSemanticSchemaExtractor.forMap(
-                        uniqueKeyType.createSerializer(new ExecutionConfig()),
-                        VoidNamespaceSerializer.INSTANCE,
-                        new MapStateDescriptor<>("right-records", uniqueKeyType, outerValueType));
+                        schemaFrom(uniqueKeyType.createSerializer(CONFIG)),
+                        schemaFrom(VoidNamespaceSerializer.INSTANCE),
+                        schemaFrom(desc.getKeySerializer()),
+                        schemaFrom(desc.getValueSerializer()),
+                        desc);
 
         assertRow(schema.stateKey(), "f0");
         assertRow(schema.mapUserKey(), "f0");
         assertEquals(StateInspectTypeKind.TUPLE, schema.mapUserValue().kind());
         assertEquals("f0", schema.mapUserValue().fields().get(0).name());
+        // Nested ROW inside a TUPLE gets field names from the descriptor overlay.
         assertRow(schema.mapUserValue().fields().get(0).type(), "order_id", "region");
         assertEquals("INT", schema.mapUserValue().fields().get(1).type().logicalType());
     }
@@ -72,11 +86,15 @@ class StateInspectSemanticSchemaExtractorTest {
     void listStateUnwrapsNamedRowElement() {
         InternalTypeInfo<RowData> recordType = namedRecordType();
 
+        ListStateDescriptor<RowData> desc =
+                new ListStateDescriptor<>("left-window-records", recordType);
+        desc.initializeSerializerUnlessSet(CONFIG);
         StateInspectSemanticSchema schema =
                 StateInspectSemanticSchemaExtractor.forList(
-                        Types.LONG.createSerializer(new ExecutionConfig()),
-                        VoidNamespaceSerializer.INSTANCE,
-                        new ListStateDescriptor<>("left-window-records", recordType));
+                        schemaFrom(Types.LONG.createSerializer(CONFIG)),
+                        schemaFrom(VoidNamespaceSerializer.INSTANCE),
+                        schemaFrom(desc.getElementSerializer()),
+                        desc);
 
         assertEquals(StateInspectTypeKind.SCALAR, schema.stateKey().kind());
         assertEquals("BIGINT", schema.stateKey().logicalType());
@@ -87,22 +105,30 @@ class StateInspectSemanticSchemaExtractorTest {
     void serializerOnlyRowDataFallsBackToOrdinalFieldNamesAndUnknownSerializerIsSafe() {
         RowDataSerializer rowSerializer =
                 new RowDataSerializer(new BigIntType(false), VarCharType.STRING_TYPE);
+        ValueStateDescriptor<RowData> rowDesc =
+                new ValueStateDescriptor<>("window-aggs", rowSerializer);
+        rowDesc.initializeSerializerUnlessSet(CONFIG);
         StateInspectSemanticSchema serializerOnlySchema =
                 StateInspectSemanticSchemaExtractor.forValue(
-                        Types.LONG.createSerializer(new ExecutionConfig()),
-                        VoidNamespaceSerializer.INSTANCE,
-                        new ValueStateDescriptor<>("window-aggs", rowSerializer));
+                        schemaFrom(Types.LONG.createSerializer(CONFIG)),
+                        schemaFrom(VoidNamespaceSerializer.INSTANCE),
+                        schemaFrom(rowDesc.getSerializer()),
+                        rowDesc);
 
         assertRow(serializerOnlySchema.value(), "f0", "f1");
         assertEquals(
                 "BIGINT NOT NULL",
                 serializerOnlySchema.value().fields().get(0).type().logicalType());
 
+        ValueStateDescriptor<org.apache.flink.runtime.state.VoidNamespace> customDesc =
+                new ValueStateDescriptor<>("custom", VoidNamespaceSerializer.INSTANCE);
+        customDesc.initializeSerializerUnlessSet(CONFIG);
         StateInspectSemanticSchema unknownSchema =
                 StateInspectSemanticSchemaExtractor.forValue(
-                        Types.LONG.createSerializer(new ExecutionConfig()),
-                        VoidNamespaceSerializer.INSTANCE,
-                        new ValueStateDescriptor<>("custom", VoidNamespaceSerializer.INSTANCE));
+                        schemaFrom(Types.LONG.createSerializer(CONFIG)),
+                        schemaFrom(VoidNamespaceSerializer.INSTANCE),
+                        schemaFrom(customDesc.getSerializer()),
+                        customDesc);
 
         assertEquals(StateInspectTypeKind.UNKNOWN, unknownSchema.value().kind());
         assertFalse(unknownSchema.isEmpty());
@@ -118,32 +144,52 @@ class StateInspectSemanticSchemaExtractorTest {
                                 new String[] {"sort_key"}));
         ListTypeInfo<RowData> recordListType = new ListTypeInfo<>(recordType);
 
+        ValueStateDescriptor<RowData> dedupDesc =
+                new ValueStateDescriptor<>("deduplicate-state", recordType);
+        dedupDesc.initializeSerializerUnlessSet(CONFIG);
         StateInspectSemanticSchema deduplicate =
                 StateInspectSemanticSchemaExtractor.forValue(
-                        Types.LONG.createSerializer(new ExecutionConfig()),
-                        VoidNamespaceSerializer.INSTANCE,
-                        new ValueStateDescriptor<>("deduplicate-state", recordType));
+                        schemaFrom(Types.LONG.createSerializer(CONFIG)),
+                        schemaFrom(VoidNamespaceSerializer.INSTANCE),
+                        schemaFrom(dedupDesc.getSerializer()),
+                        dedupDesc);
+
+        ListStateDescriptor<RowData> sortDesc = new ListStateDescriptor<>("sortState", recordType);
+        sortDesc.initializeSerializerUnlessSet(CONFIG);
         StateInspectSemanticSchema processTimeSort =
                 StateInspectSemanticSchemaExtractor.forList(
-                        Types.LONG.createSerializer(new ExecutionConfig()),
-                        VoidNamespaceSerializer.INSTANCE,
-                        new ListStateDescriptor<>("sortState", recordType));
+                        schemaFrom(Types.LONG.createSerializer(CONFIG)),
+                        schemaFrom(VoidNamespaceSerializer.INSTANCE),
+                        schemaFrom(sortDesc.getElementSerializer()),
+                        sortDesc);
+
+        MapStateDescriptor<RowData, List<RowData>> topNDesc =
+                new MapStateDescriptor<>("data-state-with-append", sortKeyType, recordListType);
+        topNDesc.initializeSerializerUnlessSet(CONFIG);
         StateInspectSemanticSchema topN =
                 StateInspectSemanticSchemaExtractor.forMap(
-                        Types.LONG.createSerializer(new ExecutionConfig()),
-                        VoidNamespaceSerializer.INSTANCE,
-                        new MapStateDescriptor<>(
-                                "data-state-with-append", sortKeyType, recordListType));
+                        schemaFrom(Types.LONG.createSerializer(CONFIG)),
+                        schemaFrom(VoidNamespaceSerializer.INSTANCE),
+                        schemaFrom(topNDesc.getKeySerializer()),
+                        schemaFrom(topNDesc.getValueSerializer()),
+                        topNDesc);
+
+        MapStateDescriptor<Long, RowData> temporalJoinDesc =
+                new MapStateDescriptor<>("left", Types.LONG, recordType);
+        temporalJoinDesc.initializeSerializerUnlessSet(CONFIG);
         StateInspectSemanticSchema temporalJoin =
                 StateInspectSemanticSchemaExtractor.forMap(
-                        Types.LONG.createSerializer(new ExecutionConfig()),
-                        VoidNamespaceSerializer.INSTANCE,
-                        new MapStateDescriptor<>("left", Types.LONG, recordType));
+                        schemaFrom(Types.LONG.createSerializer(CONFIG)),
+                        schemaFrom(VoidNamespaceSerializer.INSTANCE),
+                        schemaFrom(temporalJoinDesc.getKeySerializer()),
+                        schemaFrom(temporalJoinDesc.getValueSerializer()),
+                        temporalJoinDesc);
 
         assertRow(deduplicate.value(), "order_id", "region");
         assertRow(processTimeSort.listElement(), "order_id", "region");
         assertRow(topN.mapUserKey(), "sort_key");
         assertEquals(StateInspectTypeKind.LIST, topN.mapUserValue().kind());
+        // Nested ROW inside a LIST gets field names from the recursive descriptor overlay.
         assertRow(topN.mapUserValue().elementType(), "order_id", "region");
         assertEquals(StateInspectTypeKind.SCALAR, temporalJoin.mapUserKey().kind());
         assertEquals("BIGINT", temporalJoin.mapUserKey().logicalType());
@@ -162,50 +208,77 @@ class StateInspectSemanticSchemaExtractorTest {
         RowDataSerializer windowAccumulatorSerializer =
                 new RowDataSerializer(new BigIntType(false), VarCharType.STRING_TYPE);
 
+        MapStateDescriptor<Long, List<Tuple2<RowData, Boolean>>> intervalJoinDesc =
+                new MapStateDescriptor<>(
+                        "IntervalJoinLeftCache", Types.LONG, intervalEntryListType);
+        intervalJoinDesc.initializeSerializerUnlessSet(CONFIG);
         StateInspectSemanticSchema intervalJoin =
                 StateInspectSemanticSchemaExtractor.forMap(
-                        Types.LONG.createSerializer(new ExecutionConfig()),
-                        VoidNamespaceSerializer.INSTANCE,
-                        new MapStateDescriptor<>(
-                                "IntervalJoinLeftCache", Types.LONG, intervalEntryListType));
+                        schemaFrom(Types.LONG.createSerializer(CONFIG)),
+                        schemaFrom(VoidNamespaceSerializer.INSTANCE),
+                        schemaFrom(intervalJoinDesc.getKeySerializer()),
+                        schemaFrom(intervalJoinDesc.getValueSerializer()),
+                        intervalJoinDesc);
+
+        ValueStateDescriptor<RowData> aggDesc =
+                new ValueStateDescriptor<>("accState", accumulatorType);
+        aggDesc.initializeSerializerUnlessSet(CONFIG);
         StateInspectSemanticSchema aggregate =
                 StateInspectSemanticSchemaExtractor.forValue(
-                        Types.LONG.createSerializer(new ExecutionConfig()),
-                        VoidNamespaceSerializer.INSTANCE,
-                        new ValueStateDescriptor<>("accState", accumulatorType));
+                        schemaFrom(Types.LONG.createSerializer(CONFIG)),
+                        schemaFrom(VoidNamespaceSerializer.INSTANCE),
+                        schemaFrom(aggDesc.getSerializer()),
+                        aggDesc);
+
+        ListTypeInfo<RowData> overInputListType =
+                new ListTypeInfo<>(
+                        InternalTypeInfo.ofFields(new BigIntType(false), VarCharType.STRING_TYPE));
+        MapStateDescriptor<Long, List<RowData>> overInputDesc =
+                new MapStateDescriptor<>("inputState", Types.LONG, overInputListType);
+        overInputDesc.initializeSerializerUnlessSet(CONFIG);
         StateInspectSemanticSchema overInput =
                 StateInspectSemanticSchemaExtractor.forMap(
-                        Types.LONG.createSerializer(new ExecutionConfig()),
-                        VoidNamespaceSerializer.INSTANCE,
-                        new MapStateDescriptor<>(
-                                "inputState",
-                                Types.LONG,
-                                new ListTypeInfo<>(
-                                        InternalTypeInfo.ofFields(
-                                                new BigIntType(false), VarCharType.STRING_TYPE))));
+                        schemaFrom(Types.LONG.createSerializer(CONFIG)),
+                        schemaFrom(VoidNamespaceSerializer.INSTANCE),
+                        schemaFrom(overInputDesc.getKeySerializer()),
+                        schemaFrom(overInputDesc.getValueSerializer()),
+                        overInputDesc);
+
+        ListStateDescriptor<RowData> windowJoinDesc =
+                new ListStateDescriptor<>(
+                        "left-records",
+                        new RowDataSerializer(new BigIntType(false), VarCharType.STRING_TYPE));
+        windowJoinDesc.initializeSerializerUnlessSet(CONFIG);
         StateInspectSemanticSchema windowJoin =
                 StateInspectSemanticSchemaExtractor.forList(
-                        Types.LONG.createSerializer(new ExecutionConfig()),
-                        VoidNamespaceSerializer.INSTANCE,
-                        new ListStateDescriptor<>(
-                                "left-records",
-                                new RowDataSerializer(
-                                        new BigIntType(false), VarCharType.STRING_TYPE)));
+                        schemaFrom(Types.LONG.createSerializer(CONFIG)),
+                        schemaFrom(VoidNamespaceSerializer.INSTANCE),
+                        schemaFrom(windowJoinDesc.getElementSerializer()),
+                        windowJoinDesc);
+
+        ValueStateDescriptor<RowData> windowAggDesc =
+                new ValueStateDescriptor<>("window-aggs", windowAccumulatorSerializer);
+        windowAggDesc.initializeSerializerUnlessSet(CONFIG);
         StateInspectSemanticSchema windowAggregate =
                 StateInspectSemanticSchemaExtractor.forValue(
-                        Types.LONG.createSerializer(new ExecutionConfig()),
-                        VoidNamespaceSerializer.INSTANCE,
-                        new ValueStateDescriptor<>("window-aggs", windowAccumulatorSerializer));
+                        schemaFrom(Types.LONG.createSerializer(CONFIG)),
+                        schemaFrom(VoidNamespaceSerializer.INSTANCE),
+                        schemaFrom(windowAggDesc.getSerializer()),
+                        windowAggDesc);
 
         assertEquals(StateInspectTypeKind.LIST, intervalJoin.mapUserValue().kind());
         StateInspectType intervalEntry = intervalJoin.mapUserValue().elementType();
         assertEquals(StateInspectTypeKind.TUPLE, intervalEntry.kind());
+        // Nested ROW inside a TUPLE inside a LIST gets field names from the recursive overlay.
         assertRow(intervalEntry.fields().get(0).type(), "order_id", "region");
         assertEquals("BOOLEAN", intervalEntry.fields().get(1).type().logicalType());
         assertRow(aggregate.value(), "f0", "f1");
         assertEquals(StateInspectTypeKind.LIST, overInput.mapUserValue().kind());
+        // overInput uses InternalTypeInfo.ofFields (unnamed) → fields stay f0/f1.
         assertRow(overInput.mapUserValue().elementType(), "f0", "f1");
+        // windowJoin descriptor built from raw serializer → no TypeInfo → no overlay.
         assertRow(windowJoin.listElement(), "f0", "f1");
+        // windowAggregate descriptor built from raw serializer → no TypeInfo → no overlay.
         assertRow(windowAggregate.value(), "f0", "f1");
     }
 
@@ -213,12 +286,19 @@ class StateInspectSemanticSchemaExtractorTest {
     void timerSchemaPreservesTypedKeyAndNamespace() {
         StateInspectSemanticSchema timer =
                 StateInspectSemanticSchemaExtractor.forTimer(
-                        new RowDataSerializer(new BigIntType(false), VarCharType.STRING_TYPE),
-                        Types.INT.createSerializer(new ExecutionConfig()));
+                        schemaFrom(
+                                new RowDataSerializer(
+                                        new BigIntType(false), VarCharType.STRING_TYPE)),
+                        schemaFrom(Types.INT.createSerializer(CONFIG)));
 
         assertRow(timer.stateKey(), "f0", "f1");
         assertEquals("INT", timer.namespace().logicalType());
         assertEquals(StateInspectTypeKind.UNKNOWN, timer.value().kind());
+    }
+
+    private static SerializerInspectSchema schemaFrom(
+            org.apache.flink.api.common.typeutils.TypeSerializer<?> serializer) {
+        return SerializerInspectSchema.fromSerializer(serializer);
     }
 
     private static InternalTypeInfo<RowData> namedRecordType() {

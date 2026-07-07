@@ -989,19 +989,22 @@ final class CobbleKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
             boolean ttlEnabled,
             TypeSerializer<?> namespaceSerializer,
             ValueStateDescriptor<?> valueDescriptor) {
-        stateInspectSchemas.putIfAbsent(
-                stateName,
+        StateInspectSchema schema =
                 StateInspectSchema.forValue(
                         stateName,
                         stateName,
                         ttlEnabled,
                         keySerializer,
                         namespaceSerializer,
-                        valueDescriptor.getSerializer()));
+                        valueDescriptor.getSerializer());
+        stateInspectSchemas.putIfAbsent(stateName, schema);
         stateInspectSemanticSchemas.putIfAbsent(
                 stateName,
                 StateInspectSemanticSchemaExtractor.forValue(
-                        keySerializer, namespaceSerializer, valueDescriptor));
+                        schema.keySerializer(),
+                        schema.namespaceSerializer(),
+                        schema.valueSerializer(),
+                        valueDescriptor));
     }
 
     private void registerReducingSchema(
@@ -1009,19 +1012,22 @@ final class CobbleKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
             boolean ttlEnabled,
             TypeSerializer<?> namespaceSerializer,
             ReducingStateDescriptor<?> reducingDescriptor) {
-        stateInspectSchemas.putIfAbsent(
-                stateName,
+        StateInspectSchema schema =
                 StateInspectSchema.forReducing(
                         stateName,
                         stateName,
                         ttlEnabled,
                         keySerializer,
                         namespaceSerializer,
-                        reducingDescriptor.getSerializer()));
+                        reducingDescriptor.getSerializer());
+        stateInspectSchemas.putIfAbsent(stateName, schema);
         stateInspectSemanticSchemas.putIfAbsent(
                 stateName,
                 StateInspectSemanticSchemaExtractor.forReducing(
-                        keySerializer, namespaceSerializer, reducingDescriptor));
+                        schema.keySerializer(),
+                        schema.namespaceSerializer(),
+                        schema.valueSerializer(),
+                        reducingDescriptor));
     }
 
     /**
@@ -1034,19 +1040,22 @@ final class CobbleKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
             boolean ttlEnabled,
             TypeSerializer<?> namespaceSerializer,
             AggregatingStateDescriptor<?, ?, ?> aggregatingDescriptor) {
-        stateInspectSchemas.putIfAbsent(
-                stateName,
+        StateInspectSchema schema =
                 StateInspectSchema.forAggregating(
                         stateName,
                         stateName,
                         ttlEnabled,
                         keySerializer,
                         namespaceSerializer,
-                        aggregatingDescriptor.getSerializer()));
+                        aggregatingDescriptor.getSerializer());
+        stateInspectSchemas.putIfAbsent(stateName, schema);
         stateInspectSemanticSchemas.putIfAbsent(
                 stateName,
                 StateInspectSemanticSchemaExtractor.forAggregating(
-                        keySerializer, namespaceSerializer, aggregatingDescriptor));
+                        schema.keySerializer(),
+                        schema.namespaceSerializer(),
+                        schema.valueSerializer(),
+                        aggregatingDescriptor));
     }
 
     private void registerListSchema(
@@ -1054,19 +1063,22 @@ final class CobbleKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
             boolean ttlEnabled,
             TypeSerializer<?> namespaceSerializer,
             ListStateDescriptor<?> listDescriptor) {
-        stateInspectSchemas.putIfAbsent(
-                stateName,
+        StateInspectSchema schema =
                 StateInspectSchema.forList(
                         stateName,
                         stateName,
                         ttlEnabled,
                         keySerializer,
                         namespaceSerializer,
-                        listDescriptor.getElementSerializer()));
+                        listDescriptor.getElementSerializer());
+        stateInspectSchemas.putIfAbsent(stateName, schema);
         stateInspectSemanticSchemas.putIfAbsent(
                 stateName,
                 StateInspectSemanticSchemaExtractor.forList(
-                        keySerializer, namespaceSerializer, listDescriptor));
+                        schema.keySerializer(),
+                        schema.namespaceSerializer(),
+                        schema.listElementSerializer(),
+                        listDescriptor));
     }
 
     @SuppressWarnings("unchecked")
@@ -1077,8 +1089,7 @@ final class CobbleKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
             MapStateDescriptor<?, ?> mapDescriptor) {
         TypeSerializer<?> keySer = mapDescriptor.getKeySerializer();
         TypeSerializer<?> valueSer = mapDescriptor.getValueSerializer();
-        stateInspectSchemas.putIfAbsent(
-                stateName,
+        StateInspectSchema schema =
                 StateInspectSchema.forMap(
                         stateName,
                         stateName,
@@ -1086,11 +1097,16 @@ final class CobbleKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
                         keySerializer,
                         namespaceSerializer,
                         keySer,
-                        valueSer));
+                        valueSer);
+        stateInspectSchemas.putIfAbsent(stateName, schema);
         stateInspectSemanticSchemas.putIfAbsent(
                 stateName,
                 StateInspectSemanticSchemaExtractor.forMap(
-                        keySerializer, namespaceSerializer, mapDescriptor));
+                        schema.keySerializer(),
+                        schema.namespaceSerializer(),
+                        schema.mapUserKeySerializer(),
+                        schema.mapUserValueSerializer(),
+                        mapDescriptor));
     }
 
     private void registerTimerSchema(String stateName, TypeSerializer<?> timerSerializer) {
@@ -1098,17 +1114,17 @@ final class CobbleKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
             return;
         }
         TimerSerializer<?, ?> serializer = (TimerSerializer<?, ?>) timerSerializer;
-        stateInspectSchemas.putIfAbsent(
-                "timer:" + stateName,
+        StateInspectSchema schema =
                 StateInspectSchema.forTimer(
                         stateName,
                         CobblePriorityQueueSetFactory.timerQueueColumnFamilyName(stateName),
                         serializer.getKeySerializer(),
-                        serializer.getNamespaceSerializer()));
+                        serializer.getNamespaceSerializer());
+        stateInspectSchemas.putIfAbsent("timer:" + stateName, schema);
         stateInspectSemanticSchemas.putIfAbsent(
                 stateName,
                 StateInspectSemanticSchemaExtractor.forTimer(
-                        serializer.getKeySerializer(), serializer.getNamespaceSerializer()));
+                        schema.keySerializer(), schema.namespaceSerializer()));
     }
 
     private StateInspectSchemaStore buildSchemaStore() {

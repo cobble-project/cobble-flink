@@ -177,6 +177,12 @@ final class InspectTarget {
         if (inspectType.elementType() != null) {
             output.put("element_type", typeToJson(inspectType.elementType()));
         }
+        if (inspectType.keyType() != null) {
+            output.put("key_type", typeToJson(inspectType.keyType()));
+        }
+        if (inspectType.valueType() != null) {
+            output.put("value_type", typeToJson(inspectType.valueType()));
+        }
         return output;
     }
 }

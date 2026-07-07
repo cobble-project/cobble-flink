@@ -437,6 +437,34 @@ class StateInspectSchemaStoreTest {
     }
 
     @Test
+    void versionOneSidecarIsRejected() throws IOException {
+        // A version-1 sidecar (from before the snapshot-first format change) must be rejected
+        // with a clear version-mismatch error, not silently misread.
+        ByteArrayOutputStream out = new ByteArrayOutputStream();
+        out.write(StateInspectSchemaStore.MAGIC >> 24);
+        out.write(StateInspectSchemaStore.MAGIC >> 16);
+        out.write(StateInspectSchemaStore.MAGIC >> 8);
+        out.write(StateInspectSchemaStore.MAGIC);
+        out.write(0);
+        out.write(0);
+        out.write(0);
+        out.write(1); // version 1
+        out.write(0);
+        out.write(0);
+        out.write(0);
+        out.write(0); // count 0
+        byte[] bytes = out.toByteArray();
+
+        IOException error =
+                assertThrows(
+                        IOException.class,
+                        () -> StateInspectSchemaStore.read(new ByteArrayInputStream(bytes)));
+        assertTrue(error.getMessage().contains("Unsupported Cobble inspect schema version"));
+        assertTrue(error.getMessage().contains("1"));
+        assertTrue(error.getMessage().contains("expected 2"));
+    }
+
+    @Test
     void schemaEqualsAndHashCodeRoundTrip() throws IOException {
         StateInspectSchema original =
                 StateInspectSchema.forValue(
