@@ -2,6 +2,8 @@ package io.cobble.flink.table;
 
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -78,6 +80,48 @@ class CobbleStateLookupKeyEncoderTest {
         assertArrayEquals(expected, encoded.rowKey());
         assertEquals(
                 KeyGroupRangeAssignment.assignToKeyGroup(12, TOTAL_KEY_GROUPS), encoded.keyGroup());
+    }
+
+    @Test
+    void snapshotOnlySerializerEncodesLookupKey() throws Exception {
+        // IntSerializer is monitor-portable: the sidecar has snapshot bytes but NO
+        // serializedSerializerBytes. The lookup encoder must restore from snapshot alone.
+        StateInspectSchema schema =
+                StateInspectSchema.forValue(
+                        "orders",
+                        "cf",
+                        false,
+                        IntSerializer.INSTANCE,
+                        VoidNamespaceSerializer.INSTANCE,
+                        IntSerializer.INSTANCE);
+        assertNull(schema.keySerializer().serializedSerializerBytes());
+        assertNotNull(schema.keySerializer().snapshotBytes());
+
+        StateSourceConfig config =
+                valueConfig(
+                        fields(
+                                field("key", "INT", StateSourceField.Group.STATE_KEY, 0),
+                                field("value", "INT", StateSourceField.Group.VALUE, 0)),
+                        contract(fields(field("key", "INT", StateSourceField.Group.STATE_KEY, 0))));
+        CobbleStateSourceRuntime.RuntimeSchema runtimeSchema =
+                runtimeSchema(
+                        schema,
+                        StateInspectSemanticSchema.forValue(
+                                StateInspectType.scalar("INT"),
+                                StateInspectType.unknown(),
+                                StateInspectType.scalar("INT")));
+
+        CobbleStateLookupKeyEncoder encoder =
+                new CobbleStateLookupKeyEncoder(config, runtimeSchema, new int[] {0});
+
+        RowData keyRow = singleIntRow(7);
+        CobbleStateLookupKeyEncoder.EncodedStateLookupKey encoded =
+                encoder.encode(keyRow, TOTAL_KEY_GROUPS);
+
+        byte[] expected = concat(serialize(IntSerializer.INSTANCE, 7), namespaceBytes());
+        assertArrayEquals(expected, encoded.rowKey());
+        assertEquals(
+                KeyGroupRangeAssignment.assignToKeyGroup(7, TOTAL_KEY_GROUPS), encoded.keyGroup());
     }
 
     @Test

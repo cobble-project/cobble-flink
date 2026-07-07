@@ -1,8 +1,11 @@
 package io.cobble.flink.table;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import io.cobble.flink.common.inspect.StateInspectField;
 import io.cobble.flink.common.inspect.StateInspectSchema;
 import io.cobble.flink.common.inspect.StateInspectSemanticSchema;
 import io.cobble.flink.common.inspect.StateInspectType;
@@ -13,7 +16,12 @@ import org.apache.flink.api.common.typeutils.base.StringSerializer;
 import org.apache.flink.core.memory.DataOutputSerializer;
 import org.apache.flink.runtime.state.VoidNamespace;
 import org.apache.flink.runtime.state.VoidNamespaceSerializer;
+import org.apache.flink.table.data.GenericRowData;
 import org.apache.flink.table.data.RowData;
+import org.apache.flink.table.data.StringData;
+import org.apache.flink.table.runtime.typeutils.RowDataSerializer;
+import org.apache.flink.table.types.logical.BigIntType;
+import org.apache.flink.table.types.logical.VarCharType;
 import org.junit.jupiter.api.Test;
 
 import java.util.List;
@@ -202,6 +210,67 @@ class CobbleStateRowDecoderTest {
         assertEquals(5, rows.get(0).getInt(0));
         assertEquals("ns", rows.get(0).getString(1).toString());
         assertEquals(9, rows.get(0).getInt(2));
+    }
+
+    @Test
+    void snapshotOnlyRowDataDecodesInSourceRowDecoder() throws Exception {
+        // RowDataSerializer with primitive field serializers is monitor-portable: the sidecar
+        // has snapshot bytes but NO serializedSerializerBytes. The decoder must restore from
+        // snapshot alone.
+        RowDataSerializer rowDataSerializer =
+                new RowDataSerializer(new BigIntType(false), VarCharType.STRING_TYPE);
+        StateInspectSchema schema =
+                StateInspectSchema.forValue(
+                        "row-data-state",
+                        "cf",
+                        false,
+                        IntSerializer.INSTANCE,
+                        VoidNamespaceSerializer.INSTANCE,
+                        rowDataSerializer);
+        // Verify portability: no serialized fallback.
+        assertNull(schema.valueSerializer().serializedSerializerBytes());
+        assertNotNull(schema.valueSerializer().snapshotBytes());
+
+        CobbleStateRowDecoder decoder =
+                new CobbleStateRowDecoder(
+                        config(
+                                "value",
+                                fields(
+                                        "key",
+                                        "INT",
+                                        StateSourceField.Group.STATE_KEY,
+                                        "f0",
+                                        "BIGINT NOT NULL",
+                                        StateSourceField.Group.VALUE,
+                                        "f1",
+                                        "VARCHAR(2147483647)",
+                                        StateSourceField.Group.VALUE)),
+                        runtimeSchema(
+                                schema,
+                                StateInspectSemanticSchema.forValue(
+                                        StateInspectType.scalar("INT"),
+                                        StateInspectType.unknown(),
+                                        StateInspectType.row(
+                                                java.util.Arrays.asList(
+                                                        new StateInspectField(
+                                                                "f0",
+                                                                StateInspectType.scalar(
+                                                                        "BIGINT NOT NULL")),
+                                                        new StateInspectField(
+                                                                "f1",
+                                                                StateInspectType.scalar(
+                                                                        "VARCHAR(2147483647)")))))));
+        byte[] rowKey = concat(serialize(IntSerializer.INSTANCE, 5), namespaceBytes());
+        byte[] valueBytes =
+                serialize(
+                        rowDataSerializer, GenericRowData.of(42L, StringData.fromString("hello")));
+
+        List<RowData> rows = decoder.decode(rowKey, new byte[][] {valueBytes}, "0:0:1", 0);
+
+        assertEquals(1, rows.size());
+        assertEquals(5, rows.get(0).getInt(0));
+        assertEquals(42L, rows.get(0).getLong(1));
+        assertEquals("hello", rows.get(0).getString(2).toString());
     }
 
     private static CobbleStateSourceRuntime.RuntimeSchema runtimeSchema(

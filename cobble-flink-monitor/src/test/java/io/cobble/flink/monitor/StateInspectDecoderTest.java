@@ -3,6 +3,7 @@ package io.cobble.flink.monitor;
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -1006,6 +1007,148 @@ class StateInspectDecoderTest {
 
         assertFalse(target(valueSchema).toJson().containsKey("value_part_label"));
         assertFalse(target(reducingSchema).toJson().containsKey("value_part_label"));
+    }
+
+    @Test
+    void snapshotOnlyPortableSerializerDecodesCorrectly() throws Exception {
+        // IntSerializer is monitor-portable: the sidecar has snapshot bytes but NO
+        // serializedSerializerBytes. The decoder must restore from snapshot alone.
+        StateInspectSchema schema =
+                StateInspectSchema.forValue(
+                        "portable-value",
+                        "cf",
+                        false,
+                        IntSerializer.INSTANCE,
+                        VoidNamespaceSerializer.INSTANCE,
+                        IntSerializer.INSTANCE);
+        // Verify the portable serializer has no serialized fallback.
+        assertNull(schema.valueSerializer().serializedSerializerBytes());
+        assertNotNull(schema.valueSerializer().snapshotBytes());
+
+        InspectTarget target =
+                semanticTarget(
+                        schema,
+                        StateInspectSemanticSchema.forValue(
+                                StateInspectType.scalar("INT"),
+                                StateInspectType.unknown(),
+                                StateInspectType.scalar("INT")));
+        byte[] rowKey = keyWithVoidNamespace(serialize(IntSerializer.INSTANCE, 42));
+        byte[][] columns = new byte[][] {serialize(IntSerializer.INSTANCE, 99)};
+
+        StateInspectDecoder.DecodedRow row = StateInspectDecoder.decode(target, rowKey, columns);
+
+        assertNull(row.decodeError);
+        assertEquals(42, row.decodedKey.get("key"));
+        assertEquals(99, row.decodedValue);
+        // Semantic parts also decoded from snapshot-restored serializer.
+        assertNotNull(row.decodedParts);
+        assertEquals(42, ((Map<?, ?>) row.decodedParts.get("state_key")).get("value"));
+        assertEquals(99, ((Map<?, ?>) row.decodedParts.get("value")).get("value"));
+    }
+
+    @Test
+    void partialSemanticPartsSurviveWhenOnePartFails() throws Exception {
+        // State key is IntSerializer (portable, decodes successfully). Value uses a serializer
+        // whose snapshot and serialized bytes are both null — restoreSerializer returns null,
+        // causing the value part to fail. The state_key part must still be present.
+        StateInspectSchema schema =
+                StateInspectSchema.forValue(
+                        "partial-fail",
+                        "cf",
+                        false,
+                        IntSerializer.INSTANCE,
+                        VoidNamespaceSerializer.INSTANCE,
+                        IntSerializer.INSTANCE);
+        // Replace the value serializer with an unrestorable one (null snapshot, null bytes).
+        SerializerInspectSchema unrestorable = serializerSchema("missing.Class", -1);
+        setField(schema, "valueSerializer", unrestorable);
+
+        InspectTarget target =
+                semanticTarget(
+                        schema,
+                        StateInspectSemanticSchema.forValue(
+                                StateInspectType.scalar("INT"),
+                                StateInspectType.unknown(),
+                                StateInspectType.scalar("INT")));
+        byte[] rowKey = keyWithVoidNamespace(serialize(IntSerializer.INSTANCE, 42));
+        byte[][] columns = new byte[][] {serialize(IntSerializer.INSTANCE, 99)};
+
+        StateInspectDecoder.DecodedRow row = StateInspectDecoder.decode(target, rowKey, columns);
+
+        // Both decodedParts and decodeError must coexist — row-level failure semantics.
+        assertNotNull(row.decodedParts, "partial semantic parts must survive");
+        assertNotNull(row.decodeError, "decode error must be set for the failed part");
+        assertEquals(42, ((Map<?, ?>) row.decodedParts.get("state_key")).get("value"));
+        assertFalse(row.decodedParts.containsKey("value"), "failed part must be omitted");
+    }
+
+    @Test
+    void timerSemanticPartialSuccessBehavesConsistently() throws Exception {
+        // Timer with StringSerializer key and VoidNamespace. The state_key semantic part decodes
+        // successfully. VoidNamespace means no namespace part is emitted. This verifies the
+        // timer path returns partial results via SemanticDecodeResult instead of throwing.
+        StateInspectSchema schema =
+                StateInspectSchema.forTimer(
+                        "timer-partial",
+                        "cf",
+                        StringSerializer.INSTANCE,
+                        VoidNamespaceSerializer.INSTANCE);
+
+        InspectTarget target =
+                semanticTarget(
+                        schema,
+                        StateInspectSemanticSchema.forValue(
+                                StateInspectType.scalar("VARCHAR(2147483647)"),
+                                StateInspectType.unknown(),
+                                StateInspectType.unknown()));
+        byte[] rowKey = timerKeyWithVoidNamespace(1000L, "user-1");
+
+        StateInspectDecoder.DecodedRow row =
+                StateInspectDecoder.decode(target, rowKey, new byte[][] {});
+
+        // Timer semantic parts: state_key should decode, no namespace (VoidNamespace).
+        assertNotNull(row.decodedParts, "timer semantic parts must be returned");
+        assertNull(row.decodeError, "no decode error expected for valid timer key");
+        assertTrue(row.decodedParts.containsKey("state_key"), "state_key must be present");
+        assertFalse(row.decodedParts.containsKey("namespace"), "VoidNamespace has no part");
+    }
+
+    @Test
+    void pojoSemanticFieldsAppearInTargetJsonWithoutDecodingRows() throws Exception {
+        // A POJO state's semantic schema (ROW with field names from the snapshot) must appear
+        // in InspectTarget.toJson() — this is independent of runtime decode.
+        StateInspectSchema schema =
+                StateInspectSchema.forValue(
+                        "pojo-state",
+                        "cf",
+                        false,
+                        IntSerializer.INSTANCE,
+                        VoidNamespaceSerializer.INSTANCE,
+                        IntSerializer.INSTANCE);
+        StateInspectSemanticSchema semantic =
+                StateInspectSemanticSchema.forValue(
+                        StateInspectType.scalar("INT"),
+                        StateInspectType.unknown(),
+                        StateInspectType.row(
+                                Arrays.asList(
+                                        new StateInspectField("id", StateInspectType.scalar("INT")),
+                                        new StateInspectField(
+                                                "name",
+                                                StateInspectType.scalar("VARCHAR(2147483647)")))));
+        InspectTarget target = semanticTarget(schema, semantic);
+
+        Map<String, Object> json = target.toJson();
+        assertTrue(json.containsKey("semantic_parts"));
+
+        Map<?, ?> semanticParts = (Map<?, ?>) json.get("semantic_parts");
+        assertTrue(semanticParts.containsKey("value"));
+
+        Map<?, ?> valuePart = (Map<?, ?>) semanticParts.get("value");
+        assertEquals("ROW", valuePart.get("kind"));
+        List<?> fields = (List<?>) valuePart.get("fields");
+        assertEquals(2, fields.size());
+        assertEquals("id", ((Map<?, ?>) fields.get(0)).get("name"));
+        assertEquals("name", ((Map<?, ?>) fields.get(1)).get("name"));
     }
 
     private static InspectTarget target(StateInspectSchema schema) {

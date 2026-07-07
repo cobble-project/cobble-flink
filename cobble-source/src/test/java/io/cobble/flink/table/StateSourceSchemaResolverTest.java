@@ -1,6 +1,7 @@
 package io.cobble.flink.table;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -227,6 +228,52 @@ class StateSourceSchemaResolverTest {
         assertEquals(
                 Arrays.asList(
                         "key:INT:STATE_KEY", "map_key:INT:MAP_KEY", "map_value:VARCHAR:MAP_VALUE"),
+                describe(resolved.outputFields()));
+    }
+
+    @Test
+    void sourceDdlFromSemanticSchemaWithoutLiveSerializerRestore() throws Exception {
+        // The semantic schema can come from serializer-snapshot extraction such as POJO/RowData
+        // metadata, but the resolver itself should only need that semantic schema. It must not
+        // restore the live value serializer while deriving output fields.
+        Path root = tempDir.resolve("semantic-schema");
+        StateInspectSchema schema =
+                StateInspectSchema.forValue(
+                        "semantic-state",
+                        "cf",
+                        false,
+                        IntSerializer.INSTANCE,
+                        VoidNamespaceSerializer.INSTANCE,
+                        IntSerializer.INSTANCE);
+        // Verify the value serializer is snapshot-only (no live fallback); the resolver should not
+        // need to restore it for DDL derivation.
+        assertNull(schema.valueSerializer().serializedSerializerBytes());
+        writeRegistry(
+                root,
+                "op-a",
+                100L,
+                store(
+                        schema,
+                        "semantic-state",
+                        StateInspectSemanticSchema.forValue(
+                                scalar("INT"),
+                                unknown(),
+                                row(
+                                        field("id", scalar("INT")),
+                                        field("name", scalar("VARCHAR"))))));
+
+        StateSourceResolvedSchema resolved =
+                StateSourceSchemaResolver.resolve(
+                        uri(root),
+                        opts("semantic-state", "op-a", null),
+                        "latest",
+                        schema(
+                                physical("key", DataTypes.INT()),
+                                physical("id", DataTypes.INT()),
+                                physical("name", DataTypes.STRING())));
+
+        assertEquals(
+                Arrays.asList("key:INT:STATE_KEY", "id:INT:VALUE", "name:VARCHAR:VALUE"),
                 describe(resolved.outputFields()));
     }
 

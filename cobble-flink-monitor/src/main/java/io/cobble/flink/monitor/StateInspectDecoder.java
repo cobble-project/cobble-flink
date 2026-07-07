@@ -64,7 +64,11 @@ final class StateInspectDecoder {
             decodeError = appendError(decodeError, message(e));
         }
         try {
-            decodedParts = decodeSemanticParts(target, rowKey, columns);
+            SemanticDecodeResult semanticResult = decodeSemanticParts(target, rowKey, columns);
+            decodedParts = semanticResult.parts;
+            if (semanticResult.error != null) {
+                decodeError = appendError(decodeError, semanticResult.error);
+            }
         } catch (Exception e) {
             decodeError = appendError(decodeError, message(e));
         }
@@ -307,142 +311,146 @@ final class StateInspectDecoder {
         return values;
     }
 
-    private static Map<String, Object> decodeSemanticParts(
-            InspectTarget target, byte[] rowKey, byte[][] columns) throws IOException {
+    private static SemanticDecodeResult decodeSemanticParts(
+            InspectTarget target, byte[] rowKey, byte[][] columns) {
         if (target == null
                 || target.schema == null
                 || target.semanticSchema == null
                 || target.semanticSchema.isEmpty()) {
-            return null;
+            return new SemanticDecodeResult(null, null);
         }
-        StateInspectSchema schema = target.schema;
-        StateInspectSemanticSchema semanticSchema = target.semanticSchema;
-        if (schema.stateKind() == StateKind.TIMER) {
-            return decodeTimerSemanticParts(schema, semanticSchema, rowKey);
-        }
-        KeySlices slices =
-                schema.stateKind() == StateKind.MAP
-                        ? splitMapKey(schema, rowKey)
-                        : splitKeyAndNamespace(schema, rowKey);
-        Map<String, Object> output = new LinkedHashMap<>();
-        String decodeError = null;
-        decodeError =
-                addSemanticPart(
-                        output,
-                        decodeError,
-                        "state_key",
-                        semanticSchema.stateKey(),
-                        schema.keySerializer(),
-                        slices.key);
-        if (!isVoidNamespaceSerializer(schema.namespaceSerializer())) {
-            decodeError =
-                    addSemanticPart(
-                            output,
-                            decodeError,
-                            "namespace",
-                            semanticSchema.namespace(),
-                            schema.namespaceSerializer(),
-                            slices.namespace);
-        }
-        if (schema.stateKind() == StateKind.MAP) {
-            decodeError =
-                    addSemanticPart(
-                            output,
-                            decodeError,
-                            "map_key",
-                            semanticSchema.mapUserKey(),
-                            schema.mapUserKeySerializer(),
-                            slices.mapKey);
-            byte[] mapValueColumn = firstColumn(columns);
-            if (mapValueColumn != null) {
-                byte[] mapValuePayload = unwrapMapValuePayload(mapValueColumn);
-                if (mapValuePayload == null && isKnownSemanticType(semanticSchema.mapUserValue())) {
-                    // Present-null MapState entry: emit a literal null so callers can
-                    // distinguish it from a wrapped scalar JSON object whose nested value is
-                    // null. The map_value key is still present in the output to indicate the
-                    // row exists. Absent rows (no column at all) skip this branch entirely.
-                    output.put("map_value", null);
-                } else {
-                    decodeError =
-                            addSemanticPart(
-                                    output,
-                                    decodeError,
-                                    "map_value",
-                                    semanticSchema.mapUserValue(),
-                                    schema.mapUserValueSerializer(),
-                                    mapValuePayload);
-                }
+        try {
+            StateInspectSchema schema = target.schema;
+            StateInspectSemanticSchema semanticSchema = target.semanticSchema;
+            if (schema.stateKind() == StateKind.TIMER) {
+                return decodeTimerSemanticParts(schema, semanticSchema, rowKey);
             }
-        } else if (schema.stateKind() == StateKind.VALUE
-                || schema.stateKind() == StateKind.REDUCING
-                || schema.stateKind() == StateKind.AGGREGATING) {
+            KeySlices slices =
+                    schema.stateKind() == StateKind.MAP
+                            ? splitMapKey(schema, rowKey)
+                            : splitKeyAndNamespace(schema, rowKey);
+            Map<String, Object> output = new LinkedHashMap<>();
+            String decodeError = null;
             decodeError =
                     addSemanticPart(
                             output,
                             decodeError,
-                            "value",
-                            semanticSchema.value(),
-                            schema.valueSerializer(),
-                            firstColumn(columns));
-        } else if (schema.stateKind() == StateKind.LIST) {
-            decodeError =
-                    addSemanticListPart(
-                            output,
-                            decodeError,
-                            semanticSchema.listElement(),
-                            schema.listElementSerializer(),
-                            firstColumn(columns));
+                            "state_key",
+                            semanticSchema.stateKey(),
+                            schema.keySerializer(),
+                            slices.key);
+            if (!isVoidNamespaceSerializer(schema.namespaceSerializer())) {
+                decodeError =
+                        addSemanticPart(
+                                output,
+                                decodeError,
+                                "namespace",
+                                semanticSchema.namespace(),
+                                schema.namespaceSerializer(),
+                                slices.namespace);
+            }
+            if (schema.stateKind() == StateKind.MAP) {
+                decodeError =
+                        addSemanticPart(
+                                output,
+                                decodeError,
+                                "map_key",
+                                semanticSchema.mapUserKey(),
+                                schema.mapUserKeySerializer(),
+                                slices.mapKey);
+                byte[] mapValueColumn = firstColumn(columns);
+                if (mapValueColumn != null) {
+                    byte[] mapValuePayload = unwrapMapValuePayload(mapValueColumn);
+                    if (mapValuePayload == null
+                            && isKnownSemanticType(semanticSchema.mapUserValue())) {
+                        // Present-null MapState entry: emit a literal null so callers can
+                        // distinguish it from a wrapped scalar JSON object whose nested value is
+                        // null. The map_value key is still present in the output to indicate the
+                        // row exists. Absent rows (no column at all) skip this branch entirely.
+                        output.put("map_value", null);
+                    } else {
+                        decodeError =
+                                addSemanticPart(
+                                        output,
+                                        decodeError,
+                                        "map_value",
+                                        semanticSchema.mapUserValue(),
+                                        schema.mapUserValueSerializer(),
+                                        mapValuePayload);
+                    }
+                }
+            } else if (schema.stateKind() == StateKind.VALUE
+                    || schema.stateKind() == StateKind.REDUCING
+                    || schema.stateKind() == StateKind.AGGREGATING) {
+                decodeError =
+                        addSemanticPart(
+                                output,
+                                decodeError,
+                                "value",
+                                semanticSchema.value(),
+                                schema.valueSerializer(),
+                                firstColumn(columns));
+            } else if (schema.stateKind() == StateKind.LIST) {
+                decodeError =
+                        addSemanticListPart(
+                                output,
+                                decodeError,
+                                semanticSchema.listElement(),
+                                schema.listElementSerializer(),
+                                firstColumn(columns));
+            }
+            // Return partial results even when some parts failed — decode failure is row-level,
+            // never whole-inspect failure. The caller surfaces the error alongside the parts.
+            return new SemanticDecodeResult(output.isEmpty() ? null : output, decodeError);
+        } catch (Exception e) {
+            return new SemanticDecodeResult(null, message(e));
         }
-        if (decodeError != null) {
-            throw new IOException(decodeError);
-        }
-        return output.isEmpty() ? null : output;
     }
 
-    private static Map<String, Object> decodeTimerSemanticParts(
-            StateInspectSchema schema, StateInspectSemanticSchema semanticSchema, byte[] rowKey)
-            throws IOException {
-        requireLength(rowKey, Long.BYTES, "timer timestamp");
-        ByteArrayInputStream bytes = new ByteArrayInputStream(rowKey);
-        DataInputViewStreamWrapper input = new DataInputViewStreamWrapper(bytes);
-        input.readLong();
-        int keyStart = rowKey.length - bytes.available();
-        restore(schema.keySerializer()).deserialize(input);
-        int namespaceStart = rowKey.length - bytes.available();
-        if (isVoidNamespaceSerializer(schema.namespaceSerializer())) {
-            requireLength(
-                    slice(rowKey, namespaceStart, rowKey.length - namespaceStart),
-                    1,
-                    "timer namespace");
-            input.readByte();
-        } else {
-            restore(schema.namespaceSerializer()).deserialize(input);
-        }
-        int end = rowKey.length - bytes.available();
+    private static SemanticDecodeResult decodeTimerSemanticParts(
+            StateInspectSchema schema, StateInspectSemanticSchema semanticSchema, byte[] rowKey) {
+        try {
+            requireLength(rowKey, Long.BYTES, "timer timestamp");
+            ByteArrayInputStream bytes = new ByteArrayInputStream(rowKey);
+            DataInputViewStreamWrapper input = new DataInputViewStreamWrapper(bytes);
+            input.readLong();
+            int keyStart = rowKey.length - bytes.available();
+            restore(schema.keySerializer()).deserialize(input);
+            int namespaceStart = rowKey.length - bytes.available();
+            if (isVoidNamespaceSerializer(schema.namespaceSerializer())) {
+                requireLength(
+                        slice(rowKey, namespaceStart, rowKey.length - namespaceStart),
+                        1,
+                        "timer namespace");
+                input.readByte();
+            } else {
+                restore(schema.namespaceSerializer()).deserialize(input);
+            }
+            int end = rowKey.length - bytes.available();
 
-        Map<String, Object> output = new LinkedHashMap<>();
-        String decodeError =
-                addSemanticPart(
-                        output,
-                        null,
-                        "state_key",
-                        semanticSchema.stateKey(),
-                        schema.keySerializer(),
-                        slice(rowKey, keyStart, namespaceStart - keyStart));
-        if (!isVoidNamespaceSerializer(schema.namespaceSerializer())) {
-            decodeError =
+            Map<String, Object> output = new LinkedHashMap<>();
+            String decodeError =
                     addSemanticPart(
                             output,
-                            decodeError,
-                            "namespace",
-                            semanticSchema.namespace(),
-                            schema.namespaceSerializer(),
-                            slice(rowKey, namespaceStart, end - namespaceStart));
+                            null,
+                            "state_key",
+                            semanticSchema.stateKey(),
+                            schema.keySerializer(),
+                            slice(rowKey, keyStart, namespaceStart - keyStart));
+            if (!isVoidNamespaceSerializer(schema.namespaceSerializer())) {
+                decodeError =
+                        addSemanticPart(
+                                output,
+                                decodeError,
+                                "namespace",
+                                semanticSchema.namespace(),
+                                schema.namespaceSerializer(),
+                                slice(rowKey, namespaceStart, end - namespaceStart));
+            }
+            return new SemanticDecodeResult(output.isEmpty() ? null : output, decodeError);
+        } catch (Exception e) {
+            return new SemanticDecodeResult(null, message(e));
         }
-        if (decodeError != null) {
-            throw new IOException(decodeError);
-        }
-        return output.isEmpty() ? null : output;
     }
 
     private static String addSemanticPart(
@@ -1174,6 +1182,17 @@ final class StateInspectDecoder {
                     || decodedValue != null
                     || decodedParts != null
                     || decodeError != null;
+        }
+    }
+
+    /** Carries the partial semantic-parts result and any per-part decode error. */
+    private static final class SemanticDecodeResult {
+        final Map<String, Object> parts;
+        final String error;
+
+        SemanticDecodeResult(Map<String, Object> parts, String error) {
+            this.parts = parts;
+            this.error = error;
         }
     }
 
