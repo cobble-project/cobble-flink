@@ -72,7 +72,7 @@ class MonitorAppJsTest {
                         + "async function fetch() { return { ok: true, json: async () => ({}) }; }\n"
                         + appJs
                         + "\nconst meta = { source_open: true, source_path: 'file:///tmp/cobble-table', selected_checkpoint: 'latest', selected_checkpoint_id: 9, selected_operator_id: 'op-1', selected_checkpoint_directory: 'file:///tmp/checkpoints/job-1/chk-9' };\n"
-                        + "const sinkTarget = { kind: 'sink', key_fields: [{ name: 'id', logical_type: 'BIGINT' }], value_fields: [{ name: 'name', logical_type: 'VARCHAR(2147483647)' }] };\n"
+                        + "const sinkTarget = { kind: 'sink', key_fields: [{ name: 'id', logical_type: 'BIGINT', row_index: 1 }], value_fields: [{ name: 'name', logical_type: 'VARCHAR(2147483647)', row_index: 0 }] };\n"
                         + "const stateTarget = { kind: 'state', id: 'orders', name: 'orders', state_kind: 'MAP', semantic_parts: { state_key: { kind: 'SCALAR', logical_type: 'BIGINT' }, map_key: { kind: 'SCALAR', logical_type: 'VARCHAR(2147483647)' }, map_value: { kind: 'SCALAR', logical_type: 'BIGINT' } }, serializer_classes: { namespace: 'org.apache.flink.runtime.state.VoidNamespaceSerializer' } };\n"
                         + "const timerTarget = { kind: 'timer', id: '_timer_state/event_t', name: '_timer_state/event_t', state_kind: 'TIMER', semantic_parts: { state_key: { kind: 'SCALAR', logical_type: 'BIGINT' } }, serializer_classes: { namespace: 'org.apache.flink.runtime.state.VoidNamespaceSerializer' } };\n"
                         + "const sinkSql = sinkSourceSql(sinkTarget, meta);\n"
@@ -91,15 +91,18 @@ class MonitorAppJsTest {
 
         assertTrue(stdout.contains("'connector' = 'cobble'"));
         assertTrue(stdout.contains("PRIMARY KEY (`id`) NOT ENFORCED"));
+        // Sink DDL column order must follow row_index (name before id) so the connector accepts it.
+        assertTrue(stdout.contains("`name` VARCHAR(2147483647)"));
+        assertTrue(stdout.indexOf("`name` VARCHAR(2147483647)") < stdout.indexOf("`id` BIGINT"));
         assertTrue(stdout.contains("same source table for scan queries and temporal lookup joins"));
         assertTrue(stdout.contains("'source.kind' = 'state'"));
         assertTrue(stdout.contains("'path' = 'file:///tmp/checkpoints/job-1'"));
         assertTrue(stdout.contains("'state.operator-id' = 'op-1'"));
         assertTrue(stdout.contains("'state.name' = 'orders'"));
         assertTrue(stdout.contains("'state.kind' = 'map'"));
-        assertTrue(stdout.contains("PRIMARY KEY (`state_key`, `map_key`) NOT ENFORCED"));
+        assertTrue(stdout.contains("PRIMARY KEY (`key`, `map_key`) NOT ENFORCED"));
         assertTrue(stdout.contains("exact-key temporal lookup joins"));
-        assertTrue(stdout.contains("\"name\":\"state_key\""));
+        assertTrue(stdout.contains("\"name\":\"key\""));
         assertTrue(stdout.contains("\"name\":\"map_key\""));
         assertTrue(stdout.contains("\"name\":\"map_value\""));
         assertTrue(stdout.contains("Timer state is visible in the monitor"));

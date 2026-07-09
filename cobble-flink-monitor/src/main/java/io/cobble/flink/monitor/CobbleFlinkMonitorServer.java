@@ -726,8 +726,26 @@ public final class CobbleFlinkMonitorServer {
                     timerFilter == null && !hasPostScanFilter(stateFilter, sinkKeyFilter)
                             ? limit + 1
                             : Math.max(limit + 1, config.inspectMaxLimit);
-            try (ScanOptions options = scanOptions(target.columnFamily, columns, rawLimit);
-                    ScanCursor cursor = reader.scanWithOptions(bucket, start, end, options)) {
+            ScanCursor cursor;
+            try {
+                cursor =
+                        reader.scanWithOptions(
+                                bucket,
+                                start,
+                                end,
+                                scanOptions(target.columnFamily, columns, rawLimit));
+            } catch (RuntimeException e) {
+                // A key-group's shard may not have registered the requested column family when it
+                // never wrote any data for that state. The checkpoint's global snapshot still lists
+                // the column family (it was registered by at least one subtask), so this is not an
+                // error: the shard simply has no rows for this state in that key-group. Treat the
+                // scan as empty and let the caller advance to the next bucket.
+                if (isUnknownColumnFamily(e)) {
+                    return;
+                }
+                throw e;
+            }
+            try (ScanCursor ignored = cursor) {
                 ScanCursor.Entry entry = cursor.nextEntry();
                 while (entry != null && items.size() < limit) {
                     if (!skippedStartAfter) {
@@ -773,6 +791,25 @@ public final class CobbleFlinkMonitorServer {
                             && (stateFilter.mapKeyPrefix != null
                                     || stateFilter.mapKeyBytesPrefix != null
                                     || stateFilter.hasSemanticPartFilters()));
+        }
+
+        /**
+         * Returns true when the exception means the scanned shard has not registered the requested
+         * column family. This happens when a key-group never wrote data for a state; the global
+         * snapshot still lists the column family because at least one subtask registered it.
+         */
+        static boolean isUnknownColumnFamily(RuntimeException e) {
+            String message = e.getMessage();
+            if (message == null) {
+                return false;
+            }
+            if (message.startsWith("IO error: ")) {
+                message = message.substring("IO error: ".length());
+            }
+            return message.equals("Unknown column family")
+                    || message.startsWith("Unknown column family:")
+                    || message.startsWith("Unknown column family ")
+                    || message.startsWith("Unknown column family '");
         }
 
         private int currentTotalBuckets() {

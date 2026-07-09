@@ -1899,7 +1899,7 @@ function stateOverviewGroups(target) {
 
 function rawStateOverviewGroups(target) {
   const groups = [
-    { id: 'state_key', label: 'State key', fields: [{ name: 'state_key', logical_type: 'BYTES' }] },
+    { id: 'state_key', label: 'State key', fields: [{ name: 'key', logical_type: 'BYTES' }] },
   ]
   if (!isVoidNamespaceTarget(target)) {
     groups.push({
@@ -1923,7 +1923,7 @@ function rawStateOverviewGroups(target) {
     groups.push({
       id: 'list_element',
       label: 'List element',
-      fields: [{ name: 'element', logical_type: 'BYTES' }],
+      fields: [{ name: 'value', logical_type: 'BYTES' }],
     })
   } else if (target?.kind === 'timer' || target?.state_kind === 'TIMER') {
     groups.push({
@@ -1964,12 +1964,14 @@ function overviewFieldsFromType(groupId, type) {
 }
 
 function overviewFallbackFieldName(groupId) {
+  // Column names must match what the Cobble state source connector
+  // (StateSourceSchemaResolver) expects: state key is "key", list element is "value".
   const names = {
-    state_key: 'state_key',
+    state_key: 'key',
     namespace: 'namespace',
     map_key: 'map_key',
     value: 'value',
-    list_element: 'element',
+    list_element: 'value',
     map_value: 'map_value',
     timestamp: 'timestamp',
   }
@@ -2078,7 +2080,14 @@ function sinkSourceNote(keyFields) {
 function sinkSourceSql(target, meta = state.meta) {
   const keyFields = target.key_fields || []
   const valueFields = target.value_fields || []
-  const fields = [...keyFields, ...valueFields]
+  // The sink source connector validates that DDL physical column order matches the persisted
+  // sink schema rowIndex layout. Sort all fields by row_index so the generated DDL is accepted
+  // by the connector without manual reordering.
+  const fields = [...keyFields, ...valueFields].sort((a, b) => {
+    const ra = a?.row_index ?? a?.rowIndex ?? 0
+    const rb = b?.row_index ?? b?.rowIndex ?? 0
+    return ra - rb
+  })
   const tableName = quoteSqlIdentifier(sourceTableName('cobble_source', meta?.source_path))
   const columnLines = fields.map((field) => (
     `  ${quoteSqlIdentifier(field.name)} ${field.logical_type || 'BYTES'}`
