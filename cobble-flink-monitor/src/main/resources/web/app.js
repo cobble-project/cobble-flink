@@ -1209,11 +1209,23 @@ function semanticTableFields(type) {
   if (Array.isArray(type.fields) && type.fields.length > 0) {
     return type.fields.map((field, index) => ({
       name: field?.name || `f${index}`,
-      logical_type: field?.type?.logical_type || '',
+      logical_type: semanticDisplayTypeLabel(field?.type),
       index,
     }))
   }
-  return [{ name: 'value', logical_type: type.logical_type || '', index: 0 }]
+  return [{ name: 'value', logical_type: semanticDisplayTypeLabel(type), index: 0 }]
+}
+
+function semanticDisplayTypeLabel(type) {
+  return overviewTypeLabel(type).replace(/`/g, '')
+}
+
+function renderTypeLabel(typeLabel) {
+  return escapeHtml(typeLabel)
+    .replace(/&lt;/g, '&lt;<wbr>')
+    .replace(/&gt;/g, '<wbr>&gt;')
+    .replace(/,/g, ',<wbr>')
+    .replace(/ /g, ' <wbr>')
 }
 
 function stateTableLayout(target) {
@@ -1352,10 +1364,28 @@ function renderSemanticTableValue(value, displayId) {
   if (Array.isArray(value.values)) {
     return renderDecodedSection(value.values, { state_kind: 'LIST' }, displayId)
   }
+  if (Array.isArray(value.entries)) {
+    return renderDecodedMapEntries(value.entries)
+  }
   if (Array.isArray(value.fields)) {
     return renderDecodedBlock(value.fields.map((field) => renderDecodedPair(field.name, field.value)))
   }
   return renderDecodedValue(value)
+}
+
+function renderDecodedMapEntries(entries = []) {
+  if (!entries.length) return '<span class="muted-text">empty map</span>'
+  return renderDecodedBlock(entries.map((entry, index) => (
+    `<div class="decoded-row">
+      <span class="decoded-label">#${index}</span>
+      <div class="decoded-value">
+        ${renderDecodedBlock([
+          renderDecodedPair('key', entry?.key ?? null),
+          renderDecodedPair('value', entry?.value ?? null),
+        ])}
+      </div>
+    </div>`
+  )), 'decoded-map')
 }
 
 function renderStateRawFallback(group, index, item, target, displayId) {
@@ -1486,7 +1516,7 @@ function renderSinkFieldHeaders(fields, fallbackLabel) {
     return `
       <th class="sink-field-header ${className}">
         <span>${escapeHtml(name)}</span>
-        ${type ? `<small>${escapeHtml(truncateText(type, 80))}</small>` : ''}
+        ${type ? `<small>${renderTypeLabel(truncateText(type, 80))}</small>` : ''}
       </th>
     `
   }).join('')
@@ -1688,6 +1718,9 @@ function renderDecodedValue(value, serializerClass = null) {
   if (value === null || value === undefined) return '<span class="muted-text">null</span>'
   if (isRawBytesJson(value)) {
     return `${renderCode(value.b64)}${renderUtf8Pill(value.utf8)}`
+  }
+  if (typeof value === 'object' && value.kind) {
+    return renderSemanticTableValue(value, '')
   }
   if (Array.isArray(value)) {
     return renderDecodedBlock(value.map((item, index) => renderDecodedPair(String(index), item)))
@@ -1989,6 +2022,9 @@ function overviewTypeLabel(type) {
   if (type.kind === 'LIST' && type.element_type) {
     return `ARRAY<${overviewTypeLabel(type.element_type)}>`
   }
+  if (type.kind === 'MAP' && type.key_type && type.value_type) {
+    return `MAP<${overviewTypeLabel(type.key_type)}, ${overviewTypeLabel(type.value_type)}>`
+  }
   return 'BYTES'
 }
 
@@ -2245,7 +2281,7 @@ function stateSourceRequiredPartIds(target) {
 }
 
 function stateSourceTypeUsable(type) {
-  if (!type || type.kind === 'UNKNOWN' || type.kind === 'LIST') return false
+  if (!type || type.kind === 'UNKNOWN' || type.kind === 'LIST' || type.kind === 'MAP') return false
   if (Array.isArray(type.fields)) {
     return type.fields.every((field) => field?.type && field.type.kind === 'SCALAR')
   }

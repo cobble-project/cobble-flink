@@ -110,6 +110,58 @@ class MonitorAppJsTest {
         assertTrue(stdout.contains("Flink SQL source unavailable"));
     }
 
+    @Test
+    void structuredSemanticTypesRenderFieldTablesAndOverviewLabels() throws Exception {
+        String appJs = readAppJs();
+        String harness =
+                "const document = {\n"
+                        + "  getElementById: () => ({ addEventListener() {}, classList: { toggle() {}, remove() {}, add() {} }, setAttribute() {}, querySelectorAll: () => [] }),\n"
+                        + "  querySelectorAll: () => [],\n"
+                        + "  querySelector: () => ({ classList: { toggle() {} } }),\n"
+                        + "  addEventListener() {},\n"
+                        + "};\n"
+                        + "const window = { addEventListener() {} };\n"
+                        + "async function fetch() { return { ok: true, json: async () => ({}) }; }\n"
+                        + appJs
+                        + "\nconst rowType = { kind: 'ROW', fields: [\n"
+                        + "  { name: 'id', type: { kind: 'SCALAR', logical_type: 'INT' } },\n"
+                        + "  { name: 'profile', type: { kind: 'ROW', fields: [{ name: 'region', type: { kind: 'SCALAR', logical_type: 'VARCHAR' } }] } }\n"
+                        + "] };\n"
+                        + "const tupleType = { kind: 'TUPLE', fields: [\n"
+                        + "  { name: 'f0', type: { kind: 'SCALAR', logical_type: 'BIGINT' } },\n"
+                        + "  { name: 'f1', type: { kind: 'SCALAR', logical_type: 'VARCHAR' } }\n"
+                        + "] };\n"
+                        + "const mapType = { kind: 'MAP', key_type: { kind: 'SCALAR', logical_type: 'VARCHAR' }, value_type: rowType };\n"
+                        + "const rowFields = semanticTableFields(rowType);\n"
+                        + "const tupleFields = semanticTableFields(tupleType);\n"
+                        + "const mapFields = semanticTableFields(mapType);\n"
+                        + "const mapLabel = overviewTypeLabel(mapType);\n"
+                        + "const mapHeaderLabel = renderTypeLabel(mapLabel);\n"
+                        + "const mapUsable = stateSourceTypeUsable(mapType);\n"
+                        + "const renderedMap = renderSemanticTableValue({ kind: 'MAP', entries: [{ key: { kind: 'SCALAR', value: 'a' }, value: { kind: 'ROW', fields: [{ name: 'id', value: { kind: 'SCALAR', value: 7 } }] } }] }, 'map-test');\n"
+                        + "console.log(JSON.stringify({ rowFields, tupleFields, mapFields, mapLabel, mapHeaderLabel, mapUsable, renderedMap }));\n";
+
+        Process process = new ProcessBuilder("node", "--input-type=module", "-").start();
+        process.getOutputStream().write(harness.getBytes(StandardCharsets.UTF_8));
+        process.getOutputStream().close();
+        String stdout = new String(process.getInputStream().readAllBytes(), StandardCharsets.UTF_8);
+        String stderr = new String(process.getErrorStream().readAllBytes(), StandardCharsets.UTF_8);
+        int exit = process.waitFor();
+        assertEquals(0, exit, stderr);
+
+        assertTrue(stdout.contains("\"name\":\"id\""));
+        assertTrue(stdout.contains("\"logical_type\":\"INT\""));
+        assertTrue(stdout.contains("ROW<region VARCHAR>"));
+        assertTrue(stdout.contains("\"name\":\"f0\""));
+        assertTrue(stdout.contains("\"name\":\"f1\""));
+        assertTrue(stdout.contains("MAP<VARCHAR, ROW<"));
+        assertTrue(stdout.contains("&lt;<wbr>VARCHAR,<wbr>"));
+        assertTrue(stdout.contains("\"mapUsable\":false"));
+        assertTrue(stdout.contains("decoded-map"));
+        assertTrue(stdout.contains("key"));
+        assertTrue(stdout.contains("value"));
+    }
+
     private static String readAppJs() throws IOException {
         java.nio.file.Path workspacePath =
                 Paths.get("cobble-flink-monitor/src/main/resources/web/app.js");
