@@ -76,7 +76,35 @@ Useful options:
 --total-buckets 32768
 --inspect-default-limit 100
 --inspect-max-limit 1000
+--user-jar /path/to/job.jar
+--user-classpath /path/to/a.jar:/path/to/b.jar
 ```
+
+## User Jars
+
+If state uses user-defined POJO classes, Avro record classes, or custom
+serializers from your job jar, pass that jar to the monitor so inspect can
+decode those values instead of falling back to raw bytes:
+
+```bash
+java -jar cobble-flink-monitor/target/cobble-flink-monitor-*.jar \
+  --checkpoint file:///path/to/checkpoints \
+  --user-jar /path/to/my-flink-job.jar
+```
+
+`--user-jar` is repeatable. It also accepts a directory containing jars. For an
+existing classpath string, use `--user-classpath`:
+
+```bash
+java -jar cobble-flink-monitor/target/cobble-flink-monitor-*.jar \
+  --checkpoint file:///path/to/checkpoints \
+  --user-jar /path/to/job.jar \
+  --user-jar /path/to/deps/ \
+  --user-classpath /path/to/a.jar:/path/to/b.jar
+```
+
+Only load jars from trusted sources. The monitor may instantiate classes from
+these jars while restoring serializers.
 
 ## Remote Filesystems
 

@@ -2,7 +2,10 @@ package io.cobble.flink.monitor;
 
 import org.apache.flink.configuration.Configuration;
 
+import java.io.File;
+import java.util.ArrayList;
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 
 final class ServerConfig {
@@ -19,37 +22,64 @@ final class ServerConfig {
     int inspectMaxLimit = DEFAULT_INSPECT_MAX_LIMIT;
     String flinkConfPath;
     Configuration flinkConfiguration = new Configuration();
+    List<String> userJars = new ArrayList<>();
 
     private ServerConfig() {}
 
     static ServerConfig parse(String[] args) {
         ServerConfig config = new ServerConfig();
-        Map<String, String> values = parseArgs(args);
-        config.bindAddress = values.getOrDefault("bind", config.bindAddress);
+        Map<String, List<String>> values = parseArgs(args);
+        config.bindAddress = lastOr(values, "bind", config.bindAddress);
         if (values.containsKey("port")) {
-            config.port = parsePositiveInt(values.get("port"), "port");
+            config.port = parsePositiveInt(last(values, "port"), "port");
         }
         if (values.containsKey("total-buckets")) {
-            config.totalBuckets = parsePositiveInt(values.get("total-buckets"), "total-buckets");
+            config.totalBuckets = parsePositiveInt(last(values, "total-buckets"), "total-buckets");
         }
         if (values.containsKey("inspect-default-limit")) {
             config.inspectDefaultLimit =
-                    parsePositiveInt(values.get("inspect-default-limit"), "inspect-default-limit");
+                    parsePositiveInt(
+                            last(values, "inspect-default-limit"), "inspect-default-limit");
         }
         if (values.containsKey("inspect-max-limit")) {
             config.inspectMaxLimit =
-                    parsePositiveInt(values.get("inspect-max-limit"), "inspect-max-limit");
+                    parsePositiveInt(last(values, "inspect-max-limit"), "inspect-max-limit");
         }
-        config.flinkConfPath = blankToNull(values.get("flink-conf"));
+        config.flinkConfPath = blankToNull(last(values, "flink-conf"));
         if (config.inspectDefaultLimit > config.inspectMaxLimit) {
             throw new InputException("--inspect-default-limit must be <= --inspect-max-limit");
         }
-        config.checkpointRoot = blankToNull(values.get("checkpoint"));
+        config.checkpointRoot = blankToNull(last(values, "checkpoint"));
+        config.userJars = collectUserJars(values);
         return config;
     }
 
-    private static Map<String, String> parseArgs(String[] args) {
-        Map<String, String> output = new LinkedHashMap<>();
+    private static List<String> collectUserJars(Map<String, List<String>> values) {
+        List<String> jars = new ArrayList<>(values.getOrDefault("user-jar", new ArrayList<>()));
+        List<String> classpath = values.getOrDefault("user-classpath", new ArrayList<>());
+        for (String entry : classpath) {
+            for (String token : entry.split(File.pathSeparator)) {
+                String trimmed = token.trim();
+                if (!trimmed.isEmpty()) {
+                    jars.add(trimmed);
+                }
+            }
+        }
+        return jars;
+    }
+
+    private static String last(Map<String, List<String>> values, String key) {
+        List<String> list = values.get(key);
+        return list == null || list.isEmpty() ? null : list.get(list.size() - 1);
+    }
+
+    private static String lastOr(Map<String, List<String>> values, String key, String fallback) {
+        String value = last(values, key);
+        return value == null ? fallback : value;
+    }
+
+    private static Map<String, List<String>> parseArgs(String[] args) {
+        Map<String, List<String>> output = new LinkedHashMap<>();
         for (int index = 0; index < args.length; index++) {
             String arg = args[index];
             if ("--help".equals(arg) || "-h".equals(arg)) {
@@ -70,7 +100,7 @@ final class ServerConfig {
                 }
                 value = args[++index];
             }
-            output.put(key, value);
+            output.computeIfAbsent(key, k -> new ArrayList<>()).add(value);
         }
         return output;
     }
@@ -85,7 +115,9 @@ final class ServerConfig {
                         + "  --flink-conf PATH              optional Flink conf dir or flink-conf.yaml\n"
                         + "  --total-buckets N              default 32768\n"
                         + "  --inspect-default-limit N      default 100\n"
-                        + "  --inspect-max-limit N          default 1000");
+                        + "  --inspect-max-limit N          default 1000\n"
+                        + "  --user-jar PATH                user job jar (repeatable) for live serializer restore\n"
+                        + "  --user-classpath PATHS         path-separator-joined user jars (alias for --user-jar)");
         System.exit(0);
     }
 

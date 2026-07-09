@@ -54,6 +54,8 @@ import java.util.Objects;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.ThreadFactory;
+import java.util.concurrent.atomic.AtomicInteger;
 
 public final class CobbleFlinkMonitorServer {
 
@@ -76,10 +78,29 @@ public final class CobbleFlinkMonitorServer {
 
     public static void main(String[] args) throws Exception {
         ServerConfig config = ServerConfig.parse(args);
+        UserClasspath userClasspath = UserClasspath.create(config.userJars);
+        Thread.currentThread().setContextClassLoader(userClasspath.classLoader());
         preloadRuntimeClasses();
         config.flinkConfiguration = FlinkMonitorFileSystems.initialize(config.flinkConfPath);
-        MonitorState state = MonitorState.open(config);
-        ExecutorService executor = Executors.newCachedThreadPool();
+        MonitorState state = MonitorState.open(config, userClasspath);
+        ClassLoader contextClassLoader = userClasspath.classLoader();
+        ExecutorService executor =
+                Executors.newCachedThreadPool(
+                        new ThreadFactory() {
+                            private final AtomicInteger counter = new AtomicInteger();
+
+                            @Override
+                            public Thread newThread(Runnable r) {
+                                Thread thread =
+                                        new Thread(
+                                                r,
+                                                "cobble-flink-monitor-http-"
+                                                        + counter.incrementAndGet());
+                                thread.setDaemon(true);
+                                thread.setContextClassLoader(contextClassLoader);
+                                return thread;
+                            }
+                        });
         HttpServer server =
                 HttpServer.create(new InetSocketAddress(config.bindAddress, config.port), 0);
         server.setExecutor(executor);
@@ -93,6 +114,7 @@ public final class CobbleFlinkMonitorServer {
                                     state.close();
                                     server.stop(0);
                                     executor.shutdownNow();
+                                    userClasspath.close();
                                 },
                                 "cobble-flink-monitor-shutdown"));
 
@@ -207,6 +229,7 @@ public final class CobbleFlinkMonitorServer {
     private static final class MonitorState implements AutoCloseable {
 
         private final ServerConfig config;
+        private final UserClasspath userClasspath;
         private CheckpointCatalog catalog;
         private final long startedAtMillis;
         private boolean selectedLatest;
@@ -219,12 +242,14 @@ public final class CobbleFlinkMonitorServer {
 
         private MonitorState(
                 ServerConfig config,
+                UserClasspath userClasspath,
                 CheckpointCatalog catalog,
                 boolean selectedLatest,
                 CheckpointEntry selectedCheckpoint,
                 OperatorEntry selectedOperator,
                 ReaderHandle readerHandle) {
             this.config = config;
+            this.userClasspath = userClasspath;
             this.catalog = catalog;
             this.selectedLatest = selectedLatest;
             this.selectedCheckpoint = selectedCheckpoint;
@@ -242,10 +267,11 @@ public final class CobbleFlinkMonitorServer {
             this.startedAtMillis = System.currentTimeMillis();
         }
 
-        static MonitorState open(ServerConfig config) {
+        static MonitorState open(ServerConfig config, UserClasspath userClasspath) {
             if (config.checkpointRoot == null) {
                 return new MonitorState(
                         config,
+                        userClasspath,
                         null,
                         true,
                         null,
@@ -256,6 +282,7 @@ public final class CobbleFlinkMonitorServer {
             ReaderSelection selection = openLatestReadable(config, catalog, null);
             return new MonitorState(
                     config,
+                    userClasspath,
                     catalog,
                     true,
                     selection.checkpoint,
@@ -426,6 +453,14 @@ public final class CobbleFlinkMonitorServer {
             output.put("catalog", catalog == null ? null : catalog.toJson());
             output.put("inspect_default_limit", config.inspectDefaultLimit);
             output.put("inspect_max_limit", config.inspectMaxLimit);
+            if (!userClasspath.entries().isEmpty()) {
+                Map<String, Object> userClasspathMeta = new LinkedHashMap<>();
+                userClasspathMeta.put("jar_count", userClasspath.entries().size());
+                userClasspathMeta.put("entries", userClasspath.entries());
+                output.put("user_classpath", userClasspathMeta);
+            } else {
+                output.put("user_classpath", null);
+            }
             output.put("uptime_millis", System.currentTimeMillis() - startedAtMillis);
             return output;
         }
