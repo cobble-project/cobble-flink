@@ -43,6 +43,7 @@ import org.junit.jupiter.api.Test;
 
 import java.io.IOException;
 import java.io.Serializable;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 
@@ -160,6 +161,54 @@ class SerializerSnapshotInspectTypeExtractorTest {
     }
 
     @Test
+    void tuple3ExtractsThreeFieldsAsTuple() {
+        @SuppressWarnings("unchecked")
+        TypeSerializer<org.apache.flink.api.java.tuple.Tuple3<Integer, String, Long>>
+                tupleSerializer =
+                        (TypeSerializer<
+                                        org.apache.flink.api.java.tuple.Tuple3<
+                                                Integer, String, Long>>)
+                                TypeInformation.of(
+                                                new TypeHint<
+                                                        org.apache.flink.api.java.tuple.Tuple3<
+                                                                Integer, String, Long>>() {})
+                                        .createSerializer(new ExecutionConfig());
+        StateInspectType type = extract(tupleSerializer);
+        assertEquals(StateInspectTypeKind.TUPLE, type.kind());
+        assertEquals(3, type.fields().size());
+        assertEquals("f0", type.fields().get(0).name());
+        assertScalar(type.fields().get(0).type(), "INT");
+        assertEquals("f1", type.fields().get(1).name());
+        assertScalar(type.fields().get(1).type(), "VARCHAR");
+        assertEquals("f2", type.fields().get(2).name());
+        assertScalar(type.fields().get(2).type(), "BIGINT");
+    }
+
+    @Test
+    void nestedTupleInsideTupleExtractsRecursively() {
+        // Tuple2<Integer, Tuple2<String, Long>> -> TUPLE(f0=INT, f1=TUPLE(f0=VARCHAR, f1=BIGINT))
+        @SuppressWarnings("unchecked")
+        TypeSerializer<Tuple2<Integer, Tuple2<String, Long>>> tupleSerializer =
+                (TypeSerializer<Tuple2<Integer, Tuple2<String, Long>>>)
+                        TypeInformation.of(new TypeHint<Tuple2<Integer, Tuple2<String, Long>>>() {})
+                                .createSerializer(new ExecutionConfig());
+        StateInspectType type = extract(tupleSerializer);
+        assertEquals(StateInspectTypeKind.TUPLE, type.kind());
+        assertEquals(2, type.fields().size());
+        assertEquals("f0", type.fields().get(0).name());
+        assertScalar(type.fields().get(0).type(), "INT");
+
+        // The nested tuple field should be a TUPLE with its own f0/f1.
+        StateInspectType nestedType = type.fields().get(1).type();
+        assertEquals(StateInspectTypeKind.TUPLE, nestedType.kind());
+        assertEquals(2, nestedType.fields().size());
+        assertEquals("f0", nestedType.fields().get(0).name());
+        assertScalar(nestedType.fields().get(0).type(), "VARCHAR");
+        assertEquals("f1", nestedType.fields().get(1).name());
+        assertScalar(nestedType.fields().get(1).type(), "BIGINT");
+    }
+
+    @Test
     void unknownCompositeSnapshotReturnsUnknownNotTuple() {
         // JavaEitherSerializerSnapshot extends CompositeTypeSerializerSnapshot but is not
         // List/Map/Tuple, so it must return UNKNOWN rather than guessing a tuple shape.
@@ -210,6 +259,116 @@ class SerializerSnapshotInspectTypeExtractorTest {
         private static final long serialVersionUID = 1L;
         public int id;
         public String name;
+    }
+
+    @Test
+    void pojoWithNullableReferenceFieldsExtractsScalarTypes() {
+        // Reference types (String, Integer, Boolean) are nullable in POJOs; the snapshot should
+        // still extract the same scalar logical types as primitive fields.
+        TypeSerializer<PojoWithReferences> pojoSerializer =
+                TypeInformation.of(PojoWithReferences.class)
+                        .createSerializer(new ExecutionConfig());
+        StateInspectType type = extract(pojoSerializer);
+        assertEquals(StateInspectTypeKind.ROW, type.kind());
+        assertEquals(3, type.fields().size());
+        // POJO field order is not guaranteed to match declaration order; verify by name.
+        Map<String, StateInspectType> byName = new HashMap<>();
+        for (StateInspectField f : type.fields()) {
+            byName.put(f.name(), f.type());
+        }
+        assertScalar(byName.get("id"), "INT");
+        assertScalar(byName.get("label"), "VARCHAR");
+        assertScalar(byName.get("flag"), "BOOLEAN");
+    }
+
+    /** POJO with nullable reference-type fields (Integer, String, Boolean). */
+    public static final class PojoWithReferences implements Serializable {
+        private static final long serialVersionUID = 1L;
+        public Integer id;
+        public String label;
+        public Boolean flag;
+    }
+
+    @Test
+    void pojoWithNestedPojoExtractsRecursiveRow() {
+        // A POJO field whose type is another POJO should be a nested ROW, not a scalar.
+        TypeSerializer<PojoWithNested> pojoSerializer =
+                TypeInformation.of(PojoWithNested.class).createSerializer(new ExecutionConfig());
+        StateInspectType type = extract(pojoSerializer);
+        assertEquals(StateInspectTypeKind.ROW, type.kind());
+        assertEquals(2, type.fields().size());
+        // POJO field order is not guaranteed to match declaration order; verify by name.
+        Map<String, StateInspectType> outerByName = new HashMap<>();
+        for (StateInspectField f : type.fields()) {
+            outerByName.put(f.name(), f.type());
+        }
+        assertScalar(outerByName.get("id"), "INT");
+
+        // The nested POJO field should be a ROW with its own fields.
+        StateInspectType nestedType = outerByName.get("inner");
+        assertEquals(StateInspectTypeKind.ROW, nestedType.kind());
+        assertEquals(2, nestedType.fields().size());
+        Map<String, StateInspectType> innerByName = new HashMap<>();
+        for (StateInspectField f : nestedType.fields()) {
+            innerByName.put(f.name(), f.type());
+        }
+        assertScalar(innerByName.get("x"), "INT");
+        assertScalar(innerByName.get("y"), "VARCHAR");
+    }
+
+    /** POJO containing another POJO as a field. */
+    public static final class PojoWithNested implements Serializable {
+        private static final long serialVersionUID = 1L;
+        public int id;
+        public InnerPojo inner;
+    }
+
+    public static final class InnerPojo implements Serializable {
+        private static final long serialVersionUID = 1L;
+        public int x;
+        public String y;
+    }
+
+    @Test
+    void pojoWithListFieldFallsBackToUnknownDueToKryo() {
+        // POJO collection fields (List, Map) are serialized by Flink's PojoSerializer using Kryo,
+        // not Flink's ListSerializer/MapSerializer. The nested snapshot is a
+        // KryoSerializerSnapshot, which the extractor cannot read, so the field type is UNKNOWN.
+        // This test locks down the current contract: POJO collection fields degrade to UNKNOWN
+        // rather than crashing or producing a misleading type.
+        TypeSerializer<PojoWithList> pojoSerializer =
+                TypeInformation.of(PojoWithList.class).createSerializer(new ExecutionConfig());
+        StateInspectType type = extract(pojoSerializer);
+        assertEquals(StateInspectTypeKind.ROW, type.kind());
+        assertEquals(1, type.fields().size());
+        assertEquals("tags", type.fields().get(0).name());
+        StateInspectType listType = type.fields().get(0).type();
+        assertEquals(StateInspectTypeKind.UNKNOWN, listType.kind());
+    }
+
+    /** POJO with a List<String> field. */
+    public static final class PojoWithList implements Serializable {
+        private static final long serialVersionUID = 1L;
+        public List<String> tags;
+    }
+
+    @Test
+    void pojoWithMapFieldFallsBackToUnknownDueToKryo() {
+        // Same as List fields: POJO Map fields use Kryo, so the extractor returns UNKNOWN.
+        TypeSerializer<PojoWithMap> pojoSerializer =
+                TypeInformation.of(PojoWithMap.class).createSerializer(new ExecutionConfig());
+        StateInspectType type = extract(pojoSerializer);
+        assertEquals(StateInspectTypeKind.ROW, type.kind());
+        assertEquals(1, type.fields().size());
+        assertEquals("counts", type.fields().get(0).name());
+        StateInspectType mapType = type.fields().get(0).type();
+        assertEquals(StateInspectTypeKind.UNKNOWN, mapType.kind());
+    }
+
+    /** POJO with a Map<String, Integer> field. */
+    public static final class PojoWithMap implements Serializable {
+        private static final long serialVersionUID = 1L;
+        public Map<String, Integer> counts;
     }
 
     // ---- Avro (flink-avro on test classpath) ----
@@ -393,6 +552,279 @@ class SerializerSnapshotInspectTypeExtractorTest {
         // Must be UNKNOWN kind, not a scalar with logical_type "UNKNOWN".
         assertEquals(StateInspectTypeKind.UNKNOWN, unionType.kind());
         assertNull(unionType.logicalType());
+    }
+
+    @Test
+    void avroEnumFieldExtractsAsVarchar() {
+        // Avro enum maps to VARCHAR (the enum symbol name is the string value).
+        org.apache.avro.Schema enumSchema =
+                org.apache.avro.SchemaBuilder.enumeration("Color").symbols("RED", "GREEN", "BLUE");
+        org.apache.avro.Schema schema =
+                org.apache.avro.SchemaBuilder.record("WithEnum")
+                        .fields()
+                        .name("color")
+                        .type(enumSchema)
+                        .noDefault()
+                        .endRecord();
+        org.apache.flink.formats.avro.typeutils.AvroSerializer<
+                        org.apache.avro.generic.GenericRecord>
+                avroSerializer =
+                        new org.apache.flink.formats.avro.typeutils.AvroSerializer<>(
+                                org.apache.avro.generic.GenericRecord.class, schema);
+        StateInspectType type = extract(avroSerializer);
+        assertEquals(StateInspectTypeKind.ROW, type.kind());
+        assertEquals("color", type.fields().get(0).name());
+        assertScalar(type.fields().get(0).type(), "VARCHAR");
+    }
+
+    @Test
+    void avroBytesAndFixedFieldsExtractAsVarbinary() {
+        org.apache.avro.Schema fixedSchema =
+                org.apache.avro.SchemaBuilder.builder().fixed("Hash").size(16);
+        org.apache.avro.Schema schema =
+                org.apache.avro.SchemaBuilder.record("WithBytesAndFixed")
+                        .fields()
+                        .name("raw")
+                        .type()
+                        .bytesType()
+                        .noDefault()
+                        .name("hash")
+                        .type(fixedSchema)
+                        .noDefault()
+                        .endRecord();
+        org.apache.flink.formats.avro.typeutils.AvroSerializer<
+                        org.apache.avro.generic.GenericRecord>
+                avroSerializer =
+                        new org.apache.flink.formats.avro.typeutils.AvroSerializer<>(
+                                org.apache.avro.generic.GenericRecord.class, schema);
+        StateInspectType type = extract(avroSerializer);
+        assertEquals(StateInspectTypeKind.ROW, type.kind());
+        assertEquals("raw", type.fields().get(0).name());
+        assertScalar(type.fields().get(0).type(), "VARBINARY");
+        assertEquals("hash", type.fields().get(1).name());
+        assertScalar(type.fields().get(1).type(), "VARBINARY");
+    }
+
+    @Test
+    void avroNullableUnionOfRecordExtractsAsRow() {
+        // union(null, Record) should resolve to the Record's ROW type (nullable wrapper).
+        org.apache.avro.Schema innerSchema =
+                org.apache.avro.SchemaBuilder.record("Item")
+                        .fields()
+                        .name("sku")
+                        .type()
+                        .stringType()
+                        .noDefault()
+                        .endRecord();
+        org.apache.avro.Schema nullableInner =
+                org.apache.avro.SchemaBuilder.builder()
+                        .unionOf()
+                        .nullType()
+                        .and()
+                        .type(innerSchema)
+                        .endUnion();
+        org.apache.avro.Schema schema =
+                org.apache.avro.SchemaBuilder.record("WithNullableRecord")
+                        .fields()
+                        .name("item")
+                        .type(nullableInner)
+                        .noDefault()
+                        .endRecord();
+        org.apache.flink.formats.avro.typeutils.AvroSerializer<
+                        org.apache.avro.generic.GenericRecord>
+                avroSerializer =
+                        new org.apache.flink.formats.avro.typeutils.AvroSerializer<>(
+                                org.apache.avro.generic.GenericRecord.class, schema);
+        StateInspectType type = extract(avroSerializer);
+        assertEquals(StateInspectTypeKind.ROW, type.kind());
+        assertEquals("item", type.fields().get(0).name());
+        // The nullable union resolves to the non-null member (RECORD -> ROW).
+        StateInspectType itemType = type.fields().get(0).type();
+        assertEquals(StateInspectTypeKind.ROW, itemType.kind());
+        assertEquals(1, itemType.fields().size());
+        assertEquals("sku", itemType.fields().get(0).name());
+        assertScalar(itemType.fields().get(0).type(), "VARCHAR");
+    }
+
+    @Test
+    void avroMapOfStringToStringExtractsMapVarcharVarchar() {
+        org.apache.avro.Schema schema =
+                org.apache.avro.SchemaBuilder.record("WithStringMap")
+                        .fields()
+                        .name("labels")
+                        .type()
+                        .map()
+                        .values()
+                        .stringType()
+                        .noDefault()
+                        .endRecord();
+        org.apache.flink.formats.avro.typeutils.AvroSerializer<
+                        org.apache.avro.generic.GenericRecord>
+                avroSerializer =
+                        new org.apache.flink.formats.avro.typeutils.AvroSerializer<>(
+                                org.apache.avro.generic.GenericRecord.class, schema);
+        StateInspectType type = extract(avroSerializer);
+        assertEquals(StateInspectTypeKind.ROW, type.kind());
+        assertEquals("labels", type.fields().get(0).name());
+        StateInspectType mapType = type.fields().get(0).type();
+        assertEquals(StateInspectTypeKind.MAP, mapType.kind());
+        assertScalar(mapType.keyType(), "VARCHAR");
+        assertScalar(mapType.valueType(), "VARCHAR");
+    }
+
+    @Test
+    void avroSpecificRecordExtractsRowFromSchema() {
+        // SpecificRecord uses the same AvroSerializerSnapshot path as GenericRecord - the
+        // extractor reads the schema from the snapshot regardless of the record class. The
+        // single-arg AvroSerializer constructor resolves the schema from the SpecificRecord's
+        // getSchema() method at snapshot time. This test locks down that a SpecificRecord-typed
+        // AvroSerializer produces the same ROW structure as a GenericRecord one.
+        org.apache.flink.formats.avro.typeutils.AvroSerializer<TestSpecificRecord> avroSerializer =
+                new org.apache.flink.formats.avro.typeutils.AvroSerializer<>(
+                        TestSpecificRecord.class);
+        StateInspectType type = extract(avroSerializer);
+        assertEquals(StateInspectTypeKind.ROW, type.kind());
+        assertEquals(2, type.fields().size());
+        // Verify by name since field order comes from the Avro schema.
+        Map<String, StateInspectType> byName = new HashMap<>();
+        for (StateInspectField f : type.fields()) {
+            byName.put(f.name(), f.type());
+        }
+        assertScalar(byName.get("userId"), "INT");
+        assertScalar(byName.get("event"), "VARCHAR");
+    }
+
+    /**
+     * A minimal {@link org.apache.avro.specific.SpecificRecord} implementation for testing the
+     * SpecificRecord-typed {@code AvroSerializer} extraction path. The schema is provided
+     * explicitly to the {@code AvroSerializer} constructor, so this class only needs to implement
+     * the {@code IndexedRecord} accessors.
+     */
+    public static final class TestSpecificRecord
+            implements org.apache.avro.specific.SpecificRecord {
+        private static final long serialVersionUID = 1L;
+        public int userId;
+        public String event;
+
+        @Override
+        public org.apache.avro.Schema getSchema() {
+            return org.apache.avro.SchemaBuilder.record("UserEvent")
+                    .fields()
+                    .name("userId")
+                    .type()
+                    .intType()
+                    .noDefault()
+                    .name("event")
+                    .type()
+                    .stringType()
+                    .noDefault()
+                    .endRecord();
+        }
+
+        @Override
+        public void put(int i, Object v) {
+            switch (i) {
+                case 0:
+                    userId = (Integer) v;
+                    break;
+                case 1:
+                    event = (String) v;
+                    break;
+                default:
+                    throw new IndexOutOfBoundsException(String.valueOf(i));
+            }
+        }
+
+        @Override
+        public Object get(int i) {
+            switch (i) {
+                case 0:
+                    return userId;
+                case 1:
+                    return event;
+                default:
+                    throw new IndexOutOfBoundsException(String.valueOf(i));
+            }
+        }
+    }
+
+    @Test
+    void avroDeeplyNestedRecordExtractsRecursively() {
+        // Outer -> Middle -> Inner (int x) to verify multi-level recursion.
+        org.apache.avro.Schema innerSchema =
+                org.apache.avro.SchemaBuilder.record("DeepInner")
+                        .fields()
+                        .name("x")
+                        .type()
+                        .intType()
+                        .noDefault()
+                        .endRecord();
+        org.apache.avro.Schema middleSchema =
+                org.apache.avro.SchemaBuilder.record("DeepMiddle")
+                        .fields()
+                        .name("inner")
+                        .type(innerSchema)
+                        .noDefault()
+                        .endRecord();
+        org.apache.avro.Schema outerSchema =
+                org.apache.avro.SchemaBuilder.record("DeepOuter")
+                        .fields()
+                        .name("middle")
+                        .type(middleSchema)
+                        .noDefault()
+                        .endRecord();
+        org.apache.flink.formats.avro.typeutils.AvroSerializer<
+                        org.apache.avro.generic.GenericRecord>
+                avroSerializer =
+                        new org.apache.flink.formats.avro.typeutils.AvroSerializer<>(
+                                org.apache.avro.generic.GenericRecord.class, outerSchema);
+        StateInspectType type = extract(avroSerializer);
+        assertEquals(StateInspectTypeKind.ROW, type.kind());
+        assertEquals("middle", type.fields().get(0).name());
+        StateInspectType middleType = type.fields().get(0).type();
+        assertEquals(StateInspectTypeKind.ROW, middleType.kind());
+        assertEquals("inner", middleType.fields().get(0).name());
+        StateInspectType innerType = middleType.fields().get(0).type();
+        assertEquals(StateInspectTypeKind.ROW, innerType.kind());
+        assertEquals("x", innerType.fields().get(0).name());
+        assertScalar(innerType.fields().get(0).type(), "INT");
+    }
+
+    @Test
+    void avroArrayOfRecordsExtractsListOfRows() {
+        // array<Record> should extract as LIST(ROW(...)), not LIST(UNKNOWN).
+        org.apache.avro.Schema itemSchema =
+                org.apache.avro.SchemaBuilder.record("ArrayItem")
+                        .fields()
+                        .name("id")
+                        .type()
+                        .intType()
+                        .noDefault()
+                        .endRecord();
+        org.apache.avro.Schema schema =
+                org.apache.avro.SchemaBuilder.record("WithRecordArray")
+                        .fields()
+                        .name("items")
+                        .type()
+                        .array()
+                        .items(itemSchema)
+                        .noDefault()
+                        .endRecord();
+        org.apache.flink.formats.avro.typeutils.AvroSerializer<
+                        org.apache.avro.generic.GenericRecord>
+                avroSerializer =
+                        new org.apache.flink.formats.avro.typeutils.AvroSerializer<>(
+                                org.apache.avro.generic.GenericRecord.class, schema);
+        StateInspectType type = extract(avroSerializer);
+        assertEquals(StateInspectTypeKind.ROW, type.kind());
+        assertEquals("items", type.fields().get(0).name());
+        StateInspectType arrayType = type.fields().get(0).type();
+        assertEquals(StateInspectTypeKind.LIST, arrayType.kind());
+        StateInspectType elementType = arrayType.elementType();
+        assertEquals(StateInspectTypeKind.ROW, elementType.kind());
+        assertEquals(1, elementType.fields().size());
+        assertEquals("id", elementType.fields().get(0).name());
+        assertScalar(elementType.fields().get(0).type(), "INT");
     }
 
     // ---- Edge cases ----
