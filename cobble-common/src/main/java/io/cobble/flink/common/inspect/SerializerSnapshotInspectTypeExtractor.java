@@ -10,8 +10,10 @@ import java.lang.reflect.Method;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashMap;
+import java.util.IdentityHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 /**
  * Derives a {@link StateInspectType} from a Flink {@link TypeSerializerSnapshot} without loading
@@ -261,66 +263,87 @@ final class SerializerSnapshotInspectTypeExtractor {
      * Recursively converts an Avro {@code Schema} to a {@link StateInspectType}.
      *
      * <ul>
-     *   <li>RECORD → ROW with one field per Avro field (recursive)
-     *   <li>ARRAY → LIST(elementType)
-     *   <li>MAP → MAP(VARCHAR, valueType) — Avro map keys are always strings
-     *   <li>UNION with null + one non-null member → that member's type (nullable wrapper)
-     *   <li>UNION with multiple non-null members → UNKNOWN (no SQL equivalent)
-     *   <li>Primitives → SCALAR with the corresponding SQL logical type
+     *   <li>RECORD -> ROW with one field per Avro field (recursive)
+     *   <li>ARRAY -> LIST(elementType)
+     *   <li>MAP -> MAP(VARCHAR, valueType) - Avro map keys are always strings
+     *   <li>UNION with null + one non-null member -> that member's type (nullable wrapper)
+     *   <li>UNION with multiple non-null members -> UNKNOWN (no SQL equivalent)
+     *   <li>Primitives -> SCALAR with the corresponding SQL logical type
      * </ul>
+     *
+     * <p>Self-referential schemas (e.g. {@code Node { next: ["null", "Node"] }}) are detected via
+     * an identity-based active set. When a cycle is encountered, the recursive field is mapped to
+     * {@code UNKNOWN} to avoid infinite recursion and {@link StackOverflowError}.
      */
     private static StateInspectType avroSchemaToInspectType(Object schema)
+            throws ReflectiveOperationException, ClassNotFoundException {
+        return avroSchemaToInspectType(schema, Collections.newSetFromMap(new IdentityHashMap<>()));
+    }
+
+    private static StateInspectType avroSchemaToInspectType(
+            Object schema, Set<Object> activeSchemas)
             throws ReflectiveOperationException, ClassNotFoundException {
         if (schema == null) {
             return StateInspectType.unknown();
         }
-        // Avro's Schema is an abstract class; concrete subclasses (RecordSchema, etc.) are
-        // package-private and inaccessible. Methods must be resolved on the public Schema base
-        // class, not on the concrete subclass.
-        Class<?> schemaClass = Class.forName("org.apache.avro.Schema");
-        Method getType = schemaClass.getMethod("getType");
-        Object typeEnum = getType.invoke(schema);
-        String typeName = typeEnum.toString();
+        // Cycle detection: if this schema is already on the active recursion stack, map to UNKNOWN.
+        if (!activeSchemas.add(schema)) {
+            return StateInspectType.unknown();
+        }
+        try {
+            // Avro's Schema is an abstract class; concrete subclasses (RecordSchema, etc.) are
+            // package-private and inaccessible. Methods must be resolved on the public Schema base
+            // class, not on the concrete subclass.
+            Class<?> schemaClass = Class.forName("org.apache.avro.Schema");
+            Method getType = schemaClass.getMethod("getType");
+            Object typeEnum = getType.invoke(schema);
+            String typeName = typeEnum.toString();
 
-        switch (typeName) {
-            case "STRING":
-            case "ENUM":
-                return StateInspectType.scalar("VARCHAR");
-            case "INT":
-                return StateInspectType.scalar("INT");
-            case "LONG":
-                return StateInspectType.scalar("BIGINT");
-            case "BOOLEAN":
-                return StateInspectType.scalar("BOOLEAN");
-            case "FLOAT":
-                return StateInspectType.scalar("FLOAT");
-            case "DOUBLE":
-                return StateInspectType.scalar("DOUBLE");
-            case "BYTES":
-            case "FIXED":
-                return StateInspectType.scalar("VARBINARY");
-            case "NULL":
-                return StateInspectType.scalar("NULL");
-            case "RECORD":
-                return avroRecordToRow(schema, schemaClass);
-            case "ARRAY":
-                Method getElementType = schemaClass.getMethod("getElementType");
-                Object elementSchema = getElementType.invoke(schema);
-                return StateInspectType.list(avroSchemaToInspectType(elementSchema));
-            case "MAP":
-                Method getValueType = schemaClass.getMethod("getValueType");
-                Object valueSchema = getValueType.invoke(schema);
-                // Avro map keys are always strings.
-                return StateInspectType.map(
-                        StateInspectType.scalar("VARCHAR"), avroSchemaToInspectType(valueSchema));
-            case "UNION":
-                return avroUnionToInspectType(schema, schemaClass);
-            default:
-                return StateInspectType.unknown();
+            switch (typeName) {
+                case "STRING":
+                case "ENUM":
+                    return StateInspectType.scalar("VARCHAR");
+                case "INT":
+                    return StateInspectType.scalar("INT");
+                case "LONG":
+                    return StateInspectType.scalar("BIGINT");
+                case "BOOLEAN":
+                    return StateInspectType.scalar("BOOLEAN");
+                case "FLOAT":
+                    return StateInspectType.scalar("FLOAT");
+                case "DOUBLE":
+                    return StateInspectType.scalar("DOUBLE");
+                case "BYTES":
+                case "FIXED":
+                    return StateInspectType.scalar("VARBINARY");
+                case "NULL":
+                    return StateInspectType.scalar("NULL");
+                case "RECORD":
+                    return avroRecordToRow(schema, schemaClass, activeSchemas);
+                case "ARRAY":
+                    Method getElementType = schemaClass.getMethod("getElementType");
+                    Object elementSchema = getElementType.invoke(schema);
+                    return StateInspectType.list(
+                            avroSchemaToInspectType(elementSchema, activeSchemas));
+                case "MAP":
+                    Method getValueType = schemaClass.getMethod("getValueType");
+                    Object valueSchema = getValueType.invoke(schema);
+                    // Avro map keys are always strings.
+                    return StateInspectType.map(
+                            StateInspectType.scalar("VARCHAR"),
+                            avroSchemaToInspectType(valueSchema, activeSchemas));
+                case "UNION":
+                    return avroUnionToInspectType(schema, schemaClass, activeSchemas);
+                default:
+                    return StateInspectType.unknown();
+            }
+        } finally {
+            activeSchemas.remove(schema);
         }
     }
 
-    private static StateInspectType avroRecordToRow(Object recordSchema, Class<?> schemaClass)
+    private static StateInspectType avroRecordToRow(
+            Object recordSchema, Class<?> schemaClass, Set<Object> activeSchemas)
             throws ReflectiveOperationException, ClassNotFoundException {
         Method getFields = schemaClass.getMethod("getFields");
         Object avroFields = getFields.invoke(recordSchema);
@@ -335,12 +358,15 @@ final class SerializerSnapshotInspectTypeExtractor {
         for (Object avroField : fieldList) {
             String fieldName = (String) nameMethod.invoke(avroField);
             Object fieldSchema = schemaMethod.invoke(avroField);
-            fields.add(new StateInspectField(fieldName, avroSchemaToInspectType(fieldSchema)));
+            fields.add(
+                    new StateInspectField(
+                            fieldName, avroSchemaToInspectType(fieldSchema, activeSchemas)));
         }
         return StateInspectType.row(fields);
     }
 
-    private static StateInspectType avroUnionToInspectType(Object unionSchema, Class<?> schemaClass)
+    private static StateInspectType avroUnionToInspectType(
+            Object unionSchema, Class<?> schemaClass, Set<Object> activeSchemas)
             throws ReflectiveOperationException, ClassNotFoundException {
         Method getTypes = schemaClass.getMethod("getTypes");
         List<?> types = (List<?>) getTypes.invoke(unionSchema);
@@ -355,12 +381,12 @@ final class SerializerSnapshotInspectTypeExtractor {
             }
         }
         if (nonNullMembers.size() == 1) {
-            return avroSchemaToInspectType(nonNullMembers.get(0));
+            return avroSchemaToInspectType(nonNullMembers.get(0), activeSchemas);
         }
         if (nonNullMembers.isEmpty()) {
             return StateInspectType.scalar("NULL");
         }
-        // Complex union — cannot be expressed as a single SQL type.
+        // Complex union - cannot be expressed as a single SQL type.
         return StateInspectType.unknown();
     }
 

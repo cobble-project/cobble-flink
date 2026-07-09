@@ -461,7 +461,7 @@ class StateInspectSchemaStoreTest {
                         () -> StateInspectSchemaStore.read(new ByteArrayInputStream(bytes)));
         assertTrue(error.getMessage().contains("Unsupported Cobble inspect schema version"));
         assertTrue(error.getMessage().contains("1"));
-        assertTrue(error.getMessage().contains("expected 2"));
+        assertTrue(error.getMessage().contains("expected 3"));
     }
 
     @Test

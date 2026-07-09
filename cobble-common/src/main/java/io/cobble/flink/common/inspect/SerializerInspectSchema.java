@@ -39,6 +39,7 @@ import java.util.Objects;
  *   <li>boolean hasSnapshotBytes + snapshot bytes (when present)
  *   <li>boolean hasInspectType + {@link StateInspectType} (when present)
  *   <li>boolean hasSerializedSerializer + serialized serializer bytes (when present)
+ *   <li>boolean hasDecoderDescriptor + {@link InspectDecoderDescriptor} (when present)
  * </ol>
  */
 public final class SerializerInspectSchema {
@@ -49,6 +50,7 @@ public final class SerializerInspectSchema {
     private final byte[] snapshotBytes;
     private final StateInspectType inspectType;
     private final byte[] serializedSerializerBytes;
+    private final InspectDecoderDescriptor decoderDescriptor;
 
     private SerializerInspectSchema(
             String serializerClassName,
@@ -56,13 +58,15 @@ public final class SerializerInspectSchema {
             String snapshotClassName,
             byte[] snapshotBytes,
             StateInspectType inspectType,
-            byte[] serializedSerializerBytes) {
+            byte[] serializedSerializerBytes,
+            InspectDecoderDescriptor decoderDescriptor) {
         this.serializerClassName = serializerClassName;
         this.lengthTag = lengthTag;
         this.snapshotClassName = snapshotClassName;
         this.snapshotBytes = snapshotBytes;
         this.inspectType = inspectType;
         this.serializedSerializerBytes = serializedSerializerBytes;
+        this.decoderDescriptor = decoderDescriptor;
     }
 
     /**
@@ -109,14 +113,30 @@ public final class SerializerInspectSchema {
             }
         }
 
-        // Step 3: serialize snapshot to bytes — may throw.
+        // Step 3: serialize snapshot to bytes - may throw.
         byte[] snapshotBytes = null;
         if (snapshot != null) {
             snapshotBytes = captureSnapshotBytes(snapshot);
         }
 
-        // Step 4: capture policy — conservative allowlist.
-        boolean needFallback = snapshotBytes == null || !isMonitorPortable(snapshot);
+        // Step 3b: extract decoder descriptor - uses snapshotBytes for PORTABLE_SNAPSHOT.
+        InspectDecoderDescriptor descriptor = null;
+        if (snapshot != null) {
+            try {
+                descriptor = InspectDecoderDescriptorExtractor.extract(snapshot, snapshotBytes);
+            } catch (RuntimeException e) {
+                descriptor = null;
+            }
+        }
+
+        // Step 4: capture policy - classless descriptor or portable snapshot avoids live
+        // serializer fallback. The descriptor is an independent decode path that does not depend
+        // on snapshotBytes for POJO/AVRO kinds; only PORTABLE_SNAPSHOT requires non-null bytes.
+        boolean hasClasslessDecoder =
+                descriptor != null
+                        && descriptor.capability() == DescriptorCapability.FULLY_CLASSLESS;
+        boolean hasPortableSnapshot = snapshotBytes != null && isMonitorPortable(snapshot);
+        boolean needFallback = !hasClasslessDecoder && !hasPortableSnapshot;
         byte[] serializedBytes = needFallback ? captureSerializedSerializer(serializer) : null;
 
         return new SerializerInspectSchema(
@@ -125,7 +145,8 @@ public final class SerializerInspectSchema {
                 snapshotClassName,
                 snapshotBytes,
                 inspectType,
-                serializedBytes);
+                serializedBytes,
+                descriptor);
     }
 
     private static <T> byte[] captureSnapshotBytes(TypeSerializerSnapshot<T> snapshot) {
@@ -161,7 +182,7 @@ public final class SerializerInspectSchema {
      * checks, because some composite snapshots (e.g. {@code GenericArraySerializerSnapshot})
      * persist a component class that may be a user class.
      */
-    private static boolean isMonitorPortable(TypeSerializerSnapshot<?> snapshot) {
+    static boolean isMonitorPortable(TypeSerializerSnapshot<?> snapshot) {
         if (snapshot == null) {
             return false;
         }
@@ -291,6 +312,14 @@ public final class SerializerInspectSchema {
     }
 
     /**
+     * The classless decoder descriptor, or {@code null} when descriptor extraction was not
+     * attempted or failed.
+     */
+    public InspectDecoderDescriptor decoderDescriptor() {
+        return decoderDescriptor;
+    }
+
+    /**
      * Restores a concrete serializer. Priority: (1) restore from snapshot bytes, (2) fallback to
      * serialized serializer bytes, (3) return {@code null} (raw fallback). A snapshot-restore
      * failure falls through to the serialized fallback rather than returning {@code null}.
@@ -333,6 +362,7 @@ public final class SerializerInspectSchema {
         writeNullableBytes(output, snapshotBytes);
         writeNullableType(output, inspectType);
         writeNullableBytes(output, serializedSerializerBytes);
+        writeNullableDescriptor(output, decoderDescriptor);
     }
 
     static SerializerInspectSchema read(DataInputView input) throws IOException {
@@ -342,13 +372,15 @@ public final class SerializerInspectSchema {
         byte[] snapshotBytes = readNullableBytes(input);
         StateInspectType inspectType = readNullableType(input);
         byte[] serializedBytes = readNullableBytes(input);
+        InspectDecoderDescriptor descriptor = readNullableDescriptor(input);
         return new SerializerInspectSchema(
                 className,
                 lengthTag,
                 snapshotClassName,
                 snapshotBytes,
                 inspectType,
-                serializedBytes);
+                serializedBytes,
+                descriptor);
     }
 
     private static void writeNullableBytes(DataOutputView output, byte[] bytes) throws IOException {
@@ -388,6 +420,24 @@ public final class SerializerInspectSchema {
         return StateInspectType.read(input);
     }
 
+    private static void writeNullableDescriptor(
+            DataOutputView output, InspectDecoderDescriptor descriptor) throws IOException {
+        if (descriptor == null) {
+            output.writeBoolean(false);
+            return;
+        }
+        output.writeBoolean(true);
+        descriptor.write(output);
+    }
+
+    private static InspectDecoderDescriptor readNullableDescriptor(DataInputView input)
+            throws IOException {
+        if (!input.readBoolean()) {
+            return null;
+        }
+        return InspectDecoderDescriptor.read(input);
+    }
+
     @Override
     public boolean equals(Object other) {
         if (this == other) {
@@ -402,7 +452,8 @@ public final class SerializerInspectSchema {
                 && Objects.equals(snapshotClassName, that.snapshotClassName)
                 && Arrays.equals(snapshotBytes, that.snapshotBytes)
                 && Objects.equals(inspectType, that.inspectType)
-                && Arrays.equals(serializedSerializerBytes, that.serializedSerializerBytes);
+                && Arrays.equals(serializedSerializerBytes, that.serializedSerializerBytes)
+                && Objects.equals(decoderDescriptor, that.decoderDescriptor);
     }
 
     @Override
@@ -410,6 +461,7 @@ public final class SerializerInspectSchema {
         int result = Objects.hash(serializerClassName, lengthTag, snapshotClassName, inspectType);
         result = 31 * result + Arrays.hashCode(snapshotBytes);
         result = 31 * result + Arrays.hashCode(serializedSerializerBytes);
+        result = 31 * result + Objects.hashCode(decoderDescriptor);
         return result;
     }
 }

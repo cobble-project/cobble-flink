@@ -40,7 +40,7 @@ public final class StateInspectSchemaStore {
     /** Magic int identifying the inspect schema sidecar ("CSCH"). */
     public static final int MAGIC = 0x43534348;
 
-    private static final int VERSION = 2;
+    private static final int VERSION = 3;
 
     private final List<StateInspectSchema> schemas;
     private final Map<String, StateInspectSemanticSchema> semanticSchemas;

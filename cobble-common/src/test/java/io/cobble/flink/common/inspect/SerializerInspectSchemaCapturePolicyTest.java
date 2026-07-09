@@ -87,27 +87,34 @@ class SerializerInspectSchemaCapturePolicyTest {
         assertNull(schema.serializedSerializerBytes());
     }
 
-    // ---- Non-portable: serialized fallback persisted ----
+    // ---- Non-portable with classless descriptor: no serialized fallback ----
 
     @Test
-    void pojoSerializerHasSerializedBytesButSnapshotDerivedType() {
+    void pojoSerializerHasClasslessDescriptorAndNoSerializedBytes() {
         TypeSerializer<TestPojo> pojoSerializer =
                 TypeInformation.of(TestPojo.class).createSerializer(new ExecutionConfig());
         SerializerInspectSchema schema = SerializerInspectSchema.fromSerializer(pojoSerializer);
-        // POJO is not monitor-portable → fallback is persisted.
-        assertNotNull(schema.serializedSerializerBytes());
-        // But the snapshot-derived inspect type is still present.
+        // POJO with primitive/String fields is FULLY_CLASSLESS -> no live serializer fallback.
+        assertNull(schema.serializedSerializerBytes());
+        // The snapshot-derived inspect type is present.
         assertNotNull(schema.snapshotBytes());
         assertNotNull(schema.inspectType());
         assertEquals(StateInspectTypeKind.ROW, schema.inspectType().kind());
+        // The decoder descriptor is a FULLY_CLASSLESS POJO.
+        assertNotNull(schema.decoderDescriptor());
+        assertEquals(InspectDecoderDescriptorKind.POJO, schema.decoderDescriptor().kind());
+        assertEquals(DescriptorCapability.FULLY_CLASSLESS, schema.decoderDescriptor().capability());
     }
 
     @Test
     void customSnapshotSerializerHasSerializedBytes() {
         SerializerInspectSchema schema =
                 SerializerInspectSchema.fromSerializer(new CustomSnapshotSerializer());
-        // Custom snapshot → not monitor-portable → fallback persisted.
+        // Custom snapshot -> not monitor-portable, descriptor is UNSUPPORTED -> fallback persisted.
         assertNotNull(schema.serializedSerializerBytes());
+        assertNotNull(schema.decoderDescriptor());
+        assertEquals(InspectDecoderDescriptorKind.UNSUPPORTED, schema.decoderDescriptor().kind());
+        assertEquals(DescriptorCapability.UNSUPPORTED, schema.decoderDescriptor().capability());
     }
 
     @Test
