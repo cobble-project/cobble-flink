@@ -1151,6 +1151,619 @@ class StateInspectDecoderTest {
         assertEquals("name", ((Map<?, ?>) fields.get(1)).get("name"));
     }
 
+    // ---- Phase 2: structured user types (POJO, Tuple, Avro) ----
+
+    @Test
+    void decodesPojoValueAsSemanticRow() throws Exception {
+        // POJO value: the PojoSerializer is non-portable, so serializedSerializerBytes is the
+        // fallback. Since the POJO class is on the test classpath, restore succeeds.
+        TypeSerializer<DecodedPojo> pojoSerializer =
+                org.apache.flink.api.common.typeinfo.TypeInformation.of(DecodedPojo.class)
+                        .createSerializer(new ExecutionConfig());
+        StateInspectSchema schema =
+                StateInspectSchema.forValue(
+                        "pojo-value",
+                        "cf-pojo",
+                        false,
+                        IntSerializer.INSTANCE,
+                        VoidNamespaceSerializer.INSTANCE,
+                        pojoSerializer);
+
+        StateInspectType pojoRowType =
+                StateInspectType.row(
+                        java.util.Arrays.asList(
+                                new StateInspectField("id", StateInspectType.scalar("INT")),
+                                new StateInspectField("name", StateInspectType.scalar("VARCHAR"))));
+        InspectTarget target =
+                semanticTarget(
+                        schema,
+                        StateInspectSemanticSchema.forValue(
+                                StateInspectType.scalar("INT"),
+                                StateInspectType.unknown(),
+                                pojoRowType));
+
+        DecodedPojo pojo = new DecodedPojo();
+        pojo.id = 77;
+        pojo.name = "alice";
+        byte[] valueBytes = serialize(pojoSerializer, pojo);
+        byte[] rowKey = keyWithVoidNamespace(serialize(IntSerializer.INSTANCE, 1));
+
+        StateInspectDecoder.DecodedRow row =
+                StateInspectDecoder.decode(target, rowKey, new byte[][] {valueBytes});
+
+        // The value part should be a ROW with decoded POJO fields.
+        Map<?, ?> valuePart = (Map<?, ?>) row.decodedParts.get("value");
+        assertEquals("ROW", valuePart.get("kind"));
+        List<?> fields = (List<?>) valuePart.get("fields");
+        assertEquals(2, fields.size());
+        // POJO field order may vary; check by name.
+        Map<String, Object> byName = semanticFieldsByName(fields);
+        assertEquals(77, ((Map<?, ?>) byName.get("id")).get("value"));
+        assertEquals("alice", ((Map<?, ?>) byName.get("name")).get("value"));
+    }
+
+    @Test
+    void decodesTupleValueAsSemanticTuple() throws Exception {
+        TypeSerializer<Tuple2<Integer, String>> tupleSerializer =
+                TupleTypeInfo.of(
+                                new org.apache.flink.api.common.typeinfo.TypeHint<
+                                        Tuple2<Integer, String>>() {})
+                        .createSerializer(new ExecutionConfig());
+        StateInspectSchema schema =
+                StateInspectSchema.forValue(
+                        "tuple-value",
+                        "cf-tuple",
+                        false,
+                        IntSerializer.INSTANCE,
+                        VoidNamespaceSerializer.INSTANCE,
+                        tupleSerializer);
+
+        StateInspectType tupleType =
+                StateInspectType.tuple(
+                        java.util.Arrays.asList(
+                                new StateInspectField("f0", StateInspectType.scalar("INT")),
+                                new StateInspectField("f1", StateInspectType.scalar("VARCHAR"))));
+        InspectTarget target =
+                semanticTarget(
+                        schema,
+                        StateInspectSemanticSchema.forValue(
+                                StateInspectType.scalar("INT"),
+                                StateInspectType.unknown(),
+                                tupleType));
+
+        byte[] valueBytes = serialize(tupleSerializer, Tuple2.of(30, "bob"));
+        byte[] rowKey = keyWithVoidNamespace(serialize(IntSerializer.INSTANCE, 1));
+
+        StateInspectDecoder.DecodedRow row =
+                StateInspectDecoder.decode(target, rowKey, new byte[][] {valueBytes});
+
+        Map<?, ?> valuePart = (Map<?, ?>) row.decodedParts.get("value");
+        assertEquals("TUPLE", valuePart.get("kind"));
+        List<?> fields = (List<?>) valuePart.get("fields");
+        assertEquals(2, fields.size());
+        assertEquals("f0", ((Map<?, ?>) fields.get(0)).get("name"));
+        assertEquals(30, ((Map<?, ?>) fields.get(0)).get("value"));
+        assertEquals("f1", ((Map<?, ?>) fields.get(1)).get("name"));
+        assertEquals("bob", ((Map<?, ?>) fields.get(1)).get("value"));
+    }
+
+    @Test
+    void decodesAvroGenericRecordValueAsSemanticRow() throws Exception {
+        org.apache.avro.Schema avroSchema =
+                org.apache.avro.SchemaBuilder.record("UserRecord")
+                        .fields()
+                        .name("userId")
+                        .type()
+                        .intType()
+                        .noDefault()
+                        .name("userName")
+                        .type()
+                        .stringType()
+                        .noDefault()
+                        .endRecord();
+        org.apache.flink.formats.avro.typeutils.AvroSerializer<
+                        org.apache.avro.generic.GenericRecord>
+                avroSerializer =
+                        new org.apache.flink.formats.avro.typeutils.AvroSerializer<>(
+                                org.apache.avro.generic.GenericRecord.class, avroSchema);
+
+        StateInspectSchema schema =
+                StateInspectSchema.forValue(
+                        "avro-generic-value",
+                        "cf-avro-g",
+                        false,
+                        IntSerializer.INSTANCE,
+                        VoidNamespaceSerializer.INSTANCE,
+                        avroSerializer);
+
+        StateInspectType avroRowType =
+                StateInspectType.row(
+                        java.util.Arrays.asList(
+                                new StateInspectField("userId", StateInspectType.scalar("INT")),
+                                new StateInspectField(
+                                        "userName", StateInspectType.scalar("VARCHAR"))));
+        InspectTarget target =
+                semanticTarget(
+                        schema,
+                        StateInspectSemanticSchema.forValue(
+                                StateInspectType.scalar("INT"),
+                                StateInspectType.unknown(),
+                                avroRowType));
+
+        org.apache.avro.generic.GenericRecord record =
+                new org.apache.avro.generic.GenericData.Record(avroSchema);
+        record.put("userId", 55);
+        record.put("userName", "carol");
+        byte[] valueBytes = serialize(avroSerializer, record);
+        byte[] rowKey = keyWithVoidNamespace(serialize(IntSerializer.INSTANCE, 1));
+
+        StateInspectDecoder.DecodedRow row =
+                StateInspectDecoder.decode(target, rowKey, new byte[][] {valueBytes});
+
+        Map<?, ?> valuePart = (Map<?, ?>) row.decodedParts.get("value");
+        assertEquals("ROW", valuePart.get("kind"));
+        List<?> fields = (List<?>) valuePart.get("fields");
+        assertEquals(2, fields.size());
+        assertEquals("userId", ((Map<?, ?>) fields.get(0)).get("name"));
+        assertEquals(55, ((Map<?, ?>) fields.get(0)).get("value"));
+        assertEquals("userName", ((Map<?, ?>) fields.get(1)).get("name"));
+        // Avro string values are Utf8 (CharSequence); the scalar renderer converts to String.
+        assertEquals("carol", ((Map<?, ?>) fields.get(1)).get("value"));
+    }
+
+    @Test
+    void decodesAvroSpecificRecordValueAsSemanticRow() throws Exception {
+        org.apache.flink.formats.avro.typeutils.AvroSerializer<AvroEventRecord> avroSerializer =
+                new org.apache.flink.formats.avro.typeutils.AvroSerializer<>(AvroEventRecord.class);
+
+        StateInspectSchema stateSchema =
+                StateInspectSchema.forValue(
+                        "avro-specific-value",
+                        "cf-avro-s",
+                        false,
+                        IntSerializer.INSTANCE,
+                        VoidNamespaceSerializer.INSTANCE,
+                        avroSerializer);
+
+        StateInspectType avroRowType =
+                StateInspectType.row(
+                        java.util.Arrays.asList(
+                                new StateInspectField("eventId", StateInspectType.scalar("INT")),
+                                new StateInspectField(
+                                        "eventName", StateInspectType.scalar("VARCHAR"))));
+        InspectTarget target =
+                semanticTarget(
+                        stateSchema,
+                        StateInspectSemanticSchema.forValue(
+                                StateInspectType.scalar("INT"),
+                                StateInspectType.unknown(),
+                                avroRowType));
+
+        AvroEventRecord record = new AvroEventRecord();
+        record.eventId = 88;
+        record.eventName = "click";
+        byte[] valueBytes = serialize(avroSerializer, record);
+        byte[] rowKey = keyWithVoidNamespace(serialize(IntSerializer.INSTANCE, 1));
+
+        StateInspectDecoder.DecodedRow row =
+                StateInspectDecoder.decode(target, rowKey, new byte[][] {valueBytes});
+
+        Map<?, ?> valuePart = (Map<?, ?>) row.decodedParts.get("value");
+        assertEquals("ROW", valuePart.get("kind"));
+        List<?> fields = (List<?>) valuePart.get("fields");
+        assertEquals(2, fields.size());
+        assertEquals("eventId", ((Map<?, ?>) fields.get(0)).get("name"));
+        assertEquals(88, ((Map<?, ?>) fields.get(0)).get("value"));
+        assertEquals("eventName", ((Map<?, ?>) fields.get(1)).get("name"));
+        assertEquals("click", ((Map<?, ?>) fields.get(1)).get("value"));
+    }
+
+    @Test
+    void decodesListWithSemanticSchemaAsListOfScalars() throws Exception {
+        // ListState<String> with a semantic schema: the LIST path should produce a structured
+        // {"kind":"LIST","values":[...]} with each element rendered as a SCALAR.
+        StateInspectSchema schema =
+                StateInspectSchema.forList(
+                        "semantic-list",
+                        "cf-sem-list",
+                        false,
+                        IntSerializer.INSTANCE,
+                        VoidNamespaceSerializer.INSTANCE,
+                        StringSerializer.INSTANCE);
+        InspectTarget target =
+                semanticTarget(
+                        withVoidNamespace(schema),
+                        StateInspectSemanticSchema.forList(
+                                StateInspectType.scalar("INT"),
+                                StateInspectType.unknown(),
+                                StateInspectType.scalar("VARCHAR")));
+
+        byte[] valueBytes = listPayload("alpha", "beta");
+        byte[] rowKey = keyWithVoidNamespace(serialize(IntSerializer.INSTANCE, 1));
+
+        StateInspectDecoder.DecodedRow row =
+                StateInspectDecoder.decode(target, rowKey, new byte[][] {valueBytes});
+
+        assertNull(row.decodeError);
+        assertNotNull(row.decodedParts);
+        Map<?, ?> listPart = (Map<?, ?>) row.decodedParts.get("value");
+        assertNotNull(listPart);
+        assertEquals("LIST", listPart.get("kind"));
+        List<?> values = (List<?>) listPart.get("values");
+        assertEquals(2, values.size());
+        Map<?, ?> first = (Map<?, ?>) values.get(0);
+        assertEquals("SCALAR", first.get("kind"));
+        assertEquals("alpha", first.get("value"));
+        Map<?, ?> second = (Map<?, ?>) values.get(1);
+        assertEquals("beta", second.get("value"));
+    }
+
+    @Test
+    void decodesMapWithPojoValueAsSemanticMap() throws Exception {
+        TypeSerializer<DecodedPojo> pojoSerializer =
+                org.apache.flink.api.common.typeinfo.TypeInformation.of(DecodedPojo.class)
+                        .createSerializer(new ExecutionConfig());
+        org.apache.flink.api.common.typeutils.base.MapSerializer<String, DecodedPojo>
+                mapSerializer =
+                        new org.apache.flink.api.common.typeutils.base.MapSerializer<>(
+                                StringSerializer.INSTANCE, pojoSerializer);
+
+        StateInspectSchema schema =
+                StateInspectSchema.forMap(
+                        "pojo-map",
+                        "cf-pojo-map",
+                        false,
+                        IntSerializer.INSTANCE,
+                        VoidNamespaceSerializer.INSTANCE,
+                        StringSerializer.INSTANCE,
+                        pojoSerializer);
+
+        StateInspectType pojoRowType =
+                StateInspectType.row(
+                        java.util.Arrays.asList(
+                                new StateInspectField("id", StateInspectType.scalar("INT")),
+                                new StateInspectField("name", StateInspectType.scalar("VARCHAR"))));
+        InspectTarget target =
+                semanticTarget(
+                        withVoidNamespace(schema),
+                        StateInspectSemanticSchema.forMap(
+                                StateInspectType.scalar("INT"),
+                                StateInspectType.unknown(),
+                                StateInspectType.scalar("VARCHAR"),
+                                pojoRowType));
+
+        DecodedPojo pojo = new DecodedPojo();
+        pojo.id = 9;
+        pojo.name = "zed";
+        byte[] mapKeyBytes = serialize(StringSerializer.INSTANCE, "key-1");
+        byte[] rowKey = mapKeyWithVoidNamespace(serialize(IntSerializer.INSTANCE, 1), mapKeyBytes);
+        byte[][] columns = new byte[][] {mapValueBytes(pojoSerializer, pojo)};
+
+        StateInspectDecoder.DecodedRow row = StateInspectDecoder.decode(target, rowKey, columns);
+
+        // The map_value part should be a ROW (the POJO value).
+        Map<?, ?> mapValuePart = (Map<?, ?>) row.decodedParts.get("map_value");
+        assertEquals("ROW", mapValuePart.get("kind"));
+        List<?> fields = (List<?>) mapValuePart.get("fields");
+        Map<String, Object> byName = semanticFieldsByName(fields);
+        assertEquals(9, ((Map<?, ?>) byName.get("id")).get("value"));
+        assertEquals("zed", ((Map<?, ?>) byName.get("name")).get("value"));
+    }
+
+    @Test
+    void decodesAvroGenericRecordMapValueAsSemanticRow() throws Exception {
+        org.apache.avro.Schema avroSchema =
+                org.apache.avro.SchemaBuilder.record("MapItemRecord")
+                        .fields()
+                        .name("sku")
+                        .type()
+                        .intType()
+                        .noDefault()
+                        .endRecord();
+        org.apache.flink.formats.avro.typeutils.AvroSerializer<
+                        org.apache.avro.generic.GenericRecord>
+                avroSerializer =
+                        new org.apache.flink.formats.avro.typeutils.AvroSerializer<>(
+                                org.apache.avro.generic.GenericRecord.class, avroSchema);
+
+        StateInspectSchema schema =
+                StateInspectSchema.forMap(
+                        "avro-map",
+                        "cf-avro-map",
+                        false,
+                        IntSerializer.INSTANCE,
+                        VoidNamespaceSerializer.INSTANCE,
+                        StringSerializer.INSTANCE,
+                        avroSerializer);
+
+        StateInspectType avroRowType =
+                StateInspectType.row(
+                        java.util.Collections.singletonList(
+                                new StateInspectField("sku", StateInspectType.scalar("INT"))));
+        InspectTarget target =
+                semanticTarget(
+                        withVoidNamespace(schema),
+                        StateInspectSemanticSchema.forMap(
+                                StateInspectType.scalar("INT"),
+                                StateInspectType.unknown(),
+                                StateInspectType.scalar("VARCHAR"),
+                                avroRowType));
+
+        org.apache.avro.generic.GenericRecord record =
+                new org.apache.avro.generic.GenericData.Record(avroSchema);
+        record.put("sku", 42);
+        byte[] mapKeyBytes = serialize(StringSerializer.INSTANCE, "item-1");
+        byte[] rowKey = mapKeyWithVoidNamespace(serialize(IntSerializer.INSTANCE, 1), mapKeyBytes);
+        byte[][] columns = new byte[][] {mapValueBytes(avroSerializer, record)};
+
+        StateInspectDecoder.DecodedRow row = StateInspectDecoder.decode(target, rowKey, columns);
+
+        Map<?, ?> mapValuePart = (Map<?, ?>) row.decodedParts.get("map_value");
+        assertEquals("ROW", mapValuePart.get("kind"));
+        List<?> fields = (List<?>) mapValuePart.get("fields");
+        assertEquals("sku", ((Map<?, ?>) fields.get(0)).get("name"));
+        assertEquals(42, ((Map<?, ?>) fields.get(0)).get("value"));
+    }
+
+    @Test
+    void decodesNestedPojoValueAsRecursiveRow() throws Exception {
+        TypeSerializer<NestedPojo> pojoSerializer =
+                org.apache.flink.api.common.typeinfo.TypeInformation.of(NestedPojo.class)
+                        .createSerializer(new ExecutionConfig());
+        StateInspectSchema schema =
+                StateInspectSchema.forValue(
+                        "nested-pojo-value",
+                        "cf-nested",
+                        false,
+                        IntSerializer.INSTANCE,
+                        VoidNamespaceSerializer.INSTANCE,
+                        pojoSerializer);
+
+        StateInspectType innerRowType =
+                StateInspectType.row(
+                        java.util.Arrays.asList(
+                                new StateInspectField("x", StateInspectType.scalar("INT")),
+                                new StateInspectField("y", StateInspectType.scalar("VARCHAR"))));
+        StateInspectType outerRowType =
+                StateInspectType.row(
+                        java.util.Arrays.asList(
+                                new StateInspectField("id", StateInspectType.scalar("INT")),
+                                new StateInspectField("inner", innerRowType)));
+        InspectTarget target =
+                semanticTarget(
+                        schema,
+                        StateInspectSemanticSchema.forValue(
+                                StateInspectType.scalar("INT"),
+                                StateInspectType.unknown(),
+                                outerRowType));
+
+        NestedPojo pojo = new NestedPojo();
+        pojo.id = 3;
+        pojo.inner = new InnerPojo();
+        pojo.inner.x = 10;
+        pojo.inner.y = "deep";
+        byte[] valueBytes = serialize(pojoSerializer, pojo);
+        byte[] rowKey = keyWithVoidNamespace(serialize(IntSerializer.INSTANCE, 1));
+
+        StateInspectDecoder.DecodedRow row =
+                StateInspectDecoder.decode(target, rowKey, new byte[][] {valueBytes});
+
+        Map<?, ?> valuePart = (Map<?, ?>) row.decodedParts.get("value");
+        assertEquals("ROW", valuePart.get("kind"));
+        List<?> fields = (List<?>) valuePart.get("fields");
+        Map<String, Object> byName = semanticFieldsByName(fields);
+        assertEquals(3, ((Map<?, ?>) byName.get("id")).get("value"));
+        Map<?, ?> innerPart = (Map<?, ?>) byName.get("inner");
+        assertEquals("ROW", innerPart.get("kind"));
+        Map<String, Object> innerByName = semanticFieldsByName((List<?>) innerPart.get("fields"));
+        assertEquals(10, ((Map<?, ?>) innerByName.get("x")).get("value"));
+        assertEquals("deep", ((Map<?, ?>) innerByName.get("y")).get("value"));
+    }
+
+    @Test
+    void rendersAvroUtf8ScalarAsString() throws Exception {
+        // Directly test that renderSemanticScalar handles Avro Utf8 (a CharSequence).
+        // We can't call the private method directly, but we can test via a decode path that
+        // produces a Utf8 value. An Avro GenericRecord with a string field deserialized through
+        // AvroSerializer produces Utf8 for string fields.
+        org.apache.avro.Schema avroSchema =
+                org.apache.avro.SchemaBuilder.record("Utf8Test")
+                        .fields()
+                        .name("text")
+                        .type()
+                        .stringType()
+                        .noDefault()
+                        .endRecord();
+        org.apache.flink.formats.avro.typeutils.AvroSerializer<
+                        org.apache.avro.generic.GenericRecord>
+                avroSerializer =
+                        new org.apache.flink.formats.avro.typeutils.AvroSerializer<>(
+                                org.apache.avro.generic.GenericRecord.class, avroSchema);
+
+        StateInspectSchema schema =
+                StateInspectSchema.forValue(
+                        "utf8-value",
+                        "cf-utf8",
+                        false,
+                        IntSerializer.INSTANCE,
+                        VoidNamespaceSerializer.INSTANCE,
+                        avroSerializer);
+
+        StateInspectType rowType =
+                StateInspectType.row(
+                        java.util.Collections.singletonList(
+                                new StateInspectField("text", StateInspectType.scalar("VARCHAR"))));
+        InspectTarget target =
+                semanticTarget(
+                        schema,
+                        StateInspectSemanticSchema.forValue(
+                                StateInspectType.scalar("INT"),
+                                StateInspectType.unknown(),
+                                rowType));
+
+        org.apache.avro.generic.GenericRecord record =
+                new org.apache.avro.generic.GenericData.Record(avroSchema);
+        record.put("text", "hello-utf8");
+        byte[] valueBytes = serialize(avroSerializer, record);
+        byte[] rowKey = keyWithVoidNamespace(serialize(IntSerializer.INSTANCE, 1));
+
+        StateInspectDecoder.DecodedRow row =
+                StateInspectDecoder.decode(target, rowKey, new byte[][] {valueBytes});
+
+        // Should not have a decode_error - Utf8 should render as String.
+        Map<?, ?> valuePart = (Map<?, ?>) row.decodedParts.get("value");
+        List<?> fields = (List<?>) valuePart.get("fields");
+        assertEquals("text", ((Map<?, ?>) fields.get(0)).get("name"));
+        assertEquals("hello-utf8", ((Map<?, ?>) fields.get(0)).get("value"));
+    }
+
+    @Test
+    void rendersAvroEnumSymbolScalarAsString() throws Exception {
+        // Avro enum fields are extracted as VARCHAR at the schema level, but the runtime value
+        // is a GenericEnumSymbol (not a Java Enum). The scalar renderer must handle it via
+        // toString() rather than falling through to "not displayable".
+        org.apache.avro.Schema enumSchema =
+                org.apache.avro.SchemaBuilder.enumeration("Status").symbols("ACTIVE", "INACTIVE");
+        org.apache.avro.Schema avroSchema =
+                org.apache.avro.SchemaBuilder.record("EnumTest")
+                        .fields()
+                        .name("status")
+                        .type(enumSchema)
+                        .noDefault()
+                        .endRecord();
+        org.apache.flink.formats.avro.typeutils.AvroSerializer<
+                        org.apache.avro.generic.GenericRecord>
+                avroSerializer =
+                        new org.apache.flink.formats.avro.typeutils.AvroSerializer<>(
+                                org.apache.avro.generic.GenericRecord.class, avroSchema);
+
+        StateInspectSchema schema =
+                StateInspectSchema.forValue(
+                        "enum-value",
+                        "cf-enum",
+                        false,
+                        IntSerializer.INSTANCE,
+                        VoidNamespaceSerializer.INSTANCE,
+                        avroSerializer);
+
+        StateInspectType rowType =
+                StateInspectType.row(
+                        java.util.Collections.singletonList(
+                                new StateInspectField(
+                                        "status", StateInspectType.scalar("VARCHAR"))));
+        InspectTarget target =
+                semanticTarget(
+                        schema,
+                        StateInspectSemanticSchema.forValue(
+                                StateInspectType.scalar("INT"),
+                                StateInspectType.unknown(),
+                                rowType));
+
+        org.apache.avro.generic.GenericRecord record =
+                new org.apache.avro.generic.GenericData.Record(avroSchema);
+        record.put(
+                "status", new org.apache.avro.generic.GenericData.EnumSymbol(enumSchema, "ACTIVE"));
+        byte[] valueBytes = serialize(avroSerializer, record);
+        byte[] rowKey = keyWithVoidNamespace(serialize(IntSerializer.INSTANCE, 1));
+
+        StateInspectDecoder.DecodedRow row =
+                StateInspectDecoder.decode(target, rowKey, new byte[][] {valueBytes});
+
+        // Should not have a decode_error - GenericEnumSymbol should render as String.
+        Map<?, ?> valuePart = (Map<?, ?>) row.decodedParts.get("value");
+        List<?> fields = (List<?>) valuePart.get("fields");
+        assertEquals("status", ((Map<?, ?>) fields.get(0)).get("name"));
+        assertEquals("ACTIVE", ((Map<?, ?>) fields.get(0)).get("value"));
+    }
+
+    /** Simple POJO with int and String fields for decoder testing. */
+    public static final class DecodedPojo implements java.io.Serializable {
+        private static final long serialVersionUID = 1L;
+        public int id;
+        public String name;
+    }
+
+    /** POJO with a nested POJO field for recursive decode testing. */
+    public static final class NestedPojo implements java.io.Serializable {
+        private static final long serialVersionUID = 1L;
+        public int id;
+        public InnerPojo inner;
+    }
+
+    public static final class InnerPojo implements java.io.Serializable {
+        private static final long serialVersionUID = 1L;
+        public int x;
+        public String y;
+    }
+
+    /** A minimal Avro SpecificRecord for decoder testing. */
+    public static final class AvroEventRecord implements org.apache.avro.specific.SpecificRecord {
+        private static final long serialVersionUID = 1L;
+        public int eventId;
+        public String eventName;
+
+        @Override
+        public org.apache.avro.Schema getSchema() {
+            return org.apache.avro.SchemaBuilder.record("AvroEvent")
+                    .fields()
+                    .name("eventId")
+                    .type()
+                    .intType()
+                    .noDefault()
+                    .name("eventName")
+                    .type()
+                    .stringType()
+                    .noDefault()
+                    .endRecord();
+        }
+
+        @Override
+        public void put(int i, Object v) {
+            switch (i) {
+                case 0:
+                    eventId = (Integer) v;
+                    break;
+                case 1:
+                    eventName = (String) v;
+                    break;
+                default:
+                    throw new IndexOutOfBoundsException(String.valueOf(i));
+            }
+        }
+
+        @Override
+        public Object get(int i) {
+            switch (i) {
+                case 0:
+                    return eventId;
+                case 1:
+                    return eventName;
+                default:
+                    throw new IndexOutOfBoundsException(String.valueOf(i));
+            }
+        }
+    }
+
+    private static Map<String, Object> semanticFieldsByName(List<?> fields) {
+        Map<String, Object> byName = new java.util.LinkedHashMap<>();
+        for (Object f : fields) {
+            Map<?, ?> m = (Map<?, ?>) f;
+            byName.put((String) m.get("name"), m);
+        }
+        return byName;
+    }
+
+    private static byte[] mapKeyWithVoidNamespace(byte[] stateKeyBytes, byte[] mapKeyBytes)
+            throws Exception {
+        DataOutputSerializer output = new DataOutputSerializer(64);
+        output.write(stateKeyBytes);
+        output.writeByte(0);
+        output.writeByte(0);
+        output.write(mapKeyBytes);
+        output.writeInt(stateKeyBytes.length);
+        return output.getCopyOfBuffer();
+    }
+
     private static InspectTarget target(StateInspectSchema schema) {
         return new InspectTarget(
                 schema.stateName(),
@@ -1308,6 +1921,15 @@ class StateInspectDecoderTest {
         ByteArrayOutputStream output = new ByteArrayOutputStream();
         for (String value : values) {
             output.write(serialize(StringSerializer.INSTANCE, value));
+            output.write(',');
+        }
+        return output.toByteArray();
+    }
+
+    private static byte[] listPayload(byte[]... valueBytes) throws Exception {
+        ByteArrayOutputStream output = new ByteArrayOutputStream();
+        for (byte[] value : valueBytes) {
+            output.write(value);
             output.write(',');
         }
         return output.toByteArray();

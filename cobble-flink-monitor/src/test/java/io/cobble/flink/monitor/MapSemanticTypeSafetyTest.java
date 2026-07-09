@@ -1,7 +1,6 @@
 package io.cobble.flink.monitor;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import io.cobble.flink.common.inspect.StateInspectSchema;
@@ -14,13 +13,15 @@ import org.apache.flink.api.common.typeutils.base.StringSerializer;
 import org.apache.flink.runtime.state.VoidNamespaceSerializer;
 import org.junit.jupiter.api.Test;
 
-import java.io.IOException;
 import java.lang.reflect.Method;
+import java.util.Collections;
+import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 
 /**
  * Verifies that a nested {@link StateInspectType.Kind#MAP} value type flows through the monitor's
- * JSON rendering paths without NPE and is rejected with a clear error by the decoded-value path.
+ * JSON rendering and semantic decoded-value paths.
  *
  * <p>MAP here refers to the value-type shape (a {@code Map<K,V>} wrapper serializer), which is
  * distinct from Flink {@code MapState} (whose key/value roles are separate semantic parts). A
@@ -61,7 +62,7 @@ class MapSemanticTypeSafetyTest {
                         schema.columnFamily(),
                         false,
                         schema.stateKind().name(),
-                        java.util.Collections.emptyMap(),
+                        Collections.emptyMap(),
                         schema,
                         semantic,
                         null);
@@ -93,27 +94,42 @@ class MapSemanticTypeSafetyTest {
     }
 
     @Test
-    void semanticValueToJsonRejectsMapWithClearError() throws Exception {
+    void semanticValueToJsonHandlesMapWithStructuredEntries() throws Exception {
+        // MAP is now supported by semanticValueToJson: a null value produces an empty entries
+        // list, and a non-null Map value produces structured key/value entries.
         StateInspectType mapType =
                 StateInspectType.map(
                         StateInspectType.scalar("VARCHAR(2147483647)"),
                         StateInspectType.scalar("INT"));
 
-        // semanticValueToJson is package-private static; invoke via reflection.
         Method method =
                 StateInspectDecoder.class.getDeclaredMethod(
                         "semanticValueToJson", StateInspectType.class, Object.class);
         method.setAccessible(true);
 
-        // Method.invoke wraps the original IOException in InvocationTargetException.
-        java.lang.reflect.InvocationTargetException ex =
-                assertThrows(
-                        java.lang.reflect.InvocationTargetException.class,
-                        () -> method.invoke(null, mapType, null));
-        Throwable cause = ex.getCause();
-        assertTrue(cause instanceof IOException, "expected IOException, got " + cause);
-        assertTrue(
-                cause.getMessage().contains("MAP"),
-                "error message should mention MAP, got: " + cause.getMessage());
+        // Null value -> kind MAP, empty entries list (no throw).
+        Object nullResult = method.invoke(null, mapType, null);
+        @SuppressWarnings("unchecked")
+        Map<String, Object> nullJson = (Map<String, Object>) nullResult;
+        assertEquals("MAP", nullJson.get("kind"));
+
+        // Non-null Map value -> entries with recursive key/value rendering.
+        HashMap<String, Integer> runtimeMap = new HashMap<>();
+        runtimeMap.put("a", 1);
+        runtimeMap.put("b", 2);
+        Object mapResult = method.invoke(null, mapType, runtimeMap);
+        @SuppressWarnings("unchecked")
+        Map<String, Object> mapJson = (Map<String, Object>) mapResult;
+        assertEquals("MAP", mapJson.get("kind"));
+        @SuppressWarnings("unchecked")
+        List<?> entries = (List<?>) mapJson.get("entries");
+        assertEquals(2, entries.size());
+        // Each entry has "key" and "value" sub-objects.
+        for (Object entry : entries) {
+            @SuppressWarnings("unchecked")
+            Map<String, Object> e = (Map<String, Object>) entry;
+            assertTrue(e.containsKey("key"));
+            assertTrue(e.containsKey("value"));
+        }
     }
 }

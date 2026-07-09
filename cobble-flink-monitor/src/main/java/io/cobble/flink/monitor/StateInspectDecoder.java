@@ -25,6 +25,9 @@ import org.apache.flink.util.MathUtils;
 import java.io.ByteArrayInputStream;
 import java.io.IOException;
 import java.io.PushbackInputStream;
+import java.lang.reflect.Field;
+import java.lang.reflect.Method;
+import java.nio.ByteBuffer;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.LinkedHashMap;
@@ -707,11 +710,7 @@ final class StateInspectDecoder {
                 output.put("value", renderSemanticScalar(value));
                 return output;
             case ROW:
-                if (value != null && !(value instanceof RowData)) {
-                    throw new IOException(
-                            "Expected RowData but found " + value.getClass().getName());
-                }
-                output.put("fields", decodeRowFields(type, (RowData) value));
+                output.put("fields", decodeStructuredFields(type, value));
                 return output;
             case TUPLE:
                 if (value != null && !(value instanceof Tuple)) {
@@ -726,11 +725,52 @@ final class StateInspectDecoder {
                 }
                 output.put("values", decodeListValues(type.elementType(), (List<?>) value));
                 return output;
+            case MAP:
+                if (value != null && !(value instanceof Map)) {
+                    throw new IOException("Expected Map but found " + value.getClass().getName());
+                }
+                output.put("entries", decodeMapEntries(type, (Map<?, ?>) value));
+                return output;
             case UNKNOWN:
                 throw new IOException("Unknown semantic type");
             default:
                 throw new IOException("Unsupported semantic type " + type.kind());
         }
+    }
+
+    /**
+     * Decodes the named fields of a {@code ROW} value from any supported runtime type: Flink {@link
+     * RowData}, a POJO (field-by-name reflection), or an Avro {@code IndexedRecord} (field-by-index
+     * via reflection, avoiding a compile-time Avro dependency). Field access exceptions propagate
+     * as row-level {@code decode_error} values instead of emitting misleading null fields.
+     */
+    private static List<Map<String, Object>> decodeStructuredFields(
+            StateInspectType type, Object value) throws IOException {
+        if (value == null) {
+            return decodeStructuredFieldsNull(type);
+        }
+        if (value instanceof RowData) {
+            return decodeRowFields(type, (RowData) value);
+        }
+        if (value instanceof Tuple) {
+            // A POJO serializer snapshot may produce a Tuple at runtime if the type was actually
+            // a Tuple; route through the Tuple field accessor for positional access.
+            return decodeTupleFields(type, (Tuple) value);
+        }
+        if (isAvroIndexedRecord(value)) {
+            return decodeAvroRecordFields(type, value);
+        }
+        // Treat as POJO: field-by-name reflection.
+        return decodePojoFields(type, value);
+    }
+
+    private static List<Map<String, Object>> decodeStructuredFieldsNull(StateInspectType type)
+            throws IOException {
+        List<Map<String, Object>> output = new ArrayList<>(type.fields().size());
+        for (StateInspectField field : type.fields()) {
+            output.add(semanticFieldToJson(field, null));
+        }
+        return output;
     }
 
     private static List<Map<String, Object>> decodeRowFields(StateInspectType type, RowData row)
@@ -763,6 +803,102 @@ final class StateInspectDecoder {
         return output;
     }
 
+    /**
+     * Reads POJO fields by name via reflection. Each field in {@code type.fields()} is looked up in
+     * the value's class hierarchy, made accessible, and read. A missing field or reflection failure
+     * throws {@link IOException} so that {@code addSemanticPart} converts it to a row-level {@code
+     * decode_error} rather than silently emitting a misleading null.
+     */
+    private static List<Map<String, Object>> decodePojoFields(StateInspectType type, Object pojo)
+            throws IOException {
+        List<Map<String, Object>> output = new ArrayList<>(type.fields().size());
+        for (StateInspectField field : type.fields()) {
+            Object fieldValue;
+            try {
+                Field reflected = findField(pojo.getClass(), field.name());
+                if (reflected == null) {
+                    throw new IOException(
+                            "POJO field '"
+                                    + field.name()
+                                    + "' not found in "
+                                    + pojo.getClass().getName());
+                }
+                reflected.setAccessible(true);
+                fieldValue = reflected.get(pojo);
+            } catch (ReflectiveOperationException e) {
+                throw new IOException(
+                        "Failed to read POJO field '" + field.name() + "': " + e.getMessage(), e);
+            }
+            output.add(semanticFieldToJson(field, fieldValue));
+        }
+        return output;
+    }
+
+    /**
+     * Reads Avro record fields by index via reflection on {@code IndexedRecord.get(int)}. Avro is
+     * not a compile-time dependency of the monitor, so we use reflection to avoid importing Avro
+     * classes. The schema field names from {@code type.fields()} provide the display names; the
+     * positional index aligns with the Avro schema field order. A reflection failure throws {@link
+     * IOException} so that {@code addSemanticPart} converts it to a row-level {@code decode_error}
+     * rather than silently emitting a misleading null.
+     */
+    private static List<Map<String, Object>> decodeAvroRecordFields(
+            StateInspectType type, Object record) throws IOException {
+        List<Map<String, Object>> output = new ArrayList<>(type.fields().size());
+        for (int index = 0; index < type.fields().size(); index++) {
+            StateInspectField field = type.fields().get(index);
+            Object fieldValue;
+            try {
+                Method get = record.getClass().getMethod("get", int.class);
+                fieldValue = get.invoke(record, index);
+            } catch (ReflectiveOperationException e) {
+                throw new IOException(
+                        "Failed to read Avro field '"
+                                + field.name()
+                                + "' at index "
+                                + index
+                                + ": "
+                                + e.getMessage(),
+                        e);
+            }
+            output.add(semanticFieldToJson(field, fieldValue));
+        }
+        return output;
+    }
+
+    /**
+     * Checks whether the object implements Avro {@code IndexedRecord} without importing Avro. This
+     * walks the full interface hierarchy because {@code GenericData.Record} implements {@code
+     * GenericRecord} which extends {@code IndexedRecord}.
+     */
+    private static boolean isAvroIndexedRecord(Object value) {
+        return implementsInterface(value.getClass(), "org.apache.avro.generic.IndexedRecord");
+    }
+
+    private static boolean implementsInterface(Class<?> clazz, String interfaceName) {
+        while (clazz != null) {
+            for (Class<?> iface : clazz.getInterfaces()) {
+                if (iface.getName().equals(interfaceName)
+                        || implementsInterface(iface, interfaceName)) {
+                    return true;
+                }
+            }
+            clazz = clazz.getSuperclass();
+        }
+        return false;
+    }
+
+    private static Field findField(Class<?> clazz, String name) {
+        while (clazz != null) {
+            try {
+                return clazz.getDeclaredField(name);
+            } catch (NoSuchFieldException e) {
+                clazz = clazz.getSuperclass();
+            }
+        }
+        return null;
+    }
+
     private static List<Object> decodeListValues(StateInspectType elementType, List<?> values)
             throws IOException {
         List<Object> output = new ArrayList<>();
@@ -771,6 +907,26 @@ final class StateInspectDecoder {
         }
         for (Object value : values) {
             output.add(semanticValueToJson(elementType, value));
+        }
+        return output;
+    }
+
+    /**
+     * Decodes a {@code MAP} value into a list of {@code {key, value}} entries, recursively
+     * rendering each key and value through {@link #semanticValueToJson}. Avro maps use {@code Utf8}
+     * keys which are handled by the scalar renderer's {@code CharSequence} branch.
+     */
+    private static List<Map<String, Object>> decodeMapEntries(StateInspectType type, Map<?, ?> map)
+            throws IOException {
+        List<Map<String, Object>> output = new ArrayList<>();
+        if (map == null) {
+            return output;
+        }
+        for (Map.Entry<?, ?> entry : map.entrySet()) {
+            Map<String, Object> jsonEntry = new LinkedHashMap<>();
+            jsonEntry.put("key", semanticValueToJson(type.keyType(), entry.getKey()));
+            jsonEntry.put("value", semanticValueToJson(type.valueType(), entry.getValue()));
+            output.add(jsonEntry);
         }
         return output;
     }
@@ -797,10 +953,47 @@ final class StateInspectDecoder {
                 || value instanceof TimestampData) {
             return value.toString();
         }
+        // Avro Utf8 and other CharSequence implementations -> plain string.
+        if (value instanceof CharSequence) {
+            return value.toString();
+        }
+        // Avro bytes / GenericFixed / java.nio.ByteBuffer -> base64.
         if (value instanceof byte[]) {
             return CobbleFlinkMonitorServer.bytesJson((byte[]) value);
         }
+        if (value instanceof ByteBuffer) {
+            ByteBuffer buf = (ByteBuffer) value;
+            byte[] bytes = new byte[buf.remaining()];
+            buf.duplicate().get(bytes);
+            return CobbleFlinkMonitorServer.bytesJson(bytes);
+        }
+        // Avro GenericFixed has a bytes() method; try reflection before giving up.
+        byte[] fixedBytes = tryGetAvroFixedBytes(value);
+        if (fixedBytes != null) {
+            return CobbleFlinkMonitorServer.bytesJson(fixedBytes);
+        }
+        // Java enum -> name string.
+        if (value instanceof Enum) {
+            return ((Enum<?>) value).name();
+        }
+        // Avro GenericEnumSymbol (not a Java Enum) -> toString().
+        if (implementsInterface(value.getClass(), "org.apache.avro.generic.GenericEnumSymbol")) {
+            return value.toString();
+        }
         throw new IOException("Semantic scalar is not displayable: " + value.getClass().getName());
+    }
+
+    /** Attempts to read bytes from an Avro {@code GenericFixed} via reflection. */
+    private static byte[] tryGetAvroFixedBytes(Object value) {
+        try {
+            Method bytesMethod = value.getClass().getMethod("bytes");
+            if (bytesMethod.getReturnType() == byte[].class) {
+                return (byte[]) bytesMethod.invoke(value);
+            }
+        } catch (ReflectiveOperationException e) {
+            // Not a GenericFixed or bytes() method not available.
+        }
+        return null;
     }
 
     private static KeySlices splitKeyAndNamespace(StateInspectSchema schema, byte[] rowKey)
