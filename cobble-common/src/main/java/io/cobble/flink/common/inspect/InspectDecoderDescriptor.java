@@ -93,7 +93,7 @@ public abstract class InspectDecoderDescriptor {
     static final int MAX_WIRE_FORMAT_UTF_BYTES = 256; // 256 UTF bytes
 
     /** The only Avro wire format currently supported. */
-    static final String AVRO_WIRE_FORMAT_FLINK_DATA_INPUT_V1 = "FLINK_DATA_INPUT_V1";
+    public static final String AVRO_WIRE_FORMAT_FLINK_DATA_INPUT_V1 = "FLINK_DATA_INPUT_V1";
 
     private final InspectDecoderDescriptorKind kind;
     private final DescriptorCapability capability;
@@ -109,6 +109,29 @@ public abstract class InspectDecoderDescriptor {
 
     public DescriptorCapability capability() {
         return capability;
+    }
+
+    /**
+     * Returns the Avro writer-schema JSON if this is an AVRO descriptor, otherwise throws.
+     *
+     * @throws IllegalStateException if this descriptor is not of kind {@code AVRO}.
+     */
+    public String avroWriterSchemaJson() {
+        throw new IllegalStateException("Not an AVRO descriptor: " + kind);
+    }
+
+    /**
+     * Returns the Avro wire-format tag if this is an AVRO descriptor, otherwise throws.
+     *
+     * @throws IllegalStateException if this descriptor is not of kind {@code AVRO}.
+     */
+    public String avroWireFormat() {
+        throw new IllegalStateException("Not an AVRO descriptor: " + kind);
+    }
+
+    /** Returns {@code true} if this descriptor is of kind {@code AVRO}. */
+    public boolean isAvro() {
+        return kind == InspectDecoderDescriptorKind.AVRO;
     }
 
     // ---- Factory methods ----
@@ -571,6 +594,16 @@ public abstract class InspectDecoderDescriptor {
         }
 
         String wireFormat() {
+            return wireFormat;
+        }
+
+        @Override
+        public String avroWriterSchemaJson() {
+            return writerSchemaJson;
+        }
+
+        @Override
+        public String avroWireFormat() {
             return wireFormat;
         }
 

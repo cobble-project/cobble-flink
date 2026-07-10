@@ -1989,8 +1989,9 @@ class StateInspectDecoderTest {
                         String.class,
                         byte[].class,
                         StateInspectType.class,
-                        byte[].class);
+                        byte[].class,
+                        io.cobble.flink.common.inspect.InspectDecoderDescriptor.class);
         constructor.setAccessible(true);
-        return constructor.newInstance(className, lengthTag, null, null, null, null);
+        return constructor.newInstance(className, lengthTag, null, null, null, null, null);
     }
 }
