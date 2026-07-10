@@ -6,6 +6,7 @@ import org.apache.flink.core.memory.DataOutputView;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
 import java.util.Objects;
@@ -132,6 +133,89 @@ public abstract class InspectDecoderDescriptor {
     /** Returns {@code true} if this descriptor is of kind {@code AVRO}. */
     public boolean isAvro() {
         return kind == InspectDecoderDescriptorKind.AVRO;
+    }
+
+    /** Returns {@code true} if this descriptor is of kind {@code POJO}. */
+    public boolean isPojo() {
+        return kind == InspectDecoderDescriptorKind.POJO;
+    }
+
+    // ---- POJO accessors (overridden by PojoDescriptor) ----
+
+    /**
+     * Returns the POJO class name for diagnostics if this is a POJO descriptor, otherwise throws.
+     *
+     * @throws IllegalStateException if this descriptor is not of kind {@code POJO}.
+     */
+    public String pojoClassName() {
+        throw new IllegalStateException("Not a POJO descriptor: " + kind);
+    }
+
+    /**
+     * Returns the immutable list of POJO field descriptors if this is a POJO descriptor.
+     *
+     * @throws IllegalStateException if this descriptor is not of kind {@code POJO}.
+     */
+    public List<PojoFieldDescriptor> pojoFields() {
+        throw new IllegalStateException("Not a POJO descriptor: " + kind);
+    }
+
+    /**
+     * Returns the immutable list of registered subclass descriptors if this is a POJO descriptor.
+     *
+     * @throws IllegalStateException if this descriptor is not of kind {@code POJO}.
+     */
+    public List<RegisteredSubclass> registeredPojoSubclasses() {
+        throw new IllegalStateException("Not a POJO descriptor: " + kind);
+    }
+
+    /**
+     * Returns whether the base POJO path (no-subclass fields) can be decoded classlessly.
+     *
+     * @throws IllegalStateException if this descriptor is not of kind {@code POJO}.
+     */
+    public boolean pojoBasePathClassless() {
+        throw new IllegalStateException("Not a POJO descriptor: " + kind);
+    }
+
+    /**
+     * Returns whether the POJO serializer may emit non-registered subclass rows.
+     *
+     * @throws IllegalStateException if this descriptor is not of kind {@code POJO}.
+     */
+    public boolean pojoHasNonRegisteredSubclasses() {
+        throw new IllegalStateException("Not a POJO descriptor: " + kind);
+    }
+
+    // ---- Portable snapshot accessors (overridden by PortableSnapshotDescriptor) ----
+
+    /**
+     * Returns the snapshot class name if this is a PORTABLE_SNAPSHOT descriptor, otherwise throws.
+     *
+     * @throws IllegalStateException if this descriptor is not of kind {@code PORTABLE_SNAPSHOT}.
+     */
+    public String portableSnapshotClassName() {
+        throw new IllegalStateException("Not a PORTABLE_SNAPSHOT descriptor: " + kind);
+    }
+
+    /**
+     * Returns a defensive copy of the snapshot bytes if this is a PORTABLE_SNAPSHOT descriptor.
+     *
+     * @throws IllegalStateException if this descriptor is not of kind {@code PORTABLE_SNAPSHOT}.
+     */
+    public byte[] portableSnapshotBytes() {
+        throw new IllegalStateException("Not a PORTABLE_SNAPSHOT descriptor: " + kind);
+    }
+
+    // ---- Unsupported accessors (overridden by UnsupportedDescriptor) ----
+
+    /**
+     * Returns the diagnostic reason if this is an UNSUPPORTED descriptor, otherwise throws.
+     *
+     * @throws IllegalStateException if this descriptor is not of kind {@code UNSUPPORTED}.
+     */
+    public String unsupportedReason() {
+        throw new IllegalStateException("Not an UNSUPPORTED descriptor: " + kind);
     }
 
     // ---- Factory methods ----
@@ -335,6 +419,16 @@ public abstract class InspectDecoderDescriptor {
         }
 
         @Override
+        public String portableSnapshotClassName() {
+            return snapshotClassName;
+        }
+
+        @Override
+        public byte[] portableSnapshotBytes() {
+            return Arrays.copyOf(snapshotBytes, snapshotBytes.length);
+        }
+
+        @Override
         void writePayload(DataOutputView output) throws IOException {
             writeBoundedUtf8(
                     output,
@@ -433,10 +527,6 @@ public abstract class InspectDecoderDescriptor {
             this.basePathClassless = basePathClassless;
         }
 
-        String pojoClassName() {
-            return pojoClassName;
-        }
-
         List<PojoFieldDescriptor> fields() {
             return fields;
         }
@@ -451,6 +541,31 @@ public abstract class InspectDecoderDescriptor {
 
         boolean basePathClassless() {
             return basePathClassless;
+        }
+
+        @Override
+        public String pojoClassName() {
+            return pojoClassName;
+        }
+
+        @Override
+        public List<PojoFieldDescriptor> pojoFields() {
+            return fields;
+        }
+
+        @Override
+        public List<RegisteredSubclass> registeredPojoSubclasses() {
+            return registeredSubclasses;
+        }
+
+        @Override
+        public boolean pojoBasePathClassless() {
+            return basePathClassless;
+        }
+
+        @Override
+        public boolean pojoHasNonRegisteredSubclasses() {
+            return hasNonRegisteredSubclasses;
         }
 
         @Override
@@ -665,6 +780,11 @@ public abstract class InspectDecoderDescriptor {
         }
 
         String reason() {
+            return reason;
+        }
+
+        @Override
+        public String unsupportedReason() {
             return reason;
         }
 

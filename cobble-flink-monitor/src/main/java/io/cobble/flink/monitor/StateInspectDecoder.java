@@ -66,21 +66,21 @@ final class StateInspectDecoder {
             completeClasslessSemanticParts =
                     semanticResult.error == null
                             && decodedParts != null
-                            && hasCompleteFullyClasslessAvroSemanticParts(schema, decodedParts);
+                            && hasCompleteFullyClasslessSemanticParts(schema, decodedParts);
         } catch (Exception e) {
             decodeError = appendError(decodeError, message(e));
         }
 
         // A successful classless semantic result is the canonical preview for the matching part.
         // Keep independent legacy previews when their serializer is still available.
-        if (!completeClasslessSemanticParts || !hasFullyClasslessAvroKeyPart(schema)) {
+        if (!completeClasslessSemanticParts || !hasFullyClasslessKeyPart(schema)) {
             try {
                 decodedKey = decodeKey(schema, rowKey);
             } catch (Exception e) {
                 decodeError = appendError(decodeError, message(e));
             }
         }
-        if (!completeClasslessSemanticParts || !hasFullyClasslessAvroValuePart(schema)) {
+        if (!completeClasslessSemanticParts || !hasFullyClasslessValuePart(schema)) {
             try {
                 decodedValue =
                         schema.stateKind() == StateKind.TIMER
@@ -94,22 +94,23 @@ final class StateInspectDecoder {
     }
 
     /**
-     * Returns {@code true} when the schema has at least one FULLY_CLASSLESS Avro serializer and the
-     * semantic decode produced output for all such parts. This is used to suppress the legacy
-     * preview: when the classless path succeeds, the live serializer is not needed and its absence
-     * (no flink-avro on the classpath) must not produce a false {@code decode_error}.
+     * Returns {@code true} when the schema has at least one FULLY_CLASSLESS classless (POJO or
+     * Avro) serializer and the semantic decode produced output for all such parts. This is used to
+     * suppress the legacy preview: when the classless path succeeds, the live serializer is not
+     * needed and its absence (no flink-avro / no user jar on the classpath) must not produce a
+     * false {@code decode_error}.
      */
-    private static boolean hasCompleteFullyClasslessAvroSemanticParts(
+    private static boolean hasCompleteFullyClasslessSemanticParts(
             StateInspectSchema schema, Map<String, Object> decodedParts) {
         boolean hasClassless = false;
-        if (isFullyClasslessAvro(schema.keySerializer())) {
+        if (isFullyClasslessForSemanticDecode(schema.keySerializer())) {
             hasClassless = true;
             if (!decodedParts.containsKey("state_key")) {
                 return false;
             }
         }
         if (!isVoidNamespaceSerializer(schema.namespaceSerializer())
-                && isFullyClasslessAvro(schema.namespaceSerializer())) {
+                && isFullyClasslessForSemanticDecode(schema.namespaceSerializer())) {
             hasClassless = true;
             if (!decodedParts.containsKey("namespace")) {
                 return false;
@@ -119,7 +120,7 @@ final class StateInspectDecoder {
         if (schema.stateKind() == StateKind.VALUE
                 || schema.stateKind() == StateKind.REDUCING
                 || schema.stateKind() == StateKind.AGGREGATING) {
-            if (isFullyClasslessAvro(schema.valueSerializer())) {
+            if (isFullyClasslessForSemanticDecode(schema.valueSerializer())) {
                 hasClassless = true;
                 if (!decodedParts.containsKey("value")) {
                     return false;
@@ -128,7 +129,7 @@ final class StateInspectDecoder {
         }
         // ListState: element serializer.
         if (schema.stateKind() == StateKind.LIST) {
-            if (isFullyClasslessAvro(schema.listElementSerializer())) {
+            if (isFullyClasslessForSemanticDecode(schema.listElementSerializer())) {
                 hasClassless = true;
                 if (!decodedParts.containsKey("value")) {
                     return false;
@@ -137,14 +138,14 @@ final class StateInspectDecoder {
         }
         // MapState: key and value serializers.
         if (schema.stateKind() == StateKind.MAP) {
-            if (isFullyClasslessAvro(schema.mapUserKeySerializer())) {
+            if (isFullyClasslessForSemanticDecode(schema.mapUserKeySerializer())) {
                 hasClassless = true;
                 if (!decodedParts.containsKey("map_key")) {
                     return false;
                 }
             }
-            // map_value may be absent if the column is absent (no row) — that's fine.
-            if (isFullyClasslessAvro(schema.mapUserValueSerializer())
+            // map_value may be absent if the column is absent (no row) - that's fine.
+            if (isFullyClasslessForSemanticDecode(schema.mapUserValueSerializer())
                     && decodedParts.containsKey("map_value")) {
                 hasClassless = true;
             }
@@ -152,32 +153,33 @@ final class StateInspectDecoder {
         return hasClassless;
     }
 
-    private static boolean isFullyClasslessAvro(SerializerInspectSchema serializer) {
+    private static boolean isFullyClasslessForSemanticDecode(SerializerInspectSchema serializer) {
         return serializer != null
-                && AvroClasslessDecoder.isClasslessAvro(serializer.decoderDescriptor())
+                && ClasslessValueDecoder.shouldPreferClasslessSemanticDecode(
+                        serializer.decoderDescriptor())
                 && serializer.decoderDescriptor().capability()
                         == DescriptorCapability.FULLY_CLASSLESS;
     }
 
-    private static boolean hasFullyClasslessAvroKeyPart(StateInspectSchema schema) {
-        return isFullyClasslessAvro(schema.keySerializer())
+    private static boolean hasFullyClasslessKeyPart(StateInspectSchema schema) {
+        return isFullyClasslessForSemanticDecode(schema.keySerializer())
                 || (!isVoidNamespaceSerializer(schema.namespaceSerializer())
-                        && isFullyClasslessAvro(schema.namespaceSerializer()))
+                        && isFullyClasslessForSemanticDecode(schema.namespaceSerializer()))
                 || (schema.stateKind() == StateKind.MAP
-                        && isFullyClasslessAvro(schema.mapUserKeySerializer()));
+                        && isFullyClasslessForSemanticDecode(schema.mapUserKeySerializer()));
     }
 
-    private static boolean hasFullyClasslessAvroValuePart(StateInspectSchema schema) {
+    private static boolean hasFullyClasslessValuePart(StateInspectSchema schema) {
         if (schema.stateKind() == StateKind.VALUE
                 || schema.stateKind() == StateKind.REDUCING
                 || schema.stateKind() == StateKind.AGGREGATING) {
-            return isFullyClasslessAvro(schema.valueSerializer());
+            return isFullyClasslessForSemanticDecode(schema.valueSerializer());
         }
         if (schema.stateKind() == StateKind.LIST) {
-            return isFullyClasslessAvro(schema.listElementSerializer());
+            return isFullyClasslessForSemanticDecode(schema.listElementSerializer());
         }
         return schema.stateKind() == StateKind.MAP
-                && isFullyClasslessAvro(schema.mapUserValueSerializer());
+                && isFullyClasslessForSemanticDecode(schema.mapUserValueSerializer());
     }
 
     static byte[] encodeStateKeyPrefix(
@@ -621,8 +623,9 @@ final class StateInspectDecoder {
             List<Object> values;
             if (bytes == null) {
                 values = new ArrayList<>();
-            } else if (AvroClasslessDecoder.isClasslessAvro(serializer.decoderDescriptor())) {
-                values = deserializeAvroListElements(serializer, bytes);
+            } else if (ClasslessValueDecoder.shouldPreferClasslessSemanticDecode(
+                    serializer.decoderDescriptor())) {
+                values = deserializeClasslessListElements(serializer, bytes);
             } else {
                 values = deserializeListElements(restore(serializer), bytes);
             }
@@ -641,32 +644,45 @@ final class StateInspectDecoder {
     }
 
     /**
-     * Decodes ListState elements when the element serializer has a classless AVRO descriptor. Each
-     * Avro datum is decoded directly from the shared byte array at the current offset (no copy per
-     * element). The Cobble list delimiter (0x2C) is validated between elements.
+     * Decodes ListState elements when the element serializer has a classless (POJO or Avro)
+     * descriptor. Each datum is decoded from a shared cursor, with the Cobble list delimiter (0x2C)
+     * validated between elements.
+     *
+     * <p>Fallback contract:
+     *
+     * <ul>
+     *   <li>FULLY_CLASSLESS: classless failure is a row-level error (no fallback).
+     *   <li>PARTIALLY_CLASSLESS: classless failure discards local results and retries from the
+     *       original complete bytes via the restored live serializer.
+     * </ul>
      */
-    private static List<Object> deserializeAvroListElements(
+    private static List<Object> deserializeClasslessListElements(
             SerializerInspectSchema serializer, byte[] bytes) throws IOException {
         InspectDecoderDescriptor descriptor = serializer.decoderDescriptor();
-        List<Object> values = new ArrayList<>();
-        int offset = 0;
-        while (offset < bytes.length) {
-            AvroClasslessDecoder.DecodedDatum datum =
-                    AvroClasslessDecoder.decodeFromStream(descriptor, bytes, offset);
-            values.add(datum.record);
-            offset += datum.bytesConsumed;
-            if (offset < bytes.length) {
-                if ((bytes[offset] & 0xFF) != LIST_DELIMITER) {
-                    throw new IOException(
-                            "Invalid Cobble list delimiter after Avro element at offset "
-                                    + offset
-                                    + ": "
-                                    + (bytes[offset] & 0xFF));
+        // 1. Try classless decode into a local list. Only publish on full success.
+        try {
+            List<Object> values = new ArrayList<>();
+            ClasslessValueDecoder.DecodeCursor cursor =
+                    new ClasslessValueDecoder.DecodeCursor(bytes);
+            while (cursor.remaining() > 0) {
+                values.add(ClasslessValueDecoder.decodeFromCursor(descriptor, cursor));
+                if (cursor.remaining() > 0) {
+                    int delimiter = cursor.input().readUnsignedByte();
+                    if (delimiter != LIST_DELIMITER) {
+                        throw new IOException(
+                                "Invalid Cobble list delimiter after element: 0x"
+                                        + Integer.toHexString(delimiter));
+                    }
                 }
-                offset++; // skip delimiter
             }
+            return values; // full success
+        } catch (IOException e) {
+            if (descriptor.capability() == DescriptorCapability.FULLY_CLASSLESS) {
+                throw e; // no fallback
+            }
+            // PARTIALLY_CLASSLESS: discard local results, fall back to live serializer.
         }
-        return values;
+        return deserializeListElements(restore(serializer), bytes);
     }
 
     private static boolean isKnownSemanticType(StateInspectType type) {
@@ -912,6 +928,9 @@ final class StateInspectDecoder {
         if (value == null) {
             return decodeStructuredFieldsNull(type);
         }
+        if (value instanceof ClasslessPojoValue) {
+            return decodeClasslessPojoFields(type, (ClasslessPojoValue) value);
+        }
         if (value instanceof RowData) {
             return decodeRowFields(type, (RowData) value);
         }
@@ -932,6 +951,29 @@ final class StateInspectDecoder {
         List<Map<String, Object>> output = new ArrayList<>(type.fields().size());
         for (StateInspectField field : type.fields()) {
             output.add(semanticFieldToJson(field, null));
+        }
+        return output;
+    }
+
+    /**
+     * Renders a {@link ClasslessPojoValue} by field name. Each declared {@link StateInspectField}
+     * is looked up by name in the POJO value's fields map. A missing declared field is a decode
+     * error; extra fields (e.g. subclass-only) are silently ignored.
+     */
+    private static List<Map<String, Object>> decodeClasslessPojoFields(
+            StateInspectType type, ClasslessPojoValue pojo) throws IOException {
+        if (pojo.isNull()) {
+            return decodeStructuredFieldsNull(type);
+        }
+        Map<String, Object> pojoFields = pojo.fields();
+        List<Map<String, Object>> output = new ArrayList<>(type.fields().size());
+        for (StateInspectField field : type.fields()) {
+            Object fieldValue = pojoFields.get(field.name());
+            if (!pojoFields.containsKey(field.name())) {
+                throw new IOException(
+                        "Field '" + field.name() + "' missing from classless POJO decode");
+            }
+            output.add(semanticFieldToJson(field, fieldValue));
         }
         return output;
     }
@@ -1286,11 +1328,14 @@ final class StateInspectDecoder {
     }
 
     /**
-     * Semantic-only decode for display purposes. If the serializer schema carries a classless AVRO
-     * descriptor, the value is decoded via {@link AvroClasslessDecoder} without loading user
-     * classes or {@code flink-avro}. For {@code FULLY_CLASSLESS} descriptors, failure is fatal
-     * (row-level {@code decode_error}); for {@code PARTIALLY_CLASSLESS}, failure falls through to
-     * the restored-serializer path.
+     * Semantic-only decode for display purposes. If the serializer schema carries a classless POJO
+     * or AVRO descriptor, the value is decoded via {@link ClasslessValueDecoder} without loading
+     * user classes, {@code flink-avro}, or the writer's POJO class. For {@code FULLY_CLASSLESS}
+     * descriptors, failure is fatal (row-level {@code decode_error}); for {@code
+     * PARTIALLY_CLASSLESS}, failure falls through to the restored-serializer path.
+     *
+     * <p>PORTABLE_SNAPSHOT descriptors are NOT handled here; they continue using the existing
+     * snapshot-first {@code restore()} path via {@link #deserialize}.
      *
      * <p>This method is <strong>not</strong> used for physical key reconstruction, key-group
      * assignment, or prefix filtering. Those paths continue to use {@link #deserialize} which
@@ -1306,9 +1351,9 @@ final class StateInspectDecoder {
             return null;
         }
         InspectDecoderDescriptor descriptor = serializerSchema.decoderDescriptor();
-        if (AvroClasslessDecoder.isClasslessAvro(descriptor)) {
+        if (ClasslessValueDecoder.shouldPreferClasslessSemanticDecode(descriptor)) {
             try {
-                return AvroClasslessDecoder.decode(descriptor, bytes);
+                return ClasslessValueDecoder.decode(descriptor, bytes);
             } catch (IOException e) {
                 if (descriptor.capability() == DescriptorCapability.FULLY_CLASSLESS) {
                     throw e;

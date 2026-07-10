@@ -124,6 +124,32 @@ final class AvroClasslessDecoder {
         return new DecodedDatum(record, decoder.bytesRead());
     }
 
+    /**
+     * Decodes a single Avro datum from a shared {@link ClasslessValueDecoder.DecodeCursor}. Does
+     * not reject trailing bytes - the caller owns that validation. Used when an Avro value appears
+     * as a POJO field or ListState element, where the byte stream continues after the datum.
+     *
+     * @return the decoded {@link GenericRecord}.
+     * @throws IOException if the wire format is unsupported, the schema is invalid, or the bytes
+     *     are malformed.
+     */
+    static Object decodeFromCursor(
+            InspectDecoderDescriptor descriptor, ClasslessValueDecoder.DecodeCursor cursor)
+            throws IOException {
+        String wireFormat = validateDescriptor(descriptor);
+        Schema schema = parseSchema(wireFormat, descriptor.avroWriterSchemaJson());
+        GenericDatumReader<GenericRecord> reader = new GenericDatumReader<>(schema);
+        FlinkDataInputDecoder decoder =
+                new FlinkDataInputDecoder(cursor.input(), cursor.remaining());
+        try {
+            return reader.read(null, decoder);
+        } catch (IOException e) {
+            throw e;
+        } catch (RuntimeException e) {
+            throw new IOException("Avro decode failed: " + e.getMessage(), e);
+        }
+    }
+
     /** Result of decoding a single datum from a stream. */
     static final class DecodedDatum {
         final GenericRecord record;

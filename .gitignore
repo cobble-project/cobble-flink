@@ -63,3 +63,7 @@ replay_pid*
 .java-version
 
 .tmp
+.zcode/
+.claude/
+.codex/
+.copilot/
