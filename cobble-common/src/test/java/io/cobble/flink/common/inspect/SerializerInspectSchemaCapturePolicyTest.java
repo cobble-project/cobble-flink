@@ -3,6 +3,7 @@ package io.cobble.flink.common.inspect;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import org.apache.flink.api.common.ExecutionConfig;
@@ -24,6 +25,7 @@ import org.apache.flink.table.types.logical.VarCharType;
 import org.junit.jupiter.api.Test;
 
 import java.io.IOException;
+import java.io.ObjectInputStream;
 import java.io.Serializable;
 
 /**
@@ -207,6 +209,65 @@ class SerializerInspectSchemaCapturePolicyTest {
         assertTrue(restored instanceof ThrowingSnapshotSerializer);
     }
 
+    @Test
+    void restoreSerializerFallsBackWhenSnapshotRestoreHitsNoClassDefFoundError() {
+        SerializerInspectSchema schema =
+                SerializerInspectSchema.fromSerializer(new SnapshotLinkageSerializer());
+
+        TypeSerializer<?> restored = schema.restoreSerializer(getClass().getClassLoader());
+
+        assertNotNull(restored);
+        assertTrue(restored instanceof SnapshotLinkageSerializer);
+    }
+
+    @Test
+    void restoreSerializerPropagatesVerifyErrorWithoutRunningSerializedFallback() {
+        assertSnapshotLinkageErrorPropagates(
+                VerifyError.class, new SnapshotVerifyErrorSerializer());
+    }
+
+    @Test
+    void restoreSerializerPropagatesUnsupportedClassVersionErrorWithoutRunningSerializedFallback() {
+        assertSnapshotLinkageErrorPropagates(
+                UnsupportedClassVersionError.class,
+                new SnapshotUnsupportedClassVersionErrorSerializer());
+    }
+
+    @Test
+    void restoreSerializerPropagatesNoSuchMethodErrorWithoutRunningSerializedFallback() {
+        assertSnapshotLinkageErrorPropagates(
+                NoSuchMethodError.class, new SnapshotNoSuchMethodErrorSerializer());
+    }
+
+    @Test
+    void restoreSerializerReturnsNullWhenSerializedFallbackHitsLinkageError() {
+        SerializerInspectSchema schema =
+                SerializerInspectSchema.fromSerializer(new ThrowingSnapshotSerializer());
+        String blockedClassName = ThrowingSnapshotSerializer.class.getName();
+        ClassLoader rejectingLoader =
+                new ClassLoader(getClass().getClassLoader()) {
+                    @Override
+                    protected Class<?> loadClass(String name, boolean resolve)
+                            throws ClassNotFoundException {
+                        if (blockedClassName.equals(name)) {
+                            throw new NoClassDefFoundError(name);
+                        }
+                        return super.loadClass(name, resolve);
+                    }
+                };
+
+        assertNull(schema.restoreSerializer(rejectingLoader));
+    }
+
+    private void assertSnapshotLinkageErrorPropagates(
+            Class<? extends LinkageError> errorClass, TypeSerializer<String> serializer) {
+        SerializerInspectSchema schema = SerializerInspectSchema.fromSerializer(serializer);
+        SnapshotLinkageSerializer.resetSerializedFallbackDeserializationCount();
+
+        assertThrows(errorClass, () -> schema.restoreSerializer(getClass().getClassLoader()));
+        assertEquals(0, SnapshotLinkageSerializer.serializedFallbackDeserializationCount());
+    }
+
     // ---- Test fixtures ----
 
     public static final class TestPojo implements Serializable {
@@ -216,7 +277,7 @@ class SerializerInspectSchemaCapturePolicyTest {
     }
 
     /** A serializer with a custom (non-portable) snapshot. */
-    private static final class CustomSnapshotSerializer extends TypeSerializer<String> {
+    private static class CustomSnapshotSerializer extends TypeSerializer<String> {
         private static final long serialVersionUID = 1L;
 
         @Override
@@ -307,6 +368,106 @@ class SerializerInspectSchemaCapturePolicyTest {
         public TypeSerializerSchemaCompatibility<String> resolveSchemaCompatibility(
                 TypeSerializer<String> newSerializer) {
             return TypeSerializerSchemaCompatibility.compatibleAsIs();
+        }
+    }
+
+    public static class SnapshotLinkageSerializer extends CustomSnapshotSerializer {
+        private static final long serialVersionUID = 1L;
+        private static int serializedFallbackDeserializationCount;
+
+        @Override
+        public TypeSerializerSnapshot<String> snapshotConfiguration() {
+            return new SnapshotLinkageSnapshot();
+        }
+
+        private static void resetSerializedFallbackDeserializationCount() {
+            serializedFallbackDeserializationCount = 0;
+        }
+
+        private static int serializedFallbackDeserializationCount() {
+            return serializedFallbackDeserializationCount;
+        }
+
+        private void readObject(ObjectInputStream input)
+                throws IOException, ClassNotFoundException {
+            input.defaultReadObject();
+            serializedFallbackDeserializationCount++;
+        }
+    }
+
+    public static class SnapshotLinkageSnapshot implements TypeSerializerSnapshot<String> {
+        @Override
+        public int getCurrentVersion() {
+            return 1;
+        }
+
+        @Override
+        public void writeSnapshot(DataOutputView out) throws IOException {}
+
+        @Override
+        public void readSnapshot(int readVersion, DataInputView in, ClassLoader userCodeClassLoader)
+                throws IOException {}
+
+        @Override
+        public TypeSerializer<String> restoreSerializer() {
+            throw new NoClassDefFoundError("missing-snapshot-dependency");
+        }
+
+        @Override
+        public TypeSerializerSchemaCompatibility<String> resolveSchemaCompatibility(
+                TypeSerializer<String> newSerializer) {
+            return TypeSerializerSchemaCompatibility.compatibleAsIs();
+        }
+    }
+
+    public static final class SnapshotVerifyErrorSerializer extends SnapshotLinkageSerializer {
+        private static final long serialVersionUID = 1L;
+
+        @Override
+        public TypeSerializerSnapshot<String> snapshotConfiguration() {
+            return new SnapshotVerifyErrorSnapshot();
+        }
+    }
+
+    public static final class SnapshotVerifyErrorSnapshot extends SnapshotLinkageSnapshot {
+        @Override
+        public TypeSerializer<String> restoreSerializer() {
+            throw new VerifyError("invalid-snapshot-bytecode");
+        }
+    }
+
+    public static final class SnapshotUnsupportedClassVersionErrorSerializer
+            extends SnapshotLinkageSerializer {
+        private static final long serialVersionUID = 1L;
+
+        @Override
+        public TypeSerializerSnapshot<String> snapshotConfiguration() {
+            return new SnapshotUnsupportedClassVersionErrorSnapshot();
+        }
+    }
+
+    public static final class SnapshotUnsupportedClassVersionErrorSnapshot
+            extends SnapshotLinkageSnapshot {
+        @Override
+        public TypeSerializer<String> restoreSerializer() {
+            throw new UnsupportedClassVersionError("unsupported-snapshot-class-version");
+        }
+    }
+
+    public static final class SnapshotNoSuchMethodErrorSerializer
+            extends SnapshotLinkageSerializer {
+        private static final long serialVersionUID = 1L;
+
+        @Override
+        public TypeSerializerSnapshot<String> snapshotConfiguration() {
+            return new SnapshotNoSuchMethodErrorSnapshot();
+        }
+    }
+
+    public static final class SnapshotNoSuchMethodErrorSnapshot extends SnapshotLinkageSnapshot {
+        @Override
+        public TypeSerializer<String> restoreSerializer() {
+            throw new NoSuchMethodError("missing-snapshot-method");
         }
     }
 

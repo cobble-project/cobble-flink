@@ -119,7 +119,8 @@ final class AvroClasslessDecoder {
         } catch (IOException e) {
             throw e;
         } catch (RuntimeException e) {
-            throw new IOException("Avro decode failed: " + e.getMessage(), e);
+            throw new DecodeFailureException(
+                    DecodeIssueKind.MALFORMED_BYTES, "Avro decode failed: " + e.getMessage(), e);
         }
         return new DecodedDatum(record, decoder.bytesRead());
     }
@@ -146,7 +147,8 @@ final class AvroClasslessDecoder {
         } catch (IOException e) {
             throw e;
         } catch (RuntimeException e) {
-            throw new IOException("Avro decode failed: " + e.getMessage(), e);
+            throw new DecodeFailureException(
+                    DecodeIssueKind.MALFORMED_BYTES, "Avro decode failed: " + e.getMessage(), e);
         }
     }
 
@@ -180,12 +182,14 @@ final class AvroClasslessDecoder {
         } catch (IOException e) {
             throw e;
         } catch (RuntimeException e) {
-            throw new IOException("Avro decode failed: " + e.getMessage(), e);
+            throw new DecodeFailureException(
+                    DecodeIssueKind.MALFORMED_BYTES, "Avro decode failed: " + e.getMessage(), e);
         }
 
         // Reject trailing bytes after a complete datum.
         if (decoder.bytesRead() != bytes.length) {
-            throw new IOException(
+            throw new DecodeFailureException(
+                    DecodeIssueKind.MALFORMED_BYTES,
                     "Trailing bytes after Avro datum: consumed "
                             + decoder.bytesRead()
                             + " of "
@@ -198,11 +202,15 @@ final class AvroClasslessDecoder {
     private static String validateDescriptor(InspectDecoderDescriptor descriptor)
             throws IOException {
         if (!descriptor.isAvro()) {
-            throw new IOException("Not an AVRO descriptor: " + descriptor.kind());
+            throw new DecodeFailureException(
+                    DecodeIssueKind.CLASSLESS_UNSUPPORTED,
+                    "Not an AVRO descriptor: " + descriptor.kind());
         }
         String wireFormat = descriptor.avroWireFormat();
         if (!InspectDecoderDescriptor.AVRO_WIRE_FORMAT_FLINK_DATA_INPUT_V1.equals(wireFormat)) {
-            throw new IOException("Unsupported Avro wire format: " + wireFormat);
+            throw new DecodeFailureException(
+                    DecodeIssueKind.CLASSLESS_UNSUPPORTED,
+                    "Unsupported Avro wire format: " + wireFormat);
         }
         return wireFormat;
     }
@@ -232,7 +240,10 @@ final class AvroClasslessDecoder {
         try {
             schema = parser.parse(schemaJson);
         } catch (RuntimeException e) {
-            throw new IOException("Failed to parse Avro schema: " + e.getMessage(), e);
+            throw new DecodeFailureException(
+                    DecodeIssueKind.MALFORMED_BYTES,
+                    "Failed to parse Avro schema: " + e.getMessage(),
+                    e);
         }
 
         if (sourceBytes > SCHEMA_CACHE_MAX_TOTAL_BYTES) {

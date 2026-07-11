@@ -338,8 +338,9 @@ public final class SerializerInspectSchema {
                 if (restored != null) {
                     return restored;
                 }
-            } catch (IOException | RuntimeException ignored) {
-                // fall through to serialized bytes
+            } catch (IOException | RuntimeException | NoClassDefFoundError ignored) {
+                // A missing serializer dependency can prevent snapshot restoration.
+                // Fall through to the serialized serializer bytes in that case.
             }
         }
         // 2. Fallback to serialized serializer bytes.
@@ -347,7 +348,10 @@ public final class SerializerInspectSchema {
             try {
                 return (TypeSerializer<T>)
                         InstantiationUtil.deserializeObject(serializedSerializerBytes, classLoader);
-            } catch (IOException | ClassNotFoundException | RuntimeException ignored) {
+            } catch (IOException
+                    | ClassNotFoundException
+                    | RuntimeException
+                    | NoClassDefFoundError ignored) {
                 return null;
             }
         }

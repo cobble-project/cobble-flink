@@ -56,6 +56,9 @@ to compare a key you entered with the rows returned by the checkpoint. The
 `Track` tab keeps this field-based presentation while you refresh rows or move
 to a newer checkpoint.
 
+Standard POJO, Tuple, and Avro state values usually render as field tables
+without `--user-jar`.
+
 For streaming and temporal joins, deduplicate, process-time sort, and many
 TopN states, the monitor can usually show the SQL column names. Aggregation,
 Over, and window states may show typed columns as `f0`, `f1`, and later ordinal
@@ -63,13 +66,14 @@ names instead. This happens when Flink has already discarded the original SQL
 aliases; the values and their types remain available.
 
 Interval join cache entries are shown as their nested list and tuple values.
-If a state uses a custom serializer or cannot be decoded, the monitor leaves
-that row readable as raw bytes and continues scanning the remaining rows.
+When a custom or partially supported serializer cannot be decoded, the monitor
+keeps the raw bytes visible and continues scanning. Add trusted job jars and
+their dependencies with `--user-jar` when you need those fields decoded; see
+[User Jars](../#user-jars).
 
 Disable `Field table` when you need the original serializer-oriented key
-filters and raw row presentation. Cobble state inspect currently covers
-ValueState, ListState, and MapState; Flink states backed by ReducingState or
-AggregatingState are not yet part of this inspect surface.
+filters and raw row presentation. Cobble state inspect covers ValueState,
+ListState, MapState, ReducingState, and AggregatingState.
 
 ### ValueState
 
@@ -102,6 +106,10 @@ enabled, the timer key and namespace expand into typed fields too. This makes
 it possible to see which window and key a pending timer belongs to without
 decoding raw bytes by hand.
 
+The timestamp remains visible when the monitor cannot decode the timer key or
+namespace. To show those fields, provide trusted job jars and dependencies with
+`--user-jar`; the matching key and namespace serializers must be available.
+
 Use **Key prefix** to narrow the timer list. Enter fields from left to right;
 every field before the last must be complete, while the final supplied field
 can be a prefix. When metadata is unavailable, the monitor keeps the decoded
@@ -114,6 +122,3 @@ timer-key fallback so existing timer inspection continues to work.
 Choose `Track` from a scan row's action menu to retain it in the `Track` tab.
 Refresh tracked rows together while you move between snapshots or follow
 `latest`.
-
-If a key or value part cannot be decoded, the monitor keeps the encoded bytes
-available for inspection instead of failing the whole row.

@@ -999,6 +999,9 @@ public final class CobbleFlinkMonitorServer {
             if (decoded.decodeError != null) {
                 item.put("decode_error", decoded.decodeError);
             }
+            if (!decoded.decodeIssues.isEmpty()) {
+                item.put("decode_issues", decoded.decodeIssues);
+            }
         }
 
         private static StateRowFilter stateRowFilter(

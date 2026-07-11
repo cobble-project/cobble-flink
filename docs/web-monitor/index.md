@@ -21,7 +21,7 @@ The web monitor is useful when you want to:
 - check which checkpoints or Cobble snapshots are available
 - follow `latest` while a job is still producing checkpoints
 - keep a small set of rows tracked while newer snapshots appear
-- generate Flink SQL source DDL from the selected Cobble state or sink schema
+- generate Flink SQL source DDL from supported non-timer Cobble state or sink schemas
 - inspect Cobble state by state name, verify decoded state keys, MapState keys, ListState values, and timer entries
 - inspect Cobble sink rows, primary keys, and value columns
 
@@ -82,9 +82,13 @@ Useful options:
 
 ## User Jars
 
-If state uses user-defined POJO classes, Avro record classes, or custom
-serializers from your job jar, pass that jar to the monitor so inspect can
-decode those values instead of falling back to raw bytes:
+Standard POJO, Tuple, and Avro state values usually display their fields
+directly without extra jars. If a custom or partially supported serializer
+cannot be decoded, the monitor keeps the raw bytes visible and continues
+scanning the remaining rows.
+
+Add `--user-jar` when you need to inspect values that depend on classes from
+your job. This is commonly needed for custom serializers.
 
 ```bash
 java -jar cobble-flink-monitor/target/cobble-flink-monitor-*.jar \
@@ -103,8 +107,10 @@ java -jar cobble-flink-monitor/target/cobble-flink-monitor-*.jar \
   --user-classpath /path/to/a.jar:/path/to/b.jar
 ```
 
-Only load jars from trusted sources. The monitor may instantiate classes from
-these jars while restoring serializers.
+A custom serializer may need both the job jar and its dependency jars.
+
+Only load jars from trusted sources. The monitor may load classes from them
+while reading state.
 
 ## Remote Filesystems
 
@@ -145,14 +151,16 @@ are removed from the list on refresh.
 
 ## Overview Page
 
-The `Overview` page shows the states or sink schema in the selected datasource
-and generates Flink SQL `CREATE TABLE` DDL for each.
+The `Overview` page shows the states or sink schema in the selected datasource.
+It generates Flink SQL `CREATE TABLE` DDL for supported non-timer states and
+sink schemas.
 
 For checkpoint datasources, each state card shows the decoded key, namespace,
-MapState key, and value fields. The generated DDL uses
+MapState key, and value fields. Generated state DDL uses
 `source.kind = 'state'` and includes a `PRIMARY KEY` when the state can be used
-as a lookup table. For sink datasources, the page generates the matching
-`source.kind = 'sink'` DDL.
+as a lookup table. Timer entries are available in [State Inspect](state/), but
+do not have SQL source DDL. For sink datasources, the page generates the
+matching `source.kind = 'sink'` DDL.
 
 Use `Copy SQL` to copy a table definition into a SQL client or job.
 
@@ -162,7 +170,7 @@ Use `Copy SQL` to copy a table definition into a SQL client or job.
 
 After selecting a datasource, open `Inspect` and choose the matching guide:
 
-- [State Inspect](state/): inspect schema-aware ValueState, ListState, MapState, and timer state from a Flink checkpoint.
+- [State Inspect](state/): inspect schema-aware ValueState, ListState, MapState, ReducingState, AggregatingState, and timer state from a Flink checkpoint.
 - [Sink Inspect](sink/): inspect a Cobble sink snapshot by primary key and typed value columns.
 
 Both pages use `Scan` to browse rows and `Track` to keep selected rows visible

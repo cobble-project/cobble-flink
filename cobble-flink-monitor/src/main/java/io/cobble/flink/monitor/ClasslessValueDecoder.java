@@ -10,6 +10,7 @@ import org.apache.flink.api.common.typeutils.TypeSerializerSnapshotSerialization
 import org.apache.flink.core.memory.DataInputViewStreamWrapper;
 
 import java.io.ByteArrayInputStream;
+import java.io.EOFException;
 import java.io.IOException;
 
 /**
@@ -64,7 +65,8 @@ final class ClasslessValueDecoder {
 
         void requireFullyConsumed(String label) throws IOException {
             if (remaining() != 0) {
-                throw new IOException(
+                throw new DecodeFailureException(
+                        DecodeIssueKind.MALFORMED_BYTES,
                         "Trailing bytes after "
                                 + label
                                 + ": consumed "
@@ -106,9 +108,12 @@ final class ClasslessValueDecoder {
             case PORTABLE_SNAPSHOT:
                 return decodePortableSnapshot(descriptor, cursor);
             case UNSUPPORTED:
-                throw new IOException("Unsupported: " + descriptor.unsupportedReason());
+                throw new DecodeFailureException(
+                        DecodeIssueKind.CLASSLESS_UNSUPPORTED,
+                        "Unsupported: " + descriptor.unsupportedReason());
             default:
-                throw new IOException("Unknown descriptor kind: " + kind);
+                throw new DecodeFailureException(
+                        DecodeIssueKind.UNKNOWN, "Unknown descriptor kind: " + kind);
         }
     }
 
@@ -126,16 +131,58 @@ final class ClasslessValueDecoder {
     private static Object decodePortableSnapshot(
             InspectDecoderDescriptor descriptor, DecodeCursor cursor) throws IOException {
         byte[] snapshotBytes = descriptor.portableSnapshotBytes();
-        TypeSerializerSnapshot<?> snapshot =
-                TypeSerializerSnapshotSerializationUtil.readSerializerSnapshot(
-                        new DataInputViewStreamWrapper(new ByteArrayInputStream(snapshotBytes)),
-                        descriptor.getClass().getClassLoader());
-        TypeSerializer<?> serializer = snapshot.restoreSerializer();
-        if (serializer == null) {
-            throw new IOException(
+        TypeSerializerSnapshot<?> snapshot;
+        try {
+            snapshot =
+                    TypeSerializerSnapshotSerializationUtil.readSerializerSnapshot(
+                            new DataInputViewStreamWrapper(new ByteArrayInputStream(snapshotBytes)),
+                            descriptor.getClass().getClassLoader());
+        } catch (NoClassDefFoundError e) {
+            throw new DecodeFailureException(
+                    DecodeIssueKind.SERIALIZER_RESTORE_FAILED,
+                    "Portable serializer snapshot dependency is unavailable: "
+                            + descriptor.portableSnapshotClassName(),
+                    e);
+        } catch (IOException | RuntimeException e) {
+            throw new DecodeFailureException(
+                    DecodeIssueKind.MALFORMED_BYTES,
+                    "Failed to read portable serializer snapshot: "
+                            + descriptor.portableSnapshotClassName(),
+                    e);
+        }
+        TypeSerializer<?> serializer;
+        try {
+            serializer = snapshot.restoreSerializer();
+        } catch (NoClassDefFoundError e) {
+            throw new DecodeFailureException(
+                    DecodeIssueKind.SERIALIZER_RESTORE_FAILED,
                     "Failed to restore portable serializer from snapshot: "
+                            + descriptor.portableSnapshotClassName(),
+                    e);
+        }
+        if (serializer == null) {
+            throw new DecodeFailureException(
+                    DecodeIssueKind.SERIALIZER_RESTORE_FAILED,
+                    "Failed to restore portable serializer from snapshot (null): "
                             + descriptor.portableSnapshotClassName());
         }
-        return serializer.deserialize(cursor.input());
+        try {
+            return serializer.deserialize(cursor.input());
+        } catch (EOFException e) {
+            throw new DecodeFailureException(
+                    DecodeIssueKind.MALFORMED_BYTES,
+                    "Portable serializer deserialize failed: " + e.getMessage(),
+                    e);
+        } catch (NoClassDefFoundError e) {
+            throw new DecodeFailureException(
+                    DecodeIssueKind.SERIALIZER_RESTORE_FAILED,
+                    "Portable serializer deserialize failed: " + e.getMessage(),
+                    e);
+        } catch (IOException | RuntimeException e) {
+            throw new DecodeFailureException(
+                    DecodeIssueKind.UNKNOWN,
+                    "Portable serializer deserialize failed: " + e.getMessage(),
+                    e);
+        }
     }
 }

@@ -12,6 +12,7 @@ import io.cobble.flink.common.inspect.StateKind;
 
 import org.apache.flink.api.common.typeutils.TypeSerializer;
 import org.apache.flink.api.java.tuple.Tuple;
+import org.apache.flink.core.memory.DataInputView;
 import org.apache.flink.core.memory.DataInputViewStreamWrapper;
 import org.apache.flink.core.memory.DataOutputSerializer;
 import org.apache.flink.runtime.state.KeyGroupRangeAssignment;
@@ -25,6 +26,7 @@ import org.apache.flink.table.types.logical.utils.LogicalTypeParser;
 import org.apache.flink.util.MathUtils;
 
 import java.io.ByteArrayInputStream;
+import java.io.EOFException;
 import java.io.IOException;
 import java.io.PushbackInputStream;
 import java.lang.reflect.Field;
@@ -32,6 +34,7 @@ import java.lang.reflect.Method;
 import java.nio.ByteBuffer;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -55,10 +58,12 @@ final class StateInspectDecoder {
         Object decodedValue = null;
         Map<String, Object> decodedParts = null;
         String decodeError = null;
+        DecodeIssueCollector issues = new DecodeIssueCollector();
 
         boolean completeClasslessSemanticParts = false;
         try {
-            SemanticDecodeResult semanticResult = decodeSemanticParts(target, rowKey, columns);
+            SemanticDecodeResult semanticResult =
+                    decodeSemanticParts(target, rowKey, columns, issues);
             decodedParts = semanticResult.parts;
             if (semanticResult.error != null) {
                 decodeError = appendError(decodeError, semanticResult.error);
@@ -67,8 +72,9 @@ final class StateInspectDecoder {
                     semanticResult.error == null
                             && decodedParts != null
                             && hasCompleteFullyClasslessSemanticParts(schema, decodedParts);
-        } catch (Exception e) {
+        } catch (Exception | LinkageError e) {
             decodeError = appendError(decodeError, message(e));
+            issues.add("row", issueKind(e), message(e));
         }
 
         // A successful classless semantic result is the canonical preview for the matching part.
@@ -76,21 +82,24 @@ final class StateInspectDecoder {
         if (!completeClasslessSemanticParts || !hasFullyClasslessKeyPart(schema)) {
             try {
                 decodedKey = decodeKey(schema, rowKey);
-            } catch (Exception e) {
+            } catch (Exception | LinkageError e) {
                 decodeError = appendError(decodeError, message(e));
+                issues.add("state_key", issueKind(e), message(e));
             }
         }
-        if (!completeClasslessSemanticParts || !hasFullyClasslessValuePart(schema)) {
+        if ((!completeClasslessSemanticParts || !hasFullyClasslessValuePart(schema))
+                && !issues.has(valuePartName(schema))) {
             try {
                 decodedValue =
                         schema.stateKind() == StateKind.TIMER
                                 ? null
                                 : decodeValue(schema, firstColumn(columns));
-            } catch (Exception e) {
+            } catch (Exception | LinkageError e) {
                 decodeError = appendError(decodeError, message(e));
+                issues.add(valuePartName(schema), issueKind(e), message(e));
             }
         }
-        return new DecodedRow(decodedKey, decodedValue, decodedParts, decodeError);
+        return new DecodedRow(decodedKey, decodedValue, decodedParts, decodeError, issues.issues());
     }
 
     /**
@@ -248,7 +257,7 @@ final class StateInspectDecoder {
         DataInputViewStreamWrapper input = new DataInputViewStreamWrapper(bytes);
         long timestamp = MathUtils.flipSignBit(input.readLong());
         int keyStart = rowKey.length - bytes.available();
-        Object key = restore(schema.keySerializer()).deserialize(input);
+        Object key = deserializeWithSerializer(restore(schema.keySerializer()), input, "timer key");
         int namespaceStart = rowKey.length - bytes.available();
         Object namespace;
         if (isVoidNamespaceSerializer(schema.namespaceSerializer())) {
@@ -259,7 +268,9 @@ final class StateInspectDecoder {
             input.readByte();
             namespace = VOID_NAMESPACE_LABEL;
         } else {
-            namespace = restore(schema.namespaceSerializer()).deserialize(input);
+            namespace =
+                    deserializeWithSerializer(
+                            restore(schema.namespaceSerializer()), input, "timer namespace");
         }
         int end = rowKey.length - bytes.available();
 
@@ -383,7 +394,7 @@ final class StateInspectDecoder {
                     "MapState row value column is missing; callers must check presence first.");
         }
         if (valueBytes.length == 0) {
-            throw new IOException(
+            throw DecodeFailureException.malformed(
                     "MapState row value column is empty; expected at least the isNull byte.");
         }
         if (valueBytes[0] != 0x00) {
@@ -406,20 +417,21 @@ final class StateInspectDecoder {
                 break;
             }
             input.unread(first);
-            values.add(serializer.deserialize(inputView));
+            values.add(deserializeWithSerializer(serializer, inputView, "list element"));
             int delimiter = input.read();
             if (delimiter < 0) {
                 break;
             }
             if ((byte) delimiter != LIST_DELIMITER) {
-                throw new IOException("Invalid Cobble list delimiter: " + delimiter);
+                throw DecodeFailureException.malformed(
+                        "Invalid Cobble list delimiter: " + delimiter);
             }
         }
         return values;
     }
 
     private static SemanticDecodeResult decodeSemanticParts(
-            InspectTarget target, byte[] rowKey, byte[][] columns) {
+            InspectTarget target, byte[] rowKey, byte[][] columns, DecodeIssueCollector issues) {
         if (target == null
                 || target.schema == null
                 || target.semanticSchema == null
@@ -430,7 +442,7 @@ final class StateInspectDecoder {
             StateInspectSchema schema = target.schema;
             StateInspectSemanticSchema semanticSchema = target.semanticSchema;
             if (schema.stateKind() == StateKind.TIMER) {
-                return decodeTimerSemanticParts(schema, semanticSchema, rowKey);
+                return decodeTimerSemanticParts(schema, semanticSchema, rowKey, issues);
             }
             KeySlices slices =
                     schema.stateKind() == StateKind.MAP
@@ -445,7 +457,8 @@ final class StateInspectDecoder {
                             "state_key",
                             semanticSchema.stateKey(),
                             schema.keySerializer(),
-                            slices.key);
+                            slices.key,
+                            issues);
             if (!isVoidNamespaceSerializer(schema.namespaceSerializer())) {
                 decodeError =
                         addSemanticPart(
@@ -454,7 +467,8 @@ final class StateInspectDecoder {
                                 "namespace",
                                 semanticSchema.namespace(),
                                 schema.namespaceSerializer(),
-                                slices.namespace);
+                                slices.namespace,
+                                issues);
             }
             if (schema.stateKind() == StateKind.MAP) {
                 decodeError =
@@ -464,28 +478,16 @@ final class StateInspectDecoder {
                                 "map_key",
                                 semanticSchema.mapUserKey(),
                                 schema.mapUserKeySerializer(),
-                                slices.mapKey);
-                byte[] mapValueColumn = firstColumn(columns);
-                if (mapValueColumn != null) {
-                    byte[] mapValuePayload = unwrapMapValuePayload(mapValueColumn);
-                    if (mapValuePayload == null
-                            && isKnownSemanticType(semanticSchema.mapUserValue())) {
-                        // Present-null MapState entry: emit a literal null so callers can
-                        // distinguish it from a wrapped scalar JSON object whose nested value is
-                        // null. The map_value key is still present in the output to indicate the
-                        // row exists. Absent rows (no column at all) skip this branch entirely.
-                        output.put("map_value", null);
-                    } else {
-                        decodeError =
-                                addSemanticPart(
-                                        output,
-                                        decodeError,
-                                        "map_value",
-                                        semanticSchema.mapUserValue(),
-                                        schema.mapUserValueSerializer(),
-                                        mapValuePayload);
-                    }
-                }
+                                slices.mapKey,
+                                issues);
+                decodeError =
+                        addSemanticMapValuePart(
+                                output,
+                                decodeError,
+                                semanticSchema.mapUserValue(),
+                                schema.mapUserValueSerializer(),
+                                firstColumn(columns),
+                                issues);
             } else if (schema.stateKind() == StateKind.VALUE
                     || schema.stateKind() == StateKind.REDUCING
                     || schema.stateKind() == StateKind.AGGREGATING) {
@@ -496,7 +498,8 @@ final class StateInspectDecoder {
                                 "value",
                                 semanticSchema.value(),
                                 schema.valueSerializer(),
-                                firstColumn(columns));
+                                firstColumn(columns),
+                                issues);
             } else if (schema.stateKind() == StateKind.LIST) {
                 decodeError =
                         addSemanticListPart(
@@ -504,18 +507,23 @@ final class StateInspectDecoder {
                                 decodeError,
                                 semanticSchema.listElement(),
                                 schema.listElementSerializer(),
-                                firstColumn(columns));
+                                firstColumn(columns),
+                                issues);
             }
-            // Return partial results even when some parts failed — decode failure is row-level,
+            // Return partial results even when some parts failed - decode failure is row-level,
             // never whole-inspect failure. The caller surfaces the error alongside the parts.
             return new SemanticDecodeResult(output.isEmpty() ? null : output, decodeError);
-        } catch (Exception e) {
+        } catch (Exception | LinkageError e) {
+            issues.add("row", issueKind(e), message(e));
             return new SemanticDecodeResult(null, message(e));
         }
     }
 
     private static SemanticDecodeResult decodeTimerSemanticParts(
-            StateInspectSchema schema, StateInspectSemanticSchema semanticSchema, byte[] rowKey) {
+            StateInspectSchema schema,
+            StateInspectSemanticSchema semanticSchema,
+            byte[] rowKey,
+            DecodeIssueCollector issues) {
         Map<String, Object> output = new LinkedHashMap<>();
         String decodeError = null;
         try {
@@ -533,8 +541,9 @@ final class StateInspectDecoder {
             // timestamp is still in the output and the error is surfaced with a state_key prefix.
             int namespaceStart;
             try {
-                restore(schema.keySerializer()).deserialize(input);
-            } catch (Exception e) {
+                deserializeWithSerializer(restore(schema.keySerializer()), input, "timer key");
+            } catch (Exception | LinkageError e) {
+                issues.add("state_key", issueKind(e), message(e));
                 return new SemanticDecodeResult(
                         output, appendError(decodeError, "state_key: " + message(e)));
             }
@@ -547,15 +556,18 @@ final class StateInspectDecoder {
                             1,
                             "timer namespace");
                     input.readByte();
-                } catch (Exception e) {
+                } catch (Exception | LinkageError e) {
+                    issues.add("namespace", issueKind(e), message(e));
                     return new SemanticDecodeResult(
                             output, appendError(decodeError, "namespace: " + message(e)));
                 }
                 end = rowKey.length - bytes.available();
             } else {
                 try {
-                    restore(schema.namespaceSerializer()).deserialize(input);
-                } catch (Exception e) {
+                    deserializeWithSerializer(
+                            restore(schema.namespaceSerializer()), input, "timer namespace");
+                } catch (Exception | LinkageError e) {
+                    issues.add("namespace", issueKind(e), message(e));
                     return new SemanticDecodeResult(
                             output, appendError(decodeError, "namespace: " + message(e)));
                 }
@@ -569,7 +581,8 @@ final class StateInspectDecoder {
                             "state_key",
                             semanticSchema.stateKey(),
                             schema.keySerializer(),
-                            slice(rowKey, keyStart, namespaceStart - keyStart));
+                            slice(rowKey, keyStart, namespaceStart - keyStart),
+                            issues);
             if (!isVoidNamespaceSerializer(schema.namespaceSerializer())) {
                 decodeError =
                         addSemanticPart(
@@ -578,9 +591,11 @@ final class StateInspectDecoder {
                                 "namespace",
                                 semanticSchema.namespace(),
                                 schema.namespaceSerializer(),
-                                slice(rowKey, namespaceStart, end - namespaceStart));
+                                slice(rowKey, namespaceStart, end - namespaceStart),
+                                issues);
             }
-        } catch (Exception e) {
+        } catch (Exception | LinkageError e) {
+            issues.add("row", issueKind(e), message(e));
             decodeError = appendError(decodeError, "timestamp: " + message(e));
         }
         return new SemanticDecodeResult(output.isEmpty() ? null : output, decodeError);
@@ -592,7 +607,8 @@ final class StateInspectDecoder {
             String partName,
             StateInspectType type,
             SerializerInspectSchema serializer,
-            byte[] bytes) {
+            byte[] bytes,
+            DecodeIssueCollector issues) {
         if (!isKnownSemanticType(type)) {
             return decodeError;
         }
@@ -604,7 +620,8 @@ final class StateInspectDecoder {
                         partName,
                         semanticValueToJson(type, deserializeSemanticValue(serializer, bytes)));
             }
-        } catch (Exception e) {
+        } catch (Exception | LinkageError e) {
+            issues.add(partName, issueKind(e), message(e));
             return appendError(decodeError, partName + ": " + message(e));
         }
         return decodeError;
@@ -615,7 +632,8 @@ final class StateInspectDecoder {
             String decodeError,
             StateInspectType elementType,
             SerializerInspectSchema serializer,
-            byte[] bytes) {
+            byte[] bytes,
+            DecodeIssueCollector issues) {
         if (!isKnownSemanticType(elementType)) {
             return decodeError;
         }
@@ -637,10 +655,38 @@ final class StateInspectDecoder {
             list.put("kind", StateInspectTypeKind.LIST.name());
             list.put("values", decoded);
             output.put("value", list);
-        } catch (Exception e) {
+        } catch (Exception | LinkageError e) {
+            issues.add("value", issueKind(e), message(e));
             return appendError(decodeError, "value: " + message(e));
         }
         return decodeError;
+    }
+
+    private static String addSemanticMapValuePart(
+            Map<String, Object> output,
+            String decodeError,
+            StateInspectType type,
+            SerializerInspectSchema serializer,
+            byte[] valueColumn,
+            DecodeIssueCollector issues) {
+        if (valueColumn == null) {
+            return decodeError;
+        }
+        try {
+            byte[] payload = unwrapMapValuePayload(valueColumn);
+            if (!isKnownSemanticType(type)) {
+                return decodeError;
+            }
+            if (payload == null) {
+                output.put("map_value", null);
+                return decodeError;
+            }
+            return addSemanticPart(
+                    output, decodeError, "map_value", type, serializer, payload, issues);
+        } catch (Exception | LinkageError e) {
+            issues.add("map_value", issueKind(e), message(e));
+            return appendError(decodeError, "map_value: " + message(e));
+        }
     }
 
     /**
@@ -669,7 +715,7 @@ final class StateInspectDecoder {
                 if (cursor.remaining() > 0) {
                     int delimiter = cursor.input().readUnsignedByte();
                     if (delimiter != LIST_DELIMITER) {
-                        throw new IOException(
+                        throw DecodeFailureException.malformed(
                                 "Invalid Cobble list delimiter after element: 0x"
                                         + Integer.toHexString(delimiter));
                     }
@@ -680,9 +726,13 @@ final class StateInspectDecoder {
             if (descriptor.capability() == DescriptorCapability.FULLY_CLASSLESS) {
                 throw e; // no fallback
             }
-            // PARTIALLY_CLASSLESS: discard local results, fall back to live serializer.
+            try {
+                // PARTIALLY_CLASSLESS: discard local results, fall back to live serializer.
+                return deserializeListElements(restore(serializer), bytes);
+            } catch (Exception | LinkageError fallbackFailure) {
+                throw classlessFallbackFailure(e, fallbackFailure);
+            }
         }
-        return deserializeListElements(restore(serializer), bytes);
     }
 
     private static boolean isKnownSemanticType(StateInspectType type) {
@@ -1245,7 +1295,7 @@ final class StateInspectDecoder {
                         "map key");
         int separator = lengths[0] + lengths[1];
         if (separator < 0 || separator >= payloadEnd || rowKey[separator] != 0) {
-            throw new IOException("Invalid MapState row-key separator");
+            throw DecodeFailureException.malformed("Invalid MapState row-key separator");
         }
         return new KeySlices(
                 slice(rowKey, 0, lengths[0]),
@@ -1261,7 +1311,7 @@ final class StateInspectDecoder {
             String secondName)
             throws IOException {
         if (firstLength == null && secondLength == null) {
-            throw new IOException(
+            throw DecodeFailureException.malformed(
                     "Cannot infer variable " + firstName + " and " + secondName + " lengths");
         }
         if (firstLength == null) {
@@ -1273,7 +1323,7 @@ final class StateInspectDecoder {
         validateLength(firstLength, firstName);
         validateLength(secondLength, secondName);
         if (firstLength + secondLength != totalLength) {
-            throw new IOException(
+            throw DecodeFailureException.malformed(
                     "Invalid row-key lengths: "
                             + firstName
                             + "="
@@ -1302,7 +1352,8 @@ final class StateInspectDecoder {
         unknown += secondLength == null ? 1 : 0;
         unknown += thirdLength == null ? 1 : 0;
         if (unknown > 1) {
-            throw new IOException("Cannot infer MapState row-key component lengths");
+            throw DecodeFailureException.malformed(
+                    "Cannot infer MapState row-key component lengths");
         }
         if (firstLength == null) {
             firstLength = totalLength - secondLength - thirdLength;
@@ -1315,7 +1366,7 @@ final class StateInspectDecoder {
         validateLength(secondLength, secondName);
         validateLength(thirdLength, thirdName);
         if (firstLength + secondLength + thirdLength != totalLength) {
-            throw new IOException("Invalid MapState row-key component lengths");
+            throw DecodeFailureException.malformed("Invalid MapState row-key component lengths");
         }
         return new int[] {firstLength, secondLength, thirdLength};
     }
@@ -1323,8 +1374,25 @@ final class StateInspectDecoder {
     private static Object deserialize(SerializerInspectSchema serializerSchema, byte[] bytes)
             throws IOException {
         TypeSerializer<Object> serializer = restore(serializerSchema);
-        return serializer.deserialize(
-                new DataInputViewStreamWrapper(new ByteArrayInputStream(bytes)));
+        return deserializeWithSerializer(
+                serializer,
+                new DataInputViewStreamWrapper(new ByteArrayInputStream(bytes)),
+                serializerSchema.serializerClassName());
+    }
+
+    private static Object deserializeWithSerializer(
+            TypeSerializer<Object> serializer, DataInputView input, String label)
+            throws IOException {
+        try {
+            return serializer.deserialize(input);
+        } catch (EOFException e) {
+            throw DecodeFailureException.malformed("Truncated bytes while decoding " + label, e);
+        } catch (NoClassDefFoundError e) {
+            throw new DecodeFailureException(
+                    DecodeIssueKind.SERIALIZER_RESTORE_FAILED,
+                    "Serializer dependency is unavailable while decoding " + label,
+                    e);
+        }
     }
 
     /**
@@ -1358,7 +1426,12 @@ final class StateInspectDecoder {
                 if (descriptor.capability() == DescriptorCapability.FULLY_CLASSLESS) {
                     throw e;
                 }
-                // PARTIALLY_CLASSLESS: fall through to restored serializer.
+                try {
+                    // PARTIALLY_CLASSLESS: discard the classless attempt and retry live.
+                    return deserialize(serializerSchema, bytes);
+                } catch (Exception | LinkageError fallbackFailure) {
+                    throw classlessFallbackFailure(e, fallbackFailure);
+                }
             }
         }
         return deserialize(serializerSchema, bytes);
@@ -1455,7 +1528,8 @@ final class StateInspectDecoder {
     private static TypeSerializer<Object> restore(SerializerInspectSchema serializerSchema)
             throws IOException {
         if (serializerSchema == null) {
-            throw new IOException("Missing serializer metadata");
+            throw new DecodeFailureException(
+                    DecodeIssueKind.SERIALIZER_RESTORE_FAILED, "Missing serializer metadata");
         }
         ClassLoader classLoader = Thread.currentThread().getContextClassLoader();
         if (classLoader == null) {
@@ -1464,7 +1538,8 @@ final class StateInspectDecoder {
         TypeSerializer<Object> serializer =
                 (TypeSerializer<Object>) serializerSchema.restoreSerializer(classLoader);
         if (serializer == null) {
-            throw new IOException(
+            throw new DecodeFailureException(
+                    DecodeIssueKind.SERIALIZER_RESTORE_FAILED,
                     "Failed to restore serializer " + serializerSchema.serializerClassName());
         }
         return serializer;
@@ -1544,8 +1619,59 @@ final class StateInspectDecoder {
         return existing + "; " + next;
     }
 
-    private static String message(Exception e) {
+    private static String message(Throwable e) {
         return e.getMessage() == null ? e.getClass().getName() : e.getMessage();
+    }
+
+    private static DecodeFailureException classlessFallbackFailure(
+            IOException classlessFailure, Throwable fallbackFailure) {
+        DecodeIssueKind fallbackKind = issueKind(fallbackFailure);
+        if (fallbackKind == DecodeIssueKind.UNKNOWN
+                && isSerializerRestoreFailure(fallbackFailure)) {
+            fallbackKind = DecodeIssueKind.SERIALIZER_RESTORE_FAILED;
+        }
+        DecodeIssueKind kind =
+                fallbackKind == DecodeIssueKind.UNKNOWN
+                        ? issueKind(classlessFailure)
+                        : fallbackKind;
+        return new DecodeFailureException(
+                kind,
+                "Classless decode failed: "
+                        + message(classlessFailure)
+                        + "; live serializer fallback failed: "
+                        + message(fallbackFailure),
+                fallbackFailure);
+    }
+
+    private static boolean isSerializerRestoreFailure(Throwable failure) {
+        for (Throwable current = failure; current != null; current = current.getCause()) {
+            if (current instanceof ClassNotFoundException) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * Extracts the {@link DecodeIssueKind} from an exception. If the exception (or its chain)
+     * contains a {@link DecodeFailureException}, its kind is used; otherwise the kind defaults to
+     * {@link DecodeIssueKind#UNKNOWN}.
+     */
+    private static DecodeIssueKind issueKind(Throwable e) {
+        Throwable current = e;
+        while (current != null) {
+            if (current instanceof DecodeFailureException) {
+                return ((DecodeFailureException) current).kind();
+            }
+            if (current instanceof NoClassDefFoundError) {
+                return DecodeIssueKind.SERIALIZER_RESTORE_FAILED;
+            }
+            if (current instanceof EOFException) {
+                return DecodeIssueKind.MALFORMED_BYTES;
+            }
+            current = current.getCause();
+        }
+        return DecodeIssueKind.UNKNOWN;
     }
 
     private static Integer fixedLength(SerializerInspectSchema serializerSchema) {
@@ -1556,6 +1682,10 @@ final class StateInspectDecoder {
             return null;
         }
         return serializerSchema.lengthTag();
+    }
+
+    private static String valuePartName(StateInspectSchema schema) {
+        return schema.stateKind() == StateKind.MAP ? "map_value" : "value";
     }
 
     private static byte[] firstColumn(byte[][] columns) {
@@ -1571,19 +1701,19 @@ final class StateInspectDecoder {
 
     private static void validateLength(int length, String name) throws IOException {
         if (length < 0) {
-            throw new IOException("Invalid " + name + " length: " + length);
+            throw DecodeFailureException.malformed("Invalid " + name + " length: " + length);
         }
     }
 
     private static void requireLength(byte[] bytes, int required, String label) throws IOException {
         if (bytes.length < required) {
-            throw new IOException("Row key too short for " + label);
+            throw DecodeFailureException.malformed("Row key too short for " + label);
         }
     }
 
     private static int readInt(byte[] bytes, int offset) throws IOException {
         if (offset < 0 || offset + Integer.BYTES > bytes.length) {
-            throw new IOException("Invalid int offset in row key: " + offset);
+            throw DecodeFailureException.malformed("Invalid int offset in row key: " + offset);
         }
         return ((bytes[offset] & 0xFF) << 24)
                 | ((bytes[offset + 1] & 0xFF) << 16)
@@ -1596,27 +1726,31 @@ final class StateInspectDecoder {
         final Object decodedValue;
         final Map<String, Object> decodedParts;
         final String decodeError;
+        final List<DecodeIssue> decodeIssues;
 
         private DecodedRow(
                 Map<String, Object> decodedKey,
                 Object decodedValue,
                 Map<String, Object> decodedParts,
-                String decodeError) {
+                String decodeError,
+                List<DecodeIssue> decodeIssues) {
             this.decodedKey = decodedKey;
             this.decodedValue = decodedValue;
             this.decodedParts = decodedParts;
             this.decodeError = decodeError;
+            this.decodeIssues = decodeIssues == null ? Collections.emptyList() : decodeIssues;
         }
 
         static DecodedRow empty() {
-            return new DecodedRow(null, null, null, null);
+            return new DecodedRow(null, null, null, null, null);
         }
 
         boolean hasOutput() {
             return decodedKey != null
                     || decodedValue != null
                     || decodedParts != null
-                    || decodeError != null;
+                    || decodeError != null
+                    || !decodeIssues.isEmpty();
         }
     }
 
@@ -1628,6 +1762,42 @@ final class StateInspectDecoder {
         SemanticDecodeResult(Map<String, Object> parts, String error) {
             this.parts = parts;
             this.error = error;
+        }
+    }
+
+    /** A structured decode issue for a single part of an inspected row. */
+    static final class DecodeIssue {
+        final String part;
+        final DecodeIssueKind kind;
+        final String message;
+
+        DecodeIssue(String part, DecodeIssueKind kind, String message) {
+            this.part = part;
+            this.kind = kind;
+            this.message = message;
+        }
+    }
+
+    /**
+     * Collects {@link DecodeIssue} entries keyed by part name, preserving insertion order. Uses
+     * {@code putIfAbsent} so that the first failure for a given part wins - this prevents duplicate
+     * issues when both the semantic path and the legacy path fail for the same part (e.g. "value").
+     */
+    static final class DecodeIssueCollector {
+        private final LinkedHashMap<String, DecodeIssue> byPart = new LinkedHashMap<>();
+
+        void add(String part, DecodeIssueKind kind, String message) {
+            if (part != null) {
+                byPart.putIfAbsent(part, new DecodeIssue(part, kind, message));
+            }
+        }
+
+        boolean has(String part) {
+            return byPart.containsKey(part);
+        }
+
+        List<DecodeIssue> issues() {
+            return new ArrayList<>(byPart.values());
         }
     }
 

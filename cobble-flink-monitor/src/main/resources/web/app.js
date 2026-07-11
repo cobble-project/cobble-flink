@@ -598,6 +598,7 @@ async function runLookup() {
         tracked.decodedValue = result.decoded_value ?? null
         tracked.decodedParts = result.decoded_parts || null
         tracked.decodeError = result.decode_error || null
+        tracked.decodeIssues = result.decode_issues || null
       })
     }
     state.lookupLastUpdate = new Date()
@@ -677,6 +678,7 @@ function trackScanItem(trackId) {
     decodedValue: item.decoded_value ?? null,
     decodedParts: item.decoded_parts || null,
     decodeError: item.decode_error || null,
+    decodeIssues: item.decode_issues || null,
   })
   switchInspectMode('lookup')
   renderLookupResult()
@@ -723,9 +725,9 @@ function clearTrackedLookups() {
 }
 
 function renderTrackedValue(item) {
-  if (item.value == null) return `<span class="pill">missing</span>${renderDecodeError(item.decodeError)}`
+  if (item.value == null) return `<span class="pill">missing</span>${renderDecodeError(item.decodeError, item.decodeIssues)}`
   if (isSinkTarget(trackedTarget(item))) {
-    return renderSinkColumns(item.value, item.decodedColumns, item.decodeError)
+    return renderSinkColumns(item.value, item.decodedColumns, item.decodeError, item.decodeIssues)
   }
   if (item.allowsColumns) return renderColumns(item.value)
   return renderStateValue(
@@ -734,6 +736,7 @@ function renderTrackedValue(item) {
     item.decodeError,
     trackedTarget(item),
     `track:${item.id}:value`,
+    item.decodeIssues,
   )
 }
 
@@ -900,7 +903,7 @@ function renderScanResult(data, context = activeScanContext()) {
         : `
           <td>${item.bucket}</td>
           <td>${renderTimerKey(item.key_b64, item.key_utf8, item.decoded_key, target)}</td>
-          <td>${renderTimerTimestamp(item.decoded_key, item.decode_error)}</td>
+          <td>${renderTimerTimestamp(item.decoded_parts, item.decoded_key, item.decode_error, item.decode_issues)}</td>
           <td>${renderActionMenu(scanRowActions(item, target, context, trackId))}</td>
         `
     } else if (sinkExpanded) {
@@ -911,7 +914,7 @@ function renderScanResult(data, context = activeScanContext()) {
       row.innerHTML = `
         <td>${item.bucket}</td>
         <td>${renderKey(item.key_b64, item.key_utf8, item.decoded_key, target)}</td>
-        <td>${sink ? renderSinkColumns(item.columns, item.decoded_columns, item.decode_error) : renderStateValue(item.value, item.decoded_value, item.decode_error, target, `scan:${trackId}:value`)}</td>
+        <td>${sink ? renderSinkColumns(item.columns, item.decoded_columns, item.decode_error, item.decode_issues) : renderStateValue(item.value, item.decoded_value, item.decode_error, target, `scan:${trackId}:value`, item.decode_issues)}</td>
         <td>${renderActionMenu(scanRowActions(item, target, context, trackId))}</td>
       `
     }
@@ -964,7 +967,7 @@ function renderLookupResult() {
           <td>${escapeHtml(item.targetLabel)}</td>
           <td>${item.bucket}</td>
           <td>${renderTimerKey(item.keyB64, item.keyUtf8, item.decodedKey, target)}</td>
-          <td>${renderTimerTimestamp(item.decodedKey, item.decodeError)}</td>
+          <td>${renderTimerTimestamp(item.decodedParts, item.decodedKey, item.decodeError, item.decodeIssues)}</td>
           <td>${renderActionMenu(trackedRowActions(item, target))}</td>
         `
     } else if (sinkExpanded) {
@@ -976,7 +979,7 @@ function renderLookupResult() {
         <td>${escapeHtml(item.targetLabel)}</td>
         <td>${item.bucket}</td>
         <td>${renderKey(item.keyB64, item.keyUtf8, item.decodedKey, target)}</td>
-        <td>${isTimerTarget(target) ? renderTimerTimestamp(item.decodedKey, item.decodeError) : renderTrackedValue(item)}</td>
+        <td>${isTimerTarget(target) ? renderTimerTimestamp(item.decodedParts, item.decodedKey, item.decodeError, item.decodeIssues) : renderTrackedValue(item)}</td>
         <td>${renderActionMenu(trackedRowActions(item, target))}</td>
       `
     }
@@ -1142,14 +1145,14 @@ function renderValue(value) {
   return `${renderCode(value.b64)}${renderUtf8Pill(value.utf8)}`
 }
 
-function renderStateValue(value, decodedValue, decodeError, target = null, displayId = '') {
+function renderStateValue(value, decodedValue, decodeError, target = null, displayId = '', decodeIssues = null) {
   if (isDecodedTarget(target) && target?.kind === 'timer') {
-    return `<span class="muted-text">timer entry</span>${renderDecodeError(decodeError)}`
+    return `<span class="muted-text">timer entry</span>${renderDecodeError(decodeError, decodeIssues)}`
   }
   if (isDecodedTarget(target) && decodedValue !== undefined && decodedValue !== null) {
-    return `${renderDecodedSection(decodedValue, target, displayId)}${renderDecodeError(decodeError)}`
+    return `${renderDecodedSection(decodedValue, target, displayId)}${renderDecodeError(decodeError, decodeIssues)}`
   }
-  return `${renderValue(value)}${renderDecodeError(decodeError)}`
+  return `${renderValue(value)}${renderDecodeError(decodeError, decodeIssues)}`
 }
 
 function renderColumns(columns = []) {
@@ -1159,11 +1162,11 @@ function renderColumns(columns = []) {
   }).join('')
 }
 
-function renderSinkColumns(columns = [], decodedColumns = null, decodeError = null) {
+function renderSinkColumns(columns = [], decodedColumns = null, decodeError = null, decodeIssues = null) {
   if (Array.isArray(decodedColumns) && decodedColumns.length > 0) {
-    return `${renderSinkFields(decodedColumns)}${renderDecodeError(decodeError)}`
+    return `${renderSinkFields(decodedColumns)}${renderDecodeError(decodeError, decodeIssues)}`
   }
-  return `${renderColumns(columns)}${renderDecodeError(decodeError)}`
+  return `${renderColumns(columns)}${renderDecodeError(decodeError, decodeIssues)}`
 }
 
 function isSemanticStateTableTarget(target) {
@@ -1307,7 +1310,7 @@ function renderStateScanRow(item, target, context, trackId, layout) {
   return `
     <td>${item.bucket}</td>
     ${renderStateExpandedCells(layout.groups, item.decoded_parts, item, target, `scan:${trackId}`)}
-    <td class="action-cell">${renderDecodeError(item.decode_error)}${renderActionMenu(scanRowActions(item, target, context, trackId))}</td>
+    <td class="action-cell">${renderDecodeError(item.decode_error, item.decode_issues)}${renderActionMenu(scanRowActions(item, target, context, trackId))}</td>
   `
 }
 
@@ -1316,7 +1319,7 @@ function renderStateLookupRow(item, target, layout) {
     <td>${escapeHtml(item.targetLabel)}</td>
     <td>${item.bucket}</td>
     ${renderStateExpandedCells(layout.groups, item.decodedParts, item, target, `track:${item.id}`)}
-    <td class="action-cell">${renderDecodeError(item.decodeError)}${renderActionMenu(trackedRowActions(item, target))}</td>
+    <td class="action-cell">${renderDecodeError(item.decodeError, item.decodeIssues)}${renderActionMenu(trackedRowActions(item, target))}</td>
   `
 }
 
@@ -1324,7 +1327,7 @@ function renderTimerStateScanRow(item, target, context, trackId, layout) {
   return `
     <td>${item.bucket}</td>
     ${renderStateExpandedCells(layout.groups, item.decoded_parts, item, target, `scan:${trackId}`)}
-    <td>${renderTimerTimestamp(item.decoded_key, item.decode_error)}</td>
+    <td>${renderTimerTimestamp(item.decoded_parts, item.decoded_key, item.decode_error, item.decode_issues)}</td>
     <td class="action-cell">${renderActionMenu(scanRowActions(item, target, context, trackId))}</td>
   `
 }
@@ -1334,7 +1337,7 @@ function renderTimerStateLookupRow(item, target, layout) {
     <td>${escapeHtml(item.targetLabel)}</td>
     <td>${item.bucket}</td>
     ${renderStateExpandedCells(layout.groups, item.decodedParts, item, target, `track:${item.id}`)}
-    <td>${renderTimerTimestamp(item.decodedKey, item.decodeError)}</td>
+    <td>${renderTimerTimestamp(item.decodedParts, item.decodedKey, item.decodeError, item.decodeIssues)}</td>
     <td class="action-cell">${renderActionMenu(trackedRowActions(item, target))}</td>
   `
 }
@@ -1532,7 +1535,7 @@ function renderSinkScanRow(item, target, context, trackId, layout) {
     <td>${item.bucket}</td>
     ${renderSinkExpandedCells(layout.keyFields, item.decoded_key, 'key')}
     ${renderSinkExpandedCells(layout.valueFields, item.decoded_columns, 'column')}
-    <td class="action-cell">${renderDecodeError(item.decode_error)}${renderActionMenu(scanRowActions(item, target, context, trackId))}</td>
+    <td class="action-cell">${renderDecodeError(item.decode_error, item.decode_issues)}${renderActionMenu(scanRowActions(item, target, context, trackId))}</td>
   `
 }
 
@@ -1542,7 +1545,7 @@ function renderSinkLookupRow(item, target, layout) {
     <td>${item.bucket}</td>
     ${renderSinkExpandedCells(layout.keyFields, item.decodedKey, 'key')}
     ${renderSinkExpandedCells(layout.valueFields, item.decodedColumns, 'column')}
-    <td class="action-cell">${renderDecodeError(item.decodeError)}${renderActionMenu(trackedRowActions(item, target))}</td>
+    <td class="action-cell">${renderDecodeError(item.decodeError, item.decodeIssues)}${renderActionMenu(trackedRowActions(item, target))}</td>
   `
 }
 
@@ -1621,11 +1624,16 @@ function renderTimerKey(keyB64, keyUtf8, decodedKey = null, target = null) {
   return `${renderCode(keyB64)}${renderUtf8Pill(keyUtf8)}`
 }
 
-function renderTimerTimestamp(decodedKey = null, decodeError = null) {
-  if (decodedKey && typeof decodedKey === 'object' && Object.prototype.hasOwnProperty.call(decodedKey, 'timestamp')) {
-    return `${renderDecodedValue(decodedKey.timestamp, 'org.apache.flink.api.common.typeutils.base.LongSerializer')}${renderDecodeError(decodeError)}`
+function renderTimerTimestamp(decodedParts = null, decodedKey = null, decodeError = null, decodeIssues = null) {
+  const timestamp = decodedParts && typeof decodedParts === 'object' && Object.prototype.hasOwnProperty.call(decodedParts, 'timestamp')
+    ? decodedParts.timestamp
+    : decodedKey && typeof decodedKey === 'object' && Object.prototype.hasOwnProperty.call(decodedKey, 'timestamp')
+    ? decodedKey.timestamp
+    : undefined
+  if (timestamp !== undefined) {
+    return `${renderDecodedValue(timestamp, 'org.apache.flink.api.common.typeutils.base.LongSerializer')}${renderDecodeError(decodeError, decodeIssues)}`
   }
-  return `<span class="muted-text">unknown</span>${renderDecodeError(decodeError)}`
+  return `<span class="muted-text">unknown</span>${renderDecodeError(decodeError, decodeIssues)}`
 }
 
 function renderDecodedKey(decodedKey, target = null) {
@@ -1818,17 +1826,38 @@ function simpleSerializerName(className = '') {
   return simple.endsWith('Serializer') ? simple.slice(0, -'Serializer'.length) : simple
 }
 
-function renderDecodeError(error) {
-  if (!error) return ''
-  const message = truncateText(error)
-  const guidance = decodeErrorGuidance(String(error))
+function renderDecodeError(error, decodeIssues = null) {
+  if (!error && (!decodeIssues || decodeIssues.length === 0)) return ''
+  const message = error ? truncateText(error) : ''
+  const guidance = decodeIssues && decodeIssues.length > 0
+    ? decodeIssueGuidance(decodeIssues)
+    : decodeErrorGuidance(String(error))
   return `
     <div class="decode-error">
       <strong>Decode fallback</strong>
-      <span>${escapeHtml(message)}</span>
+      ${message ? `<span>${escapeHtml(message)}</span>` : ''}
       ${guidance ? `<small>${escapeHtml(guidance)}</small>` : ''}
     </div>
   `
+}
+
+function decodeIssueGuidance(decodeIssues) {
+  if (!decodeIssues || decodeIssues.length === 0) return ''
+  const kinds = new Set(decodeIssues.map((issue) => issue.kind))
+  const parts = []
+  if (kinds.has('CLASSLESS_UNSUPPORTED')) {
+    parts.push('Raw key and value remain available. A trusted --user-jar may enable this row.')
+  }
+  if (kinds.has('SERIALIZER_RESTORE_FAILED')) {
+    parts.push('Check that --user-jar includes the serializer class and its dependencies.')
+  }
+  if (kinds.has('MALFORMED_BYTES')) {
+    parts.push('The serialized bytes are truncated or malformed (data-level error, not a classpath issue).')
+  }
+  if (kinds.has('UNKNOWN')) {
+    parts.push('An unexpected error occurred during decode.')
+  }
+  return parts.join(' ')
 }
 
 function decodeErrorGuidance(error) {

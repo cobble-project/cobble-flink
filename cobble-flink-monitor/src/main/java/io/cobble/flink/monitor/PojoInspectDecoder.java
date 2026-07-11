@@ -65,14 +65,23 @@ final class PojoInspectDecoder {
     static Object decodeFromCursor(
             InspectDecoderDescriptor descriptor, ClasslessValueDecoder.DecodeCursor cursor)
             throws IOException {
-        int flag = cursor.input().readUnsignedByte();
+        int flag;
+        try {
+            flag = cursor.input().readUnsignedByte();
+        } catch (IOException e) {
+            throw new DecodeFailureException(
+                    DecodeIssueKind.MALFORMED_BYTES,
+                    "Failed to read POJO flag: " + e.getMessage(),
+                    e);
+        }
 
         if (flag == FLAG_IS_NULL) {
             return ClasslessPojoValue.nullValue();
         }
 
         if (flag == FLAG_IS_SUBCLASS) {
-            throw new IOException(
+            throw new DecodeFailureException(
+                    DecodeIssueKind.CLASSLESS_UNSUPPORTED,
                     "Non-registered subclass: classless POJO decode not supported (flag=0x04)");
         }
 
@@ -84,7 +93,8 @@ final class PojoInspectDecoder {
             return decodeBaseFields(descriptor, cursor);
         }
 
-        throw new IOException(
+        throw new DecodeFailureException(
+                DecodeIssueKind.MALFORMED_BYTES,
                 "Malformed POJO flag: 0x"
                         + Integer.toHexString(flag)
                         + " (expected 0x01/0x02/0x04/0x08)");
@@ -94,14 +104,26 @@ final class PojoInspectDecoder {
             InspectDecoderDescriptor descriptor, ClasslessValueDecoder.DecodeCursor cursor)
             throws IOException {
         if (!descriptor.pojoBasePathClassless()) {
-            throw new IOException(
+            throw new DecodeFailureException(
+                    DecodeIssueKind.CLASSLESS_UNSUPPORTED,
                     "POJO base path is not classless (basePathClassless=false); "
                             + "PARTIALLY_CLASSLESS fallback required");
         }
         List<PojoFieldDescriptor> fields = descriptor.pojoFields();
         Map<String, Object> output = new LinkedHashMap<>(fields.size());
         for (PojoFieldDescriptor field : fields) {
-            boolean isNull = cursor.input().readBoolean();
+            boolean isNull;
+            try {
+                isNull = cursor.input().readBoolean();
+            } catch (IOException e) {
+                throw new DecodeFailureException(
+                        DecodeIssueKind.MALFORMED_BYTES,
+                        "POJO field '"
+                                + field.name()
+                                + "': failed to read null flag: "
+                                + e.getMessage(),
+                        e);
+            }
             if (isNull) {
                 output.put(field.name(), null);
                 continue;
@@ -111,7 +133,7 @@ final class PojoInspectDecoder {
                         ClasslessValueDecoder.decodeFromCursor(field.descriptor(), cursor);
                 output.put(field.name(), fieldValue);
             } catch (IOException e) {
-                throw new IOException("POJO field '" + field.name() + "': " + e.getMessage(), e);
+                throw DecodeFailureException.wrap("POJO field '" + field.name() + "'", e);
             }
         }
         return ClasslessPojoValue.of(output);
@@ -120,10 +142,19 @@ final class PojoInspectDecoder {
     private static Object decodeTaggedSubclass(
             InspectDecoderDescriptor descriptor, ClasslessValueDecoder.DecodeCursor cursor)
             throws IOException {
-        int tag = cursor.input().readByte();
+        int tag;
+        try {
+            tag = cursor.input().readByte();
+        } catch (IOException e) {
+            throw new DecodeFailureException(
+                    DecodeIssueKind.MALFORMED_BYTES,
+                    "Failed to read POJO subclass tag: " + e.getMessage(),
+                    e);
+        }
         List<RegisteredSubclass> subclasses = descriptor.registeredPojoSubclasses();
         if (tag < 0 || tag >= subclasses.size()) {
-            throw new IOException(
+            throw new DecodeFailureException(
+                    DecodeIssueKind.MALFORMED_BYTES,
                     "Invalid POJO subclass tag: "
                             + tag
                             + " (registered: 0.."
@@ -134,7 +165,7 @@ final class PojoInspectDecoder {
         try {
             return ClasslessValueDecoder.decodeFromCursor(subclass.descriptor(), cursor);
         } catch (IOException e) {
-            throw new IOException("POJO subclass[tag=" + tag + "]: " + e.getMessage(), e);
+            throw DecodeFailureException.wrap("POJO subclass[tag=" + tag + "]", e);
         }
     }
 }

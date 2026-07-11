@@ -60,7 +60,8 @@ final class FlinkDataInputDecoder extends Decoder {
 
     private void checkRemaining(int needed) throws IOException {
         if (bytesRead + needed > totalLength) {
-            throw new IOException(
+            throw new DecodeFailureException(
+                    DecodeIssueKind.MALFORMED_BYTES,
                     "Unexpected end of Avro input: need "
                             + needed
                             + " bytes, "
@@ -127,7 +128,8 @@ final class FlinkDataInputDecoder extends Decoder {
     @Override
     public void readFixed(byte[] bytes, int start, int length) throws IOException {
         if (length < 0) {
-            throw new IOException("Negative Avro fixed length: " + length);
+            throw new DecodeFailureException(
+                    DecodeIssueKind.MALFORMED_BYTES, "Negative Avro fixed length: " + length);
         }
         checkRemaining(length);
         in.readFully(bytes, start, length);
@@ -153,7 +155,8 @@ final class FlinkDataInputDecoder extends Decoder {
     @Override
     public void skipFixed(int length) throws IOException {
         if (length < 0) {
-            throw new IOException("Negative Avro fixed skip length: " + length);
+            throw new DecodeFailureException(
+                    DecodeIssueKind.MALFORMED_BYTES, "Negative Avro fixed skip length: " + length);
         }
         checkRemaining(length);
         skipBytes(length);
@@ -248,14 +251,17 @@ final class FlinkDataInputDecoder extends Decoder {
         bytesRead += 4;
         int length = in.readInt();
         if (length < 0) {
-            throw new IOException("Negative Avro payload length: " + length);
+            throw new DecodeFailureException(
+                    DecodeIssueKind.MALFORMED_BYTES, "Negative Avro payload length: " + length);
         }
         if (length > MAX_PAYLOAD_LENGTH) {
-            throw new IOException(
+            throw new DecodeFailureException(
+                    DecodeIssueKind.MALFORMED_BYTES,
                     "Avro payload length exceeds limit: " + length + " > " + MAX_PAYLOAD_LENGTH);
         }
         if (length > remaining()) {
-            throw new IOException(
+            throw new DecodeFailureException(
+                    DecodeIssueKind.MALFORMED_BYTES,
                     "Avro payload length " + length + " exceeds remaining input " + remaining());
         }
         return length;
@@ -263,7 +269,8 @@ final class FlinkDataInputDecoder extends Decoder {
 
     private void skipBytes(int num) throws IOException {
         if (num < 0) {
-            throw new IOException("Negative Avro skip length: " + num);
+            throw new DecodeFailureException(
+                    DecodeIssueKind.MALFORMED_BYTES, "Negative Avro skip length: " + num);
         }
         checkRemaining(num);
         while (num > 0) {
@@ -294,7 +301,9 @@ final class FlinkDataInputDecoder extends Decoder {
             value = value & 0x7f;
             while (((curr = readUnsignedByteGuarded()) & 0x80) != 0) {
                 if (shift >= 63) {
-                    throw new IOException("Avro varint count overflow (shift=" + shift + ")");
+                    throw new DecodeFailureException(
+                            DecodeIssueKind.MALFORMED_BYTES,
+                            "Avro varint count overflow (shift=" + shift + ")");
                 }
                 value |= (curr & 0x7f) << shift;
                 shift += 7;
@@ -302,7 +311,9 @@ final class FlinkDataInputDecoder extends Decoder {
             // Terminal byte: at shift == 63, only the lowest bit (0x01) is valid. Any higher
             // bit would overflow the 64-bit long.
             if (shift == 63 && curr > 1) {
-                throw new IOException("Avro varint count overflow (terminal byte=" + curr + ")");
+                throw new DecodeFailureException(
+                        DecodeIssueKind.MALFORMED_BYTES,
+                        "Avro varint count overflow (terminal byte=" + curr + ")");
             }
             value |= curr << shift;
             validateCount(value);
@@ -318,10 +329,12 @@ final class FlinkDataInputDecoder extends Decoder {
 
     private void validateCount(long count) throws IOException {
         if (count < 0) {
-            throw new IOException("Negative Avro collection count: " + count);
+            throw new DecodeFailureException(
+                    DecodeIssueKind.MALFORMED_BYTES, "Negative Avro collection count: " + count);
         }
         if (count > MAX_COLLECTION_COUNT) {
-            throw new IOException(
+            throw new DecodeFailureException(
+                    DecodeIssueKind.MALFORMED_BYTES,
                     "Avro collection count exceeds limit: " + count + " > " + MAX_COLLECTION_COUNT);
         }
     }

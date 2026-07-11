@@ -6,6 +6,8 @@ import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import io.cobble.flink.common.inspect.DescriptorCapability;
+import io.cobble.flink.common.inspect.InspectDecoderDescriptorKind;
 import io.cobble.flink.common.inspect.InspectSchemaRegistryLayout;
 import io.cobble.flink.common.inspect.StateInspectSchema;
 import io.cobble.flink.common.inspect.StateInspectSchemaStore;
@@ -87,16 +89,16 @@ import java.util.stream.Stream;
  *   <li><b>ValueState&lt;RowData&gt;</b> — ROW with named fields, monitor-portable (snapshot-only).
  *   <li><b>ListState&lt;RowData&gt;</b> — LIST(ROW) with named fields, monitor-portable.
  *   <li><b>MapState&lt;RowData, RowData&gt;</b> — MAP(ROW, ROW), both key and value portable.
- *   <li><b>ValueState&lt;TestOrderPojo&gt;</b> — POJO mapped to ROW from snapshot, non-portable
- *       (serialized fallback present).
+ *   <li><b>ValueState&lt;TestOrderPojo&gt;</b> — POJO mapped to ROW with a fully classless
+ *       descriptor (snapshot-only).
  * </ul>
  *
  * <p>Phases:
  *
  * <ol>
  *   <li>Run the stateful job on a MiniCluster and trigger a checkpoint.
- *   <li>Read the inspect sidecar and verify semantic schemas carry nested field names; assert
- *       RowData serializers are snapshot-only while POJO has a serialized fallback.
+ *   <li>Read the inspect sidecar and verify semantic schemas carry nested field names and the
+ *       RowData and POJO serializers are classless and snapshot-only.
  *   <li>Scan the checkpoint via {@code connector='cobble'} state source SQL and verify decoded
  *       RowData values for value, list, and map states.
  *   <li>Lookup value state and map state via SQL {@code LEFT JOIN ... FOR SYSTEM_TIME AS OF},
@@ -163,22 +165,30 @@ class CobbleStateSnapshotPipelineITTest {
                 mapSchema.mapUserValueSerializer().serializedSerializerBytes(),
                 "RowData map value serializer should be snapshot-only (portable)");
 
-        // 2d: ValueState<TestOrderPojo> — non-portable (serialized fallback present), but
-        //     snapshot-derived type is still ROW(id, name)
+        // 2d: ValueState<TestOrderPojo> — fully classless POJO descriptor, ROW(id, name)
         StateInspectSchema pojoSchema = store.byStateName().get(POJO_STATE);
         assertNotNull(pojoSchema, "pojo-state must be in the schema store");
         StateInspectSemanticSchema pojoSemantic = store.semanticSchema(POJO_STATE);
         assertNotNull(pojoSemantic, "pojo-state must have a semantic schema");
         assertRowFields(pojoSemantic.value(), "id", "name");
         assertNotNull(
+                pojoSchema.valueSerializer().decoderDescriptor(),
+                "POJO value serializer must have a decoder descriptor");
+        assertEquals(
+                InspectDecoderDescriptorKind.POJO,
+                pojoSchema.valueSerializer().decoderDescriptor().kind(),
+                "POJO value serializer must have a POJO decoder descriptor");
+        assertEquals(
+                DescriptorCapability.FULLY_CLASSLESS,
+                pojoSchema.valueSerializer().decoderDescriptor().capability(),
+                "POJO value serializer descriptor must be fully classless");
+        assertNull(
                 pojoSchema.valueSerializer().serializedSerializerBytes(),
-                "POJO value serializer should have serialized fallback (non-portable)");
+                "Fully classless POJO serializer should not persist a serialized fallback");
         assertNotNull(
                 pojoSchema.valueSerializer().snapshotBytes(),
-                "POJO value serializer must still have snapshot bytes");
-        assertNotNull(
-                pojoSchema.valueSerializer().inspectType(),
-                "POJO value serializer must have a snapshot-derived inspect type");
+                "POJO value serializer must have snapshot bytes");
+        assertRowFields(pojoSchema.valueSerializer().inspectType(), "id", "name");
 
         // ---- Phase 3: Scan checkpoint via cobble state source SQL ----
         StreamTableEnvironment tableEnv = newTableEnv();
