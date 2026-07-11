@@ -135,11 +135,18 @@ class MonitorAppJsTest {
                         + "const rowFields = semanticTableFields(rowType);\n"
                         + "const tupleFields = semanticTableFields(tupleType);\n"
                         + "const mapFields = semanticTableFields(mapType);\n"
+                        + "const scalarInt = { kind: 'SCALAR', logical_type: 'INT' };\n"
+                        + "const mapTarget = { kind: 'state', stateKind: 'map', semantic_parts: { state_key: scalarInt, map_key: scalarInt, map_value: rowType } };\n"
+                        + "const mapGroups = semanticTableGroups(mapTarget);\n"
+                        + "const mapValueGroup = mapGroups.find((group) => group.id === 'map_value');\n"
+                        + "const renderedMapCell = renderStateExpandedCells(mapGroups, { state_key: { kind: 'SCALAR', value: 1 }, map_key: { kind: 'SCALAR', value: 2 }, map_value: { kind: 'ROW', fields: [{ name: 'id', value: { kind: 'SCALAR', value: 7 } }, { name: 'profile', value: { kind: 'ROW', fields: [{ name: 'region', value: { kind: 'SCALAR', value: 'west' } }] } }] } }, {}, mapTarget, 'map-row');\n"
                         + "const mapLabel = overviewTypeLabel(mapType);\n"
                         + "const mapHeaderLabel = renderTypeLabel(mapLabel);\n"
                         + "const mapUsable = stateSourceTypeUsable(mapType);\n"
                         + "const renderedMap = renderSemanticTableValue({ kind: 'MAP', entries: [{ key: { kind: 'SCALAR', value: 'a' }, value: { kind: 'ROW', fields: [{ name: 'id', value: { kind: 'SCALAR', value: 7 } }] } }] }, 'map-test');\n"
-                        + "console.log(JSON.stringify({ rowFields, tupleFields, mapFields, mapLabel, mapHeaderLabel, mapUsable, renderedMap }));\n";
+                        + "const unsupportedFallback = renderDecodeError('value: Unsupported: KryoSerializerSnapshot');\n"
+                        + "const restoreFallback = renderDecodeError('value: Failed to restore serializer: ClassNotFoundException');\n"
+                        + "console.log(JSON.stringify({ rowFields, tupleFields, mapFields, mapValueGroup, renderedMapCell, mapLabel, mapHeaderLabel, mapUsable, renderedMap, unsupportedFallback, restoreFallback }));\n";
 
         Process process = new ProcessBuilder("node", "--input-type=module", "-").start();
         process.getOutputStream().write(harness.getBytes(StandardCharsets.UTF_8));
@@ -156,10 +163,16 @@ class MonitorAppJsTest {
         assertTrue(stdout.contains("\"name\":\"f1\""));
         assertTrue(stdout.contains("MAP<VARCHAR, ROW<"));
         assertTrue(stdout.contains("&lt;<wbr>VARCHAR,<wbr>"));
+        assertTrue(stdout.contains("\"id\":\"map_value\""));
+        assertTrue(stdout.contains("west"));
+        assertFalse(stdout.contains("raw key above"));
         assertTrue(stdout.contains("\"mapUsable\":false"));
         assertTrue(stdout.contains("decoded-map"));
         assertTrue(stdout.contains("key"));
         assertTrue(stdout.contains("value"));
+        assertTrue(stdout.contains("Decode fallback"));
+        assertTrue(stdout.contains("Raw key and value remain available"));
+        assertTrue(stdout.contains("Check that --user-jar includes the serializer"));
     }
 
     private static String readAppJs() throws IOException {

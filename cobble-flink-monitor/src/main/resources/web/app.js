@@ -1193,11 +1193,16 @@ function semanticTableSignature(target) {
 function semanticTableGroups(target) {
   const parts = target?.semantic_parts || target?.semanticParts || {}
   const valuePartLabel = target?.value_part_label || target?.valuePartLabel || 'Value'
+  const mapState = normalizedStateKind(target) === 'MAP'
   const candidates = [
     { id: 'state_key', label: 'State key', type: parts.state_key },
     { id: 'namespace', label: 'Namespace', type: parts.namespace },
     { id: 'map_key', label: 'Map key', type: parts.map_key },
-    { id: 'value', label: valuePartLabel, type: parts.value || parts.list_element || parts.map_value },
+    {
+      id: mapState ? 'map_value' : 'value',
+      label: valuePartLabel,
+      type: mapState ? parts.map_value : (parts.value || parts.list_element),
+    },
   ]
   return candidates
     .map((group) => ({ ...group, fields: semanticTableFields(group.type) }))
@@ -1393,7 +1398,7 @@ function renderStateRawFallback(group, index, item, target, displayId) {
   if (group.id === 'state_key') {
     return renderValue({ b64: item.key_b64 || item.keyB64, utf8: item.key_utf8 || item.keyUtf8 })
   }
-  if (group.id === 'value') {
+  if (group.id === 'value' || group.id === 'map_value') {
     return renderStateValue(
       item.value,
       item.decoded_value ?? item.decodedValue,
@@ -1814,7 +1819,26 @@ function simpleSerializerName(className = '') {
 }
 
 function renderDecodeError(error) {
-  return error ? `<div class="decode-error">${escapeHtml(truncateText(error))}</div>` : ''
+  if (!error) return ''
+  const message = truncateText(error)
+  const guidance = decodeErrorGuidance(String(error))
+  return `
+    <div class="decode-error">
+      <strong>Decode fallback</strong>
+      <span>${escapeHtml(message)}</span>
+      ${guidance ? `<small>${escapeHtml(guidance)}</small>` : ''}
+    </div>
+  `
+}
+
+function decodeErrorGuidance(error) {
+  if (/Unsupported:|unsupported classless|Non-registered subclass|KryoSerializerSnapshot/i.test(error)) {
+    return 'Raw key and value remain available. A trusted --user-jar may enable this row.'
+  }
+  if (/restore serializer|ClassNotFoundException|NoClassDefFoundError/i.test(error)) {
+    return 'Check that --user-jar includes the serializer, its domain classes, and dependencies.'
+  }
+  return ''
 }
 
 function isRawBytesJson(value) {
