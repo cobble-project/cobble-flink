@@ -9,6 +9,9 @@ import io.cobble.flink.common.inspect.StateInspectSemanticSchema;
 import io.cobble.flink.common.inspect.StateInspectType;
 import io.cobble.flink.common.inspect.StateInspectTypeKind;
 import io.cobble.flink.common.inspect.StateKind;
+import io.cobble.flink.common.inspect.decode.ClasslessDecodeFailureException;
+import io.cobble.flink.common.inspect.decode.ClasslessPojoValue;
+import io.cobble.flink.common.inspect.decode.ClasslessValueDecoder;
 
 import org.apache.flink.api.common.typeutils.TypeSerializer;
 import org.apache.flink.api.java.tuple.Tuple;
@@ -1662,6 +1665,10 @@ final class StateInspectDecoder {
         while (current != null) {
             if (current instanceof DecodeFailureException) {
                 return ((DecodeFailureException) current).kind();
+            }
+            if (current instanceof ClasslessDecodeFailureException) {
+                return DecodeIssueKind.valueOf(
+                        ((ClasslessDecodeFailureException) current).kind().name());
             }
             if (current instanceof NoClassDefFoundError) {
                 return DecodeIssueKind.SERIALIZER_RESTORE_FAILED;

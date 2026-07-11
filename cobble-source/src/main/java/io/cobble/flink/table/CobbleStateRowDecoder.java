@@ -1,5 +1,7 @@
 package io.cobble.flink.table;
 
+import io.cobble.flink.common.inspect.DescriptorCapability;
+import io.cobble.flink.common.inspect.InspectDecoderDescriptor;
 import io.cobble.flink.common.inspect.SerializerInspectSchema;
 import io.cobble.flink.common.inspect.StateInspectField;
 import io.cobble.flink.common.inspect.StateInspectSchema;
@@ -7,7 +9,14 @@ import io.cobble.flink.common.inspect.StateInspectSemanticSchema;
 import io.cobble.flink.common.inspect.StateInspectType;
 import io.cobble.flink.common.inspect.StateInspectTypeKind;
 import io.cobble.flink.common.inspect.StateKind;
+import io.cobble.flink.common.inspect.decode.ClasslessDecodeFailureException;
+import io.cobble.flink.common.inspect.decode.ClasslessPojoValue;
+import io.cobble.flink.common.inspect.decode.ClasslessValueDecoder;
 
+import org.apache.avro.generic.GenericEnumSymbol;
+import org.apache.avro.generic.GenericFixed;
+import org.apache.avro.generic.IndexedRecord;
+import org.apache.avro.util.Utf8;
 import org.apache.flink.api.common.typeutils.TypeSerializer;
 import org.apache.flink.api.java.tuple.Tuple;
 import org.apache.flink.core.memory.DataInputViewStreamWrapper;
@@ -23,6 +32,7 @@ import org.apache.flink.types.RowKind;
 import java.io.ByteArrayInputStream;
 import java.io.IOException;
 import java.io.PushbackInputStream;
+import java.nio.ByteBuffer;
 import java.util.ArrayList;
 import java.util.EnumMap;
 import java.util.List;
@@ -204,31 +214,8 @@ final class CobbleStateRowDecoder {
     }
 
     private List<Object[]> decodeListElements(byte[] bytes) throws IOException {
-        List<Object[]> rows = new ArrayList<>();
-        if (bytes == null) {
-            return rows;
-        }
         GroupDecoder decoder = groupDecoders.get(StateSourceField.Group.LIST_ELEMENT);
-        TypeSerializer<Object> serializer = decoder.serializer;
-        PushbackInputStream input = new PushbackInputStream(new ByteArrayInputStream(bytes), 1);
-        DataInputViewStreamWrapper inputView = new DataInputViewStreamWrapper(input);
-        while (true) {
-            int first = input.read();
-            if (first < 0) {
-                break;
-            }
-            input.unread(first);
-            Object value = serializer.deserialize(inputView);
-            rows.add(decoder.decodeObject(value));
-            int delimiter = input.read();
-            if (delimiter < 0) {
-                break;
-            }
-            if ((byte) delimiter != LIST_DELIMITER) {
-                throw new IOException("Invalid Cobble list delimiter: " + delimiter);
-            }
-        }
-        return rows;
+        return decoder.decodeListElements(bytes);
     }
 
     private Object[] decodeMapValue(byte[] mapValueColumn) throws IOException {
@@ -453,7 +440,10 @@ final class CobbleStateRowDecoder {
     private static final class GroupDecoder {
         private final StateSourceField.Group group;
         private final StateInspectType type;
-        private final TypeSerializer<Object> serializer;
+        private final SerializerInspectSchema serializerSchema;
+        private final InspectDecoderDescriptor descriptor;
+        private final boolean preferClassless;
+        private TypeSerializer<Object> serializer;
         private final List<DataStructureConverter<Object, Object>> converters;
         private final List<LogicalType> logicalTypes;
 
@@ -464,7 +454,11 @@ final class CobbleStateRowDecoder {
                 throws IOException {
             this.group = group;
             this.type = type;
-            this.serializer = restore(serializerSchema);
+            this.serializerSchema = serializerSchema;
+            this.descriptor =
+                    serializerSchema == null ? null : serializerSchema.decoderDescriptor();
+            this.preferClassless =
+                    ClasslessValueDecoder.shouldPreferClasslessSemanticDecode(descriptor);
             this.logicalTypes = flattenedLogicalTypes(type);
             this.converters = new ArrayList<>(logicalTypes.size());
             for (LogicalType logicalType : logicalTypes) {
@@ -478,9 +472,119 @@ final class CobbleStateRowDecoder {
             if (bytes == null) {
                 return nullValues();
             }
+            if (!preferClassless) {
+                return decodeWithSerializer(bytes);
+            }
+            try {
+                return decodeObject(ClasslessValueDecoder.decode(descriptor, bytes));
+            } catch (IOException classlessFailure) {
+                if (descriptor.capability() == DescriptorCapability.FULLY_CLASSLESS) {
+                    throw classlessFailure("classless value decode", classlessFailure);
+                }
+                return decodeWithLiveFallback(bytes, classlessFailure);
+            }
+        }
+
+        private List<Object[]> decodeListElements(byte[] bytes) throws IOException {
+            List<Object[]> rows = new ArrayList<>();
+            if (bytes == null) {
+                return rows;
+            }
+            if (!preferClassless) {
+                return decodeListElementsWithSerializer(bytes);
+            }
+            try {
+                ClasslessValueDecoder.DecodeCursor cursor =
+                        new ClasslessValueDecoder.DecodeCursor(bytes);
+                while (cursor.remaining() > 0) {
+                    rows.add(
+                            decodeObject(
+                                    ClasslessValueDecoder.decodeFromCursor(descriptor, cursor)));
+                    if (cursor.remaining() > 0) {
+                        int delimiter = cursor.input().readUnsignedByte();
+                        if (delimiter != LIST_DELIMITER) {
+                            throw ClasslessDecodeFailureException.malformed(
+                                    "Invalid Cobble list delimiter after element: 0x"
+                                            + Integer.toHexString(delimiter));
+                        }
+                    }
+                }
+                return rows;
+            } catch (IOException classlessFailure) {
+                if (descriptor.capability() == DescriptorCapability.FULLY_CLASSLESS) {
+                    throw classlessFailure("classless list element decode", classlessFailure);
+                }
+                return decodeListElementsWithLiveFallback(bytes, classlessFailure);
+            }
+        }
+
+        private Object[] decodeWithSerializer(byte[] bytes) throws IOException {
             return decodeObject(
-                    serializer.deserialize(
-                            new DataInputViewStreamWrapper(new ByteArrayInputStream(bytes))));
+                    serializer()
+                            .deserialize(
+                                    new DataInputViewStreamWrapper(
+                                            new ByteArrayInputStream(bytes))));
+        }
+
+        private Object[] decodeWithLiveFallback(byte[] bytes, IOException classlessFailure)
+                throws IOException {
+            try {
+                return decodeWithSerializer(bytes);
+            } catch (Exception | LinkageError fallbackFailure) {
+                throw new IOException(
+                        "Classless value decode failed ("
+                                + classlessFailure.getMessage()
+                                + ") and live serializer fallback failed: "
+                                + fallbackFailure.getMessage(),
+                        fallbackFailure);
+            }
+        }
+
+        private List<Object[]> decodeListElementsWithLiveFallback(
+                byte[] bytes, IOException classlessFailure) throws IOException {
+            try {
+                return decodeListElementsWithSerializer(bytes);
+            } catch (Exception | LinkageError fallbackFailure) {
+                throw new IOException(
+                        "Classless list element decode failed ("
+                                + classlessFailure.getMessage()
+                                + ") and live serializer fallback failed: "
+                                + fallbackFailure.getMessage(),
+                        fallbackFailure);
+            }
+        }
+
+        private List<Object[]> decodeListElementsWithSerializer(byte[] bytes) throws IOException {
+            List<Object[]> rows = new ArrayList<>();
+            PushbackInputStream input = new PushbackInputStream(new ByteArrayInputStream(bytes), 1);
+            DataInputViewStreamWrapper inputView = new DataInputViewStreamWrapper(input);
+            while (true) {
+                int first = input.read();
+                if (first < 0) {
+                    return rows;
+                }
+                input.unread(first);
+                rows.add(decodeObject(serializer().deserialize(inputView)));
+                int delimiter = input.read();
+                if (delimiter < 0) {
+                    return rows;
+                }
+                if ((byte) delimiter != LIST_DELIMITER) {
+                    throw new IOException("Invalid Cobble list delimiter: " + delimiter);
+                }
+            }
+        }
+
+        private TypeSerializer<Object> serializer() throws IOException {
+            if (serializer == null) {
+                serializer = restore(serializerSchema);
+            }
+            return serializer;
+        }
+
+        private IOException classlessFailure(String operation, IOException failure) {
+            return new IOException(
+                    "Failed " + operation + " for " + group + ": " + failure.getMessage(), failure);
         }
 
         private Object[] decodeObject(Object value) throws IOException {
@@ -504,6 +608,31 @@ final class CobbleStateRowDecoder {
         private Object[] decodeRow(Object value) throws IOException {
             Object[] output = new Object[type.fields().size()];
             if (value == null) {
+                return output;
+            }
+            if (value instanceof ClasslessPojoValue) {
+                ClasslessPojoValue pojo = (ClasslessPojoValue) value;
+                if (pojo.isNull()) {
+                    return output;
+                }
+                for (int index = 0; index < type.fields().size(); index++) {
+                    StateInspectField field = type.fields().get(index);
+                    if (!pojo.fields().containsKey(field.name())) {
+                        throw new IOException(
+                                "Classless POJO field '"
+                                        + field.name()
+                                        + "' is missing for "
+                                        + group);
+                    }
+                    output[index] = toInternal(index, pojo.fields().get(field.name()));
+                }
+                return output;
+            }
+            if (value instanceof IndexedRecord) {
+                IndexedRecord record = (IndexedRecord) value;
+                for (int index = 0; index < type.fields().size(); index++) {
+                    output[index] = toInternal(index, record.get(index));
+                }
                 return output;
             }
             if (!(value instanceof RowData)) {
@@ -536,15 +665,47 @@ final class CobbleStateRowDecoder {
             return output;
         }
 
-        private Object toInternal(int index, Object value) {
+        private Object toInternal(int index, Object value) throws IOException {
             if (value == null) {
                 return null;
             }
             try {
-                return converters.get(index).toInternalOrNull(value);
-            } catch (RuntimeException ignored) {
-                return value;
+                return converters.get(index).toInternalOrNull(normalizeAvroScalar(value));
+            } catch (RuntimeException e) {
+                String fieldName =
+                        type.kind() == StateInspectTypeKind.SCALAR
+                                ? "value"
+                                : type.fields().get(index).name();
+                throw new IOException(
+                        "Failed to convert "
+                                + group
+                                + " field '"
+                                + fieldName
+                                + "' to internal logical type "
+                                + logicalTypes.get(index).asSummaryString()
+                                + " from "
+                                + value.getClass().getName(),
+                        e);
             }
+        }
+
+        private static Object normalizeAvroScalar(Object value) {
+            if (value instanceof Utf8) {
+                return value.toString();
+            }
+            if (value instanceof GenericEnumSymbol) {
+                return value.toString();
+            }
+            if (value instanceof ByteBuffer) {
+                ByteBuffer buffer = ((ByteBuffer) value).duplicate();
+                byte[] bytes = new byte[buffer.remaining()];
+                buffer.get(bytes);
+                return bytes;
+            }
+            if (value instanceof GenericFixed) {
+                return ((GenericFixed) value).bytes();
+            }
+            return value;
         }
 
         @SuppressWarnings("unchecked")

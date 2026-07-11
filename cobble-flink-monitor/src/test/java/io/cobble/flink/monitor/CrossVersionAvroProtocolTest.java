@@ -7,6 +7,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import io.cobble.flink.common.inspect.DescriptorCapability;
 import io.cobble.flink.common.inspect.InspectDecoderDescriptor;
 import io.cobble.flink.common.inspect.SerializerInspectSchema;
+import io.cobble.flink.common.inspect.decode.AvroClasslessDecoder;
 
 import org.apache.avro.Schema;
 import org.apache.avro.generic.GenericRecord;

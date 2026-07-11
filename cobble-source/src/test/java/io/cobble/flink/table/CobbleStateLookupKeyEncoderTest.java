@@ -13,6 +13,8 @@ import io.cobble.flink.common.inspect.StateInspectSemanticSchema;
 import io.cobble.flink.common.inspect.StateInspectType;
 import io.cobble.flink.common.inspect.StateRowKeyLayout;
 
+import org.apache.flink.api.common.ExecutionConfig;
+import org.apache.flink.api.common.typeinfo.TypeInformation;
 import org.apache.flink.api.common.typeutils.TypeSerializer;
 import org.apache.flink.api.common.typeutils.TypeSerializerSnapshot;
 import org.apache.flink.api.common.typeutils.base.IntSerializer;
@@ -41,6 +43,67 @@ import java.util.List;
 class CobbleStateLookupKeyEncoderTest {
 
     private static final int TOTAL_KEY_GROUPS = 16;
+
+    @Test
+    void rejectsClasslessPojoStructuredStateKeyForExactLookup() throws Exception {
+        TypeSerializer<LookupPojo> pojoSerializer =
+                TypeInformation.of(LookupPojo.class).createSerializer(new ExecutionConfig());
+        StateInspectType pojoKey =
+                StateInspectType.row(
+                        Arrays.asList(
+                                new StateInspectField("id", StateInspectType.scalar("INT")),
+                                new StateInspectField(
+                                        "name", StateInspectType.scalar("VARCHAR(2147483647)"))));
+        StateSourceConfig config =
+                valueConfig(
+                        fields(
+                                field("id", "INT", StateSourceField.Group.STATE_KEY, 0),
+                                field(
+                                        "name",
+                                        "VARCHAR(2147483647)",
+                                        StateSourceField.Group.STATE_KEY,
+                                        1),
+                                field("value", "INT", StateSourceField.Group.VALUE, 0)),
+                        contract(
+                                fields(
+                                        field("id", "INT", StateSourceField.Group.STATE_KEY, 0),
+                                        field(
+                                                "name",
+                                                "VARCHAR(2147483647)",
+                                                StateSourceField.Group.STATE_KEY,
+                                                1))));
+        CobbleStateSourceRuntime.RuntimeSchema runtimeSchema =
+                runtimeSchema(
+                        StateInspectSchema.forValue(
+                                "orders",
+                                "cf",
+                                false,
+                                pojoSerializer,
+                                VoidNamespaceSerializer.INSTANCE,
+                                IntSerializer.INSTANCE),
+                        StateInspectSemanticSchema.forValue(
+                                pojoKey,
+                                StateInspectType.unknown(),
+                                StateInspectType.scalar("INT")));
+
+        IllegalArgumentException error =
+                assertThrows(
+                        IllegalArgumentException.class,
+                        () ->
+                                new CobbleStateLookupKeyEncoder(
+                                        config, runtimeSchema, new int[] {0, 1}));
+        assertTrue(
+                error.getMessage().contains("exact state key reconstruction"), error.getMessage());
+        assertTrue(error.getMessage().contains("classless POJO"), error.getMessage());
+        assertTrue(error.getMessage().contains("scan mode"), error.getMessage());
+    }
+
+    public static final class LookupPojo {
+        public int id;
+        public String name;
+
+        public LookupPojo() {}
+    }
 
     // ------------------------------------------------------------------------------------------
     //  Byte-layout + key-group tests

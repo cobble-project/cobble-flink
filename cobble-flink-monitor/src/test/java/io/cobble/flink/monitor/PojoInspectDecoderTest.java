@@ -10,6 +10,8 @@ import io.cobble.flink.common.inspect.DescriptorCapability;
 import io.cobble.flink.common.inspect.InspectDecoderDescriptor;
 import io.cobble.flink.common.inspect.InspectDecoderDescriptorKind;
 import io.cobble.flink.common.inspect.SerializerInspectSchema;
+import io.cobble.flink.common.inspect.decode.ClasslessPojoValue;
+import io.cobble.flink.common.inspect.decode.PojoInspectDecoder;
 
 import org.apache.flink.api.common.ExecutionConfig;
 import org.apache.flink.api.common.typeinfo.TypeInformation;

@@ -1,4 +1,4 @@
-package io.cobble.flink.monitor;
+package io.cobble.flink.common.inspect.decode;
 
 import io.cobble.flink.common.inspect.DescriptorCapability;
 import io.cobble.flink.common.inspect.InspectDecoderDescriptor;
@@ -47,7 +47,7 @@ import java.util.Map;
  *       the intended fallback path.
  * </ul>
  */
-final class AvroClasslessDecoder {
+public final class AvroClasslessDecoder {
 
     /** Maximum number of parsed schemas cached for reuse. */
     private static final int SCHEMA_CACHE_MAX_ENTRIES = 64;
@@ -78,7 +78,7 @@ final class AvroClasslessDecoder {
      * @throws IOException if the wire format is unsupported, the schema is invalid, the bytes are
      *     malformed, or trailing bytes remain after decoding.
      */
-    static GenericRecord decode(InspectDecoderDescriptor descriptor, byte[] bytes)
+    public static GenericRecord decode(InspectDecoderDescriptor descriptor, byte[] bytes)
             throws IOException {
         return decodeStream(descriptor, bytes);
     }
@@ -90,7 +90,7 @@ final class AvroClasslessDecoder {
      *
      * @return the decoded {@link GenericRecord} and the number of bytes consumed.
      */
-    static DecodedDatum decodeFromStream(InspectDecoderDescriptor descriptor, byte[] bytes)
+    public static DecodedDatum decodeFromStream(InspectDecoderDescriptor descriptor, byte[] bytes)
             throws IOException {
         return decodeFromStream(descriptor, bytes, 0);
     }
@@ -103,7 +103,7 @@ final class AvroClasslessDecoder {
      * @return the decoded {@link GenericRecord} and the number of bytes consumed (relative to the
      *     offset, not the array start).
      */
-    static DecodedDatum decodeFromStream(
+    public static DecodedDatum decodeFromStream(
             InspectDecoderDescriptor descriptor, byte[] bytes, int offset) throws IOException {
         String wireFormat = validateDescriptor(descriptor);
         Schema schema = parseSchema(wireFormat, descriptor.avroWriterSchemaJson());
@@ -119,8 +119,10 @@ final class AvroClasslessDecoder {
         } catch (IOException e) {
             throw e;
         } catch (RuntimeException e) {
-            throw new DecodeFailureException(
-                    DecodeIssueKind.MALFORMED_BYTES, "Avro decode failed: " + e.getMessage(), e);
+            throw new ClasslessDecodeFailureException(
+                    ClasslessDecodeIssueKind.MALFORMED_BYTES,
+                    "Avro decode failed: " + e.getMessage(),
+                    e);
         }
         return new DecodedDatum(record, decoder.bytesRead());
     }
@@ -134,7 +136,7 @@ final class AvroClasslessDecoder {
      * @throws IOException if the wire format is unsupported, the schema is invalid, or the bytes
      *     are malformed.
      */
-    static Object decodeFromCursor(
+    public static Object decodeFromCursor(
             InspectDecoderDescriptor descriptor, ClasslessValueDecoder.DecodeCursor cursor)
             throws IOException {
         String wireFormat = validateDescriptor(descriptor);
@@ -147,15 +149,17 @@ final class AvroClasslessDecoder {
         } catch (IOException e) {
             throw e;
         } catch (RuntimeException e) {
-            throw new DecodeFailureException(
-                    DecodeIssueKind.MALFORMED_BYTES, "Avro decode failed: " + e.getMessage(), e);
+            throw new ClasslessDecodeFailureException(
+                    ClasslessDecodeIssueKind.MALFORMED_BYTES,
+                    "Avro decode failed: " + e.getMessage(),
+                    e);
         }
     }
 
     /** Result of decoding a single datum from a stream. */
-    static final class DecodedDatum {
-        final GenericRecord record;
-        final int bytesConsumed;
+    public static final class DecodedDatum {
+        public final GenericRecord record;
+        public final int bytesConsumed;
 
         DecodedDatum(GenericRecord record, int bytesConsumed) {
             this.record = record;
@@ -182,14 +186,16 @@ final class AvroClasslessDecoder {
         } catch (IOException e) {
             throw e;
         } catch (RuntimeException e) {
-            throw new DecodeFailureException(
-                    DecodeIssueKind.MALFORMED_BYTES, "Avro decode failed: " + e.getMessage(), e);
+            throw new ClasslessDecodeFailureException(
+                    ClasslessDecodeIssueKind.MALFORMED_BYTES,
+                    "Avro decode failed: " + e.getMessage(),
+                    e);
         }
 
         // Reject trailing bytes after a complete datum.
         if (decoder.bytesRead() != bytes.length) {
-            throw new DecodeFailureException(
-                    DecodeIssueKind.MALFORMED_BYTES,
+            throw new ClasslessDecodeFailureException(
+                    ClasslessDecodeIssueKind.MALFORMED_BYTES,
                     "Trailing bytes after Avro datum: consumed "
                             + decoder.bytesRead()
                             + " of "
@@ -202,14 +208,14 @@ final class AvroClasslessDecoder {
     private static String validateDescriptor(InspectDecoderDescriptor descriptor)
             throws IOException {
         if (!descriptor.isAvro()) {
-            throw new DecodeFailureException(
-                    DecodeIssueKind.CLASSLESS_UNSUPPORTED,
+            throw new ClasslessDecodeFailureException(
+                    ClasslessDecodeIssueKind.CLASSLESS_UNSUPPORTED,
                     "Not an AVRO descriptor: " + descriptor.kind());
         }
         String wireFormat = descriptor.avroWireFormat();
         if (!InspectDecoderDescriptor.AVRO_WIRE_FORMAT_FLINK_DATA_INPUT_V1.equals(wireFormat)) {
-            throw new DecodeFailureException(
-                    DecodeIssueKind.CLASSLESS_UNSUPPORTED,
+            throw new ClasslessDecodeFailureException(
+                    ClasslessDecodeIssueKind.CLASSLESS_UNSUPPORTED,
                     "Unsupported Avro wire format: " + wireFormat);
         }
         return wireFormat;
@@ -219,7 +225,7 @@ final class AvroClasslessDecoder {
      * Returns {@code true} if the descriptor is an AVRO descriptor that should be used for
      * classless decoding (capability is {@code FULLY_CLASSLESS} or {@code PARTIALLY_CLASSLESS}).
      */
-    static boolean isClasslessAvro(InspectDecoderDescriptor descriptor) {
+    public static boolean isClasslessAvro(InspectDecoderDescriptor descriptor) {
         return descriptor != null
                 && descriptor.isAvro()
                 && descriptor.capability() != DescriptorCapability.UNSUPPORTED;
@@ -240,8 +246,8 @@ final class AvroClasslessDecoder {
         try {
             schema = parser.parse(schemaJson);
         } catch (RuntimeException e) {
-            throw new DecodeFailureException(
-                    DecodeIssueKind.MALFORMED_BYTES,
+            throw new ClasslessDecodeFailureException(
+                    ClasslessDecodeIssueKind.MALFORMED_BYTES,
                     "Failed to parse Avro schema: " + e.getMessage(),
                     e);
         }

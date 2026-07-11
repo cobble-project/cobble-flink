@@ -1,4 +1,4 @@
-package io.cobble.flink.monitor;
+package io.cobble.flink.common.inspect.decode;
 
 import java.util.Collections;
 import java.util.LinkedHashMap;
@@ -11,7 +11,7 @@ import java.util.Map;
  * <p>Contains an immutable ordered map of decoded field name to value, and a null flag (set when
  * the POJO wire byte was {@code IS_NULL}).
  */
-final class ClasslessPojoValue {
+public final class ClasslessPojoValue {
 
     private final Map<String, Object> fields;
     private final boolean isNull;
@@ -21,21 +21,21 @@ final class ClasslessPojoValue {
         this.isNull = isNull;
     }
 
-    static ClasslessPojoValue of(Map<String, Object> fields) {
+    public static ClasslessPojoValue of(Map<String, Object> fields) {
         return new ClasslessPojoValue(
                 Collections.unmodifiableMap(new LinkedHashMap<>(fields)), false);
     }
 
-    static ClasslessPojoValue nullValue() {
+    public static ClasslessPojoValue nullValue() {
         return new ClasslessPojoValue(Collections.emptyMap(), true);
     }
 
     /** Immutable ordered map of field name to decoded value. Empty when {@link #isNull()}. */
-    Map<String, Object> fields() {
+    public Map<String, Object> fields() {
         return fields;
     }
 
-    boolean isNull() {
+    public boolean isNull() {
         return isNull;
     }
 }

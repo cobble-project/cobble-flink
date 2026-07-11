@@ -1,6 +1,7 @@
 package io.cobble.flink.table;
 
 import io.cobble.flink.common.CobbleLoader;
+import io.cobble.flink.common.inspect.StateInspectExactLookupSupport;
 
 import org.apache.flink.configuration.ConfigOption;
 import org.apache.flink.configuration.MemorySize;
@@ -250,6 +251,17 @@ public final class CobbleDynamicTableSourceFactory implements DynamicTableSource
                         resolved.stateKind(),
                         resolved.outputFields(),
                         resolvedSchema);
+        if (lookupKeyContract.isPresent()) {
+            StateInspectExactLookupSupport.Result support =
+                    StateInspectExactLookupSupport.evaluate(
+                            resolved.schema(), resolved.semanticSchema());
+            if (!support.supported()) {
+                throw new ValidationException(
+                        "Cobble state source exact lookup is unavailable for "
+                                + support.reason()
+                                + ". Remove PRIMARY KEY and use scan mode.");
+            }
+        }
 
         StateSourceConfig config =
                 new StateSourceConfig(

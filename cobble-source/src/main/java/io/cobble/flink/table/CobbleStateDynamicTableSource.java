@@ -18,9 +18,10 @@ import java.util.Set;
  * Cobble state source whose DDL schema has been resolved and validated at planning time.
  *
  * <p>Batch scans use the state checkpoint runtime. Lookup is an exact full-key contract: an
- * optional DDL {@code PRIMARY KEY} declares the full logical lookup key. Value-like states
+ * optional DDL {@code PRIMARY KEY} declares the full logical lookup key. Eligible value-like states
  * (value/reducing/aggregating) and map states support exact lookup via {@link
- * CobbleStateLookupFunction}; list/timer are rejected with a clear message.
+ * CobbleStateLookupFunction}; list/timer and classless structured key serializers are rejected with
+ * a clear message.
  */
 final class CobbleStateDynamicTableSource implements ScanTableSource, LookupTableSource {
 

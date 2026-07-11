@@ -18,6 +18,9 @@ import io.cobble.flink.state.CobbleHighAvailabilityServicesFactory;
 import io.cobble.flink.state.CobbleOptions;
 import io.cobble.flink.state.CobbleStateBackend;
 
+import org.apache.avro.SchemaBuilder;
+import org.apache.avro.generic.GenericData;
+import org.apache.avro.generic.GenericRecord;
 import org.apache.flink.api.common.JobID;
 import org.apache.flink.api.common.JobStatus;
 import org.apache.flink.api.common.functions.RichMapFunction;
@@ -36,6 +39,7 @@ import org.apache.flink.configuration.HighAvailabilityOptions;
 import org.apache.flink.configuration.JobManagerOptions;
 import org.apache.flink.configuration.MemorySize;
 import org.apache.flink.configuration.RestOptions;
+import org.apache.flink.formats.avro.typeutils.AvroSerializer;
 import org.apache.flink.runtime.jobgraph.JobGraph;
 import org.apache.flink.runtime.minicluster.MiniCluster;
 import org.apache.flink.runtime.testutils.MiniClusterResourceConfiguration;
@@ -83,7 +87,7 @@ import java.util.stream.Stream;
  * <p>Validates the full flow from real Cobble checkpoint through the schema sidecar to the cobble
  * state source scan and lookup — catching regressions when serializer capture policy changes.
  *
- * <p>The stateful job creates four states covering distinct snapshot-derived semantic types:
+ * <p>The stateful job creates five states covering distinct snapshot-derived semantic types:
  *
  * <ul>
  *   <li><b>ValueState&lt;RowData&gt;</b> — ROW with named fields, monitor-portable (snapshot-only).
@@ -91,6 +95,8 @@ import java.util.stream.Stream;
  *   <li><b>MapState&lt;RowData, RowData&gt;</b> — MAP(ROW, ROW), both key and value portable.
  *   <li><b>ValueState&lt;TestOrderPojo&gt;</b> — POJO mapped to ROW with a fully classless
  *       descriptor (snapshot-only).
+ *   <li><b>ValueState&lt;GenericRecord&gt;</b> — Avro record mapped to ROW with a fully classless
+ *       descriptor.
  * </ul>
  *
  * <p>Phases:
@@ -98,9 +104,9 @@ import java.util.stream.Stream;
  * <ol>
  *   <li>Run the stateful job on a MiniCluster and trigger a checkpoint.
  *   <li>Read the inspect sidecar and verify semantic schemas carry nested field names and the
- *       RowData and POJO serializers are classless and snapshot-only.
+ *       RowData, POJO, and Avro serializers are classless and snapshot-only where applicable.
  *   <li>Scan the checkpoint via {@code connector='cobble'} state source SQL and verify decoded
- *       RowData values for value, list, and map states.
+ *       RowData, POJO, and Avro values for value, list, and map states.
  *   <li>Lookup value state and map state via SQL {@code LEFT JOIN ... FOR SYSTEM_TIME AS OF},
  *       verifying the snapshot-only key serializer path for both state kinds.
  * </ol>
@@ -114,6 +120,13 @@ class CobbleStateSnapshotPipelineITTest {
     private static final String LIST_ROW_STATE = "list-row-state";
     private static final String MAP_ROW_ROW_STATE = "map-row-row-state";
     private static final String POJO_STATE = "pojo-state";
+    private static final String AVRO_STATE = "avro-state";
+    private static final org.apache.avro.Schema AVRO_SCHEMA =
+            SchemaBuilder.record("InspectAvroValue")
+                    .fields()
+                    .requiredInt("id")
+                    .requiredString("name")
+                    .endRecord();
 
     @TempDir private Path tempDir;
 
@@ -190,6 +203,21 @@ class CobbleStateSnapshotPipelineITTest {
                 "POJO value serializer must have snapshot bytes");
         assertRowFields(pojoSchema.valueSerializer().inspectType(), "id", "name");
 
+        StateInspectSchema avroSchema = store.byStateName().get(AVRO_STATE);
+        assertNotNull(avroSchema, "avro-state must be in the schema store");
+        assertNotNull(
+                avroSchema.valueSerializer().decoderDescriptor(),
+                "Avro value serializer must have a decoder descriptor");
+        assertEquals(
+                InspectDecoderDescriptorKind.AVRO,
+                avroSchema.valueSerializer().decoderDescriptor().kind());
+        assertEquals(
+                DescriptorCapability.FULLY_CLASSLESS,
+                avroSchema.valueSerializer().decoderDescriptor().capability());
+        StateInspectSemanticSchema avroSemantic = store.semanticSchema(AVRO_STATE);
+        assertNotNull(avroSemantic, "avro-state must have a semantic schema");
+        assertRowFields(avroSemantic.value(), "id", "name");
+
         // ---- Phase 3: Scan checkpoint via cobble state source SQL ----
         StreamTableEnvironment tableEnv = newTableEnv();
 
@@ -231,6 +259,30 @@ class CobbleStateSnapshotPipelineITTest {
                         "SELECT `key`, mk_id, mk_region, order_id, region"
                                 + " FROM row_map_row_source");
         assertEquals(expectedMapRowRowValues(), mapRows);
+
+        // 3d: Fully classless POJO ValueState scan. The source has no need to restore the writer
+        // POJO serializer; it projects persisted semantic fields directly.
+        tableEnv.executeSql(
+                stateDdl(
+                        "pojo_value_source",
+                        "`key` INT, id INT, name STRING",
+                        checkpoint,
+                        POJO_STATE,
+                        "value"));
+        assertEquals(
+                expectedStructuredValues(),
+                rowSet(tableEnv, "SELECT `key`, id, name FROM pojo_value_source"));
+
+        tableEnv.executeSql(
+                stateDdl(
+                        "avro_value_source",
+                        "`key` INT, id INT, name STRING",
+                        checkpoint,
+                        AVRO_STATE,
+                        "value"));
+        assertEquals(
+                expectedStructuredValues(),
+                rowSet(tableEnv, "SELECT `key`, id, name FROM avro_value_source"));
 
         // ---- Phase 4: Lookup value state and map state via SQL ----
         StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment();
@@ -277,6 +329,25 @@ class CobbleStateSnapshotPipelineITTest {
         assertTrue(
                 valueLookupRows.contains("999,null,null"),
                 "key 999 should miss: " + valueLookupRows);
+
+        // 4a.1: An INT-key temporal lookup may return a classless POJO structured value.
+        lookupEnv.executeSql(
+                stateLookupDdl(
+                        "pojo_value_dim",
+                        "`key` INT, id INT, name STRING",
+                        "PRIMARY KEY (`key`) NOT ENFORCED",
+                        checkpoint,
+                        POJO_STATE,
+                        "value"));
+        String pojoQuery =
+                "SELECT p.key, d.id, d.name "
+                        + "FROM value_probes AS p "
+                        + "LEFT JOIN pojo_value_dim FOR SYSTEM_TIME AS OF p.pt AS d "
+                        + "ON p.key = d.`key`";
+        assertTrue(lookupEnv.explainSql(pojoQuery).contains("LookupJoin"));
+        List<String> pojoLookupRows = collectRows(lookupEnv, pojoQuery);
+        assertTrue(pojoLookupRows.contains("0,8,region-0"), pojoLookupRows.toString());
+        assertTrue(pojoLookupRows.contains("999,null,null"), pojoLookupRows.toString());
 
         // 4b: Map<RowData, RowData> state lookup — exercises snapshot-only RowData key serializer.
         lookupEnv.executeSql(
@@ -355,6 +426,15 @@ class CobbleStateSnapshotPipelineITTest {
         for (int key = 0; key < PARALLELISM; key++) {
             long lastOrderId = key + (long) (ROWS_PER_KEY - 1) * PARALLELISM;
             rows.add(key + "," + lastOrderId + ",region-" + key);
+        }
+        return rows;
+    }
+
+    private static Set<String> expectedStructuredValues() {
+        Set<String> rows = new LinkedHashSet<>();
+        for (int key = 0; key < PARALLELISM; key++) {
+            int value = key + (ROWS_PER_KEY - 1) * PARALLELISM;
+            rows.add(key + "," + value + ",region-" + key);
         }
         return rows;
     }
@@ -859,7 +939,7 @@ class CobbleStateSnapshotPipelineITTest {
     }
 
     /**
-     * Writes into four states covering distinct snapshot-derived semantic types:
+     * Writes into five states covering distinct snapshot-derived semantic types:
      *
      * <ul>
      *   <li>ValueState&lt;RowData&gt; — keeps last RowData per key.
@@ -867,6 +947,7 @@ class CobbleStateSnapshotPipelineITTest {
      *   <li>MapState&lt;RowData, RowData&gt; — keys on ROW(mk_id, mk_region), value =
      *       ROW(order_id*10, region).
      *   <li>ValueState&lt;TestOrderPojo&gt; — keeps last POJO per key (non-portable serializer).
+     *   <li>ValueState&lt;GenericRecord&gt; — keeps last Avro record per key.
      * </ul>
      */
     private static final class RowStateMapper extends RichMapFunction<Integer, Integer> {
@@ -874,6 +955,7 @@ class CobbleStateSnapshotPipelineITTest {
         private transient ListState<RowData> listRowState;
         private transient MapState<RowData, RowData> mapRowRowState;
         private transient ValueState<TestOrderPojo> pojoState;
+        private transient ValueState<GenericRecord> avroState;
 
         @Override
         public void open(Configuration parameters) throws Exception {
@@ -893,6 +975,13 @@ class CobbleStateSnapshotPipelineITTest {
                             .getState(
                                     new ValueStateDescriptor<>(
                                             POJO_STATE, TypeInformation.of(TestOrderPojo.class)));
+            avroState =
+                    getRuntimeContext()
+                            .getState(
+                                    new ValueStateDescriptor<>(
+                                            AVRO_STATE,
+                                            new AvroSerializer<>(
+                                                    GenericRecord.class, AVRO_SCHEMA)));
         }
 
         @Override
@@ -907,6 +996,10 @@ class CobbleStateSnapshotPipelineITTest {
             listRowState.add(record);
             mapRowRowState.put(mapKey, mapValue);
             pojoState.update(new TestOrderPojo(value, region));
+            GenericRecord avro = new GenericData.Record(AVRO_SCHEMA);
+            avro.put("id", value);
+            avro.put("name", region);
+            avroState.update(avro);
             return value;
         }
     }

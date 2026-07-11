@@ -130,7 +130,9 @@ final class StateSourceSchemaResolver {
                 stateOptions.stateName(),
                 stateKind,
                 event.checkpointId(),
-                outputFields);
+                outputFields,
+                stateSchema,
+                semanticSchema);
     }
 
     // ------------------------------------------------------------------------------------------

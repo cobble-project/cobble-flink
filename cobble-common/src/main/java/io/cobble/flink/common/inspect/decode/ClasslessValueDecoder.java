@@ -1,4 +1,4 @@
-package io.cobble.flink.monitor;
+package io.cobble.flink.common.inspect.decode;
 
 import io.cobble.flink.common.inspect.DescriptorCapability;
 import io.cobble.flink.common.inspect.InspectDecoderDescriptor;
@@ -36,37 +36,37 @@ import java.io.IOException;
  * IOException} via the {@code UNSUPPORTED} case in {@code decodeFromCursor}, which the caller wraps
  * with context (e.g. "POJO field 'x': ...").
  */
-final class ClasslessValueDecoder {
+public final class ClasslessValueDecoder {
 
     /** Immutable read cursor over a byte array, shared across recursive decode calls. */
-    static final class DecodeCursor {
+    public static final class DecodeCursor {
         private final int length;
         private final ByteArrayInputStream byteStream;
         private final DataInputViewStreamWrapper inputView;
 
-        DecodeCursor(byte[] bytes) {
+        public DecodeCursor(byte[] bytes) {
             this.length = bytes.length;
             this.byteStream = new ByteArrayInputStream(bytes);
             this.inputView = new DataInputViewStreamWrapper(byteStream);
         }
 
-        DataInputViewStreamWrapper input() {
+        public DataInputViewStreamWrapper input() {
             return inputView;
         }
 
         /** Number of bytes consumed from this cursor's complete byte array. */
-        int position() {
+        public int position() {
             return length - byteStream.available();
         }
 
-        int remaining() {
+        public int remaining() {
             return byteStream.available();
         }
 
-        void requireFullyConsumed(String label) throws IOException {
+        public void requireFullyConsumed(String label) throws IOException {
             if (remaining() != 0) {
-                throw new DecodeFailureException(
-                        DecodeIssueKind.MALFORMED_BYTES,
+                throw new ClasslessDecodeFailureException(
+                        ClasslessDecodeIssueKind.MALFORMED_BYTES,
                         "Trailing bytes after "
                                 + label
                                 + ": consumed "
@@ -85,7 +85,8 @@ final class ClasslessValueDecoder {
      *
      * @throws IOException if decoding fails or trailing bytes remain.
      */
-    static Object decode(InspectDecoderDescriptor descriptor, byte[] bytes) throws IOException {
+    public static Object decode(InspectDecoderDescriptor descriptor, byte[] bytes)
+            throws IOException {
         DecodeCursor cursor = new DecodeCursor(bytes);
         Object result = decodeFromCursor(descriptor, cursor);
         cursor.requireFullyConsumed("datum");
@@ -97,7 +98,7 @@ final class ClasslessValueDecoder {
      *
      * @throws IOException if decoding fails.
      */
-    static Object decodeFromCursor(InspectDecoderDescriptor descriptor, DecodeCursor cursor)
+    public static Object decodeFromCursor(InspectDecoderDescriptor descriptor, DecodeCursor cursor)
             throws IOException {
         InspectDecoderDescriptorKind kind = descriptor.kind();
         switch (kind) {
@@ -108,12 +109,12 @@ final class ClasslessValueDecoder {
             case PORTABLE_SNAPSHOT:
                 return decodePortableSnapshot(descriptor, cursor);
             case UNSUPPORTED:
-                throw new DecodeFailureException(
-                        DecodeIssueKind.CLASSLESS_UNSUPPORTED,
+                throw new ClasslessDecodeFailureException(
+                        ClasslessDecodeIssueKind.CLASSLESS_UNSUPPORTED,
                         "Unsupported: " + descriptor.unsupportedReason());
             default:
-                throw new DecodeFailureException(
-                        DecodeIssueKind.UNKNOWN, "Unknown descriptor kind: " + kind);
+                throw new ClasslessDecodeFailureException(
+                        ClasslessDecodeIssueKind.UNKNOWN, "Unknown descriptor kind: " + kind);
         }
     }
 
@@ -122,7 +123,7 @@ final class ClasslessValueDecoder {
      * the restored-serializer path. This is true for POJO and AVRO only; PORTABLE_SNAPSHOT
      * top-level serializers continue using the existing snapshot-first {@code restore()} path.
      */
-    static boolean shouldPreferClasslessSemanticDecode(InspectDecoderDescriptor descriptor) {
+    public static boolean shouldPreferClasslessSemanticDecode(InspectDecoderDescriptor descriptor) {
         return descriptor != null
                 && (descriptor.isPojo() || descriptor.isAvro())
                 && descriptor.capability() != DescriptorCapability.UNSUPPORTED;
@@ -138,14 +139,14 @@ final class ClasslessValueDecoder {
                             new DataInputViewStreamWrapper(new ByteArrayInputStream(snapshotBytes)),
                             descriptor.getClass().getClassLoader());
         } catch (NoClassDefFoundError e) {
-            throw new DecodeFailureException(
-                    DecodeIssueKind.SERIALIZER_RESTORE_FAILED,
+            throw new ClasslessDecodeFailureException(
+                    ClasslessDecodeIssueKind.SERIALIZER_RESTORE_FAILED,
                     "Portable serializer snapshot dependency is unavailable: "
                             + descriptor.portableSnapshotClassName(),
                     e);
         } catch (IOException | RuntimeException e) {
-            throw new DecodeFailureException(
-                    DecodeIssueKind.MALFORMED_BYTES,
+            throw new ClasslessDecodeFailureException(
+                    ClasslessDecodeIssueKind.MALFORMED_BYTES,
                     "Failed to read portable serializer snapshot: "
                             + descriptor.portableSnapshotClassName(),
                     e);
@@ -154,33 +155,33 @@ final class ClasslessValueDecoder {
         try {
             serializer = snapshot.restoreSerializer();
         } catch (NoClassDefFoundError e) {
-            throw new DecodeFailureException(
-                    DecodeIssueKind.SERIALIZER_RESTORE_FAILED,
+            throw new ClasslessDecodeFailureException(
+                    ClasslessDecodeIssueKind.SERIALIZER_RESTORE_FAILED,
                     "Failed to restore portable serializer from snapshot: "
                             + descriptor.portableSnapshotClassName(),
                     e);
         }
         if (serializer == null) {
-            throw new DecodeFailureException(
-                    DecodeIssueKind.SERIALIZER_RESTORE_FAILED,
+            throw new ClasslessDecodeFailureException(
+                    ClasslessDecodeIssueKind.SERIALIZER_RESTORE_FAILED,
                     "Failed to restore portable serializer from snapshot (null): "
                             + descriptor.portableSnapshotClassName());
         }
         try {
             return serializer.deserialize(cursor.input());
         } catch (EOFException e) {
-            throw new DecodeFailureException(
-                    DecodeIssueKind.MALFORMED_BYTES,
+            throw new ClasslessDecodeFailureException(
+                    ClasslessDecodeIssueKind.MALFORMED_BYTES,
                     "Portable serializer deserialize failed: " + e.getMessage(),
                     e);
         } catch (NoClassDefFoundError e) {
-            throw new DecodeFailureException(
-                    DecodeIssueKind.SERIALIZER_RESTORE_FAILED,
+            throw new ClasslessDecodeFailureException(
+                    ClasslessDecodeIssueKind.SERIALIZER_RESTORE_FAILED,
                     "Portable serializer deserialize failed: " + e.getMessage(),
                     e);
         } catch (IOException | RuntimeException e) {
-            throw new DecodeFailureException(
-                    DecodeIssueKind.UNKNOWN,
+            throw new ClasslessDecodeFailureException(
+                    ClasslessDecodeIssueKind.UNKNOWN,
                     "Portable serializer deserialize failed: " + e.getMessage(),
                     e);
         }

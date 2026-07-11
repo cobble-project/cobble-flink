@@ -2,6 +2,7 @@ package io.cobble.flink.monitor;
 
 import io.cobble.flink.common.inspect.SinkInspectField;
 import io.cobble.flink.common.inspect.SinkInspectSchema;
+import io.cobble.flink.common.inspect.StateInspectExactLookupSupport;
 import io.cobble.flink.common.inspect.StateInspectField;
 import io.cobble.flink.common.inspect.StateInspectSchema;
 import io.cobble.flink.common.inspect.StateInspectSemanticSchema;
@@ -117,6 +118,12 @@ final class InspectTarget {
         }
         if (semanticSchema != null && !semanticSchema.isEmpty()) {
             output.put("semantic_parts", semanticPartsToJson(semanticSchema));
+            if (schema != null) {
+                StateInspectExactLookupSupport.Result support =
+                        StateInspectExactLookupSupport.evaluate(schema, semanticSchema);
+                output.put("exact_lookup_supported", support.supported());
+                output.put("exact_lookup_reason", support.reason());
+            }
         }
         if (sinkSchema != null) {
             output.put("key_fields", fieldsToJson(sinkSchema.keyFields()));

@@ -1,5 +1,6 @@
 package io.cobble.flink.table;
 
+import io.cobble.flink.common.inspect.InspectDecoderDescriptor;
 import io.cobble.flink.common.inspect.SerializerInspectSchema;
 import io.cobble.flink.common.inspect.StateInspectSchema;
 import io.cobble.flink.common.inspect.StateInspectSemanticSchema;
@@ -305,6 +306,7 @@ final class CobbleStateLookupKeyEncoder {
                 ClassLoader classLoader)
                 throws IOException {
             StateSourceField.Group group = groupForLabel(groupLabel, config);
+            rejectClasslessStructuredLookupKey(groupLabel, type, serializerSchema);
             TypeSerializer<Object> serializer =
                     restoreSerializer(serializerSchema, groupLabel, classLoader);
             List<LogicalType> logicalTypes = flattenedLogicalTypes(type, groupLabel);
@@ -317,6 +319,25 @@ final class CobbleStateLookupKeyEncoder {
             }
             return new GroupLookupEncoder(
                     groupLabel, type, serializer, logicalTypes, converters, group);
+        }
+
+        private static void rejectClasslessStructuredLookupKey(
+                String groupLabel, StateInspectType type, SerializerInspectSchema serializerSchema)
+                throws IOException {
+            InspectDecoderDescriptor descriptor =
+                    serializerSchema == null ? null : serializerSchema.decoderDescriptor();
+            if (descriptor == null
+                    || (!descriptor.isPojo() && !descriptor.isAvro())
+                    || (type.kind() != StateInspectTypeKind.ROW
+                            && type.kind() != StateInspectTypeKind.TUPLE)) {
+                return;
+            }
+            throw new IOException(
+                    "Cobble state lookup does not support exact "
+                            + groupLabel
+                            + " reconstruction for classless "
+                            + (descriptor.isPojo() ? "POJO" : "Avro")
+                            + " structured keys. Use scan mode or a scalar key.");
         }
 
         StateSourceField.Group group() {

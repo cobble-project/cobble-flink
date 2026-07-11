@@ -2207,6 +2207,10 @@ function stateSourceNote(target, groups, hasSql) {
   if (!stateLookupSupportedKind(target)) {
     return 'Use this state source table for batch scan queries. Lookup joins are not available for this state kind yet.'
   }
+  if (!stateExactLookupSupported(target)) {
+    const reason = target?.exact_lookup_reason || target?.exactLookupReason || 'this key serializer cannot be reconstructed exactly'
+    return `Use this state source table for batch scan queries. Lookup joins are unavailable because ${reason}.`
+  }
   const keys = stateSourcePrimaryKeyFields(target, groups)
     .map((field) => quoteSqlIdentifier(field.name))
     .join(', ')
@@ -2227,7 +2231,7 @@ function stateSourceSql(target, meta = state.meta, groups = stateOverviewGroups(
   const columnLines = fields.map((field) => (
     `  ${quoteSqlIdentifier(field.name)} ${field.logical_type || 'BYTES'}`
   ))
-  const primaryKeyFields = stateLookupSupportedKind(target)
+  const primaryKeyFields = stateExactLookupSupported(target)
     ? stateSourcePrimaryKeyFields(target, groups)
     : []
   if (primaryKeyFields.length > 0) {
@@ -2257,6 +2261,12 @@ function stateSourceSql(target, meta = state.meta, groups = stateOverviewGroups(
     optionLines.join(',\n'),
     `);`,
   ].join('\n')
+}
+
+function stateExactLookupSupported(target) {
+  return stateLookupSupportedKind(target)
+    && target?.exact_lookup_supported !== false
+    && target?.exactLookupSupported !== false
 }
 
 function stateSourcePathForSql(meta = state.meta) {

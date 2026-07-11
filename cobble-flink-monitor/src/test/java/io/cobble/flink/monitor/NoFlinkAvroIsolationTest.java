@@ -91,7 +91,8 @@ class NoFlinkAvroIsolationTest {
 
             // Step 4: Verify monitor classes ARE loadable.
             Class<?> decoderClass =
-                    isolatedLoader.loadClass("io.cobble.flink.monitor.AvroClasslessDecoder");
+                    isolatedLoader.loadClass(
+                            "io.cobble.flink.common.inspect.decode.AvroClasslessDecoder");
             Class<?> descriptorClass =
                     isolatedLoader.loadClass(
                             "io.cobble.flink.common.inspect.InspectDecoderDescriptor");

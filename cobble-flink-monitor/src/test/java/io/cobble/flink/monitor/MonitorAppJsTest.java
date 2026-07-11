@@ -4,6 +4,19 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import io.cobble.flink.common.inspect.StateInspectField;
+import io.cobble.flink.common.inspect.StateInspectSchema;
+import io.cobble.flink.common.inspect.StateInspectSemanticSchema;
+import io.cobble.flink.common.inspect.StateInspectType;
+
+import org.apache.avro.Schema;
+import org.apache.avro.generic.GenericRecord;
+import org.apache.flink.api.common.typeutils.base.IntSerializer;
+import org.apache.flink.formats.avro.typeutils.AvroSerializer;
+import org.apache.flink.runtime.state.VoidNamespaceSerializer;
+import org.apache.flink.table.runtime.typeutils.RowDataSerializer;
+import org.apache.flink.table.types.logical.IntType;
+import org.apache.flink.table.types.logical.VarCharType;
 import org.junit.jupiter.api.Test;
 
 import java.io.IOException;
@@ -11,6 +24,8 @@ import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Paths;
+import java.util.Arrays;
+import java.util.Collections;
 
 /** Browser-side regression checks for the static monitor UI JavaScript. */
 class MonitorAppJsTest {
@@ -108,6 +123,194 @@ class MonitorAppJsTest {
         assertTrue(stdout.contains("Timer state is visible in the monitor"));
         assertTrue(stdout.contains("\"timerItem\""));
         assertTrue(stdout.contains("Flink SQL source unavailable"));
+    }
+
+    @Test
+    void overviewDerivesStructuredStateSourceDdlFromTargetJson() throws Exception {
+        String appJs = readAppJs();
+        StateInspectType pojoRow = row(field("id", "INT"), field("name", "VARCHAR"));
+        StateInspectType tuple =
+                StateInspectType.tuple(
+                        Arrays.asList(field("f0", "BIGINT"), field("f1", "VARCHAR")));
+        StateInspectType avroRow = row(field("sku", "INT"), field("active", "BOOLEAN"));
+        StateInspectType avroListRow = row(field("sku", "INT"), field("title", "VARCHAR"));
+        StateInspectType avroMapValue =
+                row(field("count", "BIGINT"), field("valueLabel", "VARCHAR"));
+        StateInspectType structuredMapKey = row(field("itemId", "INT"), field("label", "VARCHAR"));
+        StateInspectType nestedRow =
+                StateInspectType.row(
+                        Arrays.asList(
+                                field("id", "INT"),
+                                new StateInspectField("profile", row(field("region", "VARCHAR")))));
+
+        String targetsJson =
+                "["
+                        + String.join(
+                                ",",
+                                targetJson(
+                                        valueSchema("pojo-value"),
+                                        StateInspectSemanticSchema.forValue(
+                                                StateInspectType.scalar("INT"),
+                                                StateInspectType.unknown(),
+                                                pojoRow)),
+                                targetJson(
+                                        valueSchema("tuple-value"),
+                                        StateInspectSemanticSchema.forValue(
+                                                StateInspectType.scalar("INT"),
+                                                StateInspectType.unknown(),
+                                                tuple)),
+                                targetJson(
+                                        valueSchema("avro-value"),
+                                        StateInspectSemanticSchema.forValue(
+                                                StateInspectType.scalar("INT"),
+                                                StateInspectType.unknown(),
+                                                avroRow)),
+                                targetJson(
+                                        listSchema("pojo-list"),
+                                        StateInspectSemanticSchema.forList(
+                                                StateInspectType.scalar("INT"),
+                                                StateInspectType.unknown(),
+                                                pojoRow)),
+                                targetJson(
+                                        listSchema("avro-list"),
+                                        StateInspectSemanticSchema.forList(
+                                                StateInspectType.scalar("INT"),
+                                                StateInspectType.unknown(),
+                                                avroListRow)),
+                                targetJson(
+                                        avroMapSchema("avro-map"),
+                                        StateInspectSemanticSchema.forMap(
+                                                StateInspectType.scalar("INT"),
+                                                StateInspectType.unknown(),
+                                                structuredMapKey,
+                                                avroMapValue)),
+                                targetJson(
+                                        rowDataMapSchema("row-data-map"),
+                                        StateInspectSemanticSchema.forMap(
+                                                StateInspectType.scalar("INT"),
+                                                StateInspectType.unknown(),
+                                                structuredMapKey,
+                                                StateInspectType.scalar("INT"))),
+                                targetJson(
+                                        valueSchema("nested-value"),
+                                        StateInspectSemanticSchema.forValue(
+                                                StateInspectType.scalar("INT"),
+                                                StateInspectType.unknown(),
+                                                nestedRow)),
+                                targetJson(
+                                        valueSchema("duplicate-value"),
+                                        StateInspectSemanticSchema.forValue(
+                                                StateInspectType.scalar("INT"),
+                                                StateInspectType.unknown(),
+                                                row(field("key", "BIGINT")))),
+                                targetJson(
+                                        StateInspectSchema.forTimer(
+                                                "event-timer",
+                                                "cf-event-timer",
+                                                IntSerializer.INSTANCE,
+                                                VoidNamespaceSerializer.INSTANCE),
+                                        StateInspectSemanticSchema.forValue(
+                                                StateInspectType.scalar("INT"),
+                                                StateInspectType.unknown(),
+                                                StateInspectType.unknown())))
+                        + "]";
+        String harness =
+                "const document = {\n"
+                        + "  getElementById: () => ({ addEventListener() {}, classList: { toggle() {}, remove() {}, add() {} }, setAttribute() {}, querySelectorAll: () => [] }),\n"
+                        + "  querySelectorAll: () => [],\n"
+                        + "  querySelector: () => ({ classList: { toggle() {} } }),\n"
+                        + "  addEventListener() {},\n"
+                        + "};\n"
+                        + "const window = { addEventListener() {} };\n"
+                        + "async function fetch() { return { ok: true, json: async () => ({}) }; }\n"
+                        + appJs
+                        + "\nconst meta = { source_path: 'file:///tmp/checkpoints', selected_checkpoint: 'latest', selected_operator_id: 'op-structured', selected_checkpoint_directory: 'file:///tmp/checkpoints/chk-42' };\n"
+                        + "const targets = JSON.parse('"
+                        + escapeForJavaScriptString(targetsJson)
+                        + "');\n"
+                        + "for (const target of targets) {\n"
+                        + "  const item = stateOverviewItem(target, meta);\n"
+                        + "  console.log(`--- ${target.name} ---`);\n"
+                        + "  console.log(JSON.stringify({ fields: item.fields, sql: item.sql, note: item.note }));\n"
+                        + "}\n";
+
+        Process process = new ProcessBuilder("node", "--input-type=module", "-").start();
+        process.getOutputStream().write(harness.getBytes(StandardCharsets.UTF_8));
+        process.getOutputStream().close();
+        String stdout = new String(process.getInputStream().readAllBytes(), StandardCharsets.UTF_8);
+        String stderr = new String(process.getErrorStream().readAllBytes(), StandardCharsets.UTF_8);
+        int exit = process.waitFor();
+        assertEquals(0, exit, stderr);
+
+        assertStructuredStateDdl(
+                overviewSection(stdout, "pojo-value"), "`key` INT", "`id` INT", "`name` VARCHAR");
+        assertStructuredStateDdl(
+                overviewSection(stdout, "avro-value"),
+                "`key` INT",
+                "`sku` INT",
+                "`active` BOOLEAN");
+
+        String tupleValue = overviewSection(stdout, "tuple-value");
+        assertStructuredStateDdl(tupleValue, "`key` INT", "`f0` BIGINT", "`f1` VARCHAR");
+
+        String pojoList = overviewSection(stdout, "pojo-list");
+        assertTrue(pojoList.contains("`key` INT"));
+        assertTrue(pojoList.contains("`id` INT"));
+        assertTrue(pojoList.contains("`name` VARCHAR"));
+        assertFalse(pojoList.contains("PRIMARY KEY"));
+        assertTrue(pojoList.contains("batch scan queries"));
+        assertTrue(pojoList.contains("Lookup joins are not available"));
+
+        String avroList = overviewSection(stdout, "avro-list");
+        assertTrue(avroList.contains("`key` INT"));
+        assertTrue(avroList.contains("`sku` INT"));
+        assertTrue(avroList.contains("`title` VARCHAR"));
+        assertFalse(avroList.contains("PRIMARY KEY"));
+
+        String avroMap = overviewSection(stdout, "avro-map");
+        assertTrue(avroMap.contains("`key` INT"));
+        assertTrue(avroMap.contains("`itemId` INT"));
+        assertTrue(avroMap.contains("`label` VARCHAR"));
+        assertTrue(avroMap.contains("`count` BIGINT"));
+        assertTrue(avroMap.contains("`valueLabel` VARCHAR"));
+        assertFalse(avroMap.contains("PRIMARY KEY"));
+        assertTrue(avroMap.contains("batch scan queries"));
+        assertTrue(avroMap.contains("Lookup joins are unavailable because classless Avro map key"));
+
+        String rowDataMap = overviewSection(stdout, "row-data-map");
+        assertTrue(rowDataMap.contains("`key` INT"));
+        assertTrue(rowDataMap.contains("`itemId` INT"));
+        assertTrue(rowDataMap.contains("`label` VARCHAR"));
+        assertTrue(rowDataMap.contains("PRIMARY KEY (`key`, `itemId`, `label`) NOT ENFORCED"));
+        assertTrue(rowDataMap.contains("exact-key temporal lookup joins"));
+
+        for (String supported :
+                Arrays.asList(
+                        overviewSection(stdout, "pojo-value"),
+                        overviewSection(stdout, "avro-value"),
+                        pojoList,
+                        avroList,
+                        avroMap,
+                        rowDataMap,
+                        tupleValue)) {
+            assertTrue(supported.contains("'connector' = 'cobble'"));
+            assertTrue(supported.contains("'source.kind' = 'state'"));
+            assertTrue(supported.contains("'path' = 'file:///tmp/checkpoints'"));
+            assertTrue(supported.contains("'state.operator-id' = 'op-structured'"));
+            assertTrue(supported.contains("'scan.checkpoint-id' = 'latest'"));
+        }
+        assertTrue(overviewSection(stdout, "pojo-value").contains("'state.kind' = 'value'"));
+        assertTrue(overviewSection(stdout, "pojo-list").contains("'state.kind' = 'list'"));
+        assertTrue(overviewSection(stdout, "avro-map").contains("'state.kind' = 'map'"));
+        assertTrue(rowDataMap.contains("'state.kind' = 'map'"));
+
+        String nested = overviewSection(stdout, "nested-value");
+        String duplicate = overviewSection(stdout, "duplicate-value");
+        String timer = overviewSection(stdout, "event-timer");
+        assertTrue(nested.contains("\"sql\":null"));
+        assertTrue(duplicate.contains("\"sql\":null"));
+        assertTrue(timer.contains("\"sql\":null"));
+        assertTrue(timer.contains("does not read timer queues yet"));
     }
 
     @Test
@@ -366,6 +569,104 @@ class MonitorAppJsTest {
                 throw new IOException("web/app.js resource not found");
             }
             return new String(input.readAllBytes(), StandardCharsets.UTF_8);
+        }
+    }
+
+    private static StateInspectSchema valueSchema(String name) {
+        return StateInspectSchema.forValue(
+                name,
+                "cf-" + name,
+                false,
+                IntSerializer.INSTANCE,
+                VoidNamespaceSerializer.INSTANCE,
+                IntSerializer.INSTANCE);
+    }
+
+    private static StateInspectSchema listSchema(String name) {
+        return StateInspectSchema.forList(
+                name,
+                "cf-" + name,
+                false,
+                IntSerializer.INSTANCE,
+                VoidNamespaceSerializer.INSTANCE,
+                IntSerializer.INSTANCE);
+    }
+
+    private static StateInspectSchema avroMapSchema(String name) {
+        Schema schema =
+                new Schema.Parser()
+                        .parse(
+                                "{\"type\":\"record\",\"name\":\"MapKey\","
+                                        + "\"fields\":[{\"name\":\"itemId\",\"type\":\"int\"},"
+                                        + "{\"name\":\"label\",\"type\":\"string\"}]}");
+        return StateInspectSchema.forMap(
+                name,
+                "cf-" + name,
+                false,
+                IntSerializer.INSTANCE,
+                VoidNamespaceSerializer.INSTANCE,
+                new AvroSerializer<>(GenericRecord.class, schema),
+                IntSerializer.INSTANCE);
+    }
+
+    private static StateInspectSchema rowDataMapSchema(String name) {
+        return StateInspectSchema.forMap(
+                name,
+                "cf-" + name,
+                false,
+                IntSerializer.INSTANCE,
+                VoidNamespaceSerializer.INSTANCE,
+                new RowDataSerializer(new IntType(), VarCharType.STRING_TYPE),
+                IntSerializer.INSTANCE);
+    }
+
+    private static StateInspectType row(StateInspectField... fields) {
+        return StateInspectType.row(Arrays.asList(fields));
+    }
+
+    private static StateInspectField field(String name, String logicalType) {
+        return new StateInspectField(name, StateInspectType.scalar(logicalType));
+    }
+
+    private static String targetJson(
+            StateInspectSchema schema, StateInspectSemanticSchema semanticSchema) {
+        InspectTarget target =
+                new InspectTarget(
+                        schema.stateName(),
+                        schema.stateName(),
+                        "TIMER".equals(schema.stateKind().name()) ? "timer" : "state",
+                        schema.columnFamily(),
+                        false,
+                        schema.stateKind().name(),
+                        Collections.singletonMap(
+                                "namespace", VoidNamespaceSerializer.class.getName()),
+                        schema,
+                        semanticSchema,
+                        null);
+        return CobbleFlinkMonitorServer.toJson(target.toJson());
+    }
+
+    private static String escapeForJavaScriptString(String value) {
+        return value.replace("\\", "\\\\").replace("'", "\\'");
+    }
+
+    private static String overviewSection(String output, String name) {
+        String marker = "--- " + name + " ---";
+        int start = output.indexOf(marker);
+        assertTrue(start >= 0, "missing Overview output for " + name + ": " + output);
+        int end = output.indexOf("--- ", start + marker.length());
+        return output.substring(start, end >= 0 ? end : output.length());
+    }
+
+    private static void assertStructuredStateDdl(String output, String... fields) {
+        assertTrue(output.contains("\"sql\":\"CREATE TABLE"));
+        assertTrue(output.contains("PRIMARY KEY (`key`) NOT ENFORCED"));
+        assertTrue(output.contains("exact-key temporal lookup joins"));
+        int previous = -1;
+        for (String field : fields) {
+            int index = output.indexOf(field);
+            assertTrue(index > previous, "expected field order " + Arrays.toString(fields));
+            previous = index;
         }
     }
 }

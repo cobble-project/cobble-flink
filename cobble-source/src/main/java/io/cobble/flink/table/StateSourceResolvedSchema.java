@@ -1,5 +1,7 @@
 package io.cobble.flink.table;
 
+import io.cobble.flink.common.inspect.StateInspectSchema;
+import io.cobble.flink.common.inspect.StateInspectSemanticSchema;
 import io.cobble.flink.common.inspect.StateKind;
 
 import java.util.Collections;
@@ -19,18 +21,24 @@ final class StateSourceResolvedSchema {
     private final StateKind stateKind;
     private final long schemaCheckpointId;
     private final List<StateSourceField> outputFields;
+    private final StateInspectSchema schema;
+    private final StateInspectSemanticSchema semanticSchema;
 
     StateSourceResolvedSchema(
             String operatorId,
             String stateName,
             StateKind stateKind,
             long schemaCheckpointId,
-            List<StateSourceField> outputFields) {
+            List<StateSourceField> outputFields,
+            StateInspectSchema schema,
+            StateInspectSemanticSchema semanticSchema) {
         this.operatorId = operatorId;
         this.stateName = stateName;
         this.stateKind = stateKind;
         this.schemaCheckpointId = schemaCheckpointId;
         this.outputFields = Collections.unmodifiableList(outputFields);
+        this.schema = schema;
+        this.semanticSchema = semanticSchema;
     }
 
     String operatorId() {
@@ -52,5 +60,13 @@ final class StateSourceResolvedSchema {
 
     List<StateSourceField> outputFields() {
         return outputFields;
+    }
+
+    StateInspectSchema schema() {
+        return schema;
+    }
+
+    StateInspectSemanticSchema semanticSchema() {
+        return semanticSchema;
     }
 }

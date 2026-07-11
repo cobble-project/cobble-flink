@@ -9,17 +9,27 @@ import io.cobble.flink.common.inspect.InspectSchemaRegistryLayout;
 import io.cobble.flink.common.inspect.SinkInspectField;
 import io.cobble.flink.common.inspect.SinkInspectSchema;
 import io.cobble.flink.common.inspect.SinkInspectSchemaStore;
+import io.cobble.flink.common.inspect.StateInspectField;
 import io.cobble.flink.common.inspect.StateInspectSchema;
 import io.cobble.flink.common.inspect.StateInspectSchemaStore;
 import io.cobble.flink.common.inspect.StateInspectSemanticSchema;
 import io.cobble.flink.common.inspect.StateInspectType;
 
+import org.apache.avro.Schema;
+import org.apache.avro.generic.GenericRecord;
+import org.apache.flink.api.common.ExecutionConfig;
+import org.apache.flink.api.common.typeinfo.TypeInformation;
+import org.apache.flink.api.common.typeutils.TypeSerializer;
 import org.apache.flink.api.common.typeutils.base.IntSerializer;
+import org.apache.flink.formats.avro.typeutils.AvroSerializer;
 import org.apache.flink.runtime.state.VoidNamespaceSerializer;
 import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
 import org.apache.flink.table.api.bridge.java.StreamTableEnvironment;
 import org.apache.flink.table.connector.source.DynamicTableSource;
 import org.apache.flink.table.connector.source.LookupTableSource;
+import org.apache.flink.table.runtime.typeutils.RowDataSerializer;
+import org.apache.flink.table.types.logical.IntType;
+import org.apache.flink.table.types.logical.VarCharType;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
@@ -243,6 +253,144 @@ class CobbleSourceFactoryITTest {
                         + ")");
 
         assertDoesNotThrow(() -> tableEnv.explainSql("SELECT * FROM t_state_pk_scan"));
+    }
+
+    @Test
+    void statePrimaryKeyRejectsClasslessPojoStateKeyDuringPlanning() throws Exception {
+        TypeSerializer<FactoryLookupPojo> pojoSerializer =
+                TypeInformation.of(FactoryLookupPojo.class).createSerializer(new ExecutionConfig());
+        StateInspectType pojoKey = structuredKeyType();
+        Path root =
+                stateCheckpointRoot(
+                        "state-pk-pojo-key",
+                        StateInspectSchema.forValue(
+                                "orders",
+                                "cf",
+                                false,
+                                pojoSerializer,
+                                VoidNamespaceSerializer.INSTANCE,
+                                IntSerializer.INSTANCE),
+                        StateInspectSemanticSchema.forValue(
+                                pojoKey,
+                                StateInspectType.unknown(),
+                                StateInspectType.scalar("INT")));
+        StreamTableEnvironment tableEnv = newTableEnv();
+        tableEnv.executeSql(
+                "CREATE TABLE t_state_pk_pojo_key ("
+                        + " `itemId` INT,"
+                        + " `label` VARCHAR,"
+                        + " `value` INT,"
+                        + " PRIMARY KEY (`itemId`, `label`) NOT ENFORCED"
+                        + ") WITH ("
+                        + " 'connector' = 'cobble',"
+                        + " 'path' = '"
+                        + escape(root)
+                        + "',"
+                        + " 'source.kind' = 'state',"
+                        + " 'state.name' = 'orders'"
+                        + ")");
+
+        Exception error =
+                assertThrows(
+                        Exception.class,
+                        () -> tableEnv.explainSql("SELECT * FROM t_state_pk_pojo_key"));
+        assertTrue(
+                messageChain(error)
+                        .contains("exact lookup is unavailable for classless POJO state key"),
+                messageChain(error));
+        assertTrue(messageChain(error).contains("Remove PRIMARY KEY and use scan mode"));
+    }
+
+    @Test
+    void statePrimaryKeyRejectsClasslessAvroMapKeyDuringPlanning() throws Exception {
+        Schema avroSchema =
+                new Schema.Parser()
+                        .parse(
+                                "{\"type\":\"record\",\"name\":\"MapKey\","
+                                        + "\"fields\":[{\"name\":\"itemId\",\"type\":\"int\"},"
+                                        + "{\"name\":\"label\",\"type\":\"string\"}]}");
+        TypeSerializer<GenericRecord> avroSerializer =
+                new AvroSerializer<>(GenericRecord.class, avroSchema);
+        Path root =
+                stateCheckpointRoot(
+                        "state-pk-avro-map-key",
+                        StateInspectSchema.forMap(
+                                "orders",
+                                "cf",
+                                false,
+                                IntSerializer.INSTANCE,
+                                VoidNamespaceSerializer.INSTANCE,
+                                avroSerializer,
+                                IntSerializer.INSTANCE),
+                        StateInspectSemanticSchema.forMap(
+                                StateInspectType.scalar("INT"),
+                                StateInspectType.unknown(),
+                                structuredKeyType(),
+                                StateInspectType.scalar("INT")));
+        StreamTableEnvironment tableEnv = newTableEnv();
+        tableEnv.executeSql(
+                "CREATE TABLE t_state_pk_avro_map_key ("
+                        + " `key` INT,"
+                        + " `itemId` INT,"
+                        + " `label` VARCHAR,"
+                        + " `map_value` INT,"
+                        + " PRIMARY KEY (`key`, `itemId`, `label`) NOT ENFORCED"
+                        + ") WITH ("
+                        + " 'connector' = 'cobble',"
+                        + " 'path' = '"
+                        + escape(root)
+                        + "',"
+                        + " 'source.kind' = 'state',"
+                        + " 'state.name' = 'orders'"
+                        + ")");
+
+        Exception error =
+                assertThrows(
+                        Exception.class,
+                        () -> tableEnv.explainSql("SELECT * FROM t_state_pk_avro_map_key"));
+        assertTrue(
+                messageChain(error)
+                        .contains("exact lookup is unavailable for classless Avro map key"),
+                messageChain(error));
+        assertTrue(messageChain(error).contains("Remove PRIMARY KEY and use scan mode"));
+    }
+
+    @Test
+    void statePrimaryKeyAllowsPortableRowDataMapKeyDuringPlanning() throws Exception {
+        Path root =
+                stateCheckpointRoot(
+                        "state-pk-row-data-map-key",
+                        StateInspectSchema.forMap(
+                                "orders",
+                                "cf",
+                                false,
+                                IntSerializer.INSTANCE,
+                                VoidNamespaceSerializer.INSTANCE,
+                                new RowDataSerializer(new IntType(), VarCharType.STRING_TYPE),
+                                IntSerializer.INSTANCE),
+                        StateInspectSemanticSchema.forMap(
+                                StateInspectType.scalar("INT"),
+                                StateInspectType.unknown(),
+                                structuredKeyType(),
+                                StateInspectType.scalar("INT")));
+        StreamTableEnvironment tableEnv = newTableEnv();
+        tableEnv.executeSql(
+                "CREATE TABLE t_state_pk_row_data_map_key ("
+                        + " `key` INT,"
+                        + " `itemId` INT,"
+                        + " `label` VARCHAR,"
+                        + " `map_value` INT,"
+                        + " PRIMARY KEY (`key`, `itemId`, `label`) NOT ENFORCED"
+                        + ") WITH ("
+                        + " 'connector' = 'cobble',"
+                        + " 'path' = '"
+                        + escape(root)
+                        + "',"
+                        + " 'source.kind' = 'state',"
+                        + " 'state.name' = 'orders'"
+                        + ")");
+
+        assertDoesNotThrow(() -> tableEnv.explainSql("SELECT * FROM t_state_pk_row_data_map_key"));
     }
 
     @Test
@@ -1211,24 +1359,29 @@ class CobbleSourceFactoryITTest {
      * state named {@code orders} (key INT, value INT, void namespace).
      */
     private Path stateCheckpointRoot(String name) throws Exception {
-        Path root = tempDir.resolve(name);
-        Path chk = root.resolve("chk-7");
-        write(chk.resolve("_metadata"), new byte[] {0});
-        write(chk.resolve("COBBLE-SNAPSHOT-operator-1-MANIFEST"), new byte[] {0});
-
-        StateInspectSchema schema =
+        return stateCheckpointRoot(
+                name,
                 StateInspectSchema.forValue(
                         "orders",
                         "cf",
                         false,
                         IntSerializer.INSTANCE,
                         VoidNamespaceSerializer.INSTANCE,
-                        IntSerializer.INSTANCE);
-        StateInspectSemanticSchema semantic =
+                        IntSerializer.INSTANCE),
                 StateInspectSemanticSchema.forValue(
                         StateInspectType.scalar("INT"),
                         StateInspectType.unknown(),
-                        StateInspectType.scalar("INT"));
+                        StateInspectType.scalar("INT")));
+    }
+
+    private Path stateCheckpointRoot(
+            String name, StateInspectSchema schema, StateInspectSemanticSchema semantic)
+            throws Exception {
+        Path root = tempDir.resolve(name);
+        Path chk = root.resolve("chk-7");
+        write(chk.resolve("_metadata"), new byte[] {0});
+        write(chk.resolve("COBBLE-SNAPSHOT-operator-1-MANIFEST"), new byte[] {0});
+
         StateInspectSchemaStore store =
                 new StateInspectSchemaStore(
                         Collections.singletonList(schema),
@@ -1242,6 +1395,20 @@ class CobbleSourceFactoryITTest {
                 base.resolve("events").resolve(InspectSchemaRegistryLayout.eventFileName(7L, hash)),
                 new byte[0]);
         return root;
+    }
+
+    private static StateInspectType structuredKeyType() {
+        return StateInspectType.row(
+                Arrays.asList(
+                        new StateInspectField("itemId", StateInspectType.scalar("INT")),
+                        new StateInspectField("label", StateInspectType.scalar("VARCHAR"))));
+    }
+
+    public static final class FactoryLookupPojo {
+        public int itemId;
+        public String label;
+
+        public FactoryLookupPojo() {}
     }
 
     private static void write(Path path, byte[] bytes) throws Exception {
