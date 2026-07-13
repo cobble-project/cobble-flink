@@ -312,6 +312,12 @@ This section lists the main configuration keys for the Cobble source.
 | `state.kind` | inferred from metadata | Optional state-kind validation hint. |
 | `raw.columns` | none | Comma-separated column indexes to read when `source.kind = 'raw'` (e.g. `0,1`). Required; `all` is not supported yet. |
 
+## Metrics
+
+Source scan and lookup counters are registered automatically. See [Cobble Flink
+Metrics](../metrics/#source-scan) for standard counters, Cobble metric names,
+record/byte semantics, and lookup outcomes.
+
 ## Usage Notes
 
 - `scan.mode = 'streaming'` currently works only with

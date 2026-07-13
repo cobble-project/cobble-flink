@@ -3,6 +3,7 @@ package io.cobble.flink.table;
 import io.cobble.Config;
 import io.cobble.GlobalSnapshot;
 import io.cobble.Reader;
+import io.cobble.flink.common.CobbleConnectorMetrics;
 
 import org.apache.flink.api.common.typeutils.TypeSerializer;
 import org.apache.flink.core.memory.DataOutputSerializer;
@@ -29,6 +30,7 @@ public final class CobbleLookupFunction extends LookupFunction {
     private transient CobbleRowDataDecoders.RuntimeRowDecoder rowDecoder;
     private transient Reader reader;
     private transient int totalBuckets;
+    private transient CobbleConnectorMetrics.LookupMetrics metrics;
 
     CobbleLookupFunction(
             CobbleDynamicTableSource.SerializableConfig config, int[] lookupKeyPositions) {
@@ -40,26 +42,38 @@ public final class CobbleLookupFunction extends LookupFunction {
     public void open(FunctionContext context) {
         this.keyEncoder = new RuntimeLookupKeyEncoder(config.keyFields, lookupKeyPositions);
         this.rowDecoder = new CobbleRowDataDecoders.RuntimeRowDecoder(config);
+        this.metrics = lookupMetrics(context);
     }
 
     @Override
     public Collection<RowData> lookup(RowData keyRow) throws IOException {
-        if (!ensureReaderLoaded()) {
-            return Collections.emptyList();
+        metrics.request();
+        try {
+            if (!ensureReaderLoaded()) {
+                metrics.miss();
+                return Collections.emptyList();
+            }
+            if (config.isStreamingLatest()) {
+                reader.refresh();
+                totalBuckets = reader.currentGlobalSnapshot().totalBuckets;
+            }
+            byte[] encodedKey = keyEncoder.encode(keyRow);
+            int bucket = hashFixedBucket(encodedKey, totalBuckets);
+            byte[][] columns = reader.get(bucket, encodedKey);
+            if (columns == null) {
+                metrics.miss();
+                return Collections.emptyList();
+            }
+            RowData decoded = rowDecoder.decode(encodedKey, columns);
+            metrics.hit(encodedKey, columns);
+            return Collections.singletonList(decoded);
+        } catch (IOException e) {
+            metrics.error();
+            throw e;
+        } catch (RuntimeException e) {
+            metrics.error();
+            throw e;
         }
-
-        if (config.isStreamingLatest()) {
-            reader.refresh();
-            totalBuckets = reader.currentGlobalSnapshot().totalBuckets;
-        }
-
-        byte[] encodedKey = keyEncoder.encode(keyRow);
-        int bucket = hashFixedBucket(encodedKey, totalBuckets);
-        byte[][] columns = reader.get(bucket, encodedKey);
-        if (columns == null) {
-            return Collections.emptyList();
-        }
-        return Collections.singletonList(rowDecoder.decode(encodedKey, columns));
     }
 
     @Override
@@ -90,6 +104,10 @@ public final class CobbleLookupFunction extends LookupFunction {
 
     private static int hashFixedBucket(byte[] encodedKey, int totalBuckets) {
         return Math.floorMod(Arrays.hashCode(encodedKey), totalBuckets);
+    }
+
+    private static CobbleConnectorMetrics.LookupMetrics lookupMetrics(FunctionContext context) {
+        return CobbleConnectorMetrics.lookup(context == null ? null : context.getMetricGroup());
     }
 
     private static final class RuntimeLookupKeyEncoder {

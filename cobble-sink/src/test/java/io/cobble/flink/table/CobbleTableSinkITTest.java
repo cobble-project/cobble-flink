@@ -3,6 +3,7 @@ package io.cobble.flink.table;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 
 import io.cobble.Config;
 import io.cobble.DbCoordinator;
@@ -15,8 +16,14 @@ import org.apache.flink.api.common.restartstrategy.RestartStrategies;
 import org.apache.flink.api.common.typeinfo.TypeInformation;
 import org.apache.flink.api.common.typeinfo.Types;
 import org.apache.flink.api.common.typeutils.TypeSerializer;
+import org.apache.flink.api.connector.sink2.Sink;
+import org.apache.flink.api.connector.sink2.TwoPhaseCommittingSink;
 import org.apache.flink.core.execution.JobClient;
 import org.apache.flink.core.memory.DataInputDeserializer;
+import org.apache.flink.metrics.Counter;
+import org.apache.flink.metrics.Metric;
+import org.apache.flink.metrics.View;
+import org.apache.flink.metrics.groups.SinkWriterMetricGroup;
 import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
 import org.apache.flink.streaming.api.functions.source.RichSourceFunction;
 import org.apache.flink.table.api.DataTypes;
@@ -25,6 +32,7 @@ import org.apache.flink.table.api.TableResult;
 import org.apache.flink.table.api.bridge.java.StreamTableEnvironment;
 import org.apache.flink.table.connector.ChangelogMode;
 import org.apache.flink.table.data.GenericRowData;
+import org.apache.flink.table.data.RowData;
 import org.apache.flink.table.data.StringData;
 import org.apache.flink.table.runtime.typeutils.InternalSerializers;
 import org.apache.flink.types.Row;
@@ -32,6 +40,7 @@ import org.apache.flink.types.RowKind;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
+import java.lang.reflect.Proxy;
 import java.nio.file.Path;
 import java.time.Duration;
 import java.util.ArrayList;
@@ -167,19 +176,31 @@ class CobbleTableSinkITTest {
             byte[] encodedKey = keyEncoder.encode(insertRow);
             int bucket = CobbleSqlSink.hashFixedBucket(encodedKey, sinkConfig.bucketCount);
 
-            CobbleSqlSink.applyRowChange(db, valueEncoders, bucket, encodedKey, insertRow);
+            CobbleSqlSink.MutationStats insertStats =
+                    CobbleSqlSink.applyRowChange(db, valueEncoders, bucket, encodedKey, insertRow);
+            assertEquals(true, insertStats.mutated);
+            assertEquals(true, insertStats.bytes > encodedKey.length);
             verifyRow(bucket, encodedKey, db, "name-2", 2);
 
             GenericRowData updateBeforeRow = rowData(RowKind.UPDATE_BEFORE, 2L, "name-2", 2);
-            CobbleSqlSink.applyRowChange(db, valueEncoders, bucket, encodedKey, updateBeforeRow);
+            CobbleSqlSink.MutationStats updateBeforeStats =
+                    CobbleSqlSink.applyRowChange(
+                            db, valueEncoders, bucket, encodedKey, updateBeforeRow);
+            assertEquals(false, updateBeforeStats.mutated);
+            assertEquals(0L, updateBeforeStats.bytes);
             verifyRow(bucket, encodedKey, db, "name-2", 2);
 
             GenericRowData updateRow = rowData(RowKind.UPDATE_AFTER, 2L, "updated-2", 20);
-            CobbleSqlSink.applyRowChange(db, valueEncoders, bucket, encodedKey, updateRow);
+            CobbleSqlSink.MutationStats updateStats =
+                    CobbleSqlSink.applyRowChange(db, valueEncoders, bucket, encodedKey, updateRow);
+            assertEquals(true, updateStats.mutated);
             verifyRow(bucket, encodedKey, db, "updated-2", 20);
 
             GenericRowData deleteRow = rowData(RowKind.DELETE, 2L, "updated-2", 20);
-            CobbleSqlSink.applyRowChange(db, valueEncoders, bucket, encodedKey, deleteRow);
+            CobbleSqlSink.MutationStats deleteStats =
+                    CobbleSqlSink.applyRowChange(db, valueEncoders, bucket, encodedKey, deleteRow);
+            assertEquals(true, deleteStats.mutated);
+            assertEquals((long) encodedKey.length, deleteStats.bytes);
             assertNull(db.get(bucket, encodedKey));
         }
     }
@@ -208,6 +229,97 @@ class CobbleTableSinkITTest {
         assertEquals(0, writerConfig.blockCacheHybridDiskSize.intValue());
         assertEquals(32 * 1024 * 1024, writerConfig.memtableCapacity.intValue());
         assertEquals(1, writerConfig.memtableBufferCount.intValue());
+    }
+
+    @Test
+    void writerRecordsStandardMetricsAndClosesNativeMonitor() throws Exception {
+        Path tablePath = tempDir.resolve("writer-metrics");
+        CobbleDynamicTableSink.SerializableConfig config = writerMetricsConfig(tablePath);
+        CapturingSinkMetrics metrics = new CapturingSinkMetrics();
+        Sink.InitContext context = sinkInitContext(metrics);
+        CobbleSqlSink sink = new CobbleSqlSink(config);
+        TwoPhaseCommittingSink.PrecommittingSinkWriter<RowData, CobbleShardCommittable> writer =
+                sink.createWriter(context);
+        GenericRowData insert = rowData(RowKind.INSERT, 1L, "one", 1);
+        long expectedInsertBytes = encodedUpsertBytes(config, insert);
+        long expectedDeleteBytes =
+                new CobbleRowDataCodecs.RuntimeKeyEncoder(config.keyFields).encode(insert).length;
+        writer.write(insert, null);
+        writer.write(rowData(RowKind.UPDATE_BEFORE, 1L, "one", 1), null);
+        writer.write(rowData(RowKind.DELETE, 1L, "one", 1), null);
+        GenericRowData invalid = rowData(RowKind.INSERT, 0L, "bad", 1);
+        invalid.setField(0, null);
+        assertThrows(RuntimeException.class, () -> writer.write(invalid, null));
+        assertEquals(2L, metrics.count("send"));
+        assertEquals(expectedInsertBytes + expectedDeleteBytes, metrics.count("bytes"));
+        assertEquals(1L, metrics.count("errors"));
+        View nativeView = (View) metrics.metric("cobble.memtableFlushesTotal");
+        assertNotNull(nativeView);
+        nativeView.update();
+        writer.close();
+        nativeView.update();
+    }
+
+    @Test
+    void updateBeforeKeepsWriterDirtyWithoutCountingSendMetrics() throws Exception {
+        CobbleDynamicTableSink.SerializableConfig config =
+                writerMetricsConfig(tempDir.resolve("update-before-dirty"));
+        CapturingSinkMetrics metrics = new CapturingSinkMetrics();
+        TwoPhaseCommittingSink.PrecommittingSinkWriter<RowData, CobbleShardCommittable> writer =
+                new CobbleSqlSink(config).createWriter(sinkInitContext(metrics));
+        try {
+            writer.write(rowData(RowKind.UPDATE_BEFORE, 1L, "one", 1), null);
+            assertEquals(0L, metrics.count("send"));
+            assertEquals(0L, metrics.count("bytes"));
+            assertEquals(0L, metrics.count("errors"));
+            assertEquals(
+                    1,
+                    writer.prepareCommit().size(),
+                    "successful UPDATE_BEFORE must retain the writer's dirty checkpoint state");
+        } finally {
+            writer.close();
+        }
+    }
+
+    private CobbleDynamicTableSink.SerializableConfig writerMetricsConfig(Path tablePath) {
+        return new CobbleDynamicTableSink.SerializableConfig(
+                tablePath.toUri().toString(),
+                1,
+                1,
+                1,
+                false,
+                1024L * 1024L,
+                java.util.Collections.singletonList(
+                        new CobbleDynamicTableSink.SerializableField("id", "BIGINT", 0, -1)),
+                java.util.Arrays.asList(
+                        new CobbleDynamicTableSink.SerializableField("name", "STRING", 1, 0),
+                        new CobbleDynamicTableSink.SerializableField("score", "INT", 2, 1)));
+    }
+
+    private Sink.InitContext sinkInitContext(CapturingSinkMetrics metrics) {
+        return (Sink.InitContext)
+                Proxy.newProxyInstance(
+                        getClass().getClassLoader(),
+                        new Class<?>[] {Sink.InitContext.class},
+                        (proxy, method, args) -> {
+                            if ("getSubtaskId".equals(method.getName())) return 0;
+                            if ("getNumberOfParallelSubtasks".equals(method.getName())) return 1;
+                            if ("getAttemptNumber".equals(method.getName())) return 0;
+                            if ("metricGroup".equals(method.getName())) return metrics.group();
+                            return null;
+                        });
+    }
+
+    private static long encodedUpsertBytes(
+            CobbleDynamicTableSink.SerializableConfig config, RowData row) throws Exception {
+        long bytes = new CobbleRowDataCodecs.RuntimeKeyEncoder(config.keyFields).encode(row).length;
+        for (CobbleDynamicTableSink.SerializableField field : config.valueFields) {
+            byte[] encoded = new CobbleRowDataCodecs.RuntimeFieldEncoder(field).encodeNullable(row);
+            if (encoded != null) {
+                bytes += encoded.length;
+            }
+        }
+        return bytes;
     }
 
     @Test
@@ -536,6 +648,79 @@ class CobbleTableSinkITTest {
         @Override
         public void cancel() {
             running = false;
+        }
+    }
+
+    private static final class CapturingSinkMetrics {
+        private final Map<String, Counter> counters = new LinkedHashMap<>();
+        private final Map<String, Metric> metrics = new LinkedHashMap<>();
+
+        private SinkWriterMetricGroup group() {
+            return (SinkWriterMetricGroup)
+                    Proxy.newProxyInstance(
+                            getClass().getClassLoader(),
+                            new Class<?>[] {SinkWriterMetricGroup.class},
+                            (proxy, method, args) -> {
+                                String name = method.getName();
+                                if ("getNumRecordsSendCounter".equals(name)) return counter("send");
+                                if ("getNumBytesSendCounter".equals(name)) return counter("bytes");
+                                if ("getNumRecordsSendErrorsCounter".equals(name))
+                                    return counter("errors");
+                                if ("counter".equals(name)) {
+                                    if (args.length == 2) {
+                                        metrics.put((String) args[0], (Metric) args[1]);
+                                        return args[1];
+                                    }
+                                    return counter((String) args[0]);
+                                }
+                                if ("gauge".equals(name)) {
+                                    metrics.put((String) args[0], (Metric) args[1]);
+                                    return args[1];
+                                }
+                                if ("addGroup".equals(name)) return proxy;
+                                return null;
+                            });
+        }
+
+        private Counter counter(String name) {
+            return counters.computeIfAbsent(name, ignored -> new TestCounter());
+        }
+
+        private long count(String name) {
+            return counter(name).getCount();
+        }
+
+        private Metric metric(String name) {
+            return metrics.get(name);
+        }
+    }
+
+    private static final class TestCounter implements Counter {
+        private long count;
+
+        @Override
+        public void inc() {
+            count++;
+        }
+
+        @Override
+        public void inc(long n) {
+            count += n;
+        }
+
+        @Override
+        public void dec() {
+            count--;
+        }
+
+        @Override
+        public void dec(long n) {
+            count -= n;
+        }
+
+        @Override
+        public long getCount() {
+            return count;
         }
     }
 }

@@ -2,6 +2,7 @@ package io.cobble.flink.state;
 
 import io.cobble.ColumnFamilyOptions;
 import io.cobble.Config;
+import io.cobble.flink.common.CobbleNativeMetrics;
 import io.cobble.flink.common.inspect.StateInspectSchema;
 import io.cobble.flink.common.inspect.StateInspectSchemaStore;
 import io.cobble.flink.common.inspect.StateInspectSemanticSchema;
@@ -76,6 +77,7 @@ final class CobbleKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
     private final Path configPath;
     private final Config cobbleConfig;
     private final Db cobbleDb;
+    private final CobbleNativeMetrics.Monitor nativeMetricsMonitor;
     private final Map<String, StateDescriptor.Type> stateTypes;
     private final LinkedHashMap<String, StateInspectSchema> stateInspectSchemas;
     private final LinkedHashMap<String, StateInspectSemanticSchema> stateInspectSemanticSchemas;
@@ -109,6 +111,7 @@ final class CobbleKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
             Path configPath,
             Config cobbleConfig,
             Db cobbleDb,
+            CobbleNativeMetrics.Monitor nativeMetricsMonitor,
             boolean manualTtlTimeProviderForTests,
             boolean restoredNativeQueuesMayContainEntries,
             CobbleStateBackend.PriorityQueueStateType priorityQueueStateType,
@@ -127,6 +130,7 @@ final class CobbleKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
         this.configPath = configPath;
         this.cobbleConfig = cobbleConfig;
         this.cobbleDb = cobbleDb;
+        this.nativeMetricsMonitor = nativeMetricsMonitor;
         this.stateTypes = new HashMap<>();
         this.stateInspectSchemas = new LinkedHashMap<>();
         this.stateInspectSemanticSchemas = new LinkedHashMap<>();
@@ -769,6 +773,7 @@ final class CobbleKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
         }
 
         IOException error = null;
+        nativeMetricsMonitor.close();
         snapshotStrategy.close();
 
         try {

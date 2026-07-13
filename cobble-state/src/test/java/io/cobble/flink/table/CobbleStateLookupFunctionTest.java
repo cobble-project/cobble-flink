@@ -17,6 +17,7 @@ import org.apache.flink.api.common.JobID;
 import org.apache.flink.api.common.JobStatus;
 import org.apache.flink.api.common.functions.AggregateFunction;
 import org.apache.flink.api.common.functions.RichMapFunction;
+import org.apache.flink.api.common.functions.RuntimeContext;
 import org.apache.flink.api.common.restartstrategy.RestartStrategies;
 import org.apache.flink.api.common.state.AggregatingState;
 import org.apache.flink.api.common.state.AggregatingStateDescriptor;
@@ -32,6 +33,8 @@ import org.apache.flink.api.java.tuple.Tuple2;
 import org.apache.flink.configuration.CheckpointingOptions;
 import org.apache.flink.configuration.Configuration;
 import org.apache.flink.configuration.MemorySize;
+import org.apache.flink.metrics.Counter;
+import org.apache.flink.metrics.groups.OperatorMetricGroup;
 import org.apache.flink.runtime.jobgraph.JobGraph;
 import org.apache.flink.runtime.minicluster.MiniCluster;
 import org.apache.flink.runtime.testutils.MiniClusterResourceConfiguration;
@@ -54,6 +57,7 @@ import org.junit.jupiter.api.io.TempDir;
 
 import java.io.File;
 import java.io.IOException;
+import java.lang.reflect.Proxy;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Duration;
@@ -62,7 +66,9 @@ import java.util.Arrays;
 import java.util.Collection;
 import java.util.Collections;
 import java.util.HashSet;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.TimeUnit;
 import java.util.function.Supplier;
@@ -128,13 +134,23 @@ class CobbleStateLookupFunctionTest {
 
         CobbleStateLookupFunction lookup =
                 new CobbleStateLookupFunction(lookupConfig, new int[] {0});
+        CapturingLookupMetrics metrics = new CapturingLookupMetrics();
         try {
-            lookup.open(new FunctionContext(null));
+            lookup.open(new FunctionContext(metrics.runtimeContext()));
             Collection<RowData> result = lookup.lookup(singleIntRow(knownKey));
             assertEquals(1, result.size(), "expected exactly one row for a hit");
             RowData hit = result.iterator().next();
             assertEquals(knownKey, hit.getInt(0), "key column mismatch");
             assertEquals(knownValue, hit.getInt(1), "value column mismatch");
+            assertTrue(lookup.lookup(singleIntRow(999_999)).isEmpty());
+            GenericRowData nullKey = new GenericRowData(1);
+            nullKey.setField(0, null);
+            assertThrows(IOException.class, () -> lookup.lookup(nullKey));
+            assertEquals(3L, metrics.count("cobble.lookupRequestsTotal"));
+            assertEquals(1L, metrics.count("cobble.lookupHitsTotal"));
+            assertEquals(1L, metrics.count("cobble.lookupMissesTotal"));
+            assertEquals(1L, metrics.count("cobble.lookupErrorsTotal"));
+            assertTrue(metrics.count("cobble.lookupBytesReadTotal") > 0L);
         } finally {
             lookup.close();
         }
@@ -1356,6 +1372,70 @@ class CobbleStateLookupFunctionTest {
         GenericRowData row = new GenericRowData(1);
         row.setField(0, value);
         return row;
+    }
+
+    private static final class CapturingLookupMetrics {
+        private final Map<String, Counter> counters = new LinkedHashMap<>();
+
+        private RuntimeContext runtimeContext() {
+            return (RuntimeContext)
+                    Proxy.newProxyInstance(
+                            CapturingLookupMetrics.class.getClassLoader(),
+                            new Class<?>[] {RuntimeContext.class},
+                            (proxy, method, args) -> {
+                                if ("getMetricGroup".equals(method.getName())) return metricGroup();
+                                return null;
+                            });
+        }
+
+        private OperatorMetricGroup metricGroup() {
+            return (OperatorMetricGroup)
+                    Proxy.newProxyInstance(
+                            CapturingLookupMetrics.class.getClassLoader(),
+                            new Class<?>[] {OperatorMetricGroup.class},
+                            (proxy, method, args) -> {
+                                if ("counter".equals(method.getName()))
+                                    return counter((String) args[0]);
+                                return null;
+                            });
+        }
+
+        private Counter counter(String name) {
+            return counters.computeIfAbsent(name, ignored -> new TestCounter());
+        }
+
+        private long count(String name) {
+            return counter(name).getCount();
+        }
+    }
+
+    private static final class TestCounter implements Counter {
+        private long count;
+
+        @Override
+        public void inc() {
+            count++;
+        }
+
+        @Override
+        public void inc(long n) {
+            count += n;
+        }
+
+        @Override
+        public void dec() {
+            count--;
+        }
+
+        @Override
+        public void dec(long n) {
+            count -= n;
+        }
+
+        @Override
+        public long getCount() {
+            return count;
+        }
     }
 
     private static RowData twoIntRow(int first, int second) {

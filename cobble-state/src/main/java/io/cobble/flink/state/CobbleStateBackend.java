@@ -235,6 +235,7 @@ public class CobbleStateBackend extends AbstractManagedMemoryStateBackend
 
         return new CobbleKeyedStateBackendBuilder<>(
                         env,
+                        metricGroup,
                         kvStateRegistry,
                         keySerializer,
                         numberOfKeyGroups,

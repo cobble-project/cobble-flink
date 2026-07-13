@@ -2,6 +2,7 @@ package io.cobble.flink.table;
 
 import io.cobble.ScanCursor;
 import io.cobble.ScanOptions;
+import io.cobble.flink.common.CobbleConnectorMetrics;
 
 import org.apache.flink.api.connector.source.ReaderOutput;
 import org.apache.flink.api.connector.source.SourceEvent;
@@ -26,6 +27,7 @@ final class CobbleStateSourceReader implements SourceReader<RowData, CobbleState
     private final Map<String, SourceSplitState> ownedStatesBySplit = new HashMap<>();
     private final ArrayDeque<SourceSplitState> runnableStates = new ArrayDeque<>();
     private final ArrayDeque<RowData> pendingRows = new ArrayDeque<>();
+    private final CobbleConnectorMetrics.SourceMetrics metrics;
     private CompletableFuture<Void> availability = new CompletableFuture<>();
     private CobbleStateSourceRuntime.ReaderHandle readerHandle;
     private CobbleStateSourceRuntime.RuntimeSchema runtimeSchema;
@@ -38,6 +40,7 @@ final class CobbleStateSourceReader implements SourceReader<RowData, CobbleState
     CobbleStateSourceReader(StateSourceConfig config, SourceReaderContext context) {
         this.config = config;
         this.context = context;
+        this.metrics = CobbleConnectorMetrics.source(context.metricGroup());
     }
 
     @Override
@@ -48,7 +51,13 @@ final class CobbleStateSourceReader implements SourceReader<RowData, CobbleState
     @Override
     public InputStatus pollNext(ReaderOutput<RowData> output) throws Exception {
         if (!pendingRows.isEmpty()) {
-            output.collect(pendingRows.removeFirst());
+            try {
+                output.collect(pendingRows.removeFirst());
+                metrics.emittedRow();
+            } catch (Exception e) {
+                metrics.error();
+                throw e;
+            }
             // If this row came from a partially-consumed entry, advance the intra-entry offset so a
             // mid-entry checkpoint can resume without re-emitting this row.
             if (currentState != null && currentState.partialEntryKey != null) {
@@ -81,6 +90,8 @@ final class CobbleStateSourceReader implements SourceReader<RowData, CobbleState
             return noMoreSplits ? InputStatus.END_OF_INPUT : InputStatus.NOTHING_AVAILABLE;
         }
 
+        metrics.nativeEntry(entry.key, entry.columns);
+
         // On resume from a mid-entry checkpoint, the first entry re-read from the cursor should
         // match partialEntryKey; decode it with a skip for already-emitted rows.
         int skipRows = 0;
@@ -88,9 +99,20 @@ final class CobbleStateSourceReader implements SourceReader<RowData, CobbleState
             skipRows = state.partialEmittedCount;
             state.clearPartialEntry();
         }
-        List<RowData> decoded =
-                ensureRowDecoder()
-                        .decode(entry.key, entry.columns, state.splitId, entry.bucket, skipRows);
+        List<RowData> decoded;
+        try {
+            decoded =
+                    ensureRowDecoder()
+                            .decode(
+                                    entry.key,
+                                    entry.columns,
+                                    state.splitId,
+                                    entry.bucket,
+                                    skipRows);
+        } catch (Exception e) {
+            metrics.error();
+            throw e;
+        }
         if (decoded.isEmpty()) {
             // No rows produced (e.g. an empty list entry or all rows skipped); advance and continue
             // on next poll.
@@ -102,7 +124,13 @@ final class CobbleStateSourceReader implements SourceReader<RowData, CobbleState
         pendingRows.addAll(decoded);
         state.beginPartialEntry(entry);
         // Emit the first row now; remaining rows stay in pendingRows for subsequent polls.
-        output.collect(pendingRows.removeFirst());
+        try {
+            output.collect(pendingRows.removeFirst());
+            metrics.emittedRow();
+        } catch (Exception e) {
+            metrics.error();
+            throw e;
+        }
         state.partialEmittedCount++;
         if (pendingRows.isEmpty()) {
             state.advanceStartBoundary(entry.bucket, entry.key);

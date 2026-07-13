@@ -40,3 +40,4 @@ Cobble Flink currently targets Flink `1.17.0` and later.
 | [**Source**](source/) | How to read data from Cobble in Flink SQL |
 | [**Sink**](sink/) | How to write Flink SQL results into Cobble |
 | [**Web Monitor**](web-monitor/) | How to inspect Cobble checkpoints and sink snapshots in a browser |
+| [**Metrics**](metrics/) | Metrics exposed by the state backend, source, lookup, and sink |

@@ -11,6 +11,8 @@ import org.apache.flink.api.connector.source.SourceReaderContext;
 import org.apache.flink.configuration.Configuration;
 import org.apache.flink.core.execution.JobClient;
 import org.apache.flink.core.io.InputStatus;
+import org.apache.flink.metrics.Counter;
+import org.apache.flink.metrics.groups.OperatorIOMetricGroup;
 import org.apache.flink.metrics.groups.SourceReaderMetricGroup;
 import org.apache.flink.metrics.groups.UnregisteredMetricsGroup;
 import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
@@ -22,6 +24,7 @@ import org.apache.flink.util.UserCodeClassLoader;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
+import java.lang.reflect.Proxy;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -44,7 +47,9 @@ class CobbleSourceReaderITTest {
 
         GlobalSnapshot snapshot = CobbleSourceRuntime.loadSnapshotById(config, 1L);
         List<CobbleSourceSplit> splits = CobbleSourceRuntime.createSourceSplits(config, snapshot);
-        CobbleSourceReader reader = new CobbleSourceReader(config, new TestingContext());
+        CapturingSourceMetrics metrics = new CapturingSourceMetrics();
+        CobbleSourceReader reader =
+                new CobbleSourceReader(config, new TestingContext(metrics.group()));
         CollectingOutput output = new CollectingOutput();
         try {
             reader.start();
@@ -73,6 +78,11 @@ class CobbleSourceReaderITTest {
         for (int i = 0; i < 64; i++) {
             assertEquals(Long.valueOf(i + 1L), ids.get(i));
         }
+        assertEquals(64L, metrics.count("records"));
+        assertEquals(64L, metrics.count("cobble.nativeEntriesReadTotal"));
+        assertEquals(0L, metrics.count("errors"));
+        assertEquals(true, metrics.count("bytes") > 0L);
+        assertEquals(true, metrics.count("cobble.nativeBytesReadTotal") > 0L);
     }
 
     @Test
@@ -459,9 +469,19 @@ class CobbleSourceReaderITTest {
 
     /** Minimal reader context for exercising the source reader without a full runtime. */
     private static final class TestingContext implements SourceReaderContext {
+        private final SourceReaderMetricGroup metricGroup;
+
+        private TestingContext() {
+            this(UnregisteredMetricsGroup.createSourceReaderMetricGroup());
+        }
+
+        private TestingContext(SourceReaderMetricGroup metricGroup) {
+            this.metricGroup = metricGroup;
+        }
+
         @Override
         public SourceReaderMetricGroup metricGroup() {
-            return UnregisteredMetricsGroup.createSourceReaderMetricGroup();
+            return metricGroup;
         }
 
         @Override
@@ -493,6 +513,83 @@ class CobbleSourceReaderITTest {
         @Override
         public int currentParallelism() {
             return 1;
+        }
+    }
+
+    private static final class CapturingSourceMetrics {
+        private final java.util.Map<String, Counter> counters = new java.util.HashMap<>();
+
+        private SourceReaderMetricGroup group() {
+            OperatorIOMetricGroup ioGroup =
+                    (OperatorIOMetricGroup)
+                            Proxy.newProxyInstance(
+                                    getClass().getClassLoader(),
+                                    new Class<?>[] {OperatorIOMetricGroup.class},
+                                    (proxy, method, args) -> ioMetric(method.getName()));
+            return (SourceReaderMetricGroup)
+                    Proxy.newProxyInstance(
+                            getClass().getClassLoader(),
+                            new Class<?>[] {SourceReaderMetricGroup.class},
+                            (proxy, method, args) -> {
+                                if ("getIOMetricGroup".equals(method.getName())) {
+                                    return ioGroup;
+                                }
+                                if ("getNumRecordsInErrorsCounter".equals(method.getName())) {
+                                    return counter("errors");
+                                }
+                                if ("counter".equals(method.getName())) {
+                                    return counter((String) args[0]);
+                                }
+                                return null;
+                            });
+        }
+
+        private Object ioMetric(String method) {
+            if ("getNumRecordsInCounter".equals(method)) {
+                return counter("records");
+            }
+            if ("getNumBytesInCounter".equals(method)) {
+                return counter("bytes");
+            }
+            return null;
+        }
+
+        private Counter counter(String name) {
+            return counters.computeIfAbsent(name, ignored -> new TestCounter());
+        }
+
+        private long count(String name) {
+            Counter counter = counters.get(name);
+            return counter == null ? 0L : counter.getCount();
+        }
+    }
+
+    private static final class TestCounter implements Counter {
+        private long count;
+
+        @Override
+        public void inc() {
+            count++;
+        }
+
+        @Override
+        public void inc(long n) {
+            count += n;
+        }
+
+        @Override
+        public void dec() {
+            count--;
+        }
+
+        @Override
+        public void dec(long n) {
+            count -= n;
+        }
+
+        @Override
+        public long getCount() {
+            return count;
         }
     }
 

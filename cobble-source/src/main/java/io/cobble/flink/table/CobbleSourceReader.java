@@ -3,6 +3,7 @@ package io.cobble.flink.table;
 import io.cobble.ScanCursor;
 import io.cobble.ScanOptions;
 import io.cobble.ScanSplit;
+import io.cobble.flink.common.CobbleConnectorMetrics;
 
 import org.apache.flink.api.connector.source.ReaderOutput;
 import org.apache.flink.api.connector.source.SourceEvent;
@@ -36,6 +37,7 @@ final class CobbleSourceReader implements SourceReader<RowData, CobbleSourceSpli
     private final ArrayDeque<SourceSplitState> runnableStates = new ArrayDeque<>();
     private final ScannedRowDecoder rowDecoder;
     private final int[] projectedColumnIndexes;
+    private final CobbleConnectorMetrics.SourceMetrics metrics;
     private CompletableFuture<Void> availability = new CompletableFuture<>();
     private SourceSplitState currentState;
     private ScanOptions scanOptions;
@@ -47,6 +49,7 @@ final class CobbleSourceReader implements SourceReader<RowData, CobbleSourceSpli
         this.context = context;
         this.rowDecoder = config.createDecoder();
         this.projectedColumnIndexes = config.projectedColumnIndexes();
+        this.metrics = CobbleConnectorMetrics.source(context.metricGroup());
     }
 
     @Override
@@ -65,7 +68,14 @@ final class CobbleSourceReader implements SourceReader<RowData, CobbleSourceSpli
 
         ScanCursor.Entry entry = state.nextEntry();
         if (entry != null) {
-            output.collect(rowDecoder.decode(entry.key, entry.columns));
+            metrics.nativeEntry(entry.key, entry.columns);
+            try {
+                output.collect(rowDecoder.decode(entry.key, entry.columns));
+                metrics.emittedRow();
+            } catch (Exception e) {
+                metrics.error();
+                throw e;
+            }
             signalAvailableIfNeeded();
             return hasMoreWork() ? InputStatus.MORE_AVAILABLE : InputStatus.NOTHING_AVAILABLE;
         }

@@ -2,10 +2,15 @@ package io.cobble.flink.table;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import org.apache.flink.api.common.functions.RuntimeContext;
 import org.apache.flink.api.common.restartstrategy.RestartStrategies;
 import org.apache.flink.core.execution.JobClient;
+import org.apache.flink.metrics.Counter;
+import org.apache.flink.metrics.MetricGroup;
+import org.apache.flink.metrics.groups.OperatorMetricGroup;
 import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
 import org.apache.flink.table.api.TableResult;
 import org.apache.flink.table.api.bridge.java.StreamTableEnvironment;
@@ -16,11 +21,14 @@ import org.apache.flink.types.RowKind;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
+import java.lang.reflect.Proxy;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.Arrays;
 import java.util.Collection;
 import java.util.Collections;
+import java.util.HashMap;
+import java.util.Map;
 import java.util.concurrent.TimeUnit;
 
 class CobbleLookupFunctionITTest {
@@ -99,13 +107,107 @@ class CobbleLookupFunctionITTest {
         assertFalse(Files.exists(workspaceRoot));
     }
 
+    @Test
+    void lookupRecordsOneHitMissOrErrorOutcome() throws Exception {
+        Path tablePath = tempDir.resolve("lookup-metrics");
+        writeDimensionRows(tablePath, Arrays.asList("2,name-2,20", "7,name-7,70"));
+        CapturingMetrics metrics = new CapturingMetrics();
+        CobbleLookupFunction lookup =
+                openLookupFunction(tablePath, "latest", "batch", metrics.metricGroup());
+        try {
+            assertEquals("name-2,20", lookupValue(lookup, 2L));
+            assertEquals("null", lookupValue(lookup, 99L));
+            assertThrows(
+                    IllegalArgumentException.class,
+                    () -> lookup.lookup(GenericRowData.of((Object) null)));
+        } finally {
+            lookup.close();
+        }
+        assertEquals(3L, metrics.count("cobble.lookupRequestsTotal"));
+        assertEquals(1L, metrics.count("cobble.lookupHitsTotal"));
+        assertEquals(1L, metrics.count("cobble.lookupMissesTotal"));
+        assertEquals(1L, metrics.count("cobble.lookupErrorsTotal"));
+        assertTrue(metrics.count("cobble.lookupBytesReadTotal") > 0L);
+    }
+
     private CobbleLookupFunction openLookupFunction(
             Path tablePath, String checkpointId, String scanMode) throws Exception {
+        return openLookupFunction(tablePath, checkpointId, scanMode, null);
+    }
+
+    private CobbleLookupFunction openLookupFunction(
+            Path tablePath, String checkpointId, String scanMode, MetricGroup metricGroup)
+            throws Exception {
         CobbleLookupFunction lookup =
                 new CobbleLookupFunction(
                         buildLookupConfig(tablePath, checkpointId, scanMode), new int[] {0});
-        lookup.open(new FunctionContext((RuntimeContext) null));
+        RuntimeContext context =
+                metricGroup == null
+                        ? null
+                        : (RuntimeContext)
+                                Proxy.newProxyInstance(
+                                        getClass().getClassLoader(),
+                                        new Class<?>[] {RuntimeContext.class},
+                                        (proxy, method, args) -> {
+                                            if ("getMetricGroup".equals(method.getName())) {
+                                                return metricGroup;
+                                            }
+                                            return null;
+                                        });
+        lookup.open(new FunctionContext(context));
         return lookup;
+    }
+
+    private static final class CapturingMetrics {
+        private final Map<String, Counter> counters = new HashMap<>();
+
+        private OperatorMetricGroup metricGroup() {
+            return (OperatorMetricGroup)
+                    Proxy.newProxyInstance(
+                            CapturingMetrics.class.getClassLoader(),
+                            new Class<?>[] {OperatorMetricGroup.class},
+                            (proxy, method, args) -> {
+                                if ("counter".equals(method.getName()) && args.length == 1) {
+                                    return counters.computeIfAbsent(
+                                            (String) args[0], ignored -> new TestCounter());
+                                }
+                                return null;
+                            });
+        }
+
+        private long count(String name) {
+            Counter counter = counters.get(name);
+            return counter == null ? 0L : counter.getCount();
+        }
+    }
+
+    private static final class TestCounter implements Counter {
+        private long count;
+
+        @Override
+        public void inc() {
+            count++;
+        }
+
+        @Override
+        public void inc(long n) {
+            count += n;
+        }
+
+        @Override
+        public void dec() {
+            count--;
+        }
+
+        @Override
+        public void dec(long n) {
+            count -= n;
+        }
+
+        @Override
+        public long getCount() {
+            return count;
+        }
     }
 
     private CobbleDynamicTableSource.SerializableConfig buildLookupConfig(

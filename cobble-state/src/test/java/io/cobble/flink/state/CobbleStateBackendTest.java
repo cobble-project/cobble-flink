@@ -57,6 +57,7 @@ import org.apache.flink.core.memory.DataInputView;
 import org.apache.flink.core.memory.DataInputViewStreamWrapper;
 import org.apache.flink.core.memory.DataOutputSerializer;
 import org.apache.flink.core.memory.DataOutputView;
+import org.apache.flink.metrics.MetricGroup;
 import org.apache.flink.queryablestate.client.state.serialization.KvStateSerializer;
 import org.apache.flink.runtime.checkpoint.CheckpointOptions;
 import org.apache.flink.runtime.checkpoint.SavepointType;
@@ -111,6 +112,7 @@ import org.junit.jupiter.api.io.TempDir;
 import java.io.File;
 import java.io.IOException;
 import java.io.UncheckedIOException;
+import java.lang.reflect.Proxy;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
@@ -124,6 +126,7 @@ import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.RunnableFuture;
+import java.util.concurrent.atomic.AtomicInteger;
 
 /** Tests for {@link CobbleStateBackend}. */
 class CobbleStateBackendTest {
@@ -134,6 +137,32 @@ class CobbleStateBackendTest {
     @Test
     void createsBackendAndLoadsNativeLibrary() {
         assertDoesNotThrow(() -> new CobbleStateBackend());
+    }
+
+    @Test
+    void nativeMetricRegistrationFailureDoesNotPreventBackendCreation(@TempDir Path tempDir)
+            throws Exception {
+        AtomicInteger metricRegistrationCalls = new AtomicInteger();
+        MetricGroup rejectingMetricGroup =
+                (MetricGroup)
+                        Proxy.newProxyInstance(
+                                getClass().getClassLoader(),
+                                new Class<?>[] {MetricGroup.class},
+                                (proxy, method, args) -> {
+                                    if ("counter".equals(method.getName())
+                                            || "gauge".equals(method.getName())
+                                            || "histogram".equals(method.getName())
+                                            || "addGroup".equals(method.getName())) {
+                                        metricRegistrationCalls.incrementAndGet();
+                                    }
+                                    throw new IllegalStateException("metric reporter unavailable");
+                                });
+
+        try (TestBackendContext context =
+                createBackendContextWithMetricGroup(tempDir, rejectingMetricGroup)) {
+            assertNotNull(context.cobbleBackend.getCobbleDb());
+        }
+        assertTrue(metricRegistrationCalls.get() > 0);
     }
 
     @Test
@@ -7094,6 +7123,46 @@ class CobbleStateBackendTest {
             KeyGroupRange keyGroupRange,
             Configuration extraConfiguration)
             throws Exception {
+        return createBackendContext(
+                tempDir,
+                localDirPrimaryHighPriority,
+                checkpointDirectory,
+                fixedMemoryPerSlot,
+                ttlTimeProvider,
+                manualCobbleTtlTimeProviderForTests,
+                stateHandles,
+                keyGroupRange,
+                extraConfiguration,
+                null);
+    }
+
+    private TestBackendContext createBackendContextWithMetricGroup(
+            Path tempDir, MetricGroup metricGroup) throws Exception {
+        return createBackendContext(
+                tempDir,
+                false,
+                null,
+                null,
+                TtlTimeProvider.DEFAULT,
+                false,
+                Collections.<KeyedStateHandle>emptyList(),
+                KeyGroupRange.of(0, 15),
+                new Configuration(),
+                metricGroup);
+    }
+
+    private TestBackendContext createBackendContext(
+            Path tempDir,
+            boolean localDirPrimaryHighPriority,
+            String checkpointDirectory,
+            MemorySize fixedMemoryPerSlot,
+            TtlTimeProvider ttlTimeProvider,
+            boolean manualCobbleTtlTimeProviderForTests,
+            Collection<KeyedStateHandle> stateHandles,
+            KeyGroupRange keyGroupRange,
+            Configuration extraConfiguration,
+            MetricGroup metricGroup)
+            throws Exception {
         Path configuredLocalDir = tempDir.resolve("configured-local-dir");
         Path taskManagerWorkingDir = tempDir.resolve("tm-working-dir");
 
@@ -7141,7 +7210,7 @@ class CobbleStateBackendTest {
                             keyGroupRange,
                             kvStateRegistry,
                             ttlTimeProvider,
-                            environment.getMetricGroup(),
+                            metricGroup == null ? environment.getMetricGroup() : metricGroup,
                             stateHandles,
                             new CloseableRegistry(),
                             0.5d);

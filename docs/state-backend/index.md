@@ -241,11 +241,11 @@ fn main() -> cobble::Result<()> {
 }
 ```
 
-You can also start it from the [cobble-java](https://repo1.maven.org/maven2/io/github/cobble-project/cobble/0.2.1/) artifact, which bundles
+You can also start it from the [cobble-java](https://repo1.maven.org/maven2/io/github/cobble-project/cobble/0.2.2/) artifact, which bundles
 `cobble-cli`:
 
 ```bash
-java -jar cobble-0.2.1.jar remote-compactor \
+java -jar cobble-0.2.2.jar remote-compactor \
   --config ./cobble-compactor.yaml \
   --bind 0.0.0.0:18888
 ```

@@ -1,12 +1,14 @@
 package io.cobble.flink.state;
 
 import io.cobble.Config;
+import io.cobble.flink.common.CobbleNativeMetrics;
 import io.cobble.structured.Db;
 
 import org.apache.flink.api.common.typeutils.TypeSerializer;
 import org.apache.flink.configuration.Configuration;
 import org.apache.flink.core.fs.CloseableRegistry;
 import org.apache.flink.core.memory.DataInputViewStreamWrapper;
+import org.apache.flink.metrics.MetricGroup;
 import org.apache.flink.runtime.execution.Environment;
 import org.apache.flink.runtime.query.TaskKvStateRegistry;
 import org.apache.flink.runtime.state.IncrementalRemoteKeyedStateHandle;
@@ -44,6 +46,7 @@ final class CobbleKeyedStateBackendBuilder<K> {
     private static final String COBBLE_DB_DIR_NAME = "cobble-db";
     private static final String COBBLE_LOG_FILE_NAME = "cobble.log";
     private final Environment env;
+    private final MetricGroup metricGroup;
     private final TaskKvStateRegistry kvStateRegistry;
     private final TypeSerializer<K> keySerializer;
     private final int numberOfKeyGroups;
@@ -71,6 +74,7 @@ final class CobbleKeyedStateBackendBuilder<K> {
 
     CobbleKeyedStateBackendBuilder(
             Environment env,
+            MetricGroup metricGroup,
             TaskKvStateRegistry kvStateRegistry,
             TypeSerializer<K> keySerializer,
             int numberOfKeyGroups,
@@ -89,6 +93,7 @@ final class CobbleKeyedStateBackendBuilder<K> {
             Configuration flinkConfig,
             CobbleStateBackend.PriorityQueueStateType priorityQueueStateType) {
         this.env = env;
+        this.metricGroup = metricGroup;
         this.kvStateRegistry = kvStateRegistry;
         this.keySerializer = keySerializer;
         this.numberOfKeyGroups = numberOfKeyGroups;
@@ -114,7 +119,8 @@ final class CobbleKeyedStateBackendBuilder<K> {
         validateTimerBackendRestoreCompatibility();
         StateSerializerProvider<K> keySerializerProvider =
                 StateSerializerProvider.fromNewRegisteredSerializer(keySerializer);
-        CobbleBackendResources resources = prepareCobbleResources(keySerializerProvider);
+        CobbleBackendResources resources =
+                prepareCobbleResources(keySerializerProvider, cancelStreamRegistryForBackend);
         boolean success = false;
         try {
             // Restored native timer queues can contain rows before Flink recreates their logical
@@ -136,6 +142,7 @@ final class CobbleKeyedStateBackendBuilder<K> {
                             resources.configPath,
                             resources.config,
                             resources.db,
+                            resources.nativeMetricsMonitor,
                             manualTtlTimeProviderForTests,
                             restoredNativeQueuesMayContainEntries,
                             priorityQueueStateType,
@@ -233,7 +240,9 @@ final class CobbleKeyedStateBackendBuilder<K> {
 
     /** Creates the local working directory, writes config JSON, and opens the Cobble DB. */
     private CobbleBackendResources prepareCobbleResources(
-            StateSerializerProvider<K> keySerializerProvider) throws IOException {
+            StateSerializerProvider<K> keySerializerProvider,
+            CloseableRegistry cancelStreamRegistryForBackend)
+            throws IOException {
         // Everything that creates on-disk artifacts for this backend instance must live inside a
         // single failure-cleanup try/finally. Even calls that look read-only (createVolumeLayout)
         // invoke rejectMixedRestoreHandles() / readRestoreSources() and can throw after
@@ -241,6 +250,7 @@ final class CobbleKeyedStateBackendBuilder<K> {
         // failed restore never leaves a job_<id>/op_<name> tree behind.
         Files.createDirectories(instanceBasePath.toPath());
         Db db = null;
+        CobbleNativeMetrics.Monitor nativeMetricsMonitor = null;
         boolean success = false;
         try {
             VolumeLayout volumeLayout = createVolumeLayout();
@@ -255,13 +265,21 @@ final class CobbleKeyedStateBackendBuilder<K> {
             Files.write(configPath, config.toJson().getBytes(StandardCharsets.UTF_8));
 
             db = openDb(configPath, keySerializerProvider);
+            nativeMetricsMonitor = CobbleNativeMetrics.register(metricGroup, db::metrics);
+            cancelStreamRegistryForBackend.registerCloseable(nativeMetricsMonitor);
             CobbleBackendResources resources =
                     new CobbleBackendResources(
-                            instanceBasePath, volumeLayout.localVolumePath, configPath, config, db);
+                            instanceBasePath,
+                            volumeLayout.localVolumePath,
+                            configPath,
+                            config,
+                            db,
+                            nativeMetricsMonitor);
             success = true;
             return resources;
         } finally {
             if (!success) {
+                IOUtils.closeQuietly(nativeMetricsMonitor);
                 if (db != null) {
                     db.close();
                 }
@@ -694,19 +712,27 @@ final class CobbleKeyedStateBackendBuilder<K> {
         private final Path configPath;
         private final Config config;
         private final Db db;
+        private final CobbleNativeMetrics.Monitor nativeMetricsMonitor;
 
         private CobbleBackendResources(
-                File instanceBasePath, File volumePath, Path configPath, Config config, Db db) {
+                File instanceBasePath,
+                File volumePath,
+                Path configPath,
+                Config config,
+                Db db,
+                CobbleNativeMetrics.Monitor nativeMetricsMonitor) {
             this.instanceBasePath = instanceBasePath;
             this.volumePath = volumePath;
             this.configPath = configPath;
             this.config = config;
             this.db = db;
+            this.nativeMetricsMonitor = nativeMetricsMonitor;
         }
 
         /** Releases the native DB and removes the temporary local working directory. */
         @Override
         public void close() throws IOException {
+            nativeMetricsMonitor.close();
             db.close();
             org.apache.flink.util.FileUtils.deleteDirectory(instanceBasePath);
         }

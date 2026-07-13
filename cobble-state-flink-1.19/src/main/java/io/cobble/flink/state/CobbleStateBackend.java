@@ -180,6 +180,7 @@ public class CobbleStateBackend extends AbstractManagedMemoryStateBackend
         try {
             return new CobbleKeyedStateBackendBuilder<>(
                             env,
+                            parameters.getMetricGroup(),
                             parameters.getKvStateRegistry(),
                             parameters.getKeySerializer(),
                             parameters.getNumberOfKeyGroups(),

@@ -123,6 +123,11 @@ This section lists the main configuration keys for the Cobble sink.
 | `sink.use-managed-memory-allocator` | `false` | Whether the sink writer declares managed memory usage. |
 | `sink.writer-buffer-memory` | `256mb` | Write-buffer budget for one sink writer. |
 
+## Metrics
+
+Sink writers register Flink standard send counters and Cobble storage metrics automatically. See
+[Cobble Flink Metrics](../metrics/#sink) for row-kind accounting and byte semantics.
+
 ## Usage Notes
 
 - The sink writes by primary key.
