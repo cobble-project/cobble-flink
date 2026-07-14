@@ -75,7 +75,8 @@ class CobbleTableSinkITTest {
                         + "'sink.parallelism'='1', 's3.endpoint'='http://storage.example',"
                         + "'s3.access.key'='access', 's3.secret.key'='planning-secret',"
                         + "'s3.path.style.access'='true', 's3.region'='test-region',"
-                        + "'storage.option.root'='/table')");
+                        + "'storage.option.root'='/table',"
+                        + "'storage.option.vendor.option.with.dots'='value')");
 
         String plan =
                 tableEnv.explainSql("INSERT INTO remote_sink VALUES (CAST(1 AS BIGINT), 'one')");

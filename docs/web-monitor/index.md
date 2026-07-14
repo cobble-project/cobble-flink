@@ -74,7 +74,7 @@ Useful options:
 --checkpoint file:///path/to/checkpoints-or-cobble-table
 --flink-conf /path/to/flink/conf
 --storage-options-file /path/to/storage.properties
---storage-option s3.region=us-east-1
+--storage-option storage.option.region=us-east-1
 --total-buckets 32768
 --inspect-default-limit 100
 --inspect-max-limit 1000
@@ -118,31 +118,31 @@ while reading state.
 
 Set `--checkpoint` to the remote datasource URI. Pass `--flink-conf` when the
 cluster already contains the required storage configuration. Additional access
-options can be placed in a Java properties file:
+options can be placed in a Java properties file. Every key below
+`storage.option.` is forwarded unchanged to the provider selected by the URI:
 
 ```properties
-s3.endpoint=http://127.0.0.1:9000
-s3.access-key=<access-key>
-s3.secret-key=<secret-key>
-s3.path.style.access=true
-s3.region=us-east-1
+storage.option.endpoint=http://127.0.0.1:9000
+storage.option.access_key_id=<access-key>
+storage.option.secret_access_key=<secret-key>
+storage.option.enable_virtual_host_style=false
+storage.option.region=us-east-1
 ```
 
 ```bash
 java -jar cobble-flink-monitor/target/cobble-flink-monitor-*.jar \
   --flink-conf "$FLINK_HOME/conf" \
   --storage-options-file /path/to/storage.properties \
-  --storage-option s3.region=us-east-1 \
+  --storage-option storage.option.region=us-east-1 \
   --checkpoint s3://bucket/path/to/table
 ```
 
 `--storage-option KEY=VALUE` is repeatable, overrides file values, and uses the
 last CLI value. These settings apply to the initial path and to datasource paths
-opened later in the UI. For another supported filesystem URI, use
-`storage.option.<provider-key>`. Explicit file or CLI options take precedence;
-when they are omitted, the monitor uses the filesystem configuration loaded by
-`--flink-conf`. Keep credentials out of datasource URIs and replace placeholders
-through deployment templates or secret management.
+opened later in the UI. Provider keys are arbitrary and may contain dots. For
+another filesystem, use the keys required by its provider. Explicit file or CLI
+options take precedence over configuration loaded by `--flink-conf`. Supply
+credentials through deployment templates or secret management.
 
 ## Datasource Page
 

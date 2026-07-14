@@ -46,23 +46,35 @@ class CobbleConnectorStorageOptionsTest {
     }
 
     @Test
-    void preservesGenericOptionsForArbitraryRemoteSchemes() {
+    void preservesArbitraryProviderKeysForAnyRemoteScheme() {
         Map<String, String> values = new HashMap<>();
-        values.put("storage.option.endpoint", "https://oss.example.com");
-        values.put("storage.option.access_key_id", "oss-access");
-        values.put("storage.option.access_key_secret", "oss-secret");
+        values.put(
+                "storage.option.fs.azure.account.key.account.dfs.core.windows.net", "azure-secret");
+        values.put("storage.option.fs.gs.auth.service.account.json.keyfile", "/keys/gcs.json");
+        values.put("storage.option.vendor.nested.option", "provider-value");
         CobbleConnectorStorageOptions options = CobbleConnectorStorageOptions.from(values);
 
-        Config.VolumeDescriptor oss = volume("oss://bucket/table");
-        Config.VolumeDescriptor azblob = volume("azblob://container/table");
-        options.applyTo(oss);
-        options.applyTo(azblob);
+        Config.VolumeDescriptor volume = volume("vendor-fs://container/table");
+        options.applyTo(volume);
+        Configuration flinkConfiguration =
+                options.flinkConfiguration("vendor-fs://container/table");
 
-        assertEquals("https://oss.example.com", oss.customOptions.get("endpoint"));
-        assertEquals("oss-access", oss.customOptions.get("access_key_id"));
-        assertEquals("oss-secret", oss.customOptions.get("access_key_secret"));
-        assertEquals("https://oss.example.com", azblob.customOptions.get("endpoint"));
-        assertNull(oss.accessId);
+        assertEquals(
+                "azure-secret",
+                volume.customOptions.get("fs.azure.account.key.account.dfs.core.windows.net"));
+        assertEquals(
+                "/keys/gcs.json",
+                volume.customOptions.get("fs.gs.auth.service.account.json.keyfile"));
+        assertEquals("provider-value", volume.customOptions.get("vendor.nested.option"));
+        assertEquals(
+                "azure-secret",
+                flinkConfiguration.getString(
+                        "fs.azure.account.key.account.dfs.core.windows.net", null));
+        assertEquals(
+                "/keys/gcs.json",
+                flinkConfiguration.getString("fs.gs.auth.service.account.json.keyfile", null));
+        assertEquals("provider-value", flinkConfiguration.getString("vendor.nested.option", null));
+        assertNull(volume.accessId);
     }
 
     @Test

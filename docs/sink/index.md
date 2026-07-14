@@ -99,8 +99,12 @@ FROM upstream_result;
 
 ## Remote storage
 
-Set `path` to the table URI and provide any required access options in the
-table definition. Keep credentials out of the URI:
+Set `path` to the table URI. The URI scheme selects the installed filesystem
+provider. Add each setting required by that provider as
+`storage.option.<provider-key>`; Cobble forwards the suffix unchanged and does
+not restrict provider names or keys. Keep credentials out of the URI.
+
+For example, an S3-compatible provider can be configured as follows:
 
 ```sql
 CREATE TABLE cobble_sink (
@@ -113,24 +117,19 @@ CREATE TABLE cobble_sink (
   'path' = 's3://analytics/cobble/users',
   'bucket' = '16',
   'sink.parallelism' = '4',
-  's3.endpoint' = 'https://s3.example.com',
-  's3.access-key' = '<access-key>',
-  's3.secret-key' = '<secret-key>',
-  's3.path.style.access' = 'true',
-  's3.region' = 'us-east-1'
+  'storage.option.endpoint' = 'https://s3.example.com',
+  'storage.option.access_key_id' = '<access-key>',
+  'storage.option.secret_access_key' = '<secret-key>',
+  'storage.option.enable_virtual_host_style' = 'false',
+  'storage.option.region' = 'us-east-1'
 );
 ```
 
-Cobble source accepts the same options when it reads this table. The aliases
-`s3.access.key` and `s3.secret.key` are also accepted. Explicit access and
-secret keys must be supplied together. When a custom endpoint is set without a
-region, the region defaults to `us-east-1`.
-
-For another supported filesystem URI, use
-`storage.option.<provider-key>`. Explicit table options take precedence; when
-they are omitted, Cobble uses the filesystem configuration already available to
-the Flink cluster. Replace credential placeholders through deployment templates
-or secret management.
+Cobble source accepts the same options when it reads this table. For another
+filesystem, use the option keys required by its provider. Suffixes may contain
+dots, for example `storage.option.fs.azure.account.key.<account>`. Explicit
+table options take precedence over cluster defaults. Supply credentials through
+deployment templates or secret management.
 
 ## Complete Configuration Reference
 
@@ -162,12 +161,7 @@ This section lists the main configuration keys for the Cobble sink.
 
 | Key | Default | Description |
 | --- | --- | --- |
-| `s3.endpoint` | provider default | S3-compatible endpoint. |
-| `s3.access-key` | provider chain | Access key; alias: `s3.access.key`. |
-| `s3.secret-key` | provider chain | Secret key; alias: `s3.secret.key`. |
-| `s3.path.style.access` | provider default | Set `true` for path-style access or `false` for virtual-host-style access. |
-| `s3.region` | `us-east-1` with a custom endpoint | S3 region. |
-| `storage.option.<provider-key>` | Flink cluster configuration | Filesystem setting for this table root. |
+| `storage.option.<provider-key>` | provider or Flink cluster default | Arbitrary filesystem setting for this table root. The suffix is passed unchanged and may contain dots. |
 
 ## Metrics
 

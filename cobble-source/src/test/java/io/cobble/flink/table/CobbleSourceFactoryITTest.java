@@ -89,6 +89,7 @@ class CobbleSourceFactoryITTest {
                                         + " 's3.secret.key' = 'source-secret',"
                                         + " 's3.path.style.access' = 'true',"
                                         + " 'storage.option.root' = '/table',"
+                                        + " 'storage.option.vendor.option.with.dots' = 'value',"
                                         + " 'path' = '"));
 
         String plan = tableEnv.explainSql("SELECT * FROM t_source_storage");

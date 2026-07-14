@@ -158,9 +158,13 @@ ON o.id = d.id;
 
 ### Read from remote storage
 
-Set `path` to the table URI and provide any required access options in the
-table definition. Use the same options that were used by the Cobble sink. Keep
-credentials out of the URI:
+Set `path` to the table URI. The URI scheme selects the installed filesystem
+provider. Add each setting required by that provider as
+`storage.option.<provider-key>`; Cobble forwards the suffix unchanged and does
+not restrict provider names or keys. Use the same settings that were used by
+the Cobble sink and keep credentials out of the URI.
+
+For example, an S3-compatible provider can be configured as follows:
 
 ```sql
 CREATE TABLE cobble_source (
@@ -172,23 +176,19 @@ CREATE TABLE cobble_source (
   'connector' = 'cobble',
   'source.kind' = 'sink',
   'path' = 's3://analytics/cobble/users',
-  's3.endpoint' = 'https://s3.example.com',
-  's3.access-key' = '<access-key>',
-  's3.secret-key' = '<secret-key>',
-  's3.path.style.access' = 'true',
-  's3.region' = 'us-east-1'
+  'storage.option.endpoint' = 'https://s3.example.com',
+  'storage.option.access_key_id' = '<access-key>',
+  'storage.option.secret_access_key' = '<secret-key>',
+  'storage.option.enable_virtual_host_style' = 'false',
+  'storage.option.region' = 'us-east-1'
 );
 ```
 
-The aliases `s3.access.key` and `s3.secret.key` are also accepted. Explicit
-access and secret keys must be supplied together. When a custom endpoint is set
-without a region, the region defaults to `us-east-1`.
-
-For another supported filesystem URI, use
-`storage.option.<provider-key>`. Explicit table options take precedence; when
-they are omitted, Cobble uses the filesystem configuration already available to
-the Flink cluster. Replace credential placeholders through deployment templates
-or secret management.
+For another filesystem, use the option keys required by its provider. Suffixes
+may contain dots, for example
+`storage.option.fs.azure.account.key.<account>`. Explicit table options take
+precedence over cluster defaults. Supply credentials through deployment
+templates or secret management.
 
 ## Read Cobble State
 
@@ -346,9 +346,9 @@ This section lists the main configuration keys for the Cobble source.
 | `state.kind` | inferred from metadata | Optional state-kind validation hint. |
 | `raw.columns` | none | Comma-separated column indexes to read when `source.kind = 'raw'` (e.g. `0,1`). Required; `all` is not supported yet. |
 
-`storage.option.<provider-key>` sets a filesystem option for a sink-table or
-raw-table root. Flink state checkpoint sources do not accept connector-scoped
-storage options; configure their filesystem through the Flink cluster.
+`storage.option.<provider-key>` forwards an arbitrary filesystem option to the
+provider selected by the path URI. Sink-table and raw-table sources accept these
+options. Flink state checkpoint sources use the cluster filesystem configuration.
 
 ## Metrics
 

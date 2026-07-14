@@ -142,7 +142,8 @@ class ServerConfigTest {
                         "s3.endpoint=http://file.example",
                         "s3.access-key=file-access",
                         "s3.secret-key=file-secret",
-                        "storage.option.root=/from-file"));
+                        "storage.option.root=/from-file",
+                        "storage.option.vendor.option.with.dots=from-provider"));
 
         ServerConfig config =
                 ServerConfig.parse(
@@ -161,8 +162,9 @@ class ServerConfigTest {
 
         assertEquals("http://last.example", root.customOptions.get("endpoint"));
         assertEquals("/from-cli", root.customOptions.get("root"));
+        assertEquals("from-provider", root.customOptions.get("vendor.option.with.dots"));
         assertEquals("file-access", root.accessId);
-        assertEquals(4, config.storageOptionCount);
+        assertEquals(5, config.storageOptionCount);
     }
 
     @Test

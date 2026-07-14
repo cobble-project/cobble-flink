@@ -15,7 +15,13 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 
-/** Serializable connector-scoped provider options for a single Cobble table root. */
+/**
+ * Serializable connector-scoped provider options for a single Cobble table root.
+ *
+ * <p>Every key below {@code storage.option.} is provider-defined. Cobble removes only that prefix
+ * and forwards the remaining key unchanged; it does not maintain a filesystem or option-key
+ * allowlist.
+ */
 public final class CobbleConnectorStorageOptions implements Serializable {
 
     private static final long serialVersionUID = 1L;
@@ -40,7 +46,9 @@ public final class CobbleConnectorStorageOptions implements Serializable {
             ConfigOptions.key(STORAGE_OPTION_KEY)
                     .mapType()
                     .noDefaultValue()
-                    .withDescription("Provider options for connector table storage access.");
+                    .withDescription(
+                            "Arbitrary provider options for connector table storage access. The"
+                                    + " suffix after storage.option. is forwarded unchanged.");
 
     private static final ConfigOption<String> S3_ENDPOINT =
             ConfigOptions.key(S3_ENDPOINT_KEY)
