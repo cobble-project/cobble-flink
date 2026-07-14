@@ -1,5 +1,7 @@
 package io.cobble.flink.table;
 
+import io.cobble.flink.common.CobbleConnectorStorageOptions;
+
 import org.apache.flink.core.memory.ManagedMemoryUseCase;
 import org.apache.flink.table.connector.ChangelogMode;
 import org.apache.flink.table.connector.sink.DataStreamSinkProvider;
@@ -112,6 +114,7 @@ final class CobbleDynamicTableSink implements DynamicTableSink {
         private static final long serialVersionUID = 1L;
 
         final String pathUri;
+        final CobbleConnectorStorageOptions storageOptions;
         final int bucketCount;
         final int snapshotRetention;
         final int sinkParallelism;
@@ -129,7 +132,30 @@ final class CobbleDynamicTableSink implements DynamicTableSink {
                 long sinkWriterBufferMemoryBytes,
                 List<SerializableField> keyFields,
                 List<SerializableField> valueFields) {
+            this(
+                    pathUri,
+                    bucketCount,
+                    snapshotRetention,
+                    sinkParallelism,
+                    sinkUseManagedMemoryAllocator,
+                    sinkWriterBufferMemoryBytes,
+                    keyFields,
+                    valueFields,
+                    CobbleConnectorStorageOptions.empty());
+        }
+
+        SerializableConfig(
+                String pathUri,
+                int bucketCount,
+                int snapshotRetention,
+                int sinkParallelism,
+                boolean sinkUseManagedMemoryAllocator,
+                long sinkWriterBufferMemoryBytes,
+                List<SerializableField> keyFields,
+                List<SerializableField> valueFields,
+                CobbleConnectorStorageOptions storageOptions) {
             this.pathUri = pathUri;
+            this.storageOptions = storageOptions;
             this.bucketCount = bucketCount;
             this.snapshotRetention = snapshotRetention;
             this.sinkParallelism = sinkParallelism;
@@ -148,7 +174,8 @@ final class CobbleDynamicTableSink implements DynamicTableSink {
                     sinkUseManagedMemoryAllocator,
                     sinkWriterBufferMemoryBytes,
                     keyFields,
-                    valueFields);
+                    valueFields,
+                    storageOptions);
         }
     }
 

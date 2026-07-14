@@ -1,13 +1,10 @@
 package io.cobble.flink.table;
 
+import io.cobble.flink.common.CobbleMetadataFileIO;
 import io.cobble.flink.common.inspect.InspectSchemaRegistryLayout;
 import io.cobble.flink.common.inspect.SinkInspectField;
 import io.cobble.flink.common.inspect.SinkInspectSchema;
 import io.cobble.flink.common.inspect.SinkInspectSchemaStore;
-
-import org.apache.flink.core.fs.FSDataOutputStream;
-import org.apache.flink.core.fs.FileSystem;
-import org.apache.flink.core.fs.Path;
 
 import java.io.IOException;
 import java.util.ArrayList;
@@ -27,19 +24,17 @@ final class CobbleSinkInspectSchemaRegistry {
         byte[] bytes = SinkInspectSchemaStore.of(toSchema(config)).toBytes();
         String hash = InspectSchemaRegistryLayout.sha256(bytes);
 
-        Path schemaRoot = new Path(new Path(config.pathUri), SCHEMA_DIR);
-        Path blobsDir = new Path(schemaRoot, BLOBS_DIR);
-        Path eventsDir = new Path(schemaRoot, EVENTS_DIR);
-        Path blobPath = new Path(blobsDir, InspectSchemaRegistryLayout.blobFileName(hash));
-        Path eventPath =
-                new Path(eventsDir, InspectSchemaRegistryLayout.eventFileName(snapshotId, hash));
-
-        FileSystem fileSystem = schemaRoot.getFileSystem();
-        fileSystem.mkdirs(blobsDir);
-        fileSystem.mkdirs(eventsDir);
-
-        writeBlobIfMissing(fileSystem, blobPath, bytes);
-        createEventIfMissing(fileSystem, eventPath);
+        String blobsDir = SCHEMA_DIR + "/" + BLOBS_DIR;
+        String eventsDir = SCHEMA_DIR + "/" + EVENTS_DIR;
+        String blobPath = blobsDir + "/" + InspectSchemaRegistryLayout.blobFileName(hash);
+        String eventPath =
+                eventsDir + "/" + InspectSchemaRegistryLayout.eventFileName(snapshotId, hash);
+        CobbleMetadataFileIO fileIO =
+                CobbleMetadataFileIO.open(config.pathUri, config.storageOptions);
+        fileIO.mkdirs(blobsDir);
+        fileIO.mkdirs(eventsDir);
+        fileIO.writeIfAbsent(blobPath, bytes);
+        fileIO.writeIfAbsent(eventPath, new byte[0]);
         return hash;
     }
 
@@ -64,25 +59,5 @@ final class CobbleSinkInspectSchemaRegistry {
                             field.structuredColumnIndex));
         }
         return new SinkInspectSchema(keyFields, valueFields);
-    }
-
-    private static void writeBlobIfMissing(FileSystem fileSystem, Path path, byte[] bytes)
-            throws IOException {
-        if (fileSystem.exists(path)) {
-            return;
-        }
-        try (FSDataOutputStream out = fileSystem.create(path, FileSystem.WriteMode.NO_OVERWRITE)) {
-            out.write(bytes);
-        }
-    }
-
-    private static void createEventIfMissing(FileSystem fileSystem, Path path) throws IOException {
-        if (fileSystem.exists(path)) {
-            return;
-        }
-        try (FSDataOutputStream ignored =
-                fileSystem.create(path, FileSystem.WriteMode.NO_OVERWRITE)) {
-            // The event filename contains the snapshot id and target content hash.
-        }
     }
 }

@@ -5,6 +5,7 @@ import io.cobble.GlobalSnapshot;
 import io.cobble.PendingSnapshot;
 import io.cobble.ShardSnapshot;
 import io.cobble.SnapshotTools;
+import io.cobble.flink.common.CobbleLoader;
 import io.cobble.structured.Db;
 
 import org.apache.flink.api.common.typeinfo.Types;
@@ -22,19 +23,15 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.io.File;
-import java.io.FileInputStream;
-import java.io.FileOutputStream;
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Collections;
 import java.util.Comparator;
-import java.util.HashMap;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.Properties;
 import java.util.Set;
 import java.util.concurrent.TimeUnit;
 
@@ -101,6 +98,7 @@ final class CobbleSqlSink
 
         private Writer(CobbleDynamicTableSink.SerializableConfig config, WriterInitContext context)
                 throws IOException {
+            CobbleLoader.ensureCobbleLoaded();
             this.config = config;
             this.subtaskId = context.getTaskInfo().getIndexOfThisSubtask();
             this.totalBuckets = config.bucketCount;
@@ -340,6 +338,7 @@ final class CobbleSqlSink
         private final DbCoordinator coordinator;
 
         Global(CobbleDynamicTableSink.SerializableConfig config) throws IOException {
+            CobbleLoader.ensureCobbleLoaded();
             this.config = config;
             this.coordinator = DbCoordinator.open(CobbleSinkPaths.createCoordinatorConfig(config));
         }
@@ -376,7 +375,7 @@ final class CobbleSqlSink
         public void close() throws Exception {
             try {
                 waitForEndOfInputMarkers();
-                if (CobbleSinkPaths.hasEndOfInputMarkers(config)) {
+                if (CobbleSinkPaths.countEndOfInputMarkers(config) > 0) {
                     refreshLatestSnapshotOnClose();
                     CobbleSinkPaths.clearEndOfInputMarkers(config);
                 }
@@ -410,12 +409,14 @@ final class CobbleSqlSink
             }
             validateCompleteCoverage(shardSnapshots, totalBuckets);
 
-            Map<String, String> writerPathByDbId = loadWriterPathIndex();
+            Map<String, String> writerPathByDbId = CobbleSinkPaths.loadWriterPathIndex(config);
             GlobalSnapshot latest = coordinator.loadCurrentGlobalSnapshot();
             for (CobbleShardCommittable committable : committables) {
-                writerPathByDbId.put(committable.shardSnapshot.dbId, committable.writerPath);
+                writerPathByDbId.put(
+                        committable.shardSnapshot.dbId,
+                        CobbleSinkPaths.coordinatorWriterPath(config, committable));
             }
-            storeWriterPathIndex(writerPathByDbId);
+            CobbleSinkPaths.storeWriterPathIndex(config, writerPathByDbId);
             long globalSnapshotId = latest == null ? 1L : latest.id + 1L;
             coordinator.materializeGlobalSnapshot(totalBuckets, globalSnapshotId, shardSnapshots);
             writeInspectSchema(globalSnapshotId);
@@ -521,40 +522,18 @@ final class CobbleSqlSink
             }
         }
 
-        private Map<String, String> loadWriterPathIndex() throws IOException {
-            File pathIndexFile = CobbleSinkPaths.writerPathIndexFile(config);
-            Map<String, String> writerPathByDbId = new HashMap<>();
-            if (!pathIndexFile.exists()) {
-                return writerPathByDbId;
-            }
-            Properties properties = new Properties();
-            try (FileInputStream in = new FileInputStream(pathIndexFile)) {
-                properties.load(in);
-            }
-            for (String dbId : properties.stringPropertyNames()) {
-                writerPathByDbId.put(dbId, properties.getProperty(dbId));
-            }
-            return writerPathByDbId;
-        }
-
-        private void storeWriterPathIndex(Map<String, String> writerPathByDbId) throws IOException {
-            File pathIndexFile = CobbleSinkPaths.writerPathIndexFile(config);
-            File parent = pathIndexFile.getParentFile();
-            if (parent != null) {
-                parent.mkdirs();
-            }
-            Properties properties = new Properties();
-            for (Map.Entry<String, String> entry : writerPathByDbId.entrySet()) {
-                properties.setProperty(entry.getKey(), entry.getValue());
-            }
-            try (FileOutputStream out = new FileOutputStream(pathIndexFile)) {
-                properties.store(out, "Cobble writer path index by dbId");
-            }
-        }
-
         private void refreshLatestSnapshotOnClose() throws IOException {
             GlobalSnapshot latest = coordinator.loadCurrentGlobalSnapshot();
-            Map<String, String> writerPathByDbId = loadWriterPathIndex();
+            Map<String, String> writerPathByDbId = CobbleSinkPaths.loadWriterPathIndex(config);
+            if (CobbleSinkPaths.isRemoteTable(config)) {
+                List<ShardSnapshot> refreshed =
+                        CobbleSinkPaths.resolveEndOfInputSnapshots(
+                                config,
+                                CobbleSinkPaths.listEndOfInputCommittables(config),
+                                writerPathByDbId);
+                materializeRefreshedSnapshot(latest, refreshed, writerPathByDbId);
+                return;
+            }
             if (latest == null
                     || latest.shardSnapshots == null
                     || latest.shardSnapshots.isEmpty()) {
@@ -562,7 +541,7 @@ final class CobbleSqlSink
                 if (initial.isEmpty()) {
                     return;
                 }
-                storeWriterPathIndex(writerPathByDbId);
+                CobbleSinkPaths.storeWriterPathIndex(config, writerPathByDbId);
                 coordinator.materializeGlobalSnapshot(config.bucketCount, 1L, initial);
                 writeInspectSchema(1L);
                 expireOlderSnapshots(1L, writerPathByDbId);
@@ -572,9 +551,27 @@ final class CobbleSqlSink
             for (ShardSnapshot shard : latest.shardSnapshots) {
                 refreshed.add(loadLatestShardSnapshot(shard.dbId, writerPathByDbId, shard));
             }
+            materializeRefreshedSnapshot(latest, refreshed, writerPathByDbId);
+        }
+
+        private void materializeRefreshedSnapshot(
+                GlobalSnapshot latest,
+                List<ShardSnapshot> refreshed,
+                Map<String, String> writerPathByDbId)
+                throws IOException {
+            if (latest == null
+                    || latest.shardSnapshots == null
+                    || latest.shardSnapshots.isEmpty()) {
+                CobbleSinkPaths.storeWriterPathIndex(config, writerPathByDbId);
+                coordinator.materializeGlobalSnapshot(config.bucketCount, 1L, refreshed);
+                writeInspectSchema(1L);
+                expireOlderSnapshots(1L, writerPathByDbId);
+                return;
+            }
             if (hasSameBucketCoverage(latest, refreshed, latest.totalBuckets)) {
                 return;
             }
+            CobbleSinkPaths.storeWriterPathIndex(config, writerPathByDbId);
             long globalSnapshotId = latest.id + 1L;
             coordinator.materializeGlobalSnapshot(latest.totalBuckets, globalSnapshotId, refreshed);
             writeInspectSchema(globalSnapshotId);
@@ -594,28 +591,8 @@ final class CobbleSqlSink
 
         private List<ShardSnapshot> collectEndOfInputLatestShards(
                 Map<String, String> writerPathByDbId) throws IOException {
-            List<CobbleShardCommittable> markerCommittables =
-                    CobbleSinkPaths.listEndOfInputCommittables(config);
-            List<ShardSnapshot> refreshed =
-                    new ArrayList<>(Math.min(markerCommittables.size(), config.sinkParallelism));
-            for (CobbleShardCommittable committable : markerCommittables) {
-                if (committable.shardSnapshot != null) {
-                    writerPathByDbId.put(committable.shardSnapshot.dbId, committable.writerPath);
-                    refreshed.add(committable.shardSnapshot);
-                }
-                if (refreshed.size() >= config.sinkParallelism) {
-                    break;
-                }
-            }
-            if (refreshed.size() < config.sinkParallelism) {
-                throw new IOException(
-                        "Failed to resolve enough end-of-input shard snapshots. resolved="
-                                + refreshed.size()
-                                + ", expected="
-                                + config.sinkParallelism
-                                + ".");
-            }
-            return refreshed;
+            return CobbleSinkPaths.resolveEndOfInputSnapshots(
+                    config, CobbleSinkPaths.listEndOfInputCommittables(config), writerPathByDbId);
         }
 
         private ShardSnapshot loadLatestShardSnapshot(
@@ -726,6 +703,7 @@ final class CobbleSqlSink
 
     private static GlobalSnapshot loadCurrentGlobalSnapshot(
             CobbleDynamicTableSink.SerializableConfig config) throws IOException {
+        CobbleLoader.ensureCobbleLoaded();
         DbCoordinator coordinator = null;
         try {
             coordinator = DbCoordinator.open(CobbleSinkPaths.createCoordinatorConfig(config));

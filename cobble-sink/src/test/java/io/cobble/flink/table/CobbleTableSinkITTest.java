@@ -1,14 +1,18 @@
 package io.cobble.flink.table;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import io.cobble.Config;
 import io.cobble.DbCoordinator;
 import io.cobble.GlobalSnapshot;
 import io.cobble.ShardSnapshot;
+import io.cobble.flink.common.CobbleConnectorStorageOptions;
+import io.cobble.flink.common.CobbleMetadataFileIO;
 import io.cobble.structured.Db;
 
 import org.apache.flink.api.common.JobStatus;
@@ -40,10 +44,14 @@ import org.apache.flink.types.RowKind;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
+import java.io.File;
+import java.io.IOException;
 import java.lang.reflect.Proxy;
+import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Duration;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -56,6 +64,55 @@ class CobbleTableSinkITTest {
                     new String[] {"id", "name", "score"}, Types.LONG, Types.STRING, Types.INT);
 
     @TempDir private Path tempDir;
+
+    @Test
+    void remoteStorageOptionsAreAcceptedDuringPlanningAndConflictsAreRejected() {
+        StreamTableEnvironment tableEnv = newTableEnv();
+        tableEnv.executeSql(
+                "CREATE TABLE remote_sink ("
+                        + "id BIGINT, name STRING, PRIMARY KEY (id) NOT ENFORCED) WITH ("
+                        + "'connector'='cobble', 'path'='s3://bucket/table', 'bucket'='1',"
+                        + "'sink.parallelism'='1', 's3.endpoint'='http://storage.example',"
+                        + "'s3.access.key'='access', 's3.secret.key'='planning-secret',"
+                        + "'s3.path.style.access'='true', 's3.region'='test-region',"
+                        + "'storage.option.root'='/table')");
+
+        String plan =
+                tableEnv.explainSql("INSERT INTO remote_sink VALUES (CAST(1 AS BIGINT), 'one')");
+        assertNotNull(plan);
+        assertFalse(plan.contains("planning-secret"));
+
+        tableEnv.executeSql(
+                "CREATE TABLE conflicting_sink ("
+                        + "id BIGINT, name STRING, PRIMARY KEY (id) NOT ENFORCED) WITH ("
+                        + "'connector'='cobble', 'path'='s3://bucket/table', 'bucket'='1',"
+                        + "'sink.parallelism'='1', 's3.access-key'='one',"
+                        + "'s3.access.key'='two', 's3.secret-key'='secret')");
+        Exception error =
+                assertThrows(
+                        Exception.class,
+                        () ->
+                                tableEnv.explainSql(
+                                        "INSERT INTO conflicting_sink VALUES (CAST(1 AS BIGINT),"
+                                                + " 'one')"));
+        assertTrue(messageChain(error).contains("Conflicting S3 access key options"));
+
+        tableEnv.executeSql(
+                "CREATE TABLE unsupported_volume_sink ("
+                        + "id BIGINT, name STRING, PRIMARY KEY (id) NOT ENFORCED) WITH ("
+                        + "'connector'='cobble', 'path'='s3://bucket/table', 'bucket'='1',"
+                        + "'sink.parallelism'='1',"
+                        + "'storage.volume.0.path'='s3://bucket/cold-data')");
+        Exception volumeError =
+                assertThrows(
+                        Exception.class,
+                        () ->
+                                tableEnv.explainSql(
+                                        "INSERT INTO unsupported_volume_sink VALUES (CAST(1 AS"
+                                                + " BIGINT), 'one')"));
+        assertTrue(messageChain(volumeError).contains("Unsupported options"));
+        assertTrue(messageChain(volumeError).contains("storage.volume.0.path"));
+    }
 
     @Test
     void sqlSinkWritesParallelShardsAndCommitsGlobalSnapshot() throws Exception {
@@ -232,6 +289,142 @@ class CobbleTableSinkITTest {
     }
 
     @Test
+    void remoteWriterAndCoordinatorUseScopedVolumesAndLocalStaging() throws Exception {
+        Map<String, String> values = new HashMap<>();
+        values.put("storage.option.endpoint", "https://oss.example.com");
+        values.put("storage.option.access_key_id", "oss-access");
+        values.put("storage.option.access_key_secret", "oss-secret");
+        CobbleDynamicTableSink.SerializableConfig config =
+                new CobbleDynamicTableSink.SerializableConfig(
+                        "oss://bucket/table",
+                        2,
+                        2,
+                        2,
+                        false,
+                        1024L * 1024L,
+                        java.util.Collections.singletonList(
+                                new CobbleDynamicTableSink.SerializableField(
+                                        "id", "BIGINT", 0, -1)),
+                        java.util.Collections.singletonList(
+                                new CobbleDynamicTableSink.SerializableField(
+                                        "name", "STRING", 1, 0)),
+                        CobbleConnectorStorageOptions.from(values));
+
+        File writerDir = CobbleSinkPaths.writerLocalDirectory(config, 1);
+        assertTrue(writerDir.toPath().startsWith(System.getProperty("java.io.tmpdir")));
+        assertFalse(writerDir.getAbsolutePath().equals("/table"));
+
+        Config writerConfig = CobbleSinkPaths.createWriterConfig(config, 1);
+        assertEquals(writerDir.getAbsolutePath(), writerConfig.volumes.get(0).baseDir);
+        assertRemoteVolume(writerConfig.volumes.get(1));
+        assertEquals(2, writerConfig.volumes.size());
+
+        Config coordinatorConfig = CobbleSinkPaths.createCoordinatorConfig(config);
+        assertEquals(1, coordinatorConfig.volumes.size());
+        assertRemoteVolume(coordinatorConfig.volumes.get(0));
+    }
+
+    @Test
+    void markerCleanupDeletesChildrenBeforeDirectory() throws Exception {
+        Path tablePath = tempDir.resolve("marker-cleanup");
+        try (CobbleMetadataFileIO fileIO =
+                CobbleMetadataFileIO.open(
+                        tablePath.toUri().toString(), CobbleConnectorStorageOptions.empty())) {
+            fileIO.mkdirs(".eoi-markers");
+            fileIO.write(".eoi-markers/one.marker", new byte[] {1});
+            fileIO.write(".eoi-markers/two.marker", new byte[] {2});
+
+            CobbleSinkPaths.clearEndOfInputMarkers(fileIO);
+
+            assertFalse(fileIO.exists(".eoi-markers/one.marker"));
+            assertFalse(fileIO.exists(".eoi-markers/two.marker"));
+            assertFalse(fileIO.exists(".eoi-markers"));
+        }
+    }
+
+    @Test
+    void remoteEndOfInputSnapshotsReplaceOlderGlobalShards() throws Exception {
+        CobbleDynamicTableSink.SerializableConfig config = remoteSnapshotConfig();
+        GlobalSnapshot latest = new GlobalSnapshot();
+        latest.id = 4L;
+        latest.totalBuckets = 2;
+        latest.shardSnapshots.add(shardSnapshot("old-db-0", 10L, 0, 0));
+        latest.shardSnapshots.add(shardSnapshot("old-db-1", 10L, 1, 1));
+        List<CobbleShardCommittable> markers = new ArrayList<>();
+        markers.add(
+                new CobbleShardCommittable(
+                        2, 0, "/remote-writer-a", shardSnapshot("new-db-0", 11L, 0, 0)));
+        markers.add(
+                new CobbleShardCommittable(
+                        2, 1, "/remote-writer-b", shardSnapshot("new-db-1", 12L, 1, 1)));
+        Map<String, String> writerPaths = new HashMap<>();
+
+        List<ShardSnapshot> resolved =
+                CobbleSinkPaths.resolveEndOfInputSnapshots(config, markers, writerPaths);
+
+        assertEquals(2, resolved.size());
+        assertEquals("new-db-0", resolved.get(0).dbId);
+        assertEquals("new-db-1", resolved.get(1).dbId);
+        assertFalse(
+                resolved.stream()
+                        .anyMatch(
+                                shard ->
+                                        latest.shardSnapshots.stream()
+                                                .anyMatch(old -> old.dbId.equals(shard.dbId))));
+        assertTrue(writerPaths.get("new-db-0").startsWith(System.getProperty("java.io.tmpdir")));
+        assertFalse(writerPaths.containsValue("/remote-writer-a"));
+    }
+
+    @Test
+    void endOfInputSnapshotsRejectDuplicateAndMissingSubtasks() {
+        CobbleDynamicTableSink.SerializableConfig config = remoteSnapshotConfig();
+        CobbleShardCommittable first =
+                new CobbleShardCommittable(2, 0, "/writer-a", shardSnapshot("db-a", 1L, 0, 0));
+        CobbleShardCommittable duplicate =
+                new CobbleShardCommittable(2, 0, "/writer-b", shardSnapshot("db-b", 1L, 0, 0));
+
+        IOException duplicateError =
+                assertThrows(
+                        IOException.class,
+                        () ->
+                                CobbleSinkPaths.resolveEndOfInputSnapshots(
+                                        config,
+                                        java.util.Arrays.asList(first, duplicate),
+                                        new HashMap<>()));
+        IOException missingError =
+                assertThrows(
+                        IOException.class,
+                        () ->
+                                CobbleSinkPaths.resolveEndOfInputSnapshots(
+                                        config,
+                                        java.util.Collections.singletonList(first),
+                                        new HashMap<>()));
+
+        assertTrue(duplicateError.getMessage().contains("Duplicate"));
+        assertTrue(missingError.getMessage().contains("subtask 1"));
+    }
+
+    @Test
+    void stableSubtaskMarkerOverwritesOlderAttempt() throws Exception {
+        CobbleDynamicTableSink.SerializableConfig config =
+                writerMetricsConfig(tempDir.resolve("stable-eoi-marker"));
+        CobbleSinkPaths.markEndOfInputSnapshot(
+                config,
+                new CobbleShardCommittable(1, 0, "/old-writer", shardSnapshot("old-db", 1L, 0, 0)));
+        CobbleSinkPaths.markEndOfInputSnapshot(
+                config,
+                new CobbleShardCommittable(1, 0, "/new-writer", shardSnapshot("new-db", 2L, 0, 0)));
+
+        List<CobbleShardCommittable> markers = CobbleSinkPaths.listEndOfInputCommittables(config);
+
+        assertTrue(Files.exists(tempDir.resolve("stable-eoi-marker/.eoi-markers/0.marker")));
+        assertEquals(1, CobbleSinkPaths.countEndOfInputMarkers(config));
+        assertEquals(1, markers.size());
+        assertEquals("new-db", markers.get(0).shardSnapshot.dbId);
+        assertEquals(2L, markers.get(0).shardSnapshot.snapshotId);
+    }
+
+    @Test
     void writerRecordsStandardMetricsAndClosesNativeMonitor() throws Exception {
         Path tablePath = tempDir.resolve("writer-metrics");
         CobbleDynamicTableSink.SerializableConfig config = writerMetricsConfig(tablePath);
@@ -296,6 +489,43 @@ class CobbleTableSinkITTest {
                         new CobbleDynamicTableSink.SerializableField("score", "INT", 2, 1)));
     }
 
+    private CobbleDynamicTableSink.SerializableConfig remoteSnapshotConfig() {
+        Map<String, String> values = new HashMap<>();
+        values.put("s3.endpoint", "http://storage.example");
+        return new CobbleDynamicTableSink.SerializableConfig(
+                "s3://bucket/final-snapshot",
+                2,
+                2,
+                2,
+                false,
+                1024L * 1024L,
+                java.util.Collections.singletonList(
+                        new CobbleDynamicTableSink.SerializableField("id", "BIGINT", 0, -1)),
+                java.util.Collections.singletonList(
+                        new CobbleDynamicTableSink.SerializableField("name", "STRING", 1, 0)),
+                CobbleConnectorStorageOptions.from(values));
+    }
+
+    private static void assertRemoteVolume(Config.VolumeDescriptor volume) {
+        assertEquals("oss://bucket/table", volume.baseDir);
+        assertEquals("https://oss.example.com", volume.customOptions.get("endpoint"));
+        assertEquals("oss-access", volume.customOptions.get("access_key_id"));
+        assertEquals("oss-secret", volume.customOptions.get("access_key_secret"));
+    }
+
+    private static ShardSnapshot shardSnapshot(
+            String dbId, long snapshotId, int rangeStart, int rangeEnd) {
+        ShardSnapshot snapshot = new ShardSnapshot();
+        snapshot.dbId = dbId;
+        snapshot.snapshotId = snapshotId;
+        snapshot.manifestPath = "s3://bucket/snapshot/" + dbId + '-' + snapshotId;
+        ShardSnapshot.Range range = new ShardSnapshot.Range();
+        range.start = rangeStart;
+        range.end = rangeEnd;
+        snapshot.ranges.add(range);
+        return snapshot;
+    }
+
     private Sink.InitContext sinkInitContext(CapturingSinkMetrics metrics) {
         return (Sink.InitContext)
                 Proxy.newProxyInstance(
@@ -320,6 +550,23 @@ class CobbleTableSinkITTest {
             }
         }
         return bytes;
+    }
+
+    private static StreamTableEnvironment newTableEnv() {
+        StreamExecutionEnvironment environment =
+                StreamExecutionEnvironment.getExecutionEnvironment();
+        environment.setParallelism(1);
+        return StreamTableEnvironment.create(environment);
+    }
+
+    private static String messageChain(Throwable error) {
+        StringBuilder result = new StringBuilder();
+        for (Throwable current = error; current != null; current = current.getCause()) {
+            if (current.getMessage() != null) {
+                result.append(current.getMessage()).append('\n');
+            }
+        }
+        return result.toString();
     }
 
     @Test

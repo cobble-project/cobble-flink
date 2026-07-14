@@ -1,5 +1,6 @@
 package io.cobble.flink.table;
 
+import io.cobble.flink.common.CobbleConnectorStorageOptions;
 import io.cobble.flink.common.CobbleLoader;
 
 import org.apache.flink.configuration.ConfigOption;
@@ -50,6 +51,7 @@ public final class CobbleDynamicTableFactory implements DynamicTableSinkFactory 
         options.add(CobbleTableOptions.SINK_USE_MANAGED_MEMORY_ALLOCATOR);
         options.add(CobbleTableOptions.SINK_WRITER_BUFFER_MEMORY);
         options.add(FactoryUtil.SINK_PARALLELISM);
+        CobbleConnectorStorageOptions.addFactoryOptions(options);
         return options;
     }
 
@@ -60,6 +62,8 @@ public final class CobbleDynamicTableFactory implements DynamicTableSinkFactory 
         helper.validate();
 
         ReadableConfig options = helper.getOptions();
+        CobbleConnectorStorageOptions storageOptions =
+                parseStorageOptions(context.getCatalogTable().getOptions());
         String pathUri = normalizePathToUri(options.get(CobbleTableOptions.PATH));
         int bucketCount = options.get(CobbleTableOptions.BUCKET);
         int snapshotRetention = options.get(CobbleTableOptions.SNAPSHOT_RETENTION);
@@ -152,7 +156,8 @@ public final class CobbleDynamicTableFactory implements DynamicTableSinkFactory 
                         sinkUseManagedMemoryAllocator,
                         sinkWriterBufferMemory.getBytes(),
                         keyFields,
-                        valueFields);
+                        valueFields,
+                        storageOptions);
         return new CobbleDynamicTableSink(config, context.getObjectIdentifier().asSummaryString());
     }
 
@@ -166,6 +171,15 @@ public final class CobbleDynamicTableFactory implements DynamicTableSinkFactory 
                             + " with logical type "
                             + field.getType(),
                     e);
+        }
+    }
+
+    private static CobbleConnectorStorageOptions parseStorageOptions(
+            Map<String, String> tableOptions) {
+        try {
+            return CobbleConnectorStorageOptions.from(tableOptions);
+        } catch (IllegalArgumentException e) {
+            throw new ValidationException(e.getMessage(), e);
         }
     }
 
