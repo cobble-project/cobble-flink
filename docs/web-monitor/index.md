@@ -73,6 +73,8 @@ Useful options:
 --port 8088
 --checkpoint file:///path/to/checkpoints-or-cobble-table
 --flink-conf /path/to/flink/conf
+--storage-options-file /path/to/storage.properties
+--storage-option s3.region=us-east-1
 --total-buckets 32768
 --inspect-default-limit 100
 --inspect-max-limit 1000
@@ -112,20 +114,35 @@ A custom serializer may need both the job jar and its dependency jars.
 Only load jars from trusted sources. The monitor may load classes from them
 while reading state.
 
-## Remote Filesystems
+## Remote Storage
 
-Pass `--flink-conf` when the datasource is on a filesystem configured through
-Flink:
+Set `--checkpoint` to the remote datasource URI. Pass `--flink-conf` when the
+cluster already contains the required storage configuration. Additional access
+options can be placed in a Java properties file:
+
+```properties
+s3.endpoint=http://127.0.0.1:9000
+s3.access-key=<access-key>
+s3.secret-key=<secret-key>
+s3.path.style.access=true
+s3.region=us-east-1
+```
 
 ```bash
 java -jar cobble-flink-monitor/target/cobble-flink-monitor-*.jar \
   --flink-conf "$FLINK_HOME/conf" \
-  --checkpoint s3://bucket/path/to/checkpoints
+  --storage-options-file /path/to/storage.properties \
+  --storage-option s3.region=us-east-1 \
+  --checkpoint s3://bucket/path/to/table
 ```
 
-The monitor initializes Flink filesystems before it scans the datasource and
-passes the relevant storage configuration to Cobble readers. Use this for S3,
-OSS, Azure, GCS, HDFS, and compatible filesystems.
+`--storage-option KEY=VALUE` is repeatable, overrides file values, and uses the
+last CLI value. These settings apply to the initial path and to datasource paths
+opened later in the UI. For another supported filesystem URI, use
+`storage.option.<provider-key>`. Explicit file or CLI options take precedence;
+when they are omitted, the monitor uses the filesystem configuration loaded by
+`--flink-conf`. Keep credentials out of datasource URIs and replace placeholders
+through deployment templates or secret management.
 
 ## Datasource Page
 

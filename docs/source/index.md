@@ -156,6 +156,40 @@ LEFT JOIN cobble_source FOR SYSTEM_TIME AS OF o.pt AS d
 ON o.id = d.id;
 ```
 
+### Read from remote storage
+
+Set `path` to the table URI and provide any required access options in the
+table definition. Use the same options that were used by the Cobble sink. Keep
+credentials out of the URI:
+
+```sql
+CREATE TABLE cobble_source (
+  id BIGINT,
+  name STRING,
+  score INT,
+  PRIMARY KEY (id) NOT ENFORCED
+) WITH (
+  'connector' = 'cobble',
+  'source.kind' = 'sink',
+  'path' = 's3://analytics/cobble/users',
+  's3.endpoint' = 'https://s3.example.com',
+  's3.access-key' = '<access-key>',
+  's3.secret-key' = '<secret-key>',
+  's3.path.style.access' = 'true',
+  's3.region' = 'us-east-1'
+);
+```
+
+The aliases `s3.access.key` and `s3.secret.key` are also accepted. Explicit
+access and secret keys must be supplied together. When a custom endpoint is set
+without a region, the region defaults to `us-east-1`.
+
+For another supported filesystem URI, use
+`storage.option.<provider-key>`. Explicit table options take precedence; when
+they are omitted, Cobble uses the filesystem configuration already available to
+the Flink cluster. Replace credential placeholders through deployment templates
+or secret management.
+
 ## Read Cobble State
 
 State sources read keyed state from a Flink checkpoint. The `path` points to the
@@ -311,6 +345,10 @@ This section lists the main configuration keys for the Cobble source.
 | `state.operator-id` | inferred when possible | Cobble operator id to read when `source.kind = 'state'`. |
 | `state.kind` | inferred from metadata | Optional state-kind validation hint. |
 | `raw.columns` | none | Comma-separated column indexes to read when `source.kind = 'raw'` (e.g. `0,1`). Required; `all` is not supported yet. |
+
+`storage.option.<provider-key>` sets a filesystem option for a sink-table or
+raw-table root. Flink state checkpoint sources do not accept connector-scoped
+storage options; configure their filesystem through the Flink cluster.
 
 ## Metrics
 
