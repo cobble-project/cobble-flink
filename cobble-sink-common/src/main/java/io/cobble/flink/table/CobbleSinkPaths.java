@@ -13,6 +13,7 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -92,16 +93,17 @@ final class CobbleSinkPaths {
         Config.VolumeDescriptor localVolume = new Config.VolumeDescriptor();
         localVolume.baseDir = localDir.getAbsolutePath();
         localVolume.kinds =
-                Arrays.asList(
-                        Config.VolumeUsageKind.PRIMARY_DATA_PRIORITY_HIGH,
-                        Config.VolumeUsageKind.META);
+                Collections.singletonList(Config.VolumeUsageKind.PRIMARY_DATA_PRIORITY_HIGH);
         dbConfig.addVolume(localVolume);
 
-        Config.VolumeDescriptor sharedSnapshotVolume = new Config.VolumeDescriptor();
-        sharedSnapshotVolume.baseDir = config.pathUri;
-        sharedSnapshotVolume.kinds = Arrays.asList(Config.VolumeUsageKind.SNAPSHOT);
-        config.storageOptions.applyTo(sharedSnapshotVolume);
-        dbConfig.addVolume(sharedSnapshotVolume);
+        // Snapshot manifests are metadata. Keep META with SNAPSHOT so a remote table contains the
+        // complete shard snapshot, while active writer data can remain in local staging.
+        Config.VolumeDescriptor tableVolume = new Config.VolumeDescriptor();
+        tableVolume.baseDir = config.pathUri;
+        tableVolume.kinds =
+                Arrays.asList(Config.VolumeUsageKind.META, Config.VolumeUsageKind.SNAPSHOT);
+        config.storageOptions.applyTo(tableVolume);
+        dbConfig.addVolume(tableVolume);
         return dbConfig;
     }
 

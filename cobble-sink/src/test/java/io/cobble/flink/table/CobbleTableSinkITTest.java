@@ -51,6 +51,8 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Duration;
 import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -127,10 +129,10 @@ class CobbleTableSinkITTest {
                         2,
                         true,
                         16L * 1024L * 1024L,
-                        java.util.Collections.singletonList(
+                        Collections.singletonList(
                                 new CobbleDynamicTableSink.SerializableField(
                                         "id", "BIGINT", 0, -1)),
-                        java.util.Arrays.asList(
+                        Arrays.asList(
                                 new CobbleDynamicTableSink.SerializableField(
                                         "name", "VARCHAR(2147483647)", 1, 0),
                                 new CobbleDynamicTableSink.SerializableField(
@@ -211,10 +213,10 @@ class CobbleTableSinkITTest {
                         2,
                         false,
                         256L * 1024L * 1024L,
-                        java.util.Collections.singletonList(
+                        Collections.singletonList(
                                 new CobbleDynamicTableSink.SerializableField(
                                         "id", "BIGINT", 0, -1)),
-                        java.util.Arrays.asList(
+                        Arrays.asList(
                                 new CobbleDynamicTableSink.SerializableField(
                                         "name", "VARCHAR(2147483647)", 1, 0),
                                 new CobbleDynamicTableSink.SerializableField(
@@ -274,10 +276,10 @@ class CobbleTableSinkITTest {
                         2,
                         true,
                         32L * 1024L * 1024L,
-                        java.util.Collections.singletonList(
+                        Collections.singletonList(
                                 new CobbleDynamicTableSink.SerializableField(
                                         "id", "BIGINT", 0, -1)),
-                        java.util.Collections.singletonList(
+                        Collections.singletonList(
                                 new CobbleDynamicTableSink.SerializableField(
                                         "name", "VARCHAR(2147483647)", 1, 0)));
 
@@ -290,7 +292,7 @@ class CobbleTableSinkITTest {
     }
 
     @Test
-    void remoteWriterAndCoordinatorUseScopedVolumesAndLocalStaging() throws Exception {
+    void remoteWriterStoresShardMetadataAndSnapshotsInTableStorage() throws Exception {
         Map<String, String> values = new HashMap<>();
         values.put("storage.option.endpoint", "https://oss.example.com");
         values.put("storage.option.access_key_id", "oss-access");
@@ -303,10 +305,10 @@ class CobbleTableSinkITTest {
                         2,
                         false,
                         1024L * 1024L,
-                        java.util.Collections.singletonList(
+                        Collections.singletonList(
                                 new CobbleDynamicTableSink.SerializableField(
                                         "id", "BIGINT", 0, -1)),
-                        java.util.Collections.singletonList(
+                        Collections.singletonList(
                                 new CobbleDynamicTableSink.SerializableField(
                                         "name", "STRING", 1, 0)),
                         CobbleConnectorStorageOptions.from(values));
@@ -317,12 +319,21 @@ class CobbleTableSinkITTest {
 
         Config writerConfig = CobbleSinkPaths.createWriterConfig(config, 1);
         assertEquals(writerDir.getAbsolutePath(), writerConfig.volumes.get(0).baseDir);
+        assertEquals(
+                Collections.singletonList(Config.VolumeUsageKind.PRIMARY_DATA_PRIORITY_HIGH),
+                writerConfig.volumes.get(0).kinds);
         assertRemoteVolume(writerConfig.volumes.get(1));
+        assertEquals(
+                Arrays.asList(Config.VolumeUsageKind.META, Config.VolumeUsageKind.SNAPSHOT),
+                writerConfig.volumes.get(1).kinds);
         assertEquals(2, writerConfig.volumes.size());
 
         Config coordinatorConfig = CobbleSinkPaths.createCoordinatorConfig(config);
         assertEquals(1, coordinatorConfig.volumes.size());
         assertRemoteVolume(coordinatorConfig.volumes.get(0));
+        assertEquals(
+                Arrays.asList(Config.VolumeUsageKind.META, Config.VolumeUsageKind.SNAPSHOT),
+                coordinatorConfig.volumes.get(0).kinds);
     }
 
     @Test
@@ -389,17 +400,13 @@ class CobbleTableSinkITTest {
                         IOException.class,
                         () ->
                                 CobbleSinkPaths.resolveEndOfInputSnapshots(
-                                        config,
-                                        java.util.Arrays.asList(first, duplicate),
-                                        new HashMap<>()));
+                                        config, Arrays.asList(first, duplicate), new HashMap<>()));
         IOException missingError =
                 assertThrows(
                         IOException.class,
                         () ->
                                 CobbleSinkPaths.resolveEndOfInputSnapshots(
-                                        config,
-                                        java.util.Collections.singletonList(first),
-                                        new HashMap<>()));
+                                        config, Collections.singletonList(first), new HashMap<>()));
 
         assertTrue(duplicateError.getMessage().contains("Duplicate"));
         assertTrue(missingError.getMessage().contains("subtask 1"));
@@ -483,9 +490,9 @@ class CobbleTableSinkITTest {
                 1,
                 false,
                 1024L * 1024L,
-                java.util.Collections.singletonList(
+                Collections.singletonList(
                         new CobbleDynamicTableSink.SerializableField("id", "BIGINT", 0, -1)),
-                java.util.Arrays.asList(
+                Arrays.asList(
                         new CobbleDynamicTableSink.SerializableField("name", "STRING", 1, 0),
                         new CobbleDynamicTableSink.SerializableField("score", "INT", 2, 1)));
     }
@@ -500,9 +507,9 @@ class CobbleTableSinkITTest {
                 2,
                 false,
                 1024L * 1024L,
-                java.util.Collections.singletonList(
+                Collections.singletonList(
                         new CobbleDynamicTableSink.SerializableField("id", "BIGINT", 0, -1)),
-                java.util.Collections.singletonList(
+                Collections.singletonList(
                         new CobbleDynamicTableSink.SerializableField("name", "STRING", 1, 0)),
                 CobbleConnectorStorageOptions.from(values));
     }
@@ -582,10 +589,10 @@ class CobbleTableSinkITTest {
                         2,
                         false,
                         256L * 1024L * 1024L,
-                        java.util.Collections.singletonList(
+                        Collections.singletonList(
                                 new CobbleDynamicTableSink.SerializableField(
                                         "id", "BIGINT", 0, -1)),
-                        java.util.Arrays.asList(
+                        Arrays.asList(
                                 new CobbleDynamicTableSink.SerializableField(
                                         "name", "VARCHAR(2147483647)", 1, 0),
                                 new CobbleDynamicTableSink.SerializableField(
@@ -707,15 +714,14 @@ class CobbleTableSinkITTest {
         Config.VolumeDescriptor volume = new Config.VolumeDescriptor();
         volume.baseDir = restoreDir.toAbsolutePath().toString();
         volume.kinds =
-                java.util.Arrays.asList(
+                Arrays.asList(
                         Config.VolumeUsageKind.PRIMARY_DATA_PRIORITY_HIGH,
                         Config.VolumeUsageKind.META);
         config.addVolume(volume);
         Config.VolumeDescriptor writerSnapshotVolume = new Config.VolumeDescriptor();
         writerSnapshotVolume.baseDir =
                 CobbleSinkPaths.tableRootPath(sinkConfig).toPath().toAbsolutePath().toString();
-        writerSnapshotVolume.kinds =
-                java.util.Collections.singletonList(Config.VolumeUsageKind.SNAPSHOT);
+        writerSnapshotVolume.kinds = Collections.singletonList(Config.VolumeUsageKind.SNAPSHOT);
         config.addVolume(writerSnapshotVolume);
         config.governanceMode = Config.GovernanceMode.NOOP;
         config.logConsole = Boolean.FALSE;
