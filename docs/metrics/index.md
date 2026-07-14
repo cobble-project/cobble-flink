@@ -6,9 +6,10 @@ nav_order: 9
 # Metrics
 
 Cobble Flink registers metrics automatically for state backends, sources,
-lookups, and sink writers. No additional option is required. Cobble-specific
-metrics use the `cobble.` prefix and appear in the corresponding Flink operator
-metric group.
+lookups, and sink writers. No additional option is required. All metrics are
+registered under the corresponding Flink operator metric group. This means
+they carry Flink's normal job, task, operator, subtask, and attempt scope.
+Cobble-specific metrics use the `cobble.` prefix in that same group.
 
 Metrics belong to one subtask attempt. Counters start again when Flink creates a
 new attempt after a restart or rescale. Aggregate across subtasks in your metric
@@ -50,10 +51,17 @@ and standard deviation are unavailable.
 
 ## Source Scan
 
-Source readers increment Flink's standard `numRecordsIn` once per emitted SQL
-row. `numBytesIn` counts each fetched entry once: its raw key plus all non-null
-raw columns. One ListState entry can emit multiple rows, but its bytes are
-counted once. Decode or emission failures increment `numRecordsInErrors`.
+Source readers expose these standard Flink source metrics:
+
+| Metric | Type | Meaning |
+| --- | --- | --- |
+| `numRecordsIn` | Counter | SQL rows emitted by the source reader. |
+| `numBytesIn` | Counter | Raw key and column bytes fetched from Cobble. |
+| `numRecordsInErrors` | Counter | Rows that failed during decoding or emission. |
+
+`numRecordsIn` increases once per emitted SQL row. `numBytesIn` counts each
+fetched entry once: its raw key plus all non-null raw columns. One ListState
+entry can emit multiple rows, but its bytes are counted once.
 
 The following Cobble counters use the same per-entry boundary:
 
@@ -78,11 +86,20 @@ snapshots, keys, and state column families are misses.
 
 ## Sink
 
-Sink writers use Flink's standard records-sent, bytes-sent, and send-error
-counters. Successful `INSERT`, `UPDATE_AFTER`, and `DELETE` mutations count one
-record; `UPDATE_BEFORE` is ignored. Upsert bytes include the encoded key and
-non-null values. Delete bytes include the encoded key. Encoding, ownership,
-unsupported row-kind, and database mutation failures count one send error.
+Sink writers expose these standard Flink sink metrics:
+
+| Metric | Type | Meaning |
+| --- | --- | --- |
+| `numRecordsSend` | Counter | Successful Cobble mutations sent by the sink writer. |
+| `numBytesSend` | Counter | Encoded key and value bytes written by successful mutations. |
+| `numRecordsSendErrors` | Counter | Mutations that failed before completing successfully. |
+| `numRecordsOut` | Counter | Flink operator I/O alias of `numRecordsSend`. |
+| `numBytesOut` | Counter | Flink operator I/O alias of `numBytesSend`. |
+
+Successful `INSERT`, `UPDATE_AFTER`, and `DELETE` mutations count one record;
+`UPDATE_BEFORE` is ignored. Upsert bytes include the encoded key and non-null
+values. Delete bytes include the encoded key. Encoding, ownership, unsupported
+row-kind, and database mutation failures count one send error.
 
 Sink writers also expose the [storage metrics](#storage-and-state-backend) for
 their Cobble database.
