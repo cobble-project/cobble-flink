@@ -1,5 +1,7 @@
 package io.cobble.flink.table;
 
+import io.cobble.flink.common.CobbleConnectorStorageOptions;
+
 import org.apache.flink.api.connector.source.Boundedness;
 import org.apache.flink.table.api.ValidationException;
 import org.apache.flink.table.connector.ChangelogMode;
@@ -86,6 +88,7 @@ final class CobbleDynamicTableSource implements ScanTableSource, LookupTableSour
         private static final long serialVersionUID = 1L;
 
         final String pathUri;
+        final CobbleConnectorStorageOptions storageOptions;
         final int bucketCount;
         final String scanCheckpointId;
         final String scanMode;
@@ -103,7 +106,30 @@ final class CobbleDynamicTableSource implements ScanTableSource, LookupTableSour
                 long sourceBlockCacheMemoryBytes,
                 List<SerializableField> keyFields,
                 List<SerializableField> valueFields) {
+            this(
+                    pathUri,
+                    bucketCount,
+                    scanCheckpointId,
+                    scanMode,
+                    pollIntervalMillis,
+                    sourceBlockCacheMemoryBytes,
+                    keyFields,
+                    valueFields,
+                    CobbleConnectorStorageOptions.empty());
+        }
+
+        SerializableConfig(
+                String pathUri,
+                int bucketCount,
+                String scanCheckpointId,
+                String scanMode,
+                long pollIntervalMillis,
+                long sourceBlockCacheMemoryBytes,
+                List<SerializableField> keyFields,
+                List<SerializableField> valueFields,
+                CobbleConnectorStorageOptions storageOptions) {
             this.pathUri = pathUri;
+            this.storageOptions = storageOptions;
             this.bucketCount = bucketCount;
             this.scanCheckpointId = scanCheckpointId;
             this.scanMode = scanMode;
@@ -122,12 +148,18 @@ final class CobbleDynamicTableSource implements ScanTableSource, LookupTableSour
                     pollIntervalMillis,
                     sourceBlockCacheMemoryBytes,
                     keyFields,
-                    valueFields);
+                    valueFields,
+                    storageOptions);
         }
 
         @Override
         public String pathUri() {
             return pathUri;
+        }
+
+        @Override
+        public CobbleConnectorStorageOptions storageOptions() {
+            return storageOptions;
         }
 
         @Override

@@ -1,6 +1,6 @@
 package io.cobble.flink.monitor;
 
-import io.cobble.flink.common.CobbleFlinkFileSystems;
+import io.cobble.flink.common.CobbleLoader;
 
 import org.apache.flink.configuration.Configuration;
 import org.apache.flink.configuration.GlobalConfiguration;
@@ -21,7 +21,7 @@ final class FlinkMonitorFileSystems {
             flinkConfiguration = GlobalConfiguration.loadConfiguration(configDirectory);
         }
         FileSystem.initialize(flinkConfiguration);
-        CobbleFlinkFileSystems.ensureRegistered();
+        CobbleLoader.ensureCobbleLoaded();
         return flinkConfiguration;
     }
 }

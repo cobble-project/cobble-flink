@@ -1,6 +1,7 @@
 package io.cobble.flink.table;
 
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -73,6 +74,52 @@ class CobbleSourceFactoryITTest {
         tableEnv.executeSql(sinkDdl("t_sink_auto", root, "auto"));
 
         assertDoesNotThrow(() -> tableEnv.explainSql("SELECT * FROM t_sink_auto"));
+    }
+
+    @Test
+    void sourceAcceptsStorageAliasesRedactsSecretsAndRejectsConflicts() throws Exception {
+        Path root = sinkRoot("sink-storage-options");
+        StreamTableEnvironment tableEnv = newTableEnv();
+        tableEnv.executeSql(
+                sinkDdl("t_source_storage", root, "sink")
+                        .replace(
+                                "'path' = '",
+                                "'s3.endpoint' = 'http://storage.example',"
+                                        + " 's3.access.key' = 'access',"
+                                        + " 's3.secret.key' = 'source-secret',"
+                                        + " 's3.path.style.access' = 'true',"
+                                        + " 'storage.option.root' = '/table',"
+                                        + " 'path' = '"));
+
+        String plan = tableEnv.explainSql("SELECT * FROM t_source_storage");
+        assertFalse(plan.contains("source-secret"));
+
+        tableEnv.executeSql(
+                sinkDdl("t_source_conflict", root, "sink")
+                        .replace(
+                                "'path' = '",
+                                "'s3.access-key' = 'one',"
+                                        + " 's3.access.key' = 'two',"
+                                        + " 's3.secret-key' = 'secret',"
+                                        + " 'path' = '"));
+        Exception error =
+                assertThrows(
+                        Exception.class,
+                        () -> tableEnv.explainSql("SELECT * FROM t_source_conflict"));
+        assertTrue(messageChain(error).contains("Conflicting S3 access key options"));
+
+        tableEnv.executeSql(
+                sinkDdl("t_source_invalid_volume", root, "sink")
+                        .replace(
+                                "'path' = '",
+                                "'storage.volume.0.path' = 's3://bucket/cold-data',"
+                                        + " 'path' = '"));
+        Exception volumeError =
+                assertThrows(
+                        Exception.class,
+                        () -> tableEnv.explainSql("SELECT * FROM t_source_invalid_volume"));
+        assertTrue(messageChain(volumeError).contains("Unsupported options"));
+        assertTrue(messageChain(volumeError).contains("storage.volume.0.path"));
     }
 
     @Test
@@ -231,6 +278,31 @@ class CobbleSourceFactoryITTest {
                         + ")");
 
         assertDoesNotThrow(() -> tableEnv.explainSql("SELECT * FROM t_state_valid"));
+    }
+
+    @Test
+    void stateSourceRejectsConnectorStorageOptions() throws Exception {
+        Path root = stateCheckpointRoot("state-storage-options");
+        StreamTableEnvironment tableEnv = newTableEnv();
+        tableEnv.executeSql(
+                "CREATE TABLE t_state_storage_options ("
+                        + " `key` INT,"
+                        + " `value` INT"
+                        + ") WITH ("
+                        + " 'connector' = 'cobble',"
+                        + " 'path' = '"
+                        + escape(root)
+                        + "',"
+                        + " 'source.kind' = 'state',"
+                        + " 'state.name' = 'orders',"
+                        + " 'storage.option.endpoint' = 'https://storage.example'"
+                        + ")");
+
+        Exception error =
+                assertThrows(
+                        Exception.class,
+                        () -> tableEnv.explainSql("SELECT * FROM t_state_storage_options"));
+        assertTrue(messageChain(error).contains("not Flink state checkpoint sources"));
     }
 
     @Test

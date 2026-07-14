@@ -1,12 +1,17 @@
 package io.cobble.flink.monitor;
 
+import io.cobble.flink.common.CobbleConnectorStorageOptions;
+
 import org.apache.flink.configuration.Configuration;
 
 import java.io.File;
+import java.io.FileInputStream;
+import java.io.IOException;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Properties;
 
 final class ServerConfig {
     private static final int DEFAULT_PORT = 8088;
@@ -23,6 +28,8 @@ final class ServerConfig {
     String flinkConfPath;
     Configuration flinkConfiguration = new Configuration();
     List<String> userJars = new ArrayList<>();
+    CobbleConnectorStorageOptions storageOptions = CobbleConnectorStorageOptions.empty();
+    int storageOptionCount;
 
     private ServerConfig() {}
 
@@ -51,7 +58,48 @@ final class ServerConfig {
         }
         config.checkpointRoot = blankToNull(last(values, "checkpoint"));
         config.userJars = collectUserJars(values);
+        Map<String, String> storageValues =
+                loadStorageOptionsFile(last(values, "storage-options-file"));
+        for (String raw : values.getOrDefault("storage-option", new ArrayList<>())) {
+            addStorageOption(storageValues, raw);
+        }
+        try {
+            config.storageOptions = CobbleConnectorStorageOptions.fromStorageOptions(storageValues);
+        } catch (IllegalArgumentException e) {
+            throw new InputException(e.getMessage());
+        }
+        config.storageOptionCount = storageValues.size();
         return config;
+    }
+
+    private static Map<String, String> loadStorageOptionsFile(String path) {
+        Map<String, String> result = new LinkedHashMap<>();
+        String normalizedPath = blankToNull(path);
+        if (normalizedPath == null) {
+            return result;
+        }
+        Properties properties = new Properties();
+        try (FileInputStream input = new FileInputStream(normalizedPath)) {
+            properties.load(input);
+        } catch (IOException e) {
+            throw new InputException("failed to read --storage-options-file");
+        }
+        for (String name : properties.stringPropertyNames()) {
+            result.put(name, properties.getProperty(name));
+        }
+        return result;
+    }
+
+    private static void addStorageOption(Map<String, String> output, String raw) {
+        int separator = raw == null ? -1 : raw.indexOf('=');
+        if (separator <= 0) {
+            throw new InputException("--storage-option must use KEY=VALUE syntax");
+        }
+        String key = raw.substring(0, separator).trim();
+        if (key.isEmpty()) {
+            throw new InputException("--storage-option must contain a non-empty key");
+        }
+        output.put(key, raw.substring(separator + 1).trim());
     }
 
     private static List<String> collectUserJars(Map<String, List<String>> values) {
@@ -113,6 +161,8 @@ final class ServerConfig {
                         + "  --bind ADDRESS                 default 127.0.0.1\n"
                         + "  --port PORT                    default 8088\n"
                         + "  --flink-conf PATH              optional Flink conf dir or flink-conf.yaml\n"
+                        + "  --storage-options-file PATH    Java properties file with connector storage options\n"
+                        + "  --storage-option KEY=VALUE     connector storage option (repeatable; last wins)\n"
                         + "  --total-buckets N              default 32768\n"
                         + "  --inspect-default-limit N      default 100\n"
                         + "  --inspect-max-limit N          default 1000\n"

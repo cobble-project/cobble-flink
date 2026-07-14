@@ -1,5 +1,7 @@
 package io.cobble.flink.table;
 
+import io.cobble.flink.common.CobbleConnectorStorageOptions;
+import io.cobble.flink.common.CobbleMetadataFileIO;
 import io.cobble.flink.common.inspect.InspectSchemaRegistryLayout;
 import io.cobble.flink.common.inspect.SinkInspectSchemaStore;
 import io.cobble.flink.common.inspect.StateInspectSchemaStore;
@@ -15,8 +17,9 @@ import java.io.IOException;
 /**
  * Resolves a Cobble source path to a concrete {@link CobbleSourceKind} from its on-disk layout.
  *
- * <p>The detector performs a small, bounded probe using Flink {@link FileSystem} APIs (so remote
- * paths keep working later). It never scans recursively. Detection signals, in priority order:
+ * <p>The detector performs small, bounded probes. Table roots use connector-scoped metadata IO;
+ * state checkpoint roots use Flink {@link FileSystem}. It never scans recursively. Detection
+ * signals, in priority order:
  *
  * <ol>
  *   <li>A Flink checkpoint root: a direct child {@code chk-*} directory that contains a Flink
@@ -53,7 +56,7 @@ final class CobbleSourceKindDetector {
     private static final String COBBLE_MANIFEST_SUFFIX = "-MANIFEST";
 
     /** Raw layout signal observed at a path, before applying the requested kind. */
-    private enum Probe {
+    enum Probe {
         SINK,
         STATE_CHECKPOINT,
         STATE_OPERATOR,
@@ -76,31 +79,35 @@ final class CobbleSourceKindDetector {
      */
     static CobbleResolvedSource detect(
             String pathUri, CobbleSourceKind requestedKind, boolean sinkShapedSchema) {
-        Path root = new Path(pathUri);
-        FileSystem fs;
-        try {
-            fs = root.getFileSystem();
-        } catch (IOException e) {
-            throw new ValidationException(
-                    "Failed to open filesystem for Cobble source path "
-                            + pathUri
-                            + ": "
-                            + e.getMessage(),
-                    e);
+        return detect(
+                pathUri, requestedKind, sinkShapedSchema, CobbleConnectorStorageOptions.empty());
+    }
+
+    static CobbleResolvedSource detect(
+            String pathUri,
+            CobbleSourceKind requestedKind,
+            boolean sinkShapedSchema,
+            CobbleConnectorStorageOptions storageOptions) {
+        if (requestedKind == CobbleSourceKind.STATE) {
+            return resolveExplicitState(pathUri, probeStatePath(pathUri, true));
         }
 
-        boolean exists;
+        Probe probe;
         try {
-            exists = fs.exists(root);
-        } catch (IOException e) {
-            throw new ValidationException(
-                    "Failed to access Cobble source path " + pathUri + ": " + e.getMessage(), e);
+            probe = probeTableRoot(pathUri, storageOptions);
+        } catch (ValidationException tableFailure) {
+            if (requestedKind == CobbleSourceKind.AUTO
+                    && probeStatePath(pathUri, false) == Probe.STATE_CHECKPOINT) {
+                return resolveState(pathUri, StateSourceConfig.Layout.CHECKPOINT_ROOT);
+            }
+            throw tableFailure;
         }
-        if (!exists) {
-            throw new ValidationException("Cobble source path does not exist: " + pathUri);
+        if (probe == Probe.UNKNOWN) {
+            Probe stateProbe = probeStatePath(pathUri, false);
+            if (stateProbe == Probe.STATE_CHECKPOINT || stateProbe == Probe.STATE_OPERATOR) {
+                probe = stateProbe;
+            }
         }
-
-        Probe probe = probe(fs, root, pathUri);
 
         switch (requestedKind) {
             case SINK:
@@ -111,12 +118,7 @@ final class CobbleSourceKindDetector {
                 }
                 return CobbleResolvedSource.sink(sinkDiagnostics(pathUri));
             case STATE:
-                if (probe == Probe.SINK) {
-                    throw new ValidationException(
-                            "source.kind='state' was requested, but path appears to be a Cobble"
-                                    + " sink table.");
-                }
-                return resolveState(pathUri, layoutFor(probe));
+                throw new IllegalStateException("State source should have been resolved earlier.");
             case RAW:
                 if (probe == Probe.STATE_CHECKPOINT || probe == Probe.STATE_OPERATOR) {
                     throw new ValidationException(
@@ -136,6 +138,130 @@ final class CobbleSourceKindDetector {
             default:
                 throw new IllegalStateException("Unexpected source kind: " + requestedKind);
         }
+    }
+
+    private static Probe probeTableRoot(
+            String pathUri, CobbleConnectorStorageOptions storageOptions) {
+        try {
+            CobbleMetadataFileIO fileIO = CobbleMetadataFileIO.open(pathUri, storageOptions);
+            if (!fileIO.exists("")) {
+                throw new ValidationException("Cobble source path does not exist: " + pathUri);
+            }
+            int magic = inspectSchemaBlobMagic(fileIO);
+            if (magic == SinkInspectSchemaStore.MAGIC) {
+                return Probe.SINK;
+            }
+            if (magic == StateInspectSchemaStore.MAGIC) {
+                return Probe.STATE_OPERATOR;
+            }
+            if (fileIO.exists(SNAPSHOT + "/" + CURRENT) || fileIO.exists(WRITER_PATHS)) {
+                return Probe.AMBIGUOUS;
+            }
+            return Probe.UNKNOWN;
+        } catch (ValidationException e) {
+            throw e;
+        } catch (IOException e) {
+            throw new ValidationException("Failed to inspect Cobble table metadata.", e);
+        }
+    }
+
+    private static Probe probeStatePath(String pathUri, boolean strict) {
+        try {
+            Path root = new Path(pathUri);
+            FileSystem fileSystem = root.getFileSystem();
+            return probeStatePath(fileSystem, root, pathUri);
+        } catch (IOException | RuntimeException | LinkageError e) {
+            if (strict) {
+                throw new ValidationException(
+                        "Failed to access Flink filesystem for Cobble state checkpoint source.", e);
+            }
+            return Probe.UNKNOWN;
+        }
+    }
+
+    static Probe probeStatePath(FileSystem fileSystem, Path root, String pathUri) {
+        if (!exists(fileSystem, root, pathUri)) {
+            return Probe.UNKNOWN;
+        }
+        if (hasCheckpointLayout(fileSystem, root, pathUri)) {
+            return Probe.STATE_CHECKPOINT;
+        }
+        int magic = inspectSchemaBlobMagic(fileSystem, root, pathUri);
+        if (magic == StateInspectSchemaStore.MAGIC) {
+            return Probe.STATE_OPERATOR;
+        }
+        if (magic == SinkInspectSchemaStore.MAGIC) {
+            return Probe.SINK;
+        }
+        return Probe.UNKNOWN;
+    }
+
+    static CobbleResolvedSource resolveExplicitState(String pathUri, Probe stateProbe) {
+        if (stateProbe == Probe.STATE_CHECKPOINT) {
+            return resolveState(pathUri, StateSourceConfig.Layout.CHECKPOINT_ROOT);
+        }
+        if (stateProbe == Probe.SINK) {
+            throw new ValidationException(
+                    "source.kind='state' was requested, but path appears to be a Cobble sink"
+                            + " table.");
+        }
+        if (stateProbe == Probe.STATE_OPERATOR) {
+            return resolveState(pathUri, StateSourceConfig.Layout.OPERATOR_ROOT);
+        }
+        return resolveState(pathUri, StateSourceConfig.Layout.UNKNOWN);
+    }
+
+    private static int inspectSchemaBlobMagic(CobbleMetadataFileIO fileIO) throws IOException {
+        String blobsDir = INSPECT_SCHEMA + "/" + BLOBS;
+        for (String name : fileIO.list(blobsDir)) {
+            if (!name.endsWith(InspectSchemaRegistryLayout.BLOB_SUFFIX)) {
+                continue;
+            }
+            byte[] bytes = fileIO.read(blobsDir + "/" + name);
+            if (bytes.length < 4) {
+                return 0;
+            }
+            return ((bytes[0] & 0xFF) << 24)
+                    | ((bytes[1] & 0xFF) << 16)
+                    | ((bytes[2] & 0xFF) << 8)
+                    | (bytes[3] & 0xFF);
+        }
+        return 0;
+    }
+
+    private static int inspectSchemaBlobMagic(FileSystem fileSystem, Path root, String pathUri) {
+        Path blobsDir = new Path(new Path(root, INSPECT_SCHEMA), BLOBS);
+        FileStatus[] entries = listStatus(fileSystem, blobsDir, pathUri);
+        if (entries == null) {
+            return 0;
+        }
+        for (FileStatus entry : entries) {
+            if (entry.isDir()
+                    || !entry.getPath()
+                            .getName()
+                            .endsWith(InspectSchemaRegistryLayout.BLOB_SUFFIX)) {
+                continue;
+            }
+            byte[] bytes = new byte[4];
+            try (FSDataInputStream input = fileSystem.open(entry.getPath())) {
+                int offset = 0;
+                while (offset < bytes.length) {
+                    int read = input.read(bytes, offset, bytes.length - offset);
+                    if (read < 0) {
+                        return 0;
+                    }
+                    offset += read;
+                }
+            } catch (IOException e) {
+                throw new ValidationException(
+                        "Failed to read Cobble state inspect schema under " + pathUri + '.', e);
+            }
+            return ((bytes[0] & 0xFF) << 24)
+                    | ((bytes[1] & 0xFF) << 16)
+                    | ((bytes[2] & 0xFF) << 8)
+                    | (bytes[3] & 0xFF);
+        }
+        return 0;
     }
 
     private static CobbleResolvedSource resolveAuto(
@@ -172,17 +298,6 @@ final class CobbleSourceKindDetector {
             String pathUri, StateSourceConfig.Layout layout) {
         return CobbleResolvedSource.state(
                 new StateSourceConfig(pathUri, layout), stateDiagnostics(pathUri, layout));
-    }
-
-    private static StateSourceConfig.Layout layoutFor(Probe probe) {
-        switch (probe) {
-            case STATE_CHECKPOINT:
-                return StateSourceConfig.Layout.CHECKPOINT_ROOT;
-            case STATE_OPERATOR:
-                return StateSourceConfig.Layout.OPERATOR_ROOT;
-            default:
-                return StateSourceConfig.Layout.UNKNOWN;
-        }
     }
 
     private static String sinkDiagnostics(String pathUri) {
@@ -239,24 +354,6 @@ final class CobbleSourceKindDetector {
     //  Bounded filesystem probing
     // ------------------------------------------------------------------------------------------
 
-    private static Probe probe(FileSystem fs, Path root, String pathUri) {
-        if (hasCheckpointLayout(fs, root, pathUri)) {
-            return Probe.STATE_CHECKPOINT;
-        }
-        int magic = inspectSchemaBlobMagic(fs, root, pathUri);
-        if (magic == SinkInspectSchemaStore.MAGIC) {
-            return Probe.SINK;
-        }
-        if (magic == StateInspectSchemaStore.MAGIC) {
-            return Probe.STATE_OPERATOR;
-        }
-        if (exists(fs, new Path(new Path(root, SNAPSHOT), CURRENT), pathUri)
-                || exists(fs, new Path(root, WRITER_PATHS), pathUri)) {
-            return Probe.AMBIGUOUS;
-        }
-        return Probe.UNKNOWN;
-    }
-
     /**
      * True when {@code root} has a {@code chk-*} child holding {@code _metadata} and a manifest.
      */
@@ -300,70 +397,12 @@ final class CobbleSourceKindDetector {
         return false;
     }
 
-    /**
-     * Reads the 4-byte magic of the first inspect-schema blob under {@code
-     * <root>/inspect-schema/blobs}, or {@code 0} when no blob is present.
-     */
-    private static int inspectSchemaBlobMagic(FileSystem fs, Path root, String pathUri) {
-        Path blobsDir = new Path(new Path(root, INSPECT_SCHEMA), BLOBS);
-        FileStatus[] blobs = listStatus(fs, blobsDir, pathUri);
-        if (blobs == null) {
-            return 0;
-        }
-        for (FileStatus blob : blobs) {
-            if (blob.isDir()) {
-                continue;
-            }
-            if (!blob.getPath().getName().endsWith(InspectSchemaRegistryLayout.BLOB_SUFFIX)) {
-                continue;
-            }
-            return readMagic(fs, blob.getPath(), pathUri);
-        }
-        return 0;
-    }
-
-    private static int readMagic(FileSystem fs, Path file, String pathUri) {
-        try (FSDataInputStream input = fs.open(file)) {
-            byte[] magic = new byte[4];
-            int total = 0;
-            while (total < magic.length) {
-                int n = input.read(magic, total, magic.length - total);
-                if (n < 0) {
-                    break;
-                }
-                total += n;
-            }
-            if (total < 4) {
-                return 0;
-            }
-            return ((magic[0] & 0xFF) << 24)
-                    | ((magic[1] & 0xFF) << 16)
-                    | ((magic[2] & 0xFF) << 8)
-                    | (magic[3] & 0xFF);
-        } catch (IOException e) {
-            throw new ValidationException(
-                    "Failed to read Cobble inspect schema blob "
-                            + file
-                            + " under "
-                            + pathUri
-                            + ": "
-                            + e.getMessage(),
-                    e);
-        }
-    }
-
     private static boolean exists(FileSystem fs, Path path, String pathUri) {
         try {
             return fs.exists(path);
         } catch (IOException e) {
             throw new ValidationException(
-                    "Failed to access "
-                            + path
-                            + " under Cobble source path "
-                            + pathUri
-                            + ": "
-                            + e.getMessage(),
-                    e);
+                    "Failed to access Cobble state checkpoint metadata under " + pathUri + '.', e);
         }
     }
 

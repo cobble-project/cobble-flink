@@ -6,6 +6,7 @@ import io.cobble.ReadOptions;
 import io.cobble.Reader;
 import io.cobble.ScanOptions;
 import io.cobble.ShardSnapshot;
+import io.cobble.flink.common.CobbleLoader;
 import io.cobble.flink.common.inspect.InspectSchemaRegistryLayout;
 import io.cobble.flink.common.inspect.StateInspectSchema;
 import io.cobble.flink.common.inspect.StateInspectSchemaStore;
@@ -147,6 +148,7 @@ final class CobbleStateSourceRuntime {
     }
 
     static ReaderHandle openReader(StateSourceConfig config, long checkpointId) throws IOException {
+        CobbleLoader.ensureCobbleLoaded();
         Path checkpointDir = checkpointDir(config.pathUri(), checkpointId);
         Path operatorSnapshotDir = operatorSnapshotDir(config.pathUri(), config.operatorId());
         File unifiedVolume =

@@ -18,17 +18,17 @@ import java.nio.ByteBuffer;
 import java.nio.channels.ClosedChannelException;
 import java.util.Arrays;
 import java.util.Objects;
+import java.util.ServiceConfigurationError;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
-import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
  * Registers a process-level Cobble filesystem fallback that delegates unknown/inaccessible schemes
  * to Flink's filesystem registry.
  */
 public final class CobbleFlinkFileSystems {
-    private static final AtomicBoolean REGISTERED = new AtomicBoolean(false);
-    private static final AtomicBoolean SHUTDOWN_HOOK_REGISTERED = new AtomicBoolean(false);
+    private static boolean registered;
+    private static final CustomFileSystemRegistry REGISTRY = new FlinkRegistry();
     private static final ExecutorService DELETE_EXECUTOR =
             Executors.newSingleThreadExecutor(
                     runnable -> {
@@ -39,54 +39,40 @@ public final class CobbleFlinkFileSystems {
 
     private CobbleFlinkFileSystems() {}
 
-    public static void ensureRegistered() {
-        registerShutdownHook();
-        if (REGISTERED.compareAndSet(false, true)) {
-            ProcessFileSystems.registerCustomRegistry(new FlinkRegistry());
+    public static synchronized void ensureRegistered() {
+        if (!registered) {
+            ProcessFileSystems.registerCustomRegistry(REGISTRY);
+            registered = true;
         }
     }
 
-    private static void registerShutdownHook() {
-        if (SHUTDOWN_HOOK_REGISTERED.compareAndSet(false, true)) {
-            Runtime.getRuntime()
-                    .addShutdownHook(
-                            new Thread(
-                                    () -> {
-                                        // JVM is exiting: best-effort cleanup only, never block
-                                        // exit.
-                                        try {
-                                            ProcessFileSystems.clearCustomRegistry();
-                                        } catch (Throwable ignored) {
-                                        }
-                                        try {
-                                            DELETE_EXECUTOR.shutdownNow();
-                                        } catch (Throwable ignored) {
-                                        }
-                                    },
-                                    "cobble-flink-fs-shutdown"));
+    static CustomFileSystem tryResolve(ProcessFileSystemRequest request) {
+        String baseDir = request.normalizedBaseDir();
+        if (baseDir == null || baseDir.trim().isEmpty()) {
+            baseDir = request.baseDir();
+        }
+        if (baseDir == null || baseDir.trim().isEmpty()) {
+            return null;
+        }
+        try {
+            CobbleConnectorStorageOptions storageOptions =
+                    CobbleConnectorStorageOptions.fromVolume(
+                            request.accessId(), request.secretKey(), request.customOptions());
+            Path rootPath = new Path(baseDir);
+            FileSystem fileSystem = CobbleFlinkFileSystemResolver.resolve(baseDir, storageOptions);
+            return new FlinkCustomFileSystem(fileSystem, rootPath);
+        } catch (IOException
+                | RuntimeException
+                | LinkageError
+                | ServiceConfigurationError ignored) {
+            return null;
         }
     }
 
     private static final class FlinkRegistry implements CustomFileSystemRegistry {
         @Override
         public CustomFileSystem tryResolve(ProcessFileSystemRequest request) {
-            String baseDir =
-                    request.normalizedBaseDir() != null
-                            ? request.normalizedBaseDir()
-                            : request.baseDir();
-            if (baseDir == null || baseDir.trim().isEmpty()) {
-                return null;
-            }
-            try {
-                Path rootPath = new Path(baseDir);
-                FileSystem fileSystem = rootPath.getFileSystem();
-                // Probe once so auth/permission errors happen here and not deep in native read
-                // path.
-                fileSystem.exists(rootPath);
-                return new FlinkCustomFileSystem(fileSystem, rootPath);
-            } catch (Throwable ignored) {
-                return null;
-            }
+            return CobbleFlinkFileSystems.tryResolve(request);
         }
     }
 
@@ -326,24 +312,11 @@ public final class CobbleFlinkFileSystems {
                 return;
             }
             closed = true;
-            try {
-                stream.flush();
+            try (FSDataOutputStream output = stream) {
+                output.flush();
+                output.sync();
             } catch (ClosedChannelException ignored) {
-                return;
-            } catch (IOException e) {
-                throw new IllegalStateException("Failed to flush output stream", e);
-            }
-            try {
-                stream.sync();
-            } catch (ClosedChannelException ignored) {
-                return;
-            } catch (IOException e) {
-                throw new IllegalStateException("Failed to sync output stream", e);
-            }
-            try {
-                stream.close();
-            } catch (ClosedChannelException ignored) {
-                // Already closed by owner side; treat as idempotent close.
+                // Already closed by the owner; treat close as idempotent.
             } catch (IOException e) {
                 throw new IllegalStateException("Failed to close output stream", e);
             }

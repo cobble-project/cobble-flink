@@ -177,6 +177,27 @@ class CobbleSourceKindDetectorTest {
     }
 
     @Test
+    void explicitRemoteStateOperatorUsesFlinkFilesystemProbe() throws Exception {
+        Path physicalRoot = stateOperatorRoot("remote-state-operator-probe");
+        org.apache.flink.core.fs.Path flinkRoot =
+                new org.apache.flink.core.fs.Path(physicalRoot.toUri());
+        CobbleSourceKindDetector.Probe probe =
+                CobbleSourceKindDetector.probeStatePath(
+                        flinkRoot.getFileSystem(),
+                        flinkRoot,
+                        "hdfs://namenode:8020/checkpoints/operator");
+
+        CobbleResolvedSource resolved =
+                CobbleSourceKindDetector.resolveExplicitState(
+                        "hdfs://namenode:8020/checkpoints/operator", probe);
+
+        assertEquals(CobbleSourceKindDetector.Probe.STATE_OPERATOR, probe);
+        assertEquals(CobbleSourceKind.STATE, resolved.kind());
+        assertEquals(StateSourceConfig.Layout.OPERATOR_ROOT, resolved.stateConfig().layout());
+        assertEquals("hdfs://namenode:8020/checkpoints/operator", resolved.stateConfig().pathUri());
+    }
+
+    @Test
     void explicitSinkAcceptsSinkRoot() throws Exception {
         Path root = sinkRoot("explicit-sink-on-sink");
 

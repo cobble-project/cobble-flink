@@ -6,6 +6,7 @@ import io.cobble.GlobalSnapshot;
 import io.cobble.ScanPlan;
 import io.cobble.ScanSplit;
 import io.cobble.ShardSnapshot;
+import io.cobble.flink.common.CobbleLoader;
 
 import java.io.IOException;
 import java.util.ArrayList;
@@ -21,6 +22,7 @@ final class CobbleSourceRuntime {
     private CobbleSourceRuntime() {}
 
     static GlobalSnapshot loadConfiguredSnapshot(CobbleTableScanConfig config) throws IOException {
+        CobbleLoader.ensureCobbleLoaded();
         if ("latest".equals(config.scanCheckpointId())) {
             return loadLatestSnapshot(config);
         }
@@ -38,6 +40,7 @@ final class CobbleSourceRuntime {
 
     static GlobalSnapshot loadSnapshotById(CobbleTableScanConfig config, long snapshotId)
             throws IOException {
+        CobbleLoader.ensureCobbleLoaded();
         try (DbCoordinator coordinator = DbCoordinator.open(createCoordinatorConfig(config))) {
             GlobalSnapshot snapshot = coordinator.getGlobalSnapshot(snapshotId);
             if (snapshot == null) {
@@ -177,6 +180,7 @@ final class CobbleSourceRuntime {
                         Config.VolumeUsageKind.PRIMARY_DATA_PRIORITY_HIGH,
                         Config.VolumeUsageKind.META,
                         Config.VolumeUsageKind.SNAPSHOT);
+        config.storageOptions().applyTo(volume);
         scanConfig.addVolume(volume);
         return scanConfig;
     }
@@ -202,12 +206,14 @@ final class CobbleSourceRuntime {
                         Config.VolumeUsageKind.PRIMARY_DATA_PRIORITY_HIGH,
                         Config.VolumeUsageKind.META,
                         Config.VolumeUsageKind.SNAPSHOT);
+        config.storageOptions.applyTo(volume);
         readerConfig.addVolume(volume);
         return readerConfig;
     }
 
     private static GlobalSnapshot loadLatestSnapshot(CobbleTableScanConfig config)
             throws IOException {
+        CobbleLoader.ensureCobbleLoaded();
         try (DbCoordinator coordinator = DbCoordinator.open(createCoordinatorConfig(config))) {
             GlobalSnapshot snapshot = coordinator.loadCurrentGlobalSnapshot();
             if (snapshot != null) {
@@ -243,7 +249,7 @@ final class CobbleSourceRuntime {
         return snapshot.totalBuckets;
     }
 
-    private static Config createCoordinatorConfig(CobbleTableScanConfig config) {
+    static Config createCoordinatorConfig(CobbleTableScanConfig config) {
         Config coordinatorConfig = new Config();
         if (config.hasConfiguredBucketCount()) {
             coordinatorConfig.totalBuckets(config.bucketCount());
@@ -254,6 +260,7 @@ final class CobbleSourceRuntime {
         Config.VolumeDescriptor volume = new Config.VolumeDescriptor();
         volume.baseDir = config.pathUri();
         volume.kinds = Arrays.asList(Config.VolumeUsageKind.META, Config.VolumeUsageKind.SNAPSHOT);
+        config.storageOptions().applyTo(volume);
         coordinatorConfig.addVolume(volume);
         return coordinatorConfig;
     }

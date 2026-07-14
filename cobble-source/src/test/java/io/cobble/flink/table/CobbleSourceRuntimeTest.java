@@ -7,12 +7,15 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import io.cobble.Config;
 import io.cobble.GlobalSnapshot;
 import io.cobble.ShardSnapshot;
+import io.cobble.flink.common.CobbleConnectorStorageOptions;
 
 import org.junit.jupiter.api.Test;
 
 import java.util.Arrays;
 import java.util.Collections;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 
 class CobbleSourceRuntimeTest {
 
@@ -74,6 +77,35 @@ class CobbleSourceRuntimeTest {
         assertEquals(256 * 1024 * 1024, lookupConfig.reader.blockCacheSize.intValue());
     }
 
+    @Test
+    void propagatesGenericStorageOptionsToScanLookupAndCoordinatorVolumes() throws Exception {
+        Map<String, String> values = new HashMap<>();
+        values.put("storage.option.endpoint", "https://oss.example.com");
+        values.put("storage.option.access_key_id", "oss-access");
+        values.put("storage.option.access_key_secret", "oss-secret");
+        CobbleDynamicTableSource.SerializableConfig config =
+                new CobbleDynamicTableSource.SerializableConfig(
+                        "oss://bucket/table",
+                        4,
+                        "1",
+                        "batch",
+                        1000L,
+                        0L,
+                        Collections.emptyList(),
+                        Collections.emptyList(),
+                        CobbleConnectorStorageOptions.from(values));
+
+        Config scan = CobbleSourceRuntime.createSourceScanConfig(config, 4);
+        Config lookup = CobbleSourceRuntime.createLookupReaderConfig(config, 4);
+        Config coordinator = CobbleSourceRuntime.createCoordinatorConfig(config);
+        assertRemoteVolume(scan.volumes.get(0));
+        assertRemoteVolume(lookup.volumes.get(0));
+        assertRemoteVolume(coordinator.volumes.get(0));
+        assertEquals(1, scan.volumes.size());
+        assertEquals(1, lookup.volumes.size());
+        assertEquals(1, coordinator.volumes.size());
+    }
+
     private static CobbleDynamicTableSource.SerializableConfig baseConfig(int bucketCount) {
         return new CobbleDynamicTableSource.SerializableConfig(
                 "file:///tmp/cobble-source-runtime",
@@ -92,6 +124,13 @@ class CobbleSourceRuntimeTest {
         snapshot.totalBuckets = 4;
         snapshot.shardSnapshots = Arrays.asList(shard(0, 1), shard(2, 3));
         return snapshot;
+    }
+
+    private static void assertRemoteVolume(Config.VolumeDescriptor volume) {
+        assertEquals("oss://bucket/table", volume.baseDir);
+        assertEquals("https://oss.example.com", volume.customOptions.get("endpoint"));
+        assertEquals("oss-access", volume.customOptions.get("access_key_id"));
+        assertEquals("oss-secret", volume.customOptions.get("access_key_secret"));
     }
 
     private static ShardSnapshot shard(int startBucket, int endBucket) {

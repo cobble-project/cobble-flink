@@ -1,5 +1,6 @@
 package io.cobble.flink.table;
 
+import io.cobble.flink.common.CobbleConnectorStorageOptions;
 import io.cobble.flink.common.CobbleLoader;
 import io.cobble.flink.common.inspect.StateInspectExactLookupSupport;
 
@@ -55,6 +56,7 @@ public final class CobbleDynamicTableSourceFactory implements DynamicTableSource
         options.add(CobbleSourceTableOptions.STATE_OPERATOR_ID);
         options.add(CobbleSourceTableOptions.STATE_KIND);
         options.add(CobbleSourceTableOptions.RAW_COLUMNS);
+        CobbleConnectorStorageOptions.addFactoryOptions(options);
         return options;
     }
 
@@ -65,6 +67,8 @@ public final class CobbleDynamicTableSourceFactory implements DynamicTableSource
         helper.validate();
 
         ReadableConfig options = helper.getOptions();
+        CobbleConnectorStorageOptions storageOptions =
+                parseStorageOptions(context.getCatalogTable().getOptions());
         String pathUri = normalizePathToUri(options.get(CobbleSourceTableOptions.PATH));
         int bucketCount = options.getOptional(CobbleSourceTableOptions.BUCKET).orElse(-1);
         String checkpointId =
@@ -94,10 +98,20 @@ public final class CobbleDynamicTableSourceFactory implements DynamicTableSource
 
         CobbleSourceKind requestedKind =
                 CobbleSourceKind.fromUserOption(options.get(CobbleSourceTableOptions.SOURCE_KIND));
+        if (requestedKind == CobbleSourceKind.STATE && !storageOptions.isEmpty()) {
+            throw new ValidationException(
+                    "Connector-scoped remote storage options apply to Cobble sink-table and raw"
+                            + " table roots, not Flink state checkpoint sources.");
+        }
         CobbleResolvedSource resolvedSource =
                 CobbleSourceKindDetector.detect(
-                        pathUri, requestedKind, isSinkShaped(resolvedSchema));
+                        pathUri, requestedKind, isSinkShaped(resolvedSchema), storageOptions);
         if (resolvedSource.kind() == CobbleSourceKind.STATE) {
+            if (!storageOptions.isEmpty()) {
+                throw new ValidationException(
+                        "Connector-scoped remote storage options apply to Cobble sink-table and"
+                                + " raw table roots, not Flink state checkpoint sources.");
+            }
             RawSourceOptions.rejectRawOptionsForNonRaw(options);
             return createStateSource(
                     context,
@@ -120,6 +134,7 @@ public final class CobbleDynamicTableSourceFactory implements DynamicTableSource
                     scanMode,
                     bucketCount,
                     pollIntervalMillis,
+                    storageOptions,
                     resolvedSchema);
         }
 
@@ -136,7 +151,8 @@ public final class CobbleDynamicTableSourceFactory implements DynamicTableSource
                                         "The initial Cobble source requires a PRIMARY KEY."));
 
         SinkSourceResolvedSchema sinkSidecar =
-                SinkSourceSchemaResolver.resolve(pathUri, checkpointId, resolvedSchema);
+                SinkSourceSchemaResolver.resolve(
+                        pathUri, checkpointId, resolvedSchema, storageOptions);
         List<CobbleDynamicTableSource.SerializableField> keyFields;
         List<CobbleDynamicTableSource.SerializableField> valueFields;
         if (sinkSidecar.present()) {
@@ -157,7 +173,8 @@ public final class CobbleDynamicTableSourceFactory implements DynamicTableSource
                         pollIntervalMillis,
                         sourceBlockCacheMemory.getBytes(),
                         keyFields,
-                        valueFields);
+                        valueFields,
+                        storageOptions);
         return new CobbleDynamicTableSource(
                 config, context.getObjectIdentifier().asSummaryString());
     }
@@ -293,6 +310,7 @@ public final class CobbleDynamicTableSourceFactory implements DynamicTableSource
             String scanMode,
             int bucketCount,
             long pollIntervalMillis,
+            CobbleConnectorStorageOptions storageOptions,
             ResolvedSchema resolvedSchema) {
         RawSourceSchemaResolver.validate(resolvedSchema);
         RawSourceOptions rawOptions = RawSourceOptions.parseForRaw(options);
@@ -304,7 +322,8 @@ public final class CobbleDynamicTableSourceFactory implements DynamicTableSource
                         checkpointId,
                         scanMode,
                         pollIntervalMillis,
-                        rawOptions.selectedColumns());
+                        rawOptions.selectedColumns(),
+                        storageOptions);
         return new CobbleRawDynamicTableSource(
                 config, context.getObjectIdentifier().asSummaryString());
     }
@@ -321,6 +340,15 @@ public final class CobbleDynamicTableSourceFactory implements DynamicTableSource
         RowType physicalRowType = (RowType) resolvedSchema.toPhysicalRowDataType().getLogicalType();
         int primaryKeyColumnCount = resolvedSchema.getPrimaryKey().get().getColumns().size();
         return physicalRowType.getFieldCount() - primaryKeyColumnCount >= 1;
+    }
+
+    private static CobbleConnectorStorageOptions parseStorageOptions(
+            Map<String, String> tableOptions) {
+        try {
+            return CobbleConnectorStorageOptions.from(tableOptions);
+        } catch (IllegalArgumentException e) {
+            throw new ValidationException(e.getMessage(), e);
+        }
     }
 
     private static void validateTypeSupported(RowType.RowField field) {

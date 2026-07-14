@@ -1,5 +1,7 @@
 package io.cobble.flink.table;
 
+import io.cobble.flink.common.CobbleConnectorStorageOptions;
+
 import org.apache.flink.api.connector.source.Boundedness;
 
 import java.util.Arrays;
@@ -21,6 +23,7 @@ final class RawSourceConfig implements CobbleTableScanConfig {
     private static final long serialVersionUID = 1L;
 
     private final String pathUri;
+    private final CobbleConnectorStorageOptions storageOptions;
     private final int bucketCount;
     private final String scanCheckpointId;
     private final String scanMode;
@@ -34,7 +37,26 @@ final class RawSourceConfig implements CobbleTableScanConfig {
             String scanMode,
             long pollIntervalMillis,
             int[] selectedColumns) {
+        this(
+                pathUri,
+                bucketCount,
+                scanCheckpointId,
+                scanMode,
+                pollIntervalMillis,
+                selectedColumns,
+                CobbleConnectorStorageOptions.empty());
+    }
+
+    RawSourceConfig(
+            String pathUri,
+            int bucketCount,
+            String scanCheckpointId,
+            String scanMode,
+            long pollIntervalMillis,
+            int[] selectedColumns,
+            CobbleConnectorStorageOptions storageOptions) {
         this.pathUri = pathUri;
+        this.storageOptions = storageOptions;
         this.bucketCount = bucketCount;
         this.scanCheckpointId = scanCheckpointId;
         this.scanMode = scanMode;
@@ -45,6 +67,11 @@ final class RawSourceConfig implements CobbleTableScanConfig {
     @Override
     public String pathUri() {
         return pathUri;
+    }
+
+    @Override
+    public CobbleConnectorStorageOptions storageOptions() {
+        return storageOptions;
     }
 
     @Override

@@ -4,6 +4,7 @@ import io.cobble.Config;
 import io.cobble.GlobalSnapshot;
 import io.cobble.Reader;
 import io.cobble.flink.common.CobbleConnectorMetrics;
+import io.cobble.flink.common.CobbleLoader;
 
 import org.apache.flink.api.common.typeutils.TypeSerializer;
 import org.apache.flink.core.memory.DataOutputSerializer;
@@ -88,6 +89,7 @@ public final class CobbleLookupFunction extends LookupFunction {
         if (reader != null) {
             return true;
         }
+        CobbleLoader.ensureCobbleLoaded();
         GlobalSnapshot initialSnapshot = CobbleSourceRuntime.loadConfiguredSnapshot(config);
         if (initialSnapshot == null) {
             return false;

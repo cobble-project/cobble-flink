@@ -1,17 +1,15 @@
 package io.cobble.flink.monitor;
 
+import io.cobble.flink.common.CobbleConnectorStorageOptions;
+import io.cobble.flink.common.CobbleMetadataFileIO;
 import io.cobble.flink.common.inspect.InspectSchemaRegistryLayout;
 import io.cobble.flink.common.inspect.SinkInspectSchemaStore;
 
-import org.apache.flink.core.fs.FSDataInputStream;
-import org.apache.flink.core.fs.FileStatus;
-import org.apache.flink.core.fs.FileSystem;
-import org.apache.flink.core.fs.Path;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import java.io.ByteArrayOutputStream;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.List;
 
 /** Resolves the effective Cobble sink inspect schema for a selected sink snapshot. */
@@ -26,63 +24,53 @@ final class SinkInspectSchemaResolver {
     private SinkInspectSchemaResolver() {}
 
     static SinkSchemaResolveResult resolve(String sinkRoot, long snapshotId) {
-        Path schemaRoot =
-                new Path(
-                        new Path(MonitorPathUtils.normalizeStorageDirectory(sinkRoot)),
-                        INSPECT_SCHEMA);
-        Path eventsDir = new Path(schemaRoot, EVENTS);
-        FileSystem fs;
+        return resolve(sinkRoot, snapshotId, CobbleConnectorStorageOptions.empty());
+    }
+
+    static SinkSchemaResolveResult resolve(
+            String sinkRoot, long snapshotId, CobbleConnectorStorageOptions storageOptions) {
+        String normalizedRoot = MonitorPathUtils.normalizeStorageDirectory(sinkRoot);
+        String eventsDir = INSPECT_SCHEMA + "/" + EVENTS;
+        String blobsDir = INSPECT_SCHEMA + "/" + BLOBS;
         try {
-            fs = eventsDir.getFileSystem();
-        } catch (Exception e) {
-            LOG.debug("Failed to open sink schema filesystem: {}", e.getMessage());
-            return SinkSchemaResolveResult.unavailable(
-                    "Failed to open filesystem for " + eventsDir + ": " + e.getMessage());
-        }
+            CobbleMetadataFileIO fileIO = CobbleMetadataFileIO.open(normalizedRoot, storageOptions);
+            List<InspectSchemaRegistryLayout.SchemaEvent> events = listEvents(fileIO, eventsDir);
+            if (events.isEmpty()) {
+                return SinkSchemaResolveResult.missing(
+                        "No sink schema events found at " + storagePath(normalizedRoot, eventsDir));
+            }
 
-        List<InspectSchemaRegistryLayout.SchemaEvent> events = listEvents(fs, eventsDir);
-        if (events.isEmpty()) {
-            return SinkSchemaResolveResult.missing(
-                    "No sink schema events found at " + pathToStorageString(eventsDir));
-        }
-
-        InspectSchemaRegistryLayout.SchemaEvent best = null;
-        for (InspectSchemaRegistryLayout.SchemaEvent event : events) {
-            if (event.checkpointId() <= snapshotId) {
-                if (best == null || event.checkpointId() > best.checkpointId()) {
+            InspectSchemaRegistryLayout.SchemaEvent best = null;
+            for (InspectSchemaRegistryLayout.SchemaEvent event : events) {
+                if (event.checkpointId() <= snapshotId
+                        && (best == null || event.checkpointId() > best.checkpointId())) {
                     best = event;
                 }
             }
-        }
-        if (best == null) {
-            return SinkSchemaResolveResult.missing(
-                    "No sink schema event with snapshotId <= "
-                            + snapshotId
-                            + " (events at "
-                            + pathToStorageString(eventsDir)
-                            + ")");
-        }
+            if (best == null) {
+                return SinkSchemaResolveResult.missing(
+                        "No sink schema event with snapshotId <= "
+                                + snapshotId
+                                + " (events at "
+                                + storagePath(normalizedRoot, eventsDir)
+                                + ")");
+            }
 
-        Path blobPath =
-                new Path(
-                        new Path(schemaRoot, BLOBS),
-                        InspectSchemaRegistryLayout.blobFileName(best.hash()));
-        return readBlob(fs, blobPath, best, eventsDir);
+            String blobPath =
+                    blobsDir + "/" + InspectSchemaRegistryLayout.blobFileName(best.hash());
+            return readBlob(fileIO, normalizedRoot, blobPath, best, eventsDir);
+        } catch (Exception e) {
+            LOG.debug("Failed to open sink schema metadata: {}", e.getMessage());
+            return SinkSchemaResolveResult.unavailable(
+                    "Failed to open connector-scoped sink schema metadata: " + e.getMessage());
+        }
     }
 
     private static List<InspectSchemaRegistryLayout.SchemaEvent> listEvents(
-            FileSystem fs, Path eventsDir) {
+            CobbleMetadataFileIO fileIO, String eventsDir) {
         try {
-            if (!fs.exists(eventsDir)) {
-                return java.util.Collections.emptyList();
-            }
-            FileStatus[] statuses = fs.listStatus(eventsDir);
-            if (statuses == null || statuses.length == 0) {
-                return java.util.Collections.emptyList();
-            }
             List<InspectSchemaRegistryLayout.SchemaEvent> events = new ArrayList<>();
-            for (FileStatus status : statuses) {
-                String name = status.getPath().getName();
+            for (String name : fileIO.list(eventsDir)) {
                 if (!name.startsWith(InspectSchemaRegistryLayout.EVENT_PREFIX)
                         || !name.endsWith(InspectSchemaRegistryLayout.EVENT_SUFFIX)) {
                     continue;
@@ -97,57 +85,52 @@ final class SinkInspectSchemaResolver {
             }
             return events;
         } catch (Exception e) {
-            LOG.debug("Failed to list sink schema events at {}: {}", eventsDir, e.getMessage());
-            return java.util.Collections.emptyList();
+            LOG.debug("Failed to list sink schema events: {}", e.getMessage());
+            return Collections.emptyList();
         }
     }
 
     private static SinkSchemaResolveResult readBlob(
-            FileSystem fs,
-            Path blobPath,
+            CobbleMetadataFileIO fileIO,
+            String normalizedRoot,
+            String blobPath,
             InspectSchemaRegistryLayout.SchemaEvent event,
-            Path eventsDir) {
+            String eventsDir) {
+        String displayBlobPath = storagePath(normalizedRoot, blobPath);
         try {
-            if (!fs.exists(blobPath)) {
+            if (!fileIO.exists(blobPath)) {
                 return SinkSchemaResolveResult.invalid(
                         "Sink schema blob missing for hash "
                                 + event.hash()
                                 + " (expected at "
-                                + pathToStorageString(blobPath)
+                                + displayBlobPath
                                 + ")");
             }
-            ByteArrayOutputStream buffer = new ByteArrayOutputStream();
-            try (FSDataInputStream input = fs.open(blobPath)) {
-                byte[] chunk = new byte[8 * 1024];
-                int n;
-                while ((n = input.read(chunk)) >= 0) {
-                    buffer.write(chunk, 0, n);
-                }
-            }
-            SinkInspectSchemaStore store = SinkInspectSchemaStore.fromBytes(buffer.toByteArray());
+            SinkInspectSchemaStore store = SinkInspectSchemaStore.fromBytes(fileIO.read(blobPath));
             if (store.isEmpty()) {
                 return SinkSchemaResolveResult.invalid(
                         "Sink schema blob parsed as empty store "
-                                + pathToStorageString(blobPath)
+                                + displayBlobPath
                                 + "; falling back to raw inspect");
             }
             return SinkSchemaResolveResult.available(
                     store,
-                    pathToStorageString(eventsDir),
-                    pathToStorageString(blobPath),
+                    storagePath(normalizedRoot, eventsDir),
+                    displayBlobPath,
                     event.hash(),
                     event.checkpointId());
         } catch (Exception e) {
-            LOG.debug("Failed to read sink schema blob {}: {}", blobPath.getName(), e.getMessage());
+            LOG.debug("Failed to read sink schema blob: {}", e.getMessage());
             return SinkSchemaResolveResult.invalid(
                     "Failed to read or parse sink schema blob "
-                            + pathToStorageString(blobPath)
+                            + displayBlobPath
                             + ": "
                             + e.getMessage());
         }
     }
 
-    private static String pathToStorageString(Path path) {
-        return MonitorPathUtils.pathToStorageString(path);
+    private static String storagePath(String root, String relativePath) {
+        String normalizedRoot = root.endsWith("/") ? root.substring(0, root.length() - 1) : root;
+        return normalizedRoot + "/" + relativePath;
     }
 }

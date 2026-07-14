@@ -7,6 +7,7 @@ import io.cobble.Reader;
 import io.cobble.ScanCursor;
 import io.cobble.ScanOptions;
 import io.cobble.ShardSnapshot;
+import io.cobble.flink.common.CobbleConnectorStorageOptions;
 import io.cobble.flink.common.inspect.StateInspectSemanticSchema;
 import io.cobble.flink.common.inspect.StateInspectType;
 
@@ -256,11 +257,11 @@ public final class CobbleFlinkMonitorServer {
             this.selectedOperator = selectedOperator;
             this.selectedSchema =
                     selectedCheckpoint != null && selectedOperator != null
-                            ? resolveSchema(selectedCheckpoint, selectedOperator)
+                            ? resolveSchema(catalog, selectedCheckpoint, selectedOperator)
                             : null;
             this.selectedSinkSchema =
                     catalog != null && selectedCheckpoint != null
-                            ? resolveSinkSchema(catalog, selectedCheckpoint)
+                            ? resolveSinkSchema(config, catalog, selectedCheckpoint)
                             : null;
             this.reader = readerHandle.reader;
             this.readerTemporaryDirectories = readerHandle.temporaryDirectories;
@@ -278,7 +279,8 @@ public final class CobbleFlinkMonitorServer {
                         null,
                         new ReaderHandle(null, Collections.emptyList()));
             }
-            CheckpointCatalog catalog = CheckpointCatalog.discover(config.checkpointRoot);
+            CheckpointCatalog catalog =
+                    CheckpointCatalog.discover(config.checkpointRoot, config.storageOptions);
             ReaderSelection selection = openLatestReadable(config, catalog, null);
             return new MonitorState(
                     config,
@@ -300,7 +302,9 @@ public final class CobbleFlinkMonitorServer {
                                 : checkpoint.findOperatorOrDefault(preferredOperatorId);
                 try {
                     return new ReaderSelection(
-                            checkpoint, operator, openReader(config, checkpoint, operator));
+                            checkpoint,
+                            operator,
+                            openReader(config, catalog, checkpoint, operator));
                 } catch (RuntimeException e) {
                     if (firstFailure == null) {
                         firstFailure = e;
@@ -315,16 +319,27 @@ public final class CobbleFlinkMonitorServer {
         }
 
         private static ReaderHandle openReader(
-                ServerConfig config, CheckpointEntry checkpoint, OperatorEntry operator) {
+                ServerConfig config,
+                CheckpointCatalog catalog,
+                CheckpointEntry checkpoint,
+                OperatorEntry operator) {
+            if ("data_source".equals(catalog.sourceKind)) {
+                Config cobbleConfig =
+                        CobbleReaderConfigs.dataSource(
+                                config.totalBuckets, catalog.rootDirectory, config.storageOptions);
+                cobbleConfig.snapshotRetention = null;
+                return new ReaderHandle(
+                        Reader.open(cobbleConfig, checkpoint.id), Collections.emptyList());
+            }
             if (operator.globalSnapshotLayout) {
                 return openGlobalSnapshotReader(config, checkpoint, operator);
             }
-            Config cobbleConfig = CobbleReaderConfigs.base(config.totalBuckets);
+            Config cobbleConfig =
+                    CobbleReaderConfigs.checkpoint(
+                            config.totalBuckets,
+                            operator.readerVolumeDirectories,
+                            config.storageOptions);
             cobbleConfig.snapshotRetention = null;
-            for (String volumeDirectory : operator.readerVolumeDirectories) {
-                CobbleReaderConfigs.addVolume(
-                        cobbleConfig, volumeDirectory, config.flinkConfiguration);
-            }
             return new ReaderHandle(
                     Reader.open(cobbleConfig, checkpoint.id), Collections.emptyList());
         }
@@ -349,7 +364,7 @@ public final class CobbleFlinkMonitorServer {
                 CobbleReaderConfigs.addVolume(
                         bootstrapConfig,
                         pathToCobbleConfigString(unifiedVolume),
-                        config.flinkConfiguration);
+                        config.storageOptions);
                 bootstrapReader = Reader.open(bootstrapConfig, checkpoint.id);
                 GlobalSnapshot snapshot = bootstrapReader.currentGlobalSnapshot();
                 int totalBuckets =
@@ -375,15 +390,15 @@ public final class CobbleFlinkMonitorServer {
                 CobbleReaderConfigs.addVolume(
                         cobbleConfig,
                         pathToCobbleConfigString(unifiedVolume),
-                        config.flinkConfiguration);
+                        config.storageOptions);
                 for (String shardVolumeDirectory : shardVolumeDirectories.values()) {
                     CobbleReaderConfigs.addVolume(
-                            cobbleConfig, shardVolumeDirectory, config.flinkConfiguration);
+                            cobbleConfig, shardVolumeDirectory, config.storageOptions);
                 }
                 for (String volumeDirectory : operator.readerVolumeDirectories) {
                     if (!volumeDirectory.equals(operator.operatorSnapshotDirectory)) {
                         CobbleReaderConfigs.addVolume(
-                                cobbleConfig, volumeDirectory, config.flinkConfiguration);
+                                cobbleConfig, volumeDirectory, config.storageOptions);
                     }
                 }
                 return new ReaderHandle(
@@ -453,6 +468,7 @@ public final class CobbleFlinkMonitorServer {
             output.put("catalog", catalog == null ? null : catalog.toJson());
             output.put("inspect_default_limit", config.inspectDefaultLimit);
             output.put("inspect_max_limit", config.inspectMaxLimit);
+            output.put("storage_option_count", config.storageOptionCount);
             if (!userClasspath.entries().isEmpty()) {
                 Map<String, Object> userClasspathMeta = new LinkedHashMap<>();
                 userClasspathMeta.put("jar_count", userClasspath.entries().size());
@@ -496,7 +512,7 @@ public final class CobbleFlinkMonitorServer {
             CheckpointCatalog nextCatalog = catalog;
             if (source != null) {
                 config.checkpointRoot = source;
-                nextCatalog = CheckpointCatalog.discover(source);
+                nextCatalog = CheckpointCatalog.discover(source, config.storageOptions);
             }
             if (nextCatalog == null) {
                 throw new InputException("open a checkpoint root or Cobble data source first");
@@ -525,14 +541,14 @@ public final class CobbleFlinkMonitorServer {
                         operatorId == null
                                 ? checkpoint.defaultOperator()
                                 : checkpoint.findOperator(operatorId);
-                readerHandle = openReader(config, checkpoint, operator);
+                readerHandle = openReader(config, catalog, checkpoint, operator);
             }
             replaceReader(readerHandle);
             selectedCheckpoint = checkpoint;
             selectedOperator = operator;
             selectedLatest = checkpointId == null;
-            selectedSchema = resolveSchema(checkpoint, operator);
-            selectedSinkSchema = resolveSinkSchema(catalog, checkpoint);
+            selectedSchema = resolveSchema(catalog, checkpoint, operator);
+            selectedSinkSchema = resolveSinkSchema(config, catalog, checkpoint);
 
             Map<String, Object> output = new LinkedHashMap<>();
             output.put("read_mode", reader.readMode());
@@ -893,8 +909,8 @@ public final class CobbleFlinkMonitorServer {
             }
             selectedCheckpoint = selection.checkpoint;
             selectedOperator = selection.operator;
-            selectedSchema = resolveSchema(selection.checkpoint, selection.operator);
-            selectedSinkSchema = resolveSinkSchema(catalog, selection.checkpoint);
+            selectedSchema = resolveSchema(catalog, selection.checkpoint, selection.operator);
+            selectedSinkSchema = resolveSinkSchema(config, catalog, selection.checkpoint);
         }
 
         private ReaderSelection openLatestReadableOrCurrent(
@@ -911,7 +927,9 @@ public final class CobbleFlinkMonitorServer {
                 }
                 try {
                     return new ReaderSelection(
-                            checkpoint, operator, openReader(config, checkpoint, operator));
+                            checkpoint,
+                            operator,
+                            openReader(config, refreshed, checkpoint, operator));
                 } catch (RuntimeException e) {
                     if (firstFailure == null) {
                         firstFailure = e;
@@ -1282,7 +1300,11 @@ public final class CobbleFlinkMonitorServer {
         }
 
         private static SchemaResolveResult resolveSchema(
-                CheckpointEntry checkpoint, OperatorEntry operator) {
+                CheckpointCatalog catalog, CheckpointEntry checkpoint, OperatorEntry operator) {
+            if (catalog != null && "data_source".equals(catalog.sourceKind)) {
+                return SchemaResolveResult.unsupported(
+                        "State schema registry resolution is not used for Cobble data sources.");
+            }
             try {
                 return MonitorInspectSchemaResolver.resolve(checkpoint, operator);
             } catch (Exception e) {
@@ -1292,7 +1314,7 @@ public final class CobbleFlinkMonitorServer {
         }
 
         private static SinkSchemaResolveResult resolveSinkSchema(
-                CheckpointCatalog catalog, CheckpointEntry checkpoint) {
+                ServerConfig config, CheckpointCatalog catalog, CheckpointEntry checkpoint) {
             if (catalog == null || checkpoint == null) {
                 return SinkSchemaResolveResult.unsupported("No data source is selected.");
             }
@@ -1301,7 +1323,8 @@ public final class CobbleFlinkMonitorServer {
                         "Sink schema registry resolution is only available for data sources.");
             }
             try {
-                return SinkInspectSchemaResolver.resolve(catalog.rootDirectory, checkpoint.id);
+                return SinkInspectSchemaResolver.resolve(
+                        catalog.rootDirectory, checkpoint.id, config.storageOptions);
             } catch (Exception e) {
                 return SinkSchemaResolveResult.unavailable(
                         "Failed to resolve sink schema registry: " + e.getMessage());
@@ -1655,24 +1678,30 @@ public final class CobbleFlinkMonitorServer {
         }
     }
 
-    private static final class CheckpointCatalog {
+    static final class CheckpointCatalog {
         private final String rootDirectory;
-        private final String sourceKind;
-        private final List<CheckpointEntry> checkpoints;
+        final String sourceKind;
+        final List<CheckpointEntry> checkpoints;
+        private final CobbleConnectorStorageOptions storageOptions;
 
         private CheckpointCatalog(
-                String rootDirectory, String sourceKind, List<CheckpointEntry> checkpoints) {
+                String rootDirectory,
+                String sourceKind,
+                List<CheckpointEntry> checkpoints,
+                CobbleConnectorStorageOptions storageOptions) {
             this.rootDirectory = rootDirectory;
             this.sourceKind = sourceKind;
             this.checkpoints = checkpoints;
+            this.storageOptions = storageOptions;
         }
 
-        private static CheckpointCatalog discover(String checkpointRoot) {
+        static CheckpointCatalog discover(
+                String checkpointRoot, CobbleConnectorStorageOptions storageOptions) {
             try {
-                return discoverCheckpointRoot(checkpointRoot);
+                return discoverCheckpointRoot(checkpointRoot, storageOptions);
             } catch (InputException checkpointError) {
                 try {
-                    return discoverDataSourceRoot(checkpointRoot);
+                    return discoverDataSourceRoot(checkpointRoot, storageOptions);
                 } catch (InputException dataSourceError) {
                     throw new InputException(
                             checkpointError.getMessage()
@@ -1683,10 +1712,11 @@ public final class CobbleFlinkMonitorServer {
         }
 
         private CheckpointCatalog refresh() {
-            return discover(rootDirectory);
+            return discover(rootDirectory, storageOptions);
         }
 
-        private static CheckpointCatalog discoverCheckpointRoot(String checkpointRoot) {
+        private static CheckpointCatalog discoverCheckpointRoot(
+                String checkpointRoot, CobbleConnectorStorageOptions storageOptions) {
             String normalizedRoot = normalizeStorageDirectory(checkpointRoot);
             Path requested = new Path(normalizedRoot);
             FileSystem fileSystem;
@@ -1769,73 +1799,16 @@ public final class CobbleFlinkMonitorServer {
                                 + ". Expected chk-* with Cobble manifest copies or shared/op_*/"
                                 + "<volume>/snapshot/SNAPSHOT-* files.");
             }
-            return new CheckpointCatalog(root.toString(), "checkpoint", checkpoints);
+            return new CheckpointCatalog(
+                    root.toString(), "checkpoint", checkpoints, storageOptions);
         }
 
-        private static CheckpointCatalog discoverDataSourceRoot(String sourceRoot) {
+        private static CheckpointCatalog discoverDataSourceRoot(
+                String sourceRoot, CobbleConnectorStorageOptions storageOptions) {
             String normalizedRoot = normalizeStorageDirectory(sourceRoot);
-            Path root = new Path(normalizedRoot);
-            FileSystem fileSystem;
-            FileStatus rootStatus;
-            try {
-                fileSystem = root.getFileSystem();
-                rootStatus = fileSystem.getFileStatus(root);
-            } catch (IOException e) {
-                throw new InputException(
-                        "Failed to open data source path " + sourceRoot + ": " + e.getMessage());
-            }
-            if (!rootStatus.isDir()) {
-                throw new InputException(
-                        "--checkpoint/source must point to a directory: " + sourceRoot);
-            }
-
-            Path snapshotDirectory = new Path(root, "snapshot");
-            FileStatus[] snapshotFiles;
-            try {
-                if (!fileSystem.exists(snapshotDirectory)
-                        || !fileSystem.getFileStatus(snapshotDirectory).isDir()) {
-                    throw new InputException(
-                            "No Cobble snapshot directory found at " + snapshotDirectory);
-                }
-                snapshotFiles = fileSystem.listStatus(snapshotDirectory);
-            } catch (IOException e) {
-                throw new InputException(
-                        "Failed to list Cobble data source snapshots "
-                                + snapshotDirectory
-                                + ": "
-                                + e.getMessage());
-            }
-
-            String rootString = pathToStorageString(root);
-            List<CheckpointEntry> snapshots = new ArrayList<>();
-            if (snapshotFiles != null) {
-                for (FileStatus snapshotStatus : snapshotFiles) {
-                    if (snapshotStatus.isDir()) {
-                        continue;
-                    }
-                    Long snapshotId = snapshotManifestId(snapshotStatus.getPath().getName());
-                    if (snapshotId == null
-                            || !snapshotManifestLooksGlobal(fileSystem, snapshotStatus.getPath())) {
-                        continue;
-                    }
-                    OperatorEntry operator =
-                            new OperatorEntry(
-                                    "sink",
-                                    pathToStorageString(snapshotStatus.getPath()),
-                                    rootString,
-                                    Collections.singletonList(rootString),
-                                    true);
-                    snapshots.add(
-                            new CheckpointEntry(
-                                    snapshotId, rootString, Collections.singletonList(operator)));
-                }
-            }
-            snapshots.sort(Comparator.comparingLong((CheckpointEntry item) -> item.id).reversed());
-            if (snapshots.isEmpty()) {
-                throw new InputException(
-                        "No Cobble data source snapshots found under " + snapshotDirectory);
-            }
-            return new CheckpointCatalog(rootString, "data_source", snapshots);
+            List<CheckpointEntry> snapshots =
+                    CobbleDataSourceDiscovery.discover(normalizedRoot, storageOptions);
+            return new CheckpointCatalog(normalizedRoot, "data_source", snapshots, storageOptions);
         }
 
         private CheckpointEntry defaultCheckpoint() {

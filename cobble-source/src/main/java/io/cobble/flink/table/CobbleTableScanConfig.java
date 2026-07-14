@@ -1,5 +1,7 @@
 package io.cobble.flink.table;
 
+import io.cobble.flink.common.CobbleConnectorStorageOptions;
+
 import org.apache.flink.api.connector.source.Boundedness;
 
 import java.io.Serializable;
@@ -26,6 +28,8 @@ import java.io.Serializable;
 interface CobbleTableScanConfig extends Serializable {
 
     String pathUri();
+
+    CobbleConnectorStorageOptions storageOptions();
 
     int bucketCount();
 

@@ -1,14 +1,12 @@
 package io.cobble.flink.table;
 
+import io.cobble.flink.common.CobbleConnectorStorageOptions;
+import io.cobble.flink.common.CobbleMetadataFileIO;
 import io.cobble.flink.common.inspect.InspectSchemaRegistryLayout;
 import io.cobble.flink.common.inspect.SinkInspectField;
 import io.cobble.flink.common.inspect.SinkInspectSchema;
 import io.cobble.flink.common.inspect.SinkInspectSchemaStore;
 
-import org.apache.flink.core.fs.FSDataInputStream;
-import org.apache.flink.core.fs.FileStatus;
-import org.apache.flink.core.fs.FileSystem;
-import org.apache.flink.core.fs.Path;
 import org.apache.flink.table.api.ValidationException;
 import org.apache.flink.table.catalog.ResolvedSchema;
 import org.apache.flink.table.catalog.UniqueConstraint;
@@ -17,7 +15,6 @@ import org.apache.flink.table.types.logical.LogicalTypeRoot;
 import org.apache.flink.table.types.logical.RowType;
 import org.apache.flink.table.types.logical.utils.LogicalTypeParser;
 
-import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.List;
@@ -33,30 +30,56 @@ final class SinkSourceSchemaResolver {
 
     static SinkSourceResolvedSchema resolve(
             String pathUri, String scanCheckpointId, ResolvedSchema ddlSchema) {
-        Path schemaRoot = new Path(new Path(pathUri), INSPECT_SCHEMA);
-        Path eventsDir = new Path(schemaRoot, EVENTS);
-        FileSystem fs = fileSystem(eventsDir, pathUri);
+        return resolve(pathUri, scanCheckpointId, ddlSchema, CobbleConnectorStorageOptions.empty());
+    }
 
-        List<InspectSchemaRegistryLayout.SchemaEvent> events = listEvents(fs, eventsDir, pathUri);
-        if (events.isEmpty()) {
-            return SinkSourceResolvedSchema.absent();
+    static SinkSourceResolvedSchema resolve(
+            String pathUri,
+            String scanCheckpointId,
+            ResolvedSchema ddlSchema,
+            CobbleConnectorStorageOptions storageOptions) {
+        String eventsDir = INSPECT_SCHEMA + "/" + EVENTS;
+        String blobsDir = INSPECT_SCHEMA + "/" + BLOBS;
+        try {
+            CobbleMetadataFileIO fileIO = CobbleMetadataFileIO.open(pathUri, storageOptions);
+            List<InspectSchemaRegistryLayout.SchemaEvent> events = listEvents(fileIO, eventsDir);
+            if (events.isEmpty()) {
+                return SinkSourceResolvedSchema.absent();
+            }
+
+            InspectSchemaRegistryLayout.SchemaEvent event =
+                    selectEvent(events, scanCheckpointId, pathUri);
+            SinkInspectSchemaStore store = readStore(fileIO, blobsDir, event);
+            if (store.isEmpty()) {
+                throw new ValidationException(
+                        "Cobble sink inspect schema blob for snapshot "
+                                + event.checkpointId()
+                                + " parsed as an empty store; refusing to fall back to DDL-derived"
+                                + " schema because a sidecar event exists.");
+            }
+
+            SinkInspectSchema schema = store.schema();
+            validateDdl(schema, ddlSchema);
+            return SinkSourceResolvedSchema.present(
+                    event.checkpointId(), keyFields(schema), valueFields(schema));
+        } catch (ValidationException e) {
+            throw e;
+        } catch (IOException e) {
+            throw new ValidationException("Failed to access Cobble sink inspect schema.", e);
         }
+    }
 
-        InspectSchemaRegistryLayout.SchemaEvent event =
-                selectEvent(events, scanCheckpointId, pathUri);
-        SinkInspectSchemaStore store = readStore(fs, new Path(schemaRoot, BLOBS), event);
-        if (store.isEmpty()) {
+    private static SinkInspectSchemaStore readStore(
+            CobbleMetadataFileIO fileIO,
+            String blobsDir,
+            InspectSchemaRegistryLayout.SchemaEvent event)
+            throws IOException {
+        String blobPath = blobsDir + "/" + InspectSchemaRegistryLayout.blobFileName(event.hash());
+        if (!fileIO.exists(blobPath)) {
             throw new ValidationException(
-                    "Cobble sink inspect schema blob for snapshot "
-                            + event.checkpointId()
-                            + " parsed as an empty store; refusing to fall back to DDL-derived"
-                            + " schema because a sidecar event exists.");
+                    "Cobble sink inspect schema blob is missing for hash " + event.hash() + '.');
         }
-
-        SinkInspectSchema schema = store.schema();
-        validateDdl(schema, ddlSchema);
-        return SinkSourceResolvedSchema.present(
-                event.checkpointId(), keyFields(schema), valueFields(schema));
+        return SinkInspectSchemaStore.fromBytes(fileIO.read(blobPath));
     }
 
     private static InspectSchemaRegistryLayout.SchemaEvent selectEvent(
@@ -91,39 +114,6 @@ final class SinkSourceSchemaResolver {
                             + ". Adjust scan.checkpoint-id or use 'latest'.");
         }
         return best;
-    }
-
-    private static SinkInspectSchemaStore readStore(
-            FileSystem fs, Path blobsDir, InspectSchemaRegistryLayout.SchemaEvent event) {
-        Path blobPath = new Path(blobsDir, InspectSchemaRegistryLayout.blobFileName(event.hash()));
-        try {
-            if (!fs.exists(blobPath)) {
-                throw new ValidationException(
-                        "Cobble sink inspect schema blob is missing for hash "
-                                + event.hash()
-                                + " (expected at "
-                                + blobPath
-                                + ").");
-            }
-            ByteArrayOutputStream buffer = new ByteArrayOutputStream();
-            try (FSDataInputStream input = fs.open(blobPath)) {
-                byte[] chunk = new byte[8 * 1024];
-                int read;
-                while ((read = input.read(chunk)) >= 0) {
-                    buffer.write(chunk, 0, read);
-                }
-            }
-            return SinkInspectSchemaStore.fromBytes(buffer.toByteArray());
-        } catch (ValidationException e) {
-            throw e;
-        } catch (IOException e) {
-            throw new ValidationException(
-                    "Failed to read Cobble sink inspect schema blob "
-                            + blobPath
-                            + ": "
-                            + e.getMessage(),
-                    e);
-        }
     }
 
     private static void validateDdl(SinkInspectSchema schema, ResolvedSchema ddlSchema) {
@@ -337,54 +327,16 @@ final class SinkSourceSchemaResolver {
     }
 
     private static List<InspectSchemaRegistryLayout.SchemaEvent> listEvents(
-            FileSystem fs, Path eventsDir, String pathUri) {
-        FileStatus[] statuses = listStatus(fs, eventsDir, pathUri);
+            CobbleMetadataFileIO fileIO, String eventsDir) throws IOException {
         List<InspectSchemaRegistryLayout.SchemaEvent> events = new ArrayList<>();
-        if (statuses == null) {
-            return events;
-        }
-        for (FileStatus status : statuses) {
-            if (status.isDir()) {
-                continue;
-            }
+        for (String name : fileIO.list(eventsDir)) {
             InspectSchemaRegistryLayout.SchemaEvent event =
-                    InspectSchemaRegistryLayout.parseEventFileName(status.getPath().getName());
+                    InspectSchemaRegistryLayout.parseEventFileName(name);
             if (event != null) {
                 events.add(event);
             }
         }
         return events;
-    }
-
-    private static FileSystem fileSystem(Path path, String pathUri) {
-        try {
-            return path.getFileSystem();
-        } catch (IOException e) {
-            throw new ValidationException(
-                    "Failed to open filesystem for Cobble sink source path "
-                            + pathUri
-                            + ": "
-                            + e.getMessage(),
-                    e);
-        }
-    }
-
-    private static FileStatus[] listStatus(FileSystem fs, Path dir, String pathUri) {
-        try {
-            if (!fs.exists(dir)) {
-                return null;
-            }
-            return fs.listStatus(dir);
-        } catch (IOException e) {
-            throw new ValidationException(
-                    "Failed to list "
-                            + dir
-                            + " under Cobble sink source path "
-                            + pathUri
-                            + ": "
-                            + e.getMessage(),
-                    e);
-        }
     }
 }
 
