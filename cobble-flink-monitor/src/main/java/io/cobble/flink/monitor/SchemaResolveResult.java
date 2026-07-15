@@ -50,8 +50,24 @@ final class SchemaResolveResult {
             String blobPath,
             String schemaHash,
             long schemaCheckpointId) {
+        return available(store, eventPath, blobPath, schemaHash, schemaCheckpointId, null);
+    }
+
+    static SchemaResolveResult available(
+            StateInspectSchemaStore store,
+            String eventPath,
+            String blobPath,
+            String schemaHash,
+            long schemaCheckpointId,
+            String warning) {
         return new SchemaResolveResult(
-                store, STATUS_AVAILABLE, eventPath, blobPath, schemaHash, schemaCheckpointId, null);
+                store,
+                STATUS_AVAILABLE,
+                eventPath,
+                blobPath,
+                schemaHash,
+                schemaCheckpointId,
+                warning);
     }
 
     static SchemaResolveResult missing(String warning) {

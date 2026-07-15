@@ -143,12 +143,16 @@ state.backend.cobble.localdir: /tmp/flink-cobble/local
 state.backend.cobble.memory.managed: true
 
 state.checkpoints.dir: hdfs:///user/you/checkpoints
-
-# Cobble handles the outer HA integration
+# Recommended, optional: materialize checkpoint sidecars for faster monitor/source reads.
 high-availability.type: io.cobble.flink.state.CobbleHighAvailabilityServicesFactory
-# If you already had another HA type before, put it here
-cobble.ha.delegate.type: NONE
 ```
+
+The Cobble HA wrapper is recommended when you want sidecars materialized as checkpoints
+complete, but it is not required for monitor or source access. When it is not enabled, the monitor and
+state source can read Cobble payloads from Flink `_metadata` and rebuild a temporary read-only
+view. To enable the wrapper, set `high-availability.type` to
+`io.cobble.flink.state.CobbleHighAvailabilityServicesFactory`; move an existing HA type to
+`cobble.ha.delegate.type`.
 
 If your Flink daemons run on Java 11 or newer, also add:
 

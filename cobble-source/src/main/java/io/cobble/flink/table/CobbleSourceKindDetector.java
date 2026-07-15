@@ -1,8 +1,8 @@
 package io.cobble.flink.table;
 
 import io.cobble.flink.common.CobbleConnectorStorageOptions;
+import io.cobble.flink.common.CobbleEmbeddedCheckpoint;
 import io.cobble.flink.common.CobbleMetadataFileIO;
-import io.cobble.flink.common.CobbleNativeSavepoint;
 import io.cobble.flink.common.inspect.InspectSchemaRegistryLayout;
 import io.cobble.flink.common.inspect.SinkInspectSchemaStore;
 import io.cobble.flink.common.inspect.StateInspectSchemaStore;
@@ -23,8 +23,10 @@ import java.io.IOException;
  * signals, in priority order:
  *
  * <ol>
- *   <li>A Flink checkpoint root: a direct child {@code chk-*} directory that contains a Flink
- *       {@code _metadata} file and a {@code COBBLE-SNAPSHOT-<operatorId>-MANIFEST} file → STATE.
+ *   <li>A Flink checkpoint, savepoint, metadata file, or checkpoint root containing readable Cobble
+ *       embedded {@code _metadata} → STATE.
+ *   <li>A checkpoint root with {@code chk-N/_metadata} and a Cobble manifest copy → STATE through
+ *       the existing global-sidecar path.
  *   <li>{@code <path>/inspect-schema/blobs/*.csch} whose blob begins with {@link
  *       SinkInspectSchemaStore#MAGIC} (CSNK) → SINK.
  *   <li>{@code <path>/inspect-schema/blobs/*.csch} whose blob begins with {@link
@@ -59,8 +61,8 @@ final class CobbleSourceKindDetector {
     /** Raw layout signal observed at a path, before applying the requested kind. */
     enum Probe {
         SINK,
+        EMBEDDED_CHECKPOINT,
         STATE_CHECKPOINT,
-        NATIVE_SAVEPOINT,
         STATE_OPERATOR,
         AMBIGUOUS,
         UNKNOWN
@@ -100,25 +102,22 @@ final class CobbleSourceKindDetector {
         } catch (ValidationException tableFailure) {
             if (requestedKind == CobbleSourceKind.AUTO) {
                 Probe stateProbe = probeStatePath(pathUri, false);
-                if (stateProbe == Probe.NATIVE_SAVEPOINT) {
-                    return resolveState(pathUri, StateSourceConfig.Layout.NATIVE_SAVEPOINT);
-                }
-                if (stateProbe == Probe.STATE_CHECKPOINT) {
-                    return resolveState(pathUri, StateSourceConfig.Layout.CHECKPOINT_ROOT);
+                if (isCheckpointProbe(stateProbe)) {
+                    return resolveCheckpointState(pathUri, stateProbe);
                 }
             }
             throw tableFailure;
         }
         if (probe == Probe.UNKNOWN) {
             Probe stateProbe = probeStatePath(pathUri, false);
-            if (isStateCheckpointProbe(stateProbe) || stateProbe == Probe.STATE_OPERATOR) {
+            if (isCheckpointProbe(stateProbe) || stateProbe == Probe.STATE_OPERATOR) {
                 probe = stateProbe;
             }
         }
 
         switch (requestedKind) {
             case SINK:
-                if (isStateCheckpointProbe(probe) || probe == Probe.STATE_OPERATOR) {
+                if (isCheckpointProbe(probe) || probe == Probe.STATE_OPERATOR) {
                     throw new ValidationException(
                             "source.kind='sink' was requested, but path appears to be a Cobble"
                                     + " state checkpoint.");
@@ -127,7 +126,7 @@ final class CobbleSourceKindDetector {
             case STATE:
                 throw new IllegalStateException("State source should have been resolved earlier.");
             case RAW:
-                if (isStateCheckpointProbe(probe) || probe == Probe.STATE_OPERATOR) {
+                if (isCheckpointProbe(probe) || probe == Probe.STATE_OPERATOR) {
                     throw new ValidationException(
                             "source.kind='raw' expects a Cobble table root. For Cobble Flink keyed"
                                     + " state, use source.kind='state'.");
@@ -190,8 +189,8 @@ final class CobbleSourceKindDetector {
         if (!exists(fileSystem, root, pathUri)) {
             return Probe.UNKNOWN;
         }
-        if (hasNativeSavepointLayout(fileSystem, root)) {
-            return Probe.NATIVE_SAVEPOINT;
+        if (hasEmbeddedCheckpoint(root)) {
+            return Probe.EMBEDDED_CHECKPOINT;
         }
         if (hasCheckpointLayout(fileSystem, root, pathUri)) {
             return Probe.STATE_CHECKPOINT;
@@ -207,8 +206,8 @@ final class CobbleSourceKindDetector {
     }
 
     static CobbleResolvedSource resolveExplicitState(String pathUri, Probe stateProbe) {
-        if (stateProbe == Probe.NATIVE_SAVEPOINT) {
-            return resolveState(pathUri, StateSourceConfig.Layout.NATIVE_SAVEPOINT);
+        if (stateProbe == Probe.EMBEDDED_CHECKPOINT) {
+            return resolveState(pathUri, StateSourceConfig.Layout.EMBEDDED_CHECKPOINT);
         }
         if (stateProbe == Probe.STATE_CHECKPOINT) {
             return resolveState(pathUri, StateSourceConfig.Layout.CHECKPOINT_ROOT);
@@ -282,10 +281,10 @@ final class CobbleSourceKindDetector {
         switch (probe) {
             case SINK:
                 return CobbleResolvedSource.sink(sinkDiagnostics(pathUri));
+            case EMBEDDED_CHECKPOINT:
+                return resolveState(pathUri, StateSourceConfig.Layout.EMBEDDED_CHECKPOINT);
             case STATE_CHECKPOINT:
                 return resolveState(pathUri, StateSourceConfig.Layout.CHECKPOINT_ROOT);
-            case NATIVE_SAVEPOINT:
-                return resolveState(pathUri, StateSourceConfig.Layout.NATIVE_SAVEPOINT);
             case STATE_OPERATOR:
                 return resolveState(pathUri, StateSourceConfig.Layout.OPERATOR_ROOT);
             case AMBIGUOUS:
@@ -300,6 +299,16 @@ final class CobbleSourceKindDetector {
             default:
                 throw ambiguousFailure(pathUri);
         }
+    }
+
+    private static CobbleResolvedSource resolveCheckpointState(String pathUri, Probe probe) {
+        return probe == Probe.EMBEDDED_CHECKPOINT
+                ? resolveState(pathUri, StateSourceConfig.Layout.EMBEDDED_CHECKPOINT)
+                : resolveState(pathUri, StateSourceConfig.Layout.CHECKPOINT_ROOT);
+    }
+
+    private static boolean isCheckpointProbe(Probe probe) {
+        return probe == Probe.EMBEDDED_CHECKPOINT || probe == Probe.STATE_CHECKPOINT;
     }
 
     private static ValidationException ambiguousFailure(String pathUri) {
@@ -327,14 +336,14 @@ final class CobbleSourceKindDetector {
 
     private static String stateDiagnostics(String pathUri, StateSourceConfig.Layout layout) {
         switch (layout) {
+            case EMBEDDED_CHECKPOINT:
+                return "Detected Cobble state checkpoint metadata at "
+                        + pathUri
+                        + " (Cobble keyed-state payloads embedded in Flink _metadata).";
             case CHECKPOINT_ROOT:
                 return "Detected Cobble state checkpoint root at "
                         + pathUri
-                        + " (chk-* with _metadata and Cobble manifest).";
-            case NATIVE_SAVEPOINT:
-                return "Detected Flink NATIVE savepoint at "
-                        + pathUri
-                        + " (Cobble keyed-state metadata embedded in _metadata).";
+                        + " (chk-* with _metadata and a Cobble manifest sidecar).";
             case OPERATOR_ROOT:
                 return "Detected Cobble state operator root at "
                         + pathUri
@@ -373,51 +382,37 @@ final class CobbleSourceKindDetector {
     //  Bounded filesystem probing
     // ------------------------------------------------------------------------------------------
 
-    /**
-     * True when {@code root} has a {@code chk-*} child holding {@code _metadata} and a manifest.
-     */
-    private static boolean hasCheckpointLayout(FileSystem fs, Path root, String pathUri) {
-        FileStatus[] children = listStatus(fs, root, pathUri);
-        if (children == null) {
-            return false;
-        }
-        for (FileStatus child : children) {
-            if (!child.isDir()) {
-                continue;
-            }
-            if (!child.getPath().getName().startsWith(CHECKPOINT_PREFIX)) {
-                continue;
-            }
-            Path chkDir = child.getPath();
-            if (!exists(fs, new Path(chkDir, FLINK_METADATA), pathUri)) {
-                continue;
-            }
-            if (hasCobbleManifest(fs, chkDir, pathUri)) {
-                return true;
-            }
-        }
-        return false;
-    }
-
-    /** A savepoint is native only when its Flink metadata contains Cobble's keyed-state payload. */
-    private static boolean hasNativeSavepointLayout(FileSystem fs, Path root) {
-        if (!exists(fs, new Path(root, FLINK_METADATA), root.toString())) {
-            return false;
-        }
+    /** A state path is readable when its Flink metadata contains Cobble keyed-state payloads. */
+    private static boolean hasEmbeddedCheckpoint(Path root) {
         try {
-            CobbleNativeSavepoint.load(root);
+            CobbleEmbeddedCheckpoint.locate(root);
             return true;
         } catch (IOException | RuntimeException ignored) {
             return false;
         }
     }
 
-    private static boolean isStateCheckpointProbe(Probe probe) {
-        return probe == Probe.STATE_CHECKPOINT || probe == Probe.NATIVE_SAVEPOINT;
+    /** True when a direct {@code chk-*} child has Flink metadata and a Cobble manifest copy. */
+    private static boolean hasCheckpointLayout(FileSystem fs, Path root, String pathUri) {
+        FileStatus[] children = listStatus(fs, root, pathUri);
+        if (children == null) {
+            return false;
+        }
+        for (FileStatus child : children) {
+            if (!child.isDir() || !child.getPath().getName().startsWith(CHECKPOINT_PREFIX)) {
+                continue;
+            }
+            Path checkpoint = child.getPath();
+            if (exists(fs, new Path(checkpoint, FLINK_METADATA), pathUri)
+                    && hasCobbleManifest(fs, checkpoint, pathUri)) {
+                return true;
+            }
+        }
+        return false;
     }
 
-    private static boolean hasCobbleManifest(FileSystem fs, Path chkDir, String pathUri) {
-        FileStatus[] entries = listStatus(fs, chkDir, pathUri);
+    private static boolean hasCobbleManifest(FileSystem fs, Path checkpoint, String pathUri) {
+        FileStatus[] entries = listStatus(fs, checkpoint, pathUri);
         if (entries == null) {
             return false;
         }

@@ -11,6 +11,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.io.ByteArrayOutputStream;
+import java.io.IOException;
 import java.util.ArrayList;
 import java.util.List;
 
@@ -47,21 +48,19 @@ final class MonitorInspectSchemaResolver {
      * registry.
      */
     static SchemaResolveResult resolve(CheckpointEntry checkpoint, OperatorEntry operator) {
-        if (operator.nativeSavepoint != null) {
-            StateInspectSchemaStore store = operator.nativeSavepoint.schemaStore();
-            if (store.isEmpty()) {
-                return SchemaResolveResult.missing(
-                        "No inspect schema embedded in native savepoint metadata for operator "
-                                + operator.operatorId);
-            }
-            return SchemaResolveResult.available(
-                    store, "embedded native savepoint metadata", null, null, checkpoint.id);
+        SchemaResolveResult registry =
+                operator.globalSnapshotLayout
+                        ? resolveRegistry(checkpoint, operator)
+                        : SchemaResolveResult.unsupported(
+                                "Schema registry resolution is not available for non-global-snapshot operators.");
+        if (registry.hasSchema()) {
+            return useEmbeddedSchemaWhenRegistryMismatches(registry, checkpoint, operator);
         }
-        if (!operator.globalSnapshotLayout) {
-            return SchemaResolveResult.unsupported(
-                    "Schema registry resolution is not available for non-global-snapshot operators.");
-        }
+        return fallbackToEmbeddedSchema(registry, checkpoint, operator);
+    }
 
+    private static SchemaResolveResult resolveRegistry(
+            CheckpointEntry checkpoint, OperatorEntry operator) {
         Path checkpointRoot;
         try {
             checkpointRoot = checkpointRoot(checkpoint);
@@ -120,6 +119,63 @@ final class MonitorInspectSchemaResolver {
         Path blobPath = new Path(blobsDir, InspectSchemaRegistryLayout.blobFileName(best.hash()));
 
         return readBlob(fs, blobPath, best, eventsDir);
+    }
+
+    private static SchemaResolveResult fallbackToEmbeddedSchema(
+            SchemaResolveResult registry, CheckpointEntry checkpoint, OperatorEntry operator) {
+        if (operator.embeddedCheckpoint == null) {
+            return registry;
+        }
+        StateInspectSchemaStore store = operator.embeddedCheckpoint.schemaStore();
+        String registryDiagnostic =
+                registry.warning == null
+                        ? registry.status
+                        : registry.status + ": " + registry.warning;
+        if (store.isEmpty()) {
+            return SchemaResolveResult.missing(
+                    "Schema registry "
+                            + registryDiagnostic
+                            + ". Embedded Flink checkpoint metadata also has no inspect schema for operator "
+                            + operator.operatorId
+                            + ".");
+        }
+        return SchemaResolveResult.available(
+                store,
+                "embedded Flink checkpoint metadata",
+                null,
+                null,
+                checkpoint.id,
+                "Schema registry "
+                        + registryDiagnostic
+                        + "; using embedded Flink checkpoint metadata.");
+    }
+
+    private static SchemaResolveResult useEmbeddedSchemaWhenRegistryMismatches(
+            SchemaResolveResult registry, CheckpointEntry checkpoint, OperatorEntry operator) {
+        if (operator.embeddedCheckpoint == null
+                || operator.embeddedCheckpoint.schemaStore().isEmpty()
+                || schemaStoresMatch(registry.store, operator.embeddedCheckpoint.schemaStore())) {
+            return registry;
+        }
+        return SchemaResolveResult.available(
+                operator.embeddedCheckpoint.schemaStore(),
+                "embedded Flink checkpoint metadata",
+                null,
+                null,
+                checkpoint.id,
+                "Schema registry event at checkpoint "
+                        + registry.schemaCheckpointId
+                        + " is stale or mismatched with embedded Flink checkpoint metadata; using embedded schema.");
+    }
+
+    private static boolean schemaStoresMatch(
+            StateInspectSchemaStore first, StateInspectSchemaStore second) {
+        try {
+            return java.util.Arrays.equals(first.toBytes(), second.toBytes());
+        } catch (IOException e) {
+            LOG.debug("Failed to compare inspect schema stores: {}", e.getMessage());
+            return false;
+        }
     }
 
     private static List<InspectSchemaRegistryLayout.SchemaEvent> listEvents(

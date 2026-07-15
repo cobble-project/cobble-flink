@@ -7,8 +7,8 @@ import io.cobble.ReadOptions;
 import io.cobble.Reader;
 import io.cobble.ScanOptions;
 import io.cobble.ShardSnapshot;
+import io.cobble.flink.common.CobbleEmbeddedCheckpoint;
 import io.cobble.flink.common.CobbleLoader;
-import io.cobble.flink.common.CobbleNativeSavepoint;
 import io.cobble.flink.common.inspect.InspectSchemaRegistryLayout;
 import io.cobble.flink.common.inspect.StateInspectSchema;
 import io.cobble.flink.common.inspect.StateInspectSchemaStore;
@@ -52,19 +52,8 @@ final class CobbleStateSourceRuntime {
     private CobbleStateSourceRuntime() {}
 
     static long resolveCheckpointId(StateSourceConfig config) throws IOException {
-        if (config.layout() == StateSourceConfig.Layout.NATIVE_SAVEPOINT) {
-            CobbleNativeSavepoint savepoint = loadNativeSavepoint(config);
-            long checkpointId = savepoint.checkpointId();
-            if (!"latest".equals(config.scanCheckpointId())
-                    && checkpointId != Long.parseLong(config.scanCheckpointId())) {
-                throw new IOException(
-                        "Cobble NATIVE savepoint checkpoint id is "
-                                + checkpointId
-                                + ", not requested "
-                                + config.scanCheckpointId()
-                                + ".");
-            }
-            return checkpointId;
+        if (config.layout() == StateSourceConfig.Layout.EMBEDDED_CHECKPOINT) {
+            return embeddedLocation(config).checkpoint().checkpointId();
         }
         if (!"latest".equals(config.scanCheckpointId())) {
             long checkpointId = Long.parseLong(config.scanCheckpointId());
@@ -165,11 +154,17 @@ final class CobbleStateSourceRuntime {
 
     static ReaderHandle openReader(StateSourceConfig config, long checkpointId) throws IOException {
         CobbleLoader.ensureCobbleLoaded();
-        if (config.layout() == StateSourceConfig.Layout.NATIVE_SAVEPOINT) {
-            return openNativeSavepointReader(config, checkpointId);
+        String checkpointRootUri = config.pathUri();
+        if (config.layout() == StateSourceConfig.Layout.EMBEDDED_CHECKPOINT) {
+            CobbleEmbeddedCheckpoint.Location location = embeddedLocation(config);
+            Path checkpointDirectory = location.checkpointDirectory();
+            if (!exists(manifestCopyPath(checkpointDirectory, config.operatorId()))) {
+                return openEmbeddedCheckpointReader(config, checkpointId);
+            }
+            checkpointRootUri = checkpointRoot(checkpointDirectory).toString();
         }
-        Path checkpointDir = checkpointDir(config.pathUri(), checkpointId);
-        Path operatorSnapshotDir = operatorSnapshotDir(config.pathUri(), config.operatorId());
+        Path checkpointDir = checkpointDir(checkpointRootUri, checkpointId);
+        Path operatorSnapshotDir = operatorSnapshotDir(checkpointRootUri, config.operatorId());
         File unifiedVolume =
                 Files.createTempDirectory(
                                 "cobble-state-source-"
@@ -210,7 +205,7 @@ final class CobbleStateSourceRuntime {
             for (String shardVolume : shardVolumes.values()) {
                 addVolume(readerConfig, shardVolume);
             }
-            addSharedVolumes(readerConfig, config.pathUri());
+            addSharedVolumes(readerConfig, checkpointRootUri);
             return new ReaderHandle(Reader.open(readerConfig, checkpointId), unifiedVolume);
         } catch (IOException | RuntimeException e) {
             if (bootstrapReader != null) {
@@ -281,11 +276,11 @@ final class CobbleStateSourceRuntime {
 
     private static StateInspectSchemaStore readSchemaStore(StateSourceConfig config)
             throws IOException {
-        if (config.layout() == StateSourceConfig.Layout.NATIVE_SAVEPOINT) {
-            StateInspectSchemaStore store = nativeOperator(config).schemaStore();
+        if (config.layout() == StateSourceConfig.Layout.EMBEDDED_CHECKPOINT) {
+            StateInspectSchemaStore store = embeddedOperator(config).schemaStore();
             if (store.isEmpty()) {
                 throw new IOException(
-                        "Cobble NATIVE savepoint has no inspect schema for operator '"
+                        "Cobble embedded checkpoint has no inspect schema for operator '"
                                 + config.operatorId()
                                 + "'.");
             }
@@ -352,12 +347,12 @@ final class CobbleStateSourceRuntime {
         return store;
     }
 
-    private static ReaderHandle openNativeSavepointReader(
+    private static ReaderHandle openEmbeddedCheckpointReader(
             StateSourceConfig config, long checkpointId) throws IOException {
-        CobbleNativeSavepoint.OperatorSnapshot operator = nativeOperator(config);
+        CobbleEmbeddedCheckpoint.OperatorSnapshot operator = embeddedOperator(config);
         if (operator.maxParallelism() <= 0) {
             throw new IOException(
-                    "Cobble NATIVE savepoint operator '"
+                    "Cobble embedded checkpoint operator '"
                             + config.operatorId()
                             + "' has invalid maxParallelism "
                             + operator.maxParallelism()
@@ -365,7 +360,7 @@ final class CobbleStateSourceRuntime {
         }
         File unifiedVolume =
                 Files.createTempDirectory(
-                                "cobble-native-savepoint-"
+                                "cobble-embedded-checkpoint-"
                                         + checkpointId
                                         + "-"
                                         + safeFileName(config.operatorId())
@@ -398,21 +393,30 @@ final class CobbleStateSourceRuntime {
         }
     }
 
-    private static CobbleNativeSavepoint loadNativeSavepoint(StateSourceConfig config)
+    private static CobbleEmbeddedCheckpoint.Location embeddedLocation(StateSourceConfig config)
             throws IOException {
-        return CobbleNativeSavepoint.load(new Path(config.pathUri()));
+        return CobbleEmbeddedCheckpoint.select(
+                new Path(config.pathUri()), config.scanCheckpointId());
     }
 
-    private static CobbleNativeSavepoint.OperatorSnapshot nativeOperator(StateSourceConfig config)
-            throws IOException {
-        CobbleNativeSavepoint savepoint = loadNativeSavepoint(config);
-        CobbleNativeSavepoint.OperatorSnapshot operator = savepoint.operator(config.operatorId());
+    private static Path checkpointRoot(Path checkpointDirectory) {
+        return checkpointDirectory.getName().startsWith(CHECKPOINT_PREFIX)
+                        && checkpointDirectory.getParent() != null
+                ? checkpointDirectory.getParent()
+                : checkpointDirectory;
+    }
+
+    private static CobbleEmbeddedCheckpoint.OperatorSnapshot embeddedOperator(
+            StateSourceConfig config) throws IOException {
+        CobbleEmbeddedCheckpoint checkpoint = embeddedLocation(config).checkpoint();
+        CobbleEmbeddedCheckpoint.OperatorSnapshot operator =
+                checkpoint.operator(config.operatorId());
         if (operator == null) {
             throw new IOException(
-                    "Cobble NATIVE savepoint has no Cobble operator '"
+                    "Cobble embedded checkpoint has no Cobble operator '"
                             + config.operatorId()
                             + "'. Available operators: "
-                            + String.join(", ", savepoint.operators().keySet())
+                            + String.join(", ", checkpoint.operators().keySet())
                             + ".");
         }
         return operator;

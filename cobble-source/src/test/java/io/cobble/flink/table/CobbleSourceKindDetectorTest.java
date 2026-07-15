@@ -4,16 +4,33 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import io.cobble.ShardSnapshot;
+import io.cobble.flink.common.CobbleSnapshotMetadataCodec;
+import io.cobble.flink.common.CobbleSnapshotMetadataPayload;
 import io.cobble.flink.common.inspect.InspectSchemaRegistryLayout;
 import io.cobble.flink.common.inspect.SinkInspectSchemaStore;
 import io.cobble.flink.common.inspect.StateInspectSchemaStore;
 
+import org.apache.flink.core.memory.DataOutputViewStreamWrapper;
+import org.apache.flink.runtime.checkpoint.Checkpoints;
+import org.apache.flink.runtime.checkpoint.OperatorState;
+import org.apache.flink.runtime.checkpoint.OperatorSubtaskState;
+import org.apache.flink.runtime.checkpoint.StateObjectCollection;
+import org.apache.flink.runtime.checkpoint.metadata.CheckpointMetadata;
+import org.apache.flink.runtime.jobgraph.OperatorID;
+import org.apache.flink.runtime.state.IncrementalRemoteKeyedStateHandle;
+import org.apache.flink.runtime.state.KeyGroupRange;
+import org.apache.flink.runtime.state.KeyedStateHandle;
+import org.apache.flink.runtime.state.filesystem.FileStateHandle;
 import org.apache.flink.table.api.ValidationException;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
+import java.io.DataOutputStream;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.Collections;
+import java.util.UUID;
 
 /** Tests for {@link CobbleSourceKindDetector} layout probing and explicit-kind handling. */
 class CobbleSourceKindDetectorTest {
@@ -34,7 +51,7 @@ class CobbleSourceKindDetectorTest {
     }
 
     @Test
-    void autoDetectsCheckpointRootFromChkMetadataAndCobbleManifest() throws Exception {
+    void autoDetectsSidecarCheckpointRootWhenEmbeddedMetadataIsUnreadable() throws Exception {
         Path root = checkpointRoot("checkpoint-root");
 
         CobbleResolvedSource resolved =
@@ -53,6 +70,17 @@ class CobbleSourceKindDetectorTest {
 
         assertEquals(CobbleSourceKind.STATE, resolved.kind());
         assertEquals(StateSourceConfig.Layout.CHECKPOINT_ROOT, resolved.stateConfig().layout());
+    }
+
+    @Test
+    void embeddedCheckpointTakesPriorityOverManifestSidecar() throws Exception {
+        Path root = embeddedCheckpointRoot("embedded-checkpoint-root");
+
+        CobbleResolvedSource resolved =
+                CobbleSourceKindDetector.detect(uri(root), CobbleSourceKind.AUTO, NOT_SINK_SHAPED);
+
+        assertEquals(CobbleSourceKind.STATE, resolved.kind());
+        assertEquals(StateSourceConfig.Layout.EMBEDDED_CHECKPOINT, resolved.stateConfig().layout());
     }
 
     @Test
@@ -328,8 +356,55 @@ class CobbleSourceKindDetectorTest {
 
     private Path checkpointRoot(String name) throws Exception {
         Path root = tempDir.resolve(name);
+        Path checkpoint = root.resolve("chk-5");
+        write(checkpoint.resolve("_metadata"), new byte[] {0});
+        write(checkpoint.resolve("COBBLE-SNAPSHOT-operator-1-MANIFEST"), new byte[] {0});
+        return root;
+    }
+
+    private Path embeddedCheckpointRoot(String name) throws Exception {
+        Path root = tempDir.resolve(name);
         Path chk = root.resolve("chk-5");
-        write(chk.resolve("_metadata"), new byte[] {0});
+        Path state = chk.resolve("task-state");
+        ShardSnapshot shard = new ShardSnapshot();
+        shard.dbId = "db";
+        shard.snapshotId = 5L;
+        shard.manifestPath = chk.resolve("volume/snapshot/SNAPSHOT-5").toUri().toString();
+        ShardSnapshot.Range range = new ShardSnapshot.Range();
+        range.start = 0;
+        range.end = 3;
+        shard.ranges.add(range);
+        Files.createDirectories(chk);
+        try (DataOutputStream output = new DataOutputStream(Files.newOutputStream(state))) {
+            CobbleSnapshotMetadataCodec.write(
+                    new CobbleSnapshotMetadataPayload(
+                            shard, false, StateInspectSchemaStore.empty()),
+                    new DataOutputViewStreamWrapper(output));
+        }
+        OperatorState operator = new OperatorState(new OperatorID(1L, 2L), 1, 4);
+        operator.putState(
+                0,
+                OperatorSubtaskState.builder()
+                        .setManagedKeyedState(
+                                StateObjectCollection.<KeyedStateHandle>singleton(
+                                        new IncrementalRemoteKeyedStateHandle(
+                                                UUID.randomUUID(),
+                                                new KeyGroupRange(0, 3),
+                                                5L,
+                                                Collections.emptyList(),
+                                                Collections.emptyList(),
+                                                new FileStateHandle(
+                                                        new org.apache.flink.core.fs.Path(
+                                                                state.toUri()),
+                                                        Files.size(state)))))
+                        .build());
+        try (DataOutputStream output =
+                new DataOutputStream(Files.newOutputStream(chk.resolve("_metadata")))) {
+            Checkpoints.storeCheckpointMetadata(
+                    new CheckpointMetadata(
+                            5L, Collections.singletonList(operator), Collections.emptyList()),
+                    output);
+        }
         write(chk.resolve("COBBLE-SNAPSHOT-operator-1-MANIFEST"), new byte[] {0});
         return root;
     }

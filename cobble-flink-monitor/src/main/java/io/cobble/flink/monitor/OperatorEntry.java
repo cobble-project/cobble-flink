@@ -1,6 +1,6 @@
 package io.cobble.flink.monitor;
 
-import io.cobble.flink.common.CobbleNativeSavepoint;
+import io.cobble.flink.common.CobbleEmbeddedCheckpoint;
 
 import java.util.Collections;
 import java.util.LinkedHashMap;
@@ -13,7 +13,7 @@ final class OperatorEntry {
     final String operatorSnapshotDirectory;
     final List<String> readerVolumeDirectories;
     final boolean globalSnapshotLayout;
-    final CobbleNativeSavepoint.OperatorSnapshot nativeSavepoint;
+    final CobbleEmbeddedCheckpoint.OperatorSnapshot embeddedCheckpoint;
 
     OperatorEntry(String operatorId, String manifestCopyPath, String operatorSnapshotDirectory) {
         this(
@@ -60,18 +60,35 @@ final class OperatorEntry {
             String operatorSnapshotDirectory,
             List<String> readerVolumeDirectories,
             boolean globalSnapshotLayout,
-            CobbleNativeSavepoint.OperatorSnapshot nativeSavepoint) {
+            CobbleEmbeddedCheckpoint.OperatorSnapshot embeddedCheckpoint) {
         this.operatorId = operatorId;
         this.manifestCopyPath = manifestCopyPath;
         this.operatorSnapshotDirectory = operatorSnapshotDirectory;
         this.readerVolumeDirectories = readerVolumeDirectories;
         this.globalSnapshotLayout = globalSnapshotLayout;
-        this.nativeSavepoint = nativeSavepoint;
+        this.embeddedCheckpoint = embeddedCheckpoint;
     }
 
-    static OperatorEntry nativeSavepoint(CobbleNativeSavepoint.OperatorSnapshot snapshot) {
+    static OperatorEntry embeddedCheckpoint(CobbleEmbeddedCheckpoint.OperatorSnapshot snapshot) {
         return new OperatorEntry(
                 snapshot.operatorId(), null, null, Collections.emptyList(), false, snapshot);
+    }
+
+    OperatorEntry withEmbeddedCheckpoint(CobbleEmbeddedCheckpoint.OperatorSnapshot snapshot) {
+        if (!operatorId.equals(snapshot.operatorId())) {
+            throw new IllegalArgumentException(
+                    "Cannot attach embedded checkpoint metadata for "
+                            + snapshot.operatorId()
+                            + " to operator "
+                            + operatorId);
+        }
+        return new OperatorEntry(
+                operatorId,
+                manifestCopyPath,
+                operatorSnapshotDirectory,
+                readerVolumeDirectories,
+                globalSnapshotLayout,
+                snapshot);
     }
 
     Map<String, Object> toJson() {
@@ -81,7 +98,7 @@ final class OperatorEntry {
         output.put("operator_snapshot_directory", operatorSnapshotDirectory);
         output.put("reader_volume_directories", readerVolumeDirectories);
         output.put("global_snapshot_layout", globalSnapshotLayout);
-        output.put("native_savepoint", nativeSavepoint != null);
+        output.put("embedded_checkpoint", embeddedCheckpoint != null);
         return output;
     }
 }

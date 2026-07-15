@@ -6,6 +6,7 @@ import io.cobble.Config;
 import io.cobble.ShardSnapshot;
 import io.cobble.flink.common.CobbleSnapshotMetadataCodec;
 import io.cobble.flink.common.CobbleSnapshotMetadataPayload;
+import io.cobble.flink.common.inspect.InspectSchemaRegistryLayout;
 import io.cobble.flink.common.inspect.StateInspectSchema;
 import io.cobble.flink.common.inspect.StateInspectSchemaStore;
 import io.cobble.flink.common.inspect.StateInspectSemanticSchema;
@@ -33,6 +34,7 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
 import java.io.DataOutputStream;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.util.Arrays;
 import java.util.Collections;
@@ -40,7 +42,7 @@ import java.util.LinkedHashMap;
 import java.util.UUID;
 
 /** Native savepoint planning coverage using Flink's actual metadata serialization. */
-class CobbleNativeSavepointSourceTest {
+class CobbleEmbeddedCheckpointSourceTest {
 
     @TempDir java.nio.file.Path tempDir;
 
@@ -52,7 +54,7 @@ class CobbleNativeSavepointSourceTest {
 
         CobbleResolvedSource detected =
                 CobbleSourceKindDetector.detect(uri, CobbleSourceKind.AUTO, false);
-        assertEquals(StateSourceConfig.Layout.NATIVE_SAVEPOINT, detected.stateConfig().layout());
+        assertEquals(StateSourceConfig.Layout.EMBEDDED_CHECKPOINT, detected.stateConfig().layout());
 
         org.apache.flink.configuration.Configuration options =
                 new org.apache.flink.configuration.Configuration();
@@ -61,7 +63,7 @@ class CobbleNativeSavepointSourceTest {
         StateSourceResolvedSchema resolved =
                 StateSourceSchemaResolver.resolve(
                         uri,
-                        StateSourceConfig.Layout.NATIVE_SAVEPOINT,
+                        StateSourceConfig.Layout.EMBEDDED_CHECKPOINT,
                         StateSourceOptions.parseForState(options),
                         "3",
                         new ResolvedSchema(
@@ -98,7 +100,7 @@ class CobbleNativeSavepointSourceTest {
         StateSourceConfig config =
                 new StateSourceConfig(
                         savepoint.toUri().toString(),
-                        StateSourceConfig.Layout.NATIVE_SAVEPOINT,
+                        StateSourceConfig.Layout.EMBEDDED_CHECKPOINT,
                         operatorId.toHexString(),
                         "state",
                         "value",
@@ -119,6 +121,71 @@ class CobbleNativeSavepointSourceTest {
         } finally {
             fixture.close();
         }
+    }
+
+    @Test
+    void embeddedSchemaWinsOverStaleSidecarEvent() throws Exception {
+        OperatorID operatorId = new OperatorID(21L, 23L);
+        java.nio.file.Path checkpoint = writeNativeSavepoint("schema-evolution", operatorId);
+        StateInspectSchemaStore staleStore =
+                new StateInspectSchemaStore(
+                        Collections.singletonList(
+                                StateInspectSchema.forValue(
+                                        "state",
+                                        "stale",
+                                        false,
+                                        IntSerializer.INSTANCE,
+                                        VoidNamespaceSerializer.INSTANCE,
+                                        IntSerializer.INSTANCE)),
+                        Collections.singletonMap(
+                                "state",
+                                StateInspectSemanticSchema.forValue(
+                                        StateInspectType.scalar("INT"),
+                                        StateInspectType.unknown(),
+                                        StateInspectType.scalar("INT"))));
+        writeRegistry(checkpoint, operatorId.toHexString(), 2L, staleStore);
+
+        org.apache.flink.configuration.Configuration options =
+                new org.apache.flink.configuration.Configuration();
+        options.set(CobbleSourceTableOptions.STATE_NAME, "state");
+        options.set(CobbleSourceTableOptions.STATE_OPERATOR_ID, operatorId.toHexString());
+        StateSourceResolvedSchema resolved =
+                StateSourceSchemaResolver.resolve(
+                        checkpoint.toUri().toString(),
+                        StateSourceConfig.Layout.EMBEDDED_CHECKPOINT,
+                        StateSourceOptions.parseForState(options),
+                        "3",
+                        new ResolvedSchema(
+                                Arrays.asList(
+                                        Column.physical("key", DataTypes.INT()),
+                                        Column.physical("value", DataTypes.INT())),
+                                Collections.emptyList(),
+                                null));
+
+        assertEquals(3L, resolved.schemaCheckpointId());
+        assertEquals("default", resolved.schema().columnFamily());
+    }
+
+    private void writeRegistry(
+            java.nio.file.Path checkpoint,
+            String operatorId,
+            long checkpointId,
+            StateInspectSchemaStore store)
+            throws Exception {
+        byte[] bytes = store.toBytes();
+        String hash = InspectSchemaRegistryLayout.sha256(bytes);
+        java.nio.file.Path schema =
+                checkpoint.resolve("cobble").resolve(operatorId).resolve("inspect-schema");
+        Files.createDirectories(schema.resolve("events"));
+        Files.createDirectories(schema.resolve("blobs"));
+        Files.write(
+                schema.resolve("blobs").resolve(InspectSchemaRegistryLayout.blobFileName(hash)),
+                bytes);
+        Files.write(
+                schema.resolve("events")
+                        .resolve(InspectSchemaRegistryLayout.eventFileName(checkpointId, hash)),
+                Arrays.asList("checkpoint_id=" + checkpointId),
+                StandardCharsets.UTF_8);
     }
 
     private java.nio.file.Path writeNativeSavepoint(String directoryName, OperatorID operatorId)

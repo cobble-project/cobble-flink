@@ -28,8 +28,8 @@ import java.util.Arrays;
 import java.util.Collections;
 import java.util.UUID;
 
-/** Regression coverage for read-only parsing of real Flink NATIVE savepoint metadata. */
-class CobbleNativeSavepointTest {
+/** Regression coverage for read-only parsing of Flink checkpoint metadata with Cobble payloads. */
+class CobbleEmbeddedCheckpointTest {
 
     @TempDir java.nio.file.Path tempDir;
 
@@ -41,8 +41,10 @@ class CobbleNativeSavepointTest {
         OperatorID operatorId = new OperatorID(1L, 2L);
         writeMetadata(savepoint, stateFile, operatorId);
 
-        CobbleNativeSavepoint first = CobbleNativeSavepoint.load(new Path(savepoint.toUri()));
-        CobbleNativeSavepoint second = CobbleNativeSavepoint.load(new Path(savepoint.toUri()));
+        CobbleEmbeddedCheckpoint first =
+                CobbleEmbeddedCheckpoint.read(new Path(savepoint.resolve("_metadata").toUri()));
+        CobbleEmbeddedCheckpoint second =
+                CobbleEmbeddedCheckpoint.read(new Path(savepoint.resolve("_metadata").toUri()));
 
         assertEquals(3L, first.checkpointId());
         assertEquals(first.checkpointId(), second.checkpointId());
@@ -75,12 +77,68 @@ class CobbleNativeSavepointTest {
         OperatorState foreign = operatorState(foreignOperator, keyedHandle(foreignState, 0, 3));
         writeMetadata(savepoint, Arrays.asList(first, second, foreign));
 
-        CobbleNativeSavepoint parsed = CobbleNativeSavepoint.load(new Path(savepoint.toUri()));
+        CobbleEmbeddedCheckpoint parsed =
+                CobbleEmbeddedCheckpoint.read(new Path(savepoint.resolve("_metadata").toUri()));
 
         assertEquals(2, parsed.operators().size());
         assertEquals(2, parsed.operator(firstOperator.toHexString()).shards().size());
         assertEquals(1, parsed.operator(secondOperator.toHexString()).shards().size());
         assertNull(parsed.operator(foreignOperator.toHexString()));
+    }
+
+    @Test
+    void locatesRootCheckpointMetadataAndShardManifestWithLatestSelection() throws Exception {
+        java.nio.file.Path root = Files.createDirectory(tempDir.resolve("checkpoints"));
+        java.nio.file.Path checkpointThree = Files.createDirectory(root.resolve("chk-3"));
+        java.nio.file.Path checkpointFour = Files.createDirectory(root.resolve("chk-4"));
+        java.nio.file.Path stateThree = checkpointThree.resolve("task-state");
+        java.nio.file.Path stateFour = checkpointFour.resolve("task-state");
+        writePayload(stateThree, "db-3", 0, 3);
+        writePayload(stateFour, "db-4", 0, 3);
+        writeMetadata(checkpointThree, stateThree, new OperatorID(9L, 10L));
+        writeMetadata(checkpointFour, 4L, stateFour, new OperatorID(11L, 12L));
+        java.nio.file.Path manifest =
+                Files.createDirectories(root.resolve("shared/op/volume/snapshot"))
+                        .resolve("SNAPSHOT-3");
+        Files.write(manifest, new byte[] {0});
+
+        Path rootPath = new Path(root.toUri());
+        assertEquals(2, CobbleEmbeddedCheckpoint.locate(rootPath).size());
+        assertEquals(
+                4L,
+                CobbleEmbeddedCheckpoint.select(rootPath, "latest").checkpoint().checkpointId());
+        assertEquals(
+                3L,
+                CobbleEmbeddedCheckpoint.select(new Path(checkpointThree.toUri()), "3")
+                        .checkpoint()
+                        .checkpointId());
+        assertEquals(
+                4L,
+                CobbleEmbeddedCheckpoint.select(
+                                new Path(checkpointFour.resolve("_metadata").toUri()), "4")
+                        .checkpoint()
+                        .checkpointId());
+        assertEquals(
+                3L,
+                CobbleEmbeddedCheckpoint.select(new Path(manifest.toUri()), "3")
+                        .checkpoint()
+                        .checkpointId());
+    }
+
+    @Test
+    void locatesCheckpointBelowConfiguredRootJobDirectory() throws Exception {
+        java.nio.file.Path root = Files.createDirectory(tempDir.resolve("configured-checkpoints"));
+        java.nio.file.Path checkpoint =
+                Files.createDirectories(root.resolve("job-123").resolve("chk-3"));
+        java.nio.file.Path state = checkpoint.resolve("task-state");
+        writePayload(state, "db-3", 0, 3);
+        writeMetadata(checkpoint, state, new OperatorID(13L, 14L));
+
+        Path rootPath = new Path(root.toUri());
+        assertEquals(1, CobbleEmbeddedCheckpoint.locate(rootPath).size());
+        assertEquals(
+                3L,
+                CobbleEmbeddedCheckpoint.select(rootPath, "latest").checkpoint().checkpointId());
     }
 
     private static void writePayload(java.nio.file.Path stateFile) throws Exception {
@@ -119,13 +177,33 @@ class CobbleNativeSavepointTest {
             java.nio.file.Path savepoint, java.nio.file.Path stateFile, OperatorID operatorId)
             throws Exception {
         writeMetadata(
+                3L,
+                savepoint,
+                Collections.singletonList(operatorState(operatorId, keyedHandle(stateFile, 0, 3))));
+    }
+
+    private static void writeMetadata(
+            java.nio.file.Path savepoint,
+            long checkpointId,
+            java.nio.file.Path stateFile,
+            OperatorID operatorId)
+            throws Exception {
+        writeMetadata(
+                checkpointId,
                 savepoint,
                 Collections.singletonList(operatorState(operatorId, keyedHandle(stateFile, 0, 3))));
     }
 
     private static void writeMetadata(
             java.nio.file.Path savepoint, java.util.List<OperatorState> states) throws Exception {
-        CheckpointMetadata metadata = new CheckpointMetadata(3L, states, Collections.emptyList());
+        writeMetadata(3L, savepoint, states);
+    }
+
+    private static void writeMetadata(
+            long checkpointId, java.nio.file.Path savepoint, java.util.List<OperatorState> states)
+            throws Exception {
+        CheckpointMetadata metadata =
+                new CheckpointMetadata(checkpointId, states, Collections.emptyList());
         try (DataOutputStream output =
                 new DataOutputStream(Files.newOutputStream(savepoint.resolve("_metadata")))) {
             Checkpoints.storeCheckpointMetadata(metadata, output);

@@ -83,14 +83,17 @@ state.backend.cobble.localdir: /tmp/flink-cobble/local
 state.backend.cobble.memory.managed: true
 
 state.checkpoints.dir: hdfs:///user/you/checkpoints
-
+# Recommended, optional: materialize checkpoint sidecars for faster monitor/source reads.
 high-availability.type: io.cobble.flink.state.CobbleHighAvailabilityServicesFactory
-cobble.ha.delegate.type: NONE
 ```
 
-If you were already using another Flink HA mode before enabling Cobble, keep
-Cobble as `high-availability.type` and move the old value into
-`cobble.ha.delegate.type`.
+The Cobble HA wrapper is recommended, not required. It materializes and maintains Cobble
+sidecars as checkpoints complete, so the monitor and state source can open them directly. Without
+the wrapper, those tools read Cobble payloads embedded in Flink `_metadata` and temporarily
+materialize a read-only view, so checkpoints and native savepoints remain inspectable.
+
+If you enable the wrapper and were already using another Flink HA mode, keep Cobble as
+`high-availability.type` and move the old value into `cobble.ha.delegate.type`.
 
 Example:
 
@@ -160,7 +163,7 @@ backend.
 | --- | --- | --- |
 | `state.backend.type` | none | Set this to `io.cobble.flink.state.CobbleStateBackendFactory` to enable Cobble as the Flink state backend. |
 | `state.checkpoints.dir` | none | The checkpoint storage location. This should point to shared storage that all relevant restore flows can access. |
-| `high-availability.type` | none | Set this to `io.cobble.flink.state.CobbleHighAvailabilityServicesFactory` when using the Cobble state backend. |
+| `high-availability.type` | none | Recommended: set this to `io.cobble.flink.state.CobbleHighAvailabilityServicesFactory` to materialize Cobble sidecars as checkpoints complete. |
 | `env.java.opts.all` | none | Required JVM flags when running Flink on Java 11 or newer. |
 | `env.java.home` | none | Optional JDK path if you want to pin the Java runtime used by Flink. |
 
@@ -204,7 +207,6 @@ For a first deployment, most users can start with just these keys:
 - `state.backend.type`
 - `state.checkpoints.dir`
 - `high-availability.type`
-- `cobble.ha.delegate.type`
 - `state.backend.cobble.localdir`
 - `state.backend.cobble.memory.managed`
 
@@ -333,7 +335,6 @@ earlier in [Configure `flink-conf.yaml`](#configure-flink-confyaml):
 ```yaml
 state.backend.type: io.cobble.flink.state.CobbleStateBackendFactory
 state.checkpoints.dir: hdfs:///user/you/checkpoints
-high-availability.type: io.cobble.flink.state.CobbleHighAvailabilityServicesFactory
 ```
 
 Keep the job's state descriptors exactly as they were. The restored state is

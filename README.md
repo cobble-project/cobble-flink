@@ -193,15 +193,22 @@ For stateful jobs, Cobble can be used as the Flink state backend. To use it, set
 
 ```yaml
 state.backend.type: io.cobble.flink.state.CobbleStateBackendFactory
+# Recommended, optional: materialize checkpoint sidecars for faster monitor/source reads.
 high-availability.type: io.cobble.flink.state.CobbleHighAvailabilityServicesFactory
 ```
 
-If you originally used another HA mode, move it to `cobble.ha.delegate.type`.
+The Cobble HA wrapper is recommended, but not required. It materializes and maintains Cobble
+checkpoint sidecars early, which makes monitor and source discovery faster. Without it, the
+monitor and state source can rebuild a read-only view from Flink `_metadata` when needed.
+
+If you use the wrapper and already have another HA mode, move that value to
+`cobble.ha.delegate.type`.
 
 Example:
 
 ```yaml
 state.backend.type: io.cobble.flink.state.CobbleStateBackendFactory
+# Recommended, optional: materialize checkpoint sidecars for faster monitor/source reads.
 high-availability.type: io.cobble.flink.state.CobbleHighAvailabilityServicesFactory
 cobble.ha.delegate.type: kubernetes
 ```

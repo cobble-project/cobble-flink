@@ -9,7 +9,7 @@ import io.cobble.ScanCursor;
 import io.cobble.ScanOptions;
 import io.cobble.ShardSnapshot;
 import io.cobble.flink.common.CobbleConnectorStorageOptions;
-import io.cobble.flink.common.CobbleNativeSavepoint;
+import io.cobble.flink.common.CobbleEmbeddedCheckpoint;
 import io.cobble.flink.common.inspect.StateInspectSemanticSchema;
 import io.cobble.flink.common.inspect.StateInspectType;
 
@@ -333,11 +333,23 @@ public final class CobbleFlinkMonitorServer {
                 return new ReaderHandle(
                         Reader.open(cobbleConfig, checkpoint.id), Collections.emptyList());
             }
-            if (operator.nativeSavepoint != null) {
-                return openNativeSavepointReader(config, checkpoint, operator);
-            }
             if (operator.globalSnapshotLayout) {
-                return openGlobalSnapshotReader(config, checkpoint, operator);
+                try {
+                    return openGlobalSnapshotReader(config, checkpoint, operator);
+                } catch (RuntimeException globalFailure) {
+                    if (operator.embeddedCheckpoint == null) {
+                        throw globalFailure;
+                    }
+                    try {
+                        return openEmbeddedCheckpointReader(config, checkpoint, operator);
+                    } catch (RuntimeException embeddedFailure) {
+                        globalFailure.addSuppressed(embeddedFailure);
+                        throw globalFailure;
+                    }
+                }
+            }
+            if (operator.embeddedCheckpoint != null) {
+                return openEmbeddedCheckpointReader(config, checkpoint, operator);
             }
             Config cobbleConfig =
                     CobbleReaderConfigs.checkpoint(
@@ -427,21 +439,22 @@ public final class CobbleFlinkMonitorServer {
             }
         }
 
-        private static ReaderHandle openNativeSavepointReader(
+        private static ReaderHandle openEmbeddedCheckpointReader(
                 ServerConfig config, CheckpointEntry checkpoint, OperatorEntry operator) {
             List<File> temporaryDirectories = new ArrayList<>();
             try {
-                CobbleNativeSavepoint.OperatorSnapshot nativeSnapshot = operator.nativeSavepoint;
+                CobbleEmbeddedCheckpoint.OperatorSnapshot nativeSnapshot =
+                        operator.embeddedCheckpoint;
                 if (nativeSnapshot.maxParallelism() <= 0) {
                     throw new InputException(
-                            "Native savepoint operator "
+                            "Embedded checkpoint operator "
                                     + operator.operatorId
                                     + " has invalid maxParallelism "
                                     + nativeSnapshot.maxParallelism());
                 }
                 File unifiedVolume =
                         java.nio.file.Files.createTempDirectory(
-                                        "cobble-flink-native-savepoint-"
+                                        "cobble-flink-embedded-checkpoint-"
                                                 + checkpoint.id
                                                 + "-"
                                                 + safeFileName(operator.operatorId)
@@ -484,7 +497,7 @@ public final class CobbleFlinkMonitorServer {
             } catch (IOException | RuntimeException e) {
                 deleteTemporaryDirectories(temporaryDirectories);
                 throw new InputException(
-                        "Failed to prepare Cobble NATIVE savepoint for operator "
+                        "Failed to prepare Cobble embedded checkpoint for operator "
                                 + operator.operatorId
                                 + ": "
                                 + e.getMessage());
@@ -1803,16 +1816,25 @@ public final class CobbleFlinkMonitorServer {
                 throw new InputException(
                         "Failed to open checkpoint path " + checkpointRoot + ": " + e.getMessage());
             }
+            if (!requestedStatus.isDir()) {
+                try {
+                    return discoverEmbeddedCheckpoints(
+                            CobbleEmbeddedCheckpoint.locate(requested), storageOptions);
+                } catch (IOException e) {
+                    throw new InputException(e.getMessage());
+                }
+            }
             Path root =
                     checkpointDirectoryId(requested) == null ? requested : requested.getParent();
-            if (root == null || !requestedStatus.isDir()) {
+            if (root == null) {
                 throw new InputException(
                         "--checkpoint must point to a checkpoint directory: " + checkpointRoot);
             }
             try {
                 if (fileSystem.exists(new Path(requested, "_metadata"))) {
                     try {
-                        return discoverNativeSavepoint(requested, storageOptions);
+                        return discoverEmbeddedCheckpoints(
+                                CobbleEmbeddedCheckpoint.locate(requested), storageOptions);
                     } catch (InputException ignored) {
                         // A non-Cobble savepoint or ordinary chk-* directory still has a valid
                         // legacy discovery path below.
@@ -1880,46 +1902,108 @@ public final class CobbleFlinkMonitorServer {
                                 pathToStorageString(checkpointDirectory),
                                 entry.getValue()));
             }
-            List<CheckpointEntry> checkpoints = new ArrayList<>(checkpointById.values());
-            checkpoints.sort(
+            addEmbeddedCheckpointEntries(requested, checkpointById);
+            List<CheckpointEntry> embeddedCheckpoints = new ArrayList<>(checkpointById.values());
+            embeddedCheckpoints.sort(
                     Comparator.comparingLong((CheckpointEntry item) -> item.id).reversed());
-            if (checkpoints.isEmpty()) {
+            if (embeddedCheckpoints.isEmpty()) {
                 throw new InputException(
                         "No Cobble Flink checkpoints found under "
                                 + root
-                                + ". Expected chk-* with Cobble manifest copies or shared/op_*/"
-                                + "<volume>/snapshot/SNAPSHOT-* files.");
+                                + ". Expected chk-* with a Flink _metadata file containing Cobble"
+                                + " embedded state, Cobble manifest copies, or shared/op_*/<volume>/"
+                                + "snapshot/SNAPSHOT-* files.");
             }
             return new CheckpointCatalog(
-                    root.toString(), "checkpoint", checkpoints, storageOptions);
+                    root.toString(), "checkpoint", embeddedCheckpoints, storageOptions);
         }
 
-        private static CheckpointCatalog discoverNativeSavepoint(
-                Path savepointDirectory, CobbleConnectorStorageOptions storageOptions) {
-            final CobbleNativeSavepoint savepoint;
-            try {
-                savepoint = CobbleNativeSavepoint.load(savepointDirectory);
-            } catch (IOException | RuntimeException e) {
-                throw new InputException(
-                        "No readable Cobble NATIVE savepoint state found at "
-                                + savepointDirectory
-                                + ": "
-                                + e.getMessage());
+        private static CheckpointCatalog discoverEmbeddedCheckpoints(
+                List<CobbleEmbeddedCheckpoint.Location> locations,
+                CobbleConnectorStorageOptions storageOptions) {
+            if (locations.isEmpty()) {
+                throw new InputException("No readable Cobble embedded checkpoint metadata found.");
             }
-            List<OperatorEntry> operators = new ArrayList<>();
-            for (CobbleNativeSavepoint.OperatorSnapshot operator : savepoint.operators().values()) {
-                operators.add(OperatorEntry.nativeSavepoint(operator));
+            List<CheckpointEntry> checkpoints = new ArrayList<>();
+            for (CobbleEmbeddedCheckpoint.Location location : locations) {
+                checkpoints.add(embeddedCheckpointEntry(location));
             }
-            operators.sort(Comparator.comparing(operator -> operator.operatorId));
             return new CheckpointCatalog(
-                    pathToStorageString(savepointDirectory),
-                    "native_savepoint",
-                    Collections.singletonList(
-                            new CheckpointEntry(
-                                    savepoint.checkpointId(),
-                                    pathToStorageString(savepointDirectory),
-                                    operators)),
+                    pathToStorageString(locations.get(0).checkpointDirectory()),
+                    "checkpoint",
+                    checkpoints,
                     storageOptions);
+        }
+
+        private static CheckpointEntry embeddedCheckpointEntry(
+                CobbleEmbeddedCheckpoint.Location location) {
+            Path checkpointDirectory = location.checkpointDirectory();
+            try {
+                FileSystem fileSystem = checkpointDirectory.getFileSystem();
+                Path checkpointRoot = checkpointDirectory.getParent();
+                List<OperatorEntry> sidecarOperators =
+                        discoverOperators(
+                                fileSystem,
+                                checkpointRoot == null ? checkpointDirectory : checkpointRoot,
+                                checkpointDirectory,
+                                location.checkpoint().checkpointId());
+                return mergeEmbeddedCheckpoint(
+                        new CheckpointEntry(
+                                location.checkpoint().checkpointId(),
+                                pathToStorageString(checkpointDirectory),
+                                sidecarOperators),
+                        location);
+            } catch (IOException | RuntimeException ignored) {
+                // Embedded metadata remains readable when an optional sidecar cannot be listed.
+                List<OperatorEntry> operators = new ArrayList<>();
+                for (CobbleEmbeddedCheckpoint.OperatorSnapshot operator :
+                        location.checkpoint().operators().values()) {
+                    operators.add(OperatorEntry.embeddedCheckpoint(operator));
+                }
+                operators.sort(Comparator.comparing(operator -> operator.operatorId));
+                return new CheckpointEntry(
+                        location.checkpoint().checkpointId(),
+                        pathToStorageString(checkpointDirectory),
+                        operators);
+            }
+        }
+
+        private static void addEmbeddedCheckpointEntries(
+                Path requested, Map<Long, CheckpointEntry> checkpointById) {
+            try {
+                for (CobbleEmbeddedCheckpoint.Location location :
+                        CobbleEmbeddedCheckpoint.locate(requested)) {
+                    long checkpointId = location.checkpoint().checkpointId();
+                    CheckpointEntry existing = checkpointById.get(checkpointId);
+                    checkpointById.put(
+                            checkpointId,
+                            existing == null
+                                    ? embeddedCheckpointEntry(location)
+                                    : mergeEmbeddedCheckpoint(existing, location));
+                }
+            } catch (IOException ignored) {
+                // Sidecar-only checkpoints remain readable without embedded metadata.
+            }
+        }
+
+        static CheckpointEntry mergeEmbeddedCheckpoint(
+                CheckpointEntry existing, CobbleEmbeddedCheckpoint.Location location) {
+            Map<String, OperatorEntry> operators = new LinkedHashMap<>();
+            for (OperatorEntry operator : existing.operators) {
+                operators.put(operator.operatorId, operator);
+            }
+            for (CobbleEmbeddedCheckpoint.OperatorSnapshot embedded :
+                    location.checkpoint().operators().values()) {
+                OperatorEntry current = operators.get(embedded.operatorId());
+                operators.put(
+                        embedded.operatorId(),
+                        current == null
+                                ? OperatorEntry.embeddedCheckpoint(embedded)
+                                : current.withEmbeddedCheckpoint(embedded));
+            }
+            List<OperatorEntry> merged = new ArrayList<>(operators.values());
+            merged.sort(Comparator.comparing(operator -> operator.operatorId));
+            return new CheckpointEntry(existing.id, existing.directory, merged);
         }
 
         private static CheckpointCatalog discoverDataSourceRoot(

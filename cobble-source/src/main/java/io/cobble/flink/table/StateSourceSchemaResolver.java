@@ -1,6 +1,6 @@
 package io.cobble.flink.table;
 
-import io.cobble.flink.common.CobbleNativeSavepoint;
+import io.cobble.flink.common.CobbleEmbeddedCheckpoint;
 import io.cobble.flink.common.inspect.InspectSchemaRegistryLayout;
 import io.cobble.flink.common.inspect.SerializerInspectSchema;
 import io.cobble.flink.common.inspect.StateInspectField;
@@ -82,8 +82,8 @@ final class StateSourceSchemaResolver {
             StateSourceOptions stateOptions,
             String scanCheckpointId,
             ResolvedSchema ddlSchema) {
-        if (layout == StateSourceConfig.Layout.NATIVE_SAVEPOINT) {
-            return resolveNativeSavepoint(
+        if (layout == StateSourceConfig.Layout.EMBEDDED_CHECKPOINT) {
+            return resolveEmbeddedCheckpoint(
                     checkpointRootUri, stateOptions, scanCheckpointId, ddlSchema);
         }
         Path root = new Path(checkpointRootUri);
@@ -111,37 +111,55 @@ final class StateSourceSchemaResolver {
         return resolveStore(store, operatorId, event.checkpointId(), stateOptions, ddlSchema);
     }
 
-    private static StateSourceResolvedSchema resolveNativeSavepoint(
-            String savepointUri,
+    private static StateSourceResolvedSchema resolveEmbeddedCheckpoint(
+            String checkpointEntry,
             StateSourceOptions stateOptions,
             String scanCheckpointId,
             ResolvedSchema ddlSchema) {
-        CobbleNativeSavepoint savepoint;
+        CobbleEmbeddedCheckpoint.Location location;
         try {
-            savepoint = CobbleNativeSavepoint.load(new Path(savepointUri));
+            location = CobbleEmbeddedCheckpoint.select(new Path(checkpointEntry), scanCheckpointId);
         } catch (IOException | RuntimeException e) {
             throw new ValidationException(
-                    "Failed to read Cobble NATIVE savepoint metadata at " + savepointUri + '.', e);
+                    "Failed to read Cobble embedded checkpoint metadata at "
+                            + checkpointEntry
+                            + '.',
+                    e);
         }
-        if (!"latest".equals(scanCheckpointId)
-                && savepoint.checkpointId() != Long.parseLong(scanCheckpointId)) {
-            throw new ValidationException(
-                    "Cobble NATIVE savepoint checkpoint id is "
-                            + savepoint.checkpointId()
-                            + ", not requested "
-                            + scanCheckpointId
-                            + ".");
+        List<String> operators = new ArrayList<>(location.checkpoint().operators().keySet());
+        String operatorId = selectOperator(operators, stateOptions.operatorId(), checkpointEntry);
+        StateInspectSchemaStore embeddedStore =
+                location.checkpoint().operator(operatorId).schemaStore();
+        if (!embeddedStore.isEmpty()) {
+            return resolveStore(
+                    embeddedStore,
+                    operatorId,
+                    location.checkpoint().checkpointId(),
+                    stateOptions,
+                    ddlSchema);
         }
-        List<String> operators = new ArrayList<>(savepoint.operators().keySet());
-        String operatorId = selectOperator(operators, stateOptions.operatorId(), savepointUri);
-        StateInspectSchemaStore store = savepoint.operator(operatorId).schemaStore();
-        if (store.isEmpty()) {
-            throw new ValidationException(
-                    "Cobble NATIVE savepoint operator '"
-                            + operatorId
-                            + "' has no embedded inspect schema.");
+        Path sidecarRoot = checkpointRoot(location.checkpointDirectory());
+        try {
+            return resolve(
+                    sidecarRoot.toString(),
+                    StateSourceConfig.Layout.CHECKPOINT_ROOT,
+                    stateOptions,
+                    Long.toString(location.checkpoint().checkpointId()),
+                    ddlSchema);
+        } catch (ValidationException ignored) {
+            // The HA sidecar is optional; use metadata embedded in Flink's checkpoint instead.
         }
-        return resolveStore(store, operatorId, savepoint.checkpointId(), stateOptions, ddlSchema);
+        throw new ValidationException(
+                "Cobble embedded checkpoint operator '"
+                        + operatorId
+                        + "' has no embedded inspect schema and no readable sidecar schema.");
+    }
+
+    private static Path checkpointRoot(Path checkpointDirectory) {
+        return checkpointDirectory.getName().startsWith("chk-")
+                        && checkpointDirectory.getParent() != null
+                ? checkpointDirectory.getParent()
+                : checkpointDirectory;
     }
 
     private static StateSourceResolvedSchema resolveStore(
