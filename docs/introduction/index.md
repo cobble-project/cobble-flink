@@ -52,7 +52,7 @@ Append the Flink compatibility suffix shown in
 [Getting Started](../getting-started/), for example:
 
 ```text
-0.2.0-1-flink-1.17
+0.2.2-1-flink-1.17
 ```
 
 ## When To Use Which Part

@@ -37,10 +37,10 @@ not need both at the same time.
 Download the released runtime jar from a Maven repository and put it into
 Flink's `lib/` directory. Use the version matrix in
 [Getting Started](../getting-started/) to choose the artifact that matches your
-Flink version. For example, on Flink 1.17 or later:
+Flink version. For example, on Flink 1.17 or 1.18; use the matrix for later versions:
 
 ```bash
-cp cobble-flink-dist-0.2.0-1-flink-1.17.jar "$FLINK_HOME/lib/"
+cp cobble-flink-dist-0.2.2-1-flink-1.17.jar "$FLINK_HOME/lib/"
 ```
 
 ### Option B: use a job-side dependency

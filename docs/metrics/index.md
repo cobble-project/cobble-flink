@@ -106,8 +106,9 @@ their Cobble database.
 
 ## Reporter Example
 
-Configure a Flink metric reporter normally. For example, Prometheus can be
-enabled in `flink-conf.yaml`:
+Configure a Flink metric reporter normally. Add it to the
+[cluster configuration file](../getting-started/#flink-cluster-configuration)
+for your Flink version. For example, Prometheus can be enabled with:
 
 ```yaml
 metrics.reporters: prom

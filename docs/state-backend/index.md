@@ -51,7 +51,7 @@ Flink's `lib/` directory. Use the version matrix in
 Flink version. For example, on Flink 1.19 or 1.20:
 
 ```bash
-cp cobble-flink-dist-0.2.0-1-flink-1.19.jar "$FLINK_HOME/lib/"
+cp cobble-flink-dist-0.2.2-1-flink-1.19.jar "$FLINK_HOME/lib/"
 ```
 
 ### Option B: use a job-side dependency
@@ -73,7 +73,12 @@ version value from the state column in [Getting Started](../getting-started/).
 Most users do not need this if the runtime jar is already present in Flink
 `lib/`.
 
-### Configure `flink-conf.yaml`
+### Configure the Flink cluster configuration
+
+Choose the configuration file and checkpoint directory key for your Flink
+version in [Getting Started](../getting-started/#flink-cluster-configuration).
+`state.backend.type`, `high-availability.type`, `env.java.opts.all`, and
+`env.java.home` use the same keys in Flink 1.17 through 2.0.
 
 Minimal example:
 
@@ -82,10 +87,13 @@ state.backend.type: io.cobble.flink.state.CobbleStateBackendFactory
 state.backend.cobble.localdir: /tmp/flink-cobble/local
 state.backend.cobble.memory.managed: true
 
-state.checkpoints.dir: hdfs:///user/you/checkpoints
 # Recommended, optional: materialize checkpoint sidecars for faster monitor/source reads.
 high-availability.type: io.cobble.flink.state.CobbleHighAvailabilityServicesFactory
 ```
+
+Add the version-appropriate checkpoint directory setting from Getting Started:
+`state.checkpoints.dir` for Flink 1.17–1.19, or
+`execution.checkpointing.dir` for Flink 1.20 and 2.0+.
 
 The Cobble HA wrapper is recommended, not required. It materializes and maintains Cobble
 sidecars as checkpoints complete, so the monitor and state source can open them directly. Without
@@ -102,16 +110,11 @@ high-availability.type: io.cobble.flink.state.CobbleHighAvailabilityServicesFact
 cobble.ha.delegate.type: kubernetes
 ```
 
-If Flink runs on Java 11 or newer, also add:
-
-```yaml
-env.java.opts.all: >-
-  --add-exports=java.base/sun.nio.ch=ALL-UNNAMED
-  --add-opens=java.base/java.lang=ALL-UNNAMED
-  --add-opens=java.base/java.util=ALL-UNNAMED
-```
-
-If multiple JDKs are installed, you can also pin the runtime:
+For JVM flags, follow the version-specific guidance in
+[Getting Started](../getting-started/#configure-flink-if-you-use-the-state-backend).
+In particular, preserve the existing `env.java.opts.all` value in Flink 1.19+
+distributions and append only missing flags. If multiple JDKs are installed,
+you can also pin the runtime:
 
 ```yaml
 env.java.home: /path/to/your/jdk
@@ -162,10 +165,11 @@ backend.
 | Key | Default | Description |
 | --- | --- | --- |
 | `state.backend.type` | none | Set this to `io.cobble.flink.state.CobbleStateBackendFactory` to enable Cobble as the Flink state backend. |
-| `state.checkpoints.dir` | none | The checkpoint storage location. This should point to shared storage that all relevant restore flows can access. |
+| `state.checkpoints.dir` | none | Primary checkpoint storage key for Flink 1.17–1.19. |
+| `execution.checkpointing.dir` | none | Primary checkpoint storage key for Flink 1.20 and 2.0+. `state.checkpoints.dir` remains a deprecated alias. |
 | `high-availability.type` | none | Recommended: set this to `io.cobble.flink.state.CobbleHighAvailabilityServicesFactory` to materialize Cobble sidecars as checkpoints complete. |
-| `env.java.opts.all` | none | Required JVM flags when running Flink on Java 11 or newer. |
-| `env.java.home` | none | Optional JDK path if you want to pin the Java runtime used by Flink. |
+| `env.java.opts.all` | none | Preserve Flink's existing value and append only missing Cobble JVM flags. |
+| `env.java.home` | none | Optional JDK path; the same key is used by every supported Flink version. |
 
 ### Cobble HA Wrapper Settings
 
@@ -205,7 +209,7 @@ backend.
 For a first deployment, most users can start with just these keys:
 
 - `state.backend.type`
-- `state.checkpoints.dir`
+- `state.checkpoints.dir` on Flink 1.17–1.19, or `execution.checkpointing.dir` on Flink 1.20+
 - `high-availability.type`
 - `state.backend.cobble.localdir`
 - `state.backend.cobble.memory.managed`
@@ -256,7 +260,7 @@ If you already use a Cobble Flink dist bundle, the same bundled CLI entrypoint
 is available there too. Pick the dist jar that matches your Flink version:
 
 ```bash
-java -jar cobble-flink-dist-0.2.0-1-flink-1.17.jar remote-compactor \
+java -jar cobble-flink-dist-0.2.2-1-flink-1.17.jar remote-compactor \
   --config ./cobble-compactor.yaml \
   --bind 0.0.0.0:18888
 ```
@@ -329,13 +333,15 @@ Confirm your Flink version's exact savepoint command syntax if it differs.
 
 ### Switch the state backend
 
-Point Flink at the Cobble state backend. Use the `flink-conf.yaml` keys described
-earlier in [Configure `flink-conf.yaml`](#configure-flink-confyaml):
+Point Flink at the Cobble state backend. Use the cluster configuration keys
+described earlier in [Configure the Flink cluster configuration](#configure-the-flink-cluster-configuration):
 
 ```yaml
 state.backend.type: io.cobble.flink.state.CobbleStateBackendFactory
-state.checkpoints.dir: hdfs:///user/you/checkpoints
 ```
+
+Also add the version-appropriate checkpoint directory key from
+[Getting Started](../getting-started/#flink-cluster-configuration).
 
 Keep the job's state descriptors exactly as they were. The restored state is
 matched by state name, so renaming or retyping a descriptor prevents a match.
