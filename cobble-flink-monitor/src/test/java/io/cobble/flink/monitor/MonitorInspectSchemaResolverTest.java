@@ -12,6 +12,7 @@ import io.cobble.flink.common.inspect.StateInspectSchema;
 import io.cobble.flink.common.inspect.StateInspectSchemaStore;
 import io.cobble.flink.common.inspect.StateInspectSemanticSchema;
 import io.cobble.flink.common.inspect.StateInspectType;
+import io.cobble.flink.inspect.internal.*;
 
 import org.apache.flink.api.common.typeutils.base.IntSerializer;
 import org.apache.flink.api.common.typeutils.base.StringSerializer;

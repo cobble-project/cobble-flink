@@ -6,6 +6,8 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assumptions.assumeTrue;
 
+import io.cobble.flink.inspect.internal.*;
+
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
@@ -95,9 +97,9 @@ class UserClasspathTest {
 
     @Test
     void missingPathThrowsInputException() {
-        InputException e =
+        InspectInputException e =
                 assertThrows(
-                        InputException.class,
+                        InspectInputException.class,
                         () ->
                                 UserClasspath.create(
                                         Collections.singletonList("/nonexistent/path.jar")));

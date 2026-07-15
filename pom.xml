@@ -47,6 +47,7 @@
         <module>cobble-dist</module>
         <module>cobble-dist-flink-1.19</module>
         <module>cobble-dist-flink-2.0</module>
+        <module>cobble-flink-inspect</module>
         <module>cobble-flink-monitor</module>
         <module>cobble-state-bench</module>
         <module>cobble-tests</module>

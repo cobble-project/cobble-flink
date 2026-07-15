@@ -3,6 +3,7 @@ package io.cobble.flink.monitor;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 
 import io.cobble.flink.common.CobbleConnectorStorageOptions;
+import io.cobble.flink.inspect.internal.*;
 
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
@@ -34,7 +35,7 @@ class CobbleDataSourceDiscoveryTest {
         assertEquals(7L, discovered.get(0).id);
         assertEquals("sink", discovered.get(0).defaultOperator().operatorId);
         assertEquals(
-                MonitorPathUtils.normalizeStorageDirectory(root.toUri().toString()),
+                InspectPathUtils.normalizeStorageDirectory(root.toUri().toString()),
                 discovered.get(0).directory);
     }
 }

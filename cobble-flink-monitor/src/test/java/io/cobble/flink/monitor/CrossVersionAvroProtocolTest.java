@@ -8,6 +8,7 @@ import io.cobble.flink.common.inspect.DescriptorCapability;
 import io.cobble.flink.common.inspect.InspectDecoderDescriptor;
 import io.cobble.flink.common.inspect.SerializerInspectSchema;
 import io.cobble.flink.common.inspect.decode.AvroClasslessDecoder;
+import io.cobble.flink.inspect.internal.*;
 
 import org.apache.avro.Schema;
 import org.apache.avro.generic.GenericRecord;

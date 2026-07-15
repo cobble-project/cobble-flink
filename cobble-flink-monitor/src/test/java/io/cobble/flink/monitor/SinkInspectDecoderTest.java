@@ -7,6 +7,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import io.cobble.flink.common.inspect.SinkInspectField;
 import io.cobble.flink.common.inspect.SinkInspectSchema;
+import io.cobble.flink.inspect.internal.*;
 
 import org.apache.flink.api.common.typeutils.TypeSerializer;
 import org.apache.flink.core.memory.DataOutputSerializer;

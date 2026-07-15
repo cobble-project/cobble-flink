@@ -18,6 +18,11 @@
     <dependencies>
         <dependency>
             <groupId>io.github.cobble-project</groupId>
+            <artifactId>cobble-flink-inspect</artifactId>
+            <version>${project.version}</version>
+        </dependency>
+        <dependency>
+            <groupId>io.github.cobble-project</groupId>
             <artifactId>cobble</artifactId>
             <version>${cobble.java.version}</version>
         </dependency>

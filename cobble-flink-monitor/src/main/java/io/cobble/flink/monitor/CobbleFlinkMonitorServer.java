@@ -1,17 +1,33 @@
 package io.cobble.flink.monitor;
 
-import io.cobble.Config;
-import io.cobble.DbCoordinator;
 import io.cobble.GlobalSnapshot;
 import io.cobble.ReadOptions;
 import io.cobble.Reader;
-import io.cobble.ScanCursor;
 import io.cobble.ScanOptions;
 import io.cobble.ShardSnapshot;
 import io.cobble.flink.common.CobbleConnectorStorageOptions;
 import io.cobble.flink.common.CobbleEmbeddedCheckpoint;
 import io.cobble.flink.common.inspect.StateInspectSemanticSchema;
 import io.cobble.flink.common.inspect.StateInspectType;
+import io.cobble.flink.inspect.CobbleInspectClient;
+import io.cobble.flink.inspect.internal.CheckpointEntry;
+import io.cobble.flink.inspect.internal.CobbleDataSourceDiscovery;
+import io.cobble.flink.inspect.internal.DisplayLong;
+import io.cobble.flink.inspect.internal.FlinkInspectFileSystems;
+import io.cobble.flink.inspect.internal.InspectReaderOperations;
+import io.cobble.flink.inspect.internal.InspectTarget;
+import io.cobble.flink.inspect.internal.LookupItem;
+import io.cobble.flink.inspect.internal.MonitorInspectSchemaResolver;
+import io.cobble.flink.inspect.internal.MonitorReaderSession;
+import io.cobble.flink.inspect.internal.OperatorEntry;
+import io.cobble.flink.inspect.internal.ReaderHandle;
+import io.cobble.flink.inspect.internal.SchemaResolveResult;
+import io.cobble.flink.inspect.internal.SinkInspectDecoder;
+import io.cobble.flink.inspect.internal.SinkInspectSchemaResolver;
+import io.cobble.flink.inspect.internal.SinkSchemaResolveResult;
+import io.cobble.flink.inspect.internal.StateInspectDecoder;
+import io.cobble.flink.inspect.internal.StateInspectTargetBuilder;
+import io.cobble.flink.inspect.internal.UserClassLoaderScope;
 
 import com.google.gson.FieldNamingPolicy;
 import com.google.gson.Gson;
@@ -81,12 +97,16 @@ public final class CobbleFlinkMonitorServer {
 
     public static void main(String[] args) throws Exception {
         ServerConfig config = ServerConfig.parse(args);
-        UserClasspath userClasspath = UserClasspath.create(config.userJars);
-        Thread.currentThread().setContextClassLoader(userClasspath.classLoader());
         preloadRuntimeClasses();
-        config.flinkConfiguration = FlinkMonitorFileSystems.initialize(config.flinkConfPath);
-        MonitorState state = MonitorState.open(config, userClasspath);
-        ClassLoader contextClassLoader = userClasspath.classLoader();
+        config.flinkConfiguration = FlinkInspectFileSystems.initialize(config.flinkConfPath);
+        CobbleInspectClient inspectClient =
+                CobbleInspectClient.builder()
+                        .storageOptions(config.storageOptions)
+                        .flinkConfiguration(config.flinkConfiguration)
+                        .userJars(config.userJars)
+                        .totalBuckets(config.totalBuckets)
+                        .build();
+        MonitorState state = MonitorState.open(config, inspectClient);
         ExecutorService executor =
                 Executors.newCachedThreadPool(
                         new ThreadFactory() {
@@ -100,7 +120,6 @@ public final class CobbleFlinkMonitorServer {
                                                 "cobble-flink-monitor-http-"
                                                         + counter.incrementAndGet());
                                 thread.setDaemon(true);
-                                thread.setContextClassLoader(contextClassLoader);
                                 return thread;
                             }
                         });
@@ -117,7 +136,7 @@ public final class CobbleFlinkMonitorServer {
                                     state.close();
                                     server.stop(0);
                                     executor.shutdownNow();
-                                    userClasspath.close();
+                                    inspectClient.close();
                                 },
                                 "cobble-flink-monitor-shutdown"));
 
@@ -232,7 +251,7 @@ public final class CobbleFlinkMonitorServer {
     private static final class MonitorState implements AutoCloseable {
 
         private final ServerConfig config;
-        private final UserClasspath userClasspath;
+        private final CobbleInspectClient inspectClient;
         private CheckpointCatalog catalog;
         private final long startedAtMillis;
         private boolean selectedLatest;
@@ -245,14 +264,14 @@ public final class CobbleFlinkMonitorServer {
 
         private MonitorState(
                 ServerConfig config,
-                UserClasspath userClasspath,
+                CobbleInspectClient inspectClient,
                 CheckpointCatalog catalog,
                 boolean selectedLatest,
                 CheckpointEntry selectedCheckpoint,
                 OperatorEntry selectedOperator,
                 ReaderHandle readerHandle) {
             this.config = config;
-            this.userClasspath = userClasspath;
+            this.inspectClient = inspectClient;
             this.catalog = catalog;
             this.selectedLatest = selectedLatest;
             this.selectedCheckpoint = selectedCheckpoint;
@@ -270,11 +289,11 @@ public final class CobbleFlinkMonitorServer {
             this.startedAtMillis = System.currentTimeMillis();
         }
 
-        static MonitorState open(ServerConfig config, UserClasspath userClasspath) {
+        static MonitorState open(ServerConfig config, CobbleInspectClient inspectClient) {
             if (config.checkpointRoot == null) {
                 return new MonitorState(
                         config,
-                        userClasspath,
+                        inspectClient,
                         null,
                         true,
                         null,
@@ -286,7 +305,7 @@ public final class CobbleFlinkMonitorServer {
             ReaderSelection selection = openLatestReadable(config, catalog, null);
             return new MonitorState(
                     config,
-                    userClasspath,
+                    inspectClient,
                     catalog,
                     true,
                     selection.checkpoint,
@@ -325,183 +344,27 @@ public final class CobbleFlinkMonitorServer {
                 CheckpointCatalog catalog,
                 CheckpointEntry checkpoint,
                 OperatorEntry operator) {
-            if ("data_source".equals(catalog.sourceKind)) {
-                Config cobbleConfig =
-                        CobbleReaderConfigs.dataSource(
-                                config.totalBuckets, catalog.rootDirectory, config.storageOptions);
-                cobbleConfig.snapshotRetention = null;
-                return new ReaderHandle(
-                        Reader.open(cobbleConfig, checkpoint.id), Collections.emptyList());
-            }
-            if (operator.globalSnapshotLayout) {
-                try {
-                    return openGlobalSnapshotReader(config, checkpoint, operator);
-                } catch (RuntimeException globalFailure) {
-                    if (operator.embeddedCheckpoint == null) {
-                        throw globalFailure;
-                    }
-                    try {
-                        return openEmbeddedCheckpointReader(config, checkpoint, operator);
-                    } catch (RuntimeException embeddedFailure) {
-                        globalFailure.addSuppressed(embeddedFailure);
-                        throw globalFailure;
-                    }
-                }
-            }
-            if (operator.embeddedCheckpoint != null) {
-                return openEmbeddedCheckpointReader(config, checkpoint, operator);
-            }
-            Config cobbleConfig =
-                    CobbleReaderConfigs.checkpoint(
+            MonitorReaderSession session =
+                    MonitorReaderSession.open(
                             config.totalBuckets,
-                            operator.readerVolumeDirectories,
-                            config.storageOptions);
-            cobbleConfig.snapshotRetention = null;
-            return new ReaderHandle(
-                    Reader.open(cobbleConfig, checkpoint.id), Collections.emptyList());
+                            config.storageOptions,
+                            catalog.sourceKind,
+                            checkpoint,
+                            operator);
+            return new ReaderHandle(session.reader(), session.temporaryDirectories());
         }
 
-        private static ReaderHandle openGlobalSnapshotReader(
-                ServerConfig config, CheckpointEntry checkpoint, OperatorEntry operator) {
-            List<File> temporaryDirectories = new ArrayList<>();
-            Reader bootstrapReader = null;
-            try {
-                File unifiedVolume =
-                        java.nio.file.Files.createTempDirectory(
-                                        "cobble-flink-monitor-"
-                                                + checkpoint.id
-                                                + "-"
-                                                + safeFileName(operator.operatorId)
-                                                + "-")
-                                .toFile();
-                temporaryDirectories.add(unifiedVolume);
-                copyGlobalManifest(operator, checkpoint.id, unifiedVolume);
-
-                Config bootstrapConfig = CobbleReaderConfigs.base(config.totalBuckets);
-                CobbleReaderConfigs.addVolume(
-                        bootstrapConfig,
-                        pathToCobbleConfigString(unifiedVolume),
-                        config.storageOptions);
-                bootstrapReader = Reader.open(bootstrapConfig, checkpoint.id);
-                GlobalSnapshot snapshot = bootstrapReader.currentGlobalSnapshot();
-                int totalBuckets =
-                        snapshot == null || snapshot.totalBuckets <= 0
-                                ? config.totalBuckets
-                                : snapshot.totalBuckets;
-
-                Map<String, String> shardVolumeDirectories = new LinkedHashMap<>();
-                if (snapshot != null && snapshot.shardSnapshots != null) {
-                    for (ShardSnapshot shardSnapshot : snapshot.shardSnapshots) {
-                        String shardVolumeDirectory =
-                                copyShardMetadata(shardSnapshot, unifiedVolume);
-                        if (shardVolumeDirectory != null) {
-                            shardVolumeDirectories.putIfAbsent(
-                                    shardVolumeDirectory, shardVolumeDirectory);
-                        }
-                    }
-                }
-                bootstrapReader.close();
-                bootstrapReader = null;
-
-                Config cobbleConfig = CobbleReaderConfigs.base(totalBuckets);
-                CobbleReaderConfigs.addVolume(
-                        cobbleConfig,
-                        pathToCobbleConfigString(unifiedVolume),
-                        config.storageOptions);
-                for (String shardVolumeDirectory : shardVolumeDirectories.values()) {
-                    CobbleReaderConfigs.addVolume(
-                            cobbleConfig, shardVolumeDirectory, config.storageOptions);
-                }
-                for (String volumeDirectory : operator.readerVolumeDirectories) {
-                    if (!volumeDirectory.equals(operator.operatorSnapshotDirectory)) {
-                        CobbleReaderConfigs.addVolume(
-                                cobbleConfig, volumeDirectory, config.storageOptions);
-                    }
-                }
-                return new ReaderHandle(
-                        Reader.open(cobbleConfig, checkpoint.id), temporaryDirectories);
-            } catch (IOException e) {
-                if (bootstrapReader != null) {
-                    bootstrapReader.close();
-                }
-                deleteTemporaryDirectories(temporaryDirectories);
-                throw new InputException(
-                        "Failed to prepare Cobble checkpoint metadata for operator "
-                                + operator.operatorId
-                                + ": "
-                                + e.getMessage());
-            } catch (RuntimeException e) {
-                if (bootstrapReader != null) {
-                    bootstrapReader.close();
-                }
-                deleteTemporaryDirectories(temporaryDirectories);
-                throw e;
-            }
-        }
-
+        // Kept as a package-private test seam while materialization lives in the SDK.
         private static ReaderHandle openEmbeddedCheckpointReader(
                 ServerConfig config, CheckpointEntry checkpoint, OperatorEntry operator) {
-            List<File> temporaryDirectories = new ArrayList<>();
-            try {
-                CobbleEmbeddedCheckpoint.OperatorSnapshot nativeSnapshot =
-                        operator.embeddedCheckpoint;
-                if (nativeSnapshot.maxParallelism() <= 0) {
-                    throw new InputException(
-                            "Embedded checkpoint operator "
-                                    + operator.operatorId
-                                    + " has invalid maxParallelism "
-                                    + nativeSnapshot.maxParallelism());
-                }
-                File unifiedVolume =
-                        java.nio.file.Files.createTempDirectory(
-                                        "cobble-flink-embedded-checkpoint-"
-                                                + checkpoint.id
-                                                + "-"
-                                                + safeFileName(operator.operatorId)
-                                                + "-")
-                                .toFile();
-                temporaryDirectories.add(unifiedVolume);
-                Config coordinatorConfig =
-                        CobbleReaderConfigs.base(nativeSnapshot.maxParallelism());
-                CobbleReaderConfigs.addVolume(
-                        coordinatorConfig,
-                        pathToCobbleConfigString(unifiedVolume),
-                        config.storageOptions);
-                try (DbCoordinator coordinator = DbCoordinator.open(coordinatorConfig)) {
-                    coordinator.materializeGlobalSnapshot(
-                            nativeSnapshot.maxParallelism(),
-                            checkpoint.id,
-                            nativeSnapshot.shards());
-                }
-
-                Config readerConfig = CobbleReaderConfigs.base(nativeSnapshot.maxParallelism());
-                CobbleReaderConfigs.addVolume(
-                        readerConfig,
-                        pathToCobbleConfigString(unifiedVolume),
-                        config.storageOptions);
-                Map<String, String> shardVolumes = new LinkedHashMap<>();
-                for (ShardSnapshot shard : nativeSnapshot.shards()) {
-                    String shardVolume = copyShardMetadata(shard, unifiedVolume);
-                    if (shardVolume != null) {
-                        shardVolumes.putIfAbsent(shardVolume, shardVolume);
-                    }
-                }
-                for (String root : shardVolumes.values()) {
-                    CobbleReaderConfigs.addVolume(readerConfig, root, config.storageOptions);
-                }
-                return new ReaderHandle(
-                        Reader.open(readerConfig, checkpoint.id), temporaryDirectories);
-            } catch (InputException e) {
-                deleteTemporaryDirectories(temporaryDirectories);
-                throw e;
-            } catch (IOException | RuntimeException e) {
-                deleteTemporaryDirectories(temporaryDirectories);
-                throw new InputException(
-                        "Failed to prepare Cobble embedded checkpoint for operator "
-                                + operator.operatorId
-                                + ": "
-                                + e.getMessage());
-            }
+            MonitorReaderSession session =
+                    MonitorReaderSession.open(
+                            config.totalBuckets,
+                            config.storageOptions,
+                            "checkpoint",
+                            checkpoint,
+                            operator);
+            return new ReaderHandle(session.reader(), session.temporaryDirectories());
         }
 
         synchronized Map<String, Object> meta() {
@@ -551,10 +414,10 @@ public final class CobbleFlinkMonitorServer {
             output.put("inspect_default_limit", config.inspectDefaultLimit);
             output.put("inspect_max_limit", config.inspectMaxLimit);
             output.put("storage_option_count", config.storageOptionCount);
-            if (!userClasspath.entries().isEmpty()) {
+            if (!inspectClient.userClasspathEntries().isEmpty()) {
                 Map<String, Object> userClasspathMeta = new LinkedHashMap<>();
-                userClasspathMeta.put("jar_count", userClasspath.entries().size());
-                userClasspathMeta.put("entries", userClasspath.entries());
+                userClasspathMeta.put("jar_count", inspectClient.userClasspathEntries().size());
+                userClasspathMeta.put("entries", inspectClient.userClasspathEntries());
                 output.put("user_classpath", userClasspathMeta);
             } else {
                 output.put("user_classpath", null);
@@ -671,7 +534,8 @@ public final class CobbleFlinkMonitorServer {
             List<Map<String, Object>> items = new ArrayList<>(lookupItems.size());
             try (ReadOptions options = readOptions(target.columnFamily, columns)) {
                 for (LookupItem item : lookupItems) {
-                    byte[][] columnsValue = reader.getWithOptions(item.bucket, item.key, options);
+                    byte[][] columnsValue =
+                            InspectReaderOperations.lookup(reader, item.bucket, item.key, options);
                     Map<String, Object> output = new LinkedHashMap<>();
                     output.put("bucket", item.bucket);
                     output.put("key_b64", b64(item.key));
@@ -854,67 +718,41 @@ public final class CobbleFlinkMonitorServer {
                 TimerRowFilter timerFilter,
                 int limit,
                 List<Map<String, Object>> items) {
-            boolean skippedStartAfter = startAfter == null;
             int rawLimit =
                     timerFilter == null && !hasPostScanFilter(stateFilter, sinkKeyFilter)
                             ? limit + 1
                             : Math.max(limit + 1, config.inspectMaxLimit);
-            ScanCursor cursor;
-            try {
-                cursor =
-                        reader.scanWithOptions(
-                                bucket,
-                                start,
-                                end,
-                                scanOptions(target.columnFamily, columns, rawLimit));
-            } catch (RuntimeException e) {
-                // A key-group's shard may not have registered the requested column family when it
-                // never wrote any data for that state. The checkpoint's global snapshot still lists
-                // the column family (it was registered by at least one subtask), so this is not an
-                // error: the shard simply has no rows for this state in that key-group. Treat the
-                // scan as empty and let the caller advance to the next bucket.
-                if (isUnknownColumnFamily(e)) {
-                    return;
-                }
-                throw e;
-            }
-            try (ScanCursor ignored = cursor) {
-                ScanCursor.Entry entry = cursor.nextEntry();
-                while (entry != null && items.size() < limit) {
-                    if (!skippedStartAfter) {
-                        if (entry.bucket == bucket && bytesEqual(entry.key, startAfter)) {
-                            entry = cursor.nextEntry();
-                            skippedStartAfter = true;
-                            continue;
+            InspectReaderOperations.scanBucket(
+                    reader,
+                    bucket,
+                    start,
+                    end,
+                    startAfter,
+                    scanOptions(target.columnFamily, columns, rawLimit),
+                    limit - items.size(),
+                    (entryBucket, key, entryColumns) -> {
+                        Map<String, Object> item = new LinkedHashMap<>();
+                        item.put("bucket", entryBucket);
+                        item.put("key_b64", b64(key));
+                        item.put("key_utf8", utf8(key));
+                        if (target.allowsColumns) {
+                            item.put("columns", columnsToJson(entryColumns));
+                        } else {
+                            item.put("value", firstColumnToJson(entryColumns));
                         }
-                        skippedStartAfter = true;
-                    }
-                    Map<String, Object> item = new LinkedHashMap<>();
-                    item.put("bucket", entry.bucket);
-                    item.put("key_b64", b64(entry.key));
-                    item.put("key_utf8", utf8(entry.key));
-                    if (target.allowsColumns) {
-                        item.put("columns", columnsToJson(entry.columns));
-                    } else {
-                        item.put("value", firstColumnToJson(entry.columns));
-                    }
-                    decorateDecodedRow(item, target, entry.key, entry.columns, columns);
-                    if (stateFilter != null && !stateFilter.matches(item, target, entry.key)) {
-                        entry = cursor.nextEntry();
-                        continue;
-                    }
-                    if (sinkKeyFilter != null && !sinkKeyFilter.matches(item)) {
-                        entry = cursor.nextEntry();
-                        continue;
-                    }
-                    if (timerFilter != null && !timerFilter.matches(item)) {
-                        entry = cursor.nextEntry();
-                        continue;
-                    }
-                    items.add(item);
-                    entry = cursor.nextEntry();
-                }
-            }
+                        decorateDecodedRow(item, target, key, entryColumns, columns);
+                        if (stateFilter != null && !stateFilter.matches(item, target, key)) {
+                            return false;
+                        }
+                        if (sinkKeyFilter != null && !sinkKeyFilter.matches(item)) {
+                            return false;
+                        }
+                        if (timerFilter != null && !timerFilter.matches(item)) {
+                            return false;
+                        }
+                        items.add(item);
+                        return true;
+                    });
         }
 
         private static boolean hasPostScanFilter(
@@ -932,17 +770,7 @@ public final class CobbleFlinkMonitorServer {
          * snapshot still lists the column family because at least one subtask registered it.
          */
         static boolean isUnknownColumnFamily(RuntimeException e) {
-            String message = e.getMessage();
-            if (message == null) {
-                return false;
-            }
-            if (message.startsWith("IO error: ")) {
-                message = message.substring("IO error: ".length());
-            }
-            return message.equals("Unknown column family")
-                    || message.startsWith("Unknown column family:")
-                    || message.startsWith("Unknown column family ")
-                    || message.startsWith("Unknown column family '");
+            return InspectReaderOperations.isUnknownColumnFamily(e);
         }
 
         private int currentTotalBuckets() {
@@ -1049,7 +877,7 @@ public final class CobbleFlinkMonitorServer {
                     previous.close();
                 }
             } finally {
-                deleteTemporaryDirectories(previousTemporaryDirectories);
+                MonitorReaderSession.deleteTemporaryDirectories(previousTemporaryDirectories);
             }
         }
 
@@ -1062,7 +890,7 @@ public final class CobbleFlinkMonitorServer {
             }
         }
 
-        private static void decorateDecodedRow(
+        private void decorateDecodedRow(
                 Map<String, Object> item,
                 InspectTarget target,
                 byte[] key,
@@ -1070,7 +898,9 @@ public final class CobbleFlinkMonitorServer {
                 int[] projection) {
             if (target != null && target.sinkSchema != null) {
                 SinkInspectDecoder.DecodedRow decoded =
-                        SinkInspectDecoder.decode(target, key, columns, projection);
+                        UserClassLoaderScope.call(
+                                inspectClient.userClassLoader(),
+                                () -> SinkInspectDecoder.decode(target, key, columns, projection));
                 if (!decoded.hasOutput()) {
                     return;
                 }
@@ -1086,7 +916,9 @@ public final class CobbleFlinkMonitorServer {
                 return;
             }
             StateInspectDecoder.DecodedRow decoded =
-                    StateInspectDecoder.decode(target, key, columns);
+                    UserClassLoaderScope.call(
+                            inspectClient.userClassLoader(),
+                            () -> StateInspectDecoder.decode(target, key, columns));
             if (!decoded.hasOutput()) {
                 return;
             }
@@ -1382,7 +1214,7 @@ public final class CobbleFlinkMonitorServer {
                     reader = null;
                 }
             } finally {
-                deleteTemporaryDirectories(readerTemporaryDirectories);
+                MonitorReaderSession.deleteTemporaryDirectories(readerTemporaryDirectories);
                 readerTemporaryDirectories = Collections.emptyList();
             }
         }
@@ -1636,134 +1468,8 @@ public final class CobbleFlinkMonitorServer {
         }
     }
 
-    private static void copyGlobalManifest(
-            OperatorEntry operator, long checkpointId, File unifiedVolume) throws IOException {
-        java.nio.file.Path target =
-                unifiedVolume.toPath().resolve("snapshot").resolve("SNAPSHOT-" + checkpointId);
-        Path fallback = operatorSnapshotManifest(operator.operatorSnapshotDirectory, checkpointId);
-        Path source =
-                operator.manifestCopyPath == null ? fallback : new Path(operator.manifestCopyPath);
-        try {
-            copyFile(source, target);
-        } catch (IOException primaryError) {
-            if (pathToStorageString(source).equals(pathToStorageString(fallback))) {
-                throw primaryError;
-            }
-            try {
-                copyFile(fallback, target);
-            } catch (IOException fallbackError) {
-                throw new IOException(
-                        primaryError.getMessage()
-                                + "; fallback "
-                                + fallback
-                                + " also failed: "
-                                + fallbackError.getMessage(),
-                        primaryError);
-            }
-        }
-    }
-
-    private static Path operatorSnapshotManifest(
-            String operatorSnapshotDirectory, long checkpointId) {
-        return new Path(
-                new Path(operatorSnapshotDirectory, "snapshot"), "SNAPSHOT-" + checkpointId);
-    }
-
-    private static String copyShardMetadata(ShardSnapshot shardSnapshot, File unifiedVolume)
-            throws IOException {
-        if (shardSnapshot.manifestPath == null || shardSnapshot.manifestPath.trim().isEmpty()) {
-            return null;
-        }
-        Path manifest = new Path(shardSnapshot.manifestPath);
-        Path snapshotDirectory = manifest.getParent();
-        if (snapshotDirectory == null) {
-            return null;
-        }
-        Path shardRoot = snapshotDirectory.getParent();
-        if (shardRoot == null) {
-            return null;
-        }
-
-        java.nio.file.Path localShardRoot = unifiedVolume.toPath().resolve(shardSnapshot.dbId);
-        copyDirectoryIfExists(snapshotDirectory, localShardRoot.resolve("snapshot"));
-        copyDirectoryIfExists(new Path(shardRoot, "schema"), localShardRoot.resolve("schema"));
-        return pathToStorageString(shardRoot);
-    }
-
-    private static void copyDirectoryIfExists(
-            Path sourceDirectory, java.nio.file.Path targetDirectory) throws IOException {
-        FileSystem fileSystem = sourceDirectory.getFileSystem();
-        if (!fileSystem.exists(sourceDirectory)) {
-            return;
-        }
-        FileStatus status = fileSystem.getFileStatus(sourceDirectory);
-        if (!status.isDir()) {
-            return;
-        }
-        java.nio.file.Files.createDirectories(targetDirectory);
-        FileStatus[] children = fileSystem.listStatus(sourceDirectory);
-        if (children == null) {
-            return;
-        }
-        for (FileStatus child : children) {
-            java.nio.file.Path childTarget = targetDirectory.resolve(child.getPath().getName());
-            if (child.isDir()) {
-                copyDirectoryIfExists(child.getPath(), childTarget);
-            } else {
-                copyFile(child.getPath(), childTarget);
-            }
-        }
-    }
-
-    private static void copyFile(Path source, java.nio.file.Path target) throws IOException {
-        java.nio.file.Files.createDirectories(target.getParent());
-        try (InputStream input = source.getFileSystem().open(source)) {
-            java.nio.file.Files.copy(
-                    input, target, java.nio.file.StandardCopyOption.REPLACE_EXISTING);
-        }
-    }
-
-    private static String pathToCobbleConfigString(File directory) {
-        return directory.getAbsoluteFile().toPath().normalize().toString();
-    }
-
-    private static String safeFileName(String value) {
-        StringBuilder builder = new StringBuilder(value.length());
-        for (int index = 0; index < value.length(); index++) {
-            char c = value.charAt(index);
-            builder.append(Character.isLetterOrDigit(c) || c == '-' || c == '_' ? c : '-');
-        }
-        return builder.length() == 0 ? "operator" : builder.toString();
-    }
-
     private static void deleteTemporaryDirectories(List<File> directories) {
-        if (directories == null) {
-            return;
-        }
-        for (File directory : directories) {
-            deleteTemporaryDirectory(directory);
-        }
-    }
-
-    private static void deleteTemporaryDirectory(File directory) {
-        if (directory == null || !directory.exists()) {
-            return;
-        }
-        try {
-            java.nio.file.Files.walk(directory.toPath())
-                    .sorted(Comparator.reverseOrder())
-                    .forEach(CobbleFlinkMonitorServer::deletePathQuietly);
-        } catch (IOException ignored) {
-            // Best effort cleanup for per-reader metadata copies.
-        }
-    }
-
-    private static void deletePathQuietly(java.nio.file.Path path) {
-        try {
-            java.nio.file.Files.deleteIfExists(path);
-        } catch (IOException ignored) {
-            // Best effort cleanup for per-reader metadata copies.
-        }
+        MonitorReaderSession.deleteTemporaryDirectories(directories);
     }
 
     static final class CheckpointCatalog {
@@ -2210,6 +1916,12 @@ public final class CobbleFlinkMonitorServer {
             // Keep the checkpoint-local manifest copy as a fallback candidate.
         }
         return manifestCopyPath;
+    }
+
+    private static Path operatorSnapshotManifest(
+            String operatorSnapshotDirectory, long checkpointId) {
+        return new Path(
+                new Path(operatorSnapshotDirectory, "snapshot"), "SNAPSHOT-" + checkpointId);
     }
 
     private static void discoverSharedOperators(

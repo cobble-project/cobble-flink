@@ -8,6 +8,7 @@ import io.cobble.flink.common.inspect.InspectSchemaRegistryLayout;
 import io.cobble.flink.common.inspect.SinkInspectField;
 import io.cobble.flink.common.inspect.SinkInspectSchema;
 import io.cobble.flink.common.inspect.SinkInspectSchemaStore;
+import io.cobble.flink.inspect.internal.*;
 
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;

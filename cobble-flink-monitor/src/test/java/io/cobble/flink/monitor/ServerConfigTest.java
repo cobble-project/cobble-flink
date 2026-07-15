@@ -6,6 +6,7 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import io.cobble.Config;
+import io.cobble.flink.inspect.internal.*;
 
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
@@ -90,8 +91,9 @@ class ServerConfigTest {
         ServerConfig config =
                 ServerConfig.parse(new String[] {"--user-jar", "/nonexistent/path.jar"});
         assertEquals(Collections.singletonList("/nonexistent/path.jar"), config.userJars);
-        InputException e =
-                assertThrows(InputException.class, () -> UserClasspath.create(config.userJars));
+        InspectInputException e =
+                assertThrows(
+                        InspectInputException.class, () -> UserClasspath.create(config.userJars));
         assertTrue(e.getMessage().contains("does not exist"));
     }
 
@@ -170,12 +172,12 @@ class ServerConfigTest {
     @Test
     void rejectsMalformedAndUnknownStorageOptionsWithoutLeakingValues() {
         assertThrows(
-                InputException.class,
+                InspectInputException.class,
                 () -> ServerConfig.parse(new String[] {"--storage-option", "missing-equals"}));
 
-        InputException unknown =
+        InspectInputException unknown =
                 assertThrows(
-                        InputException.class,
+                        InspectInputException.class,
                         () ->
                                 ServerConfig.parse(
                                         new String[] {
@@ -183,9 +185,9 @@ class ServerConfigTest {
                                         }));
         assertFalse(unknown.getMessage().contains("very-secret"));
 
-        InputException extraVolume =
+        InspectInputException extraVolume =
                 assertThrows(
-                        InputException.class,
+                        InspectInputException.class,
                         () ->
                                 ServerConfig.parse(
                                         new String[] {
@@ -194,9 +196,9 @@ class ServerConfigTest {
                                         }));
         assertTrue(extraVolume.getMessage().contains("storage.volume.0.path"));
 
-        InputException exactStorageOption =
+        InspectInputException exactStorageOption =
                 assertThrows(
-                        InputException.class,
+                        InspectInputException.class,
                         () ->
                                 ServerConfig.parse(
                                         new String[] {

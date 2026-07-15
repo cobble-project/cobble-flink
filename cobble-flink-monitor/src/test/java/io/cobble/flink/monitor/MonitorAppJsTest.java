@@ -8,6 +8,7 @@ import io.cobble.flink.common.inspect.StateInspectField;
 import io.cobble.flink.common.inspect.StateInspectSchema;
 import io.cobble.flink.common.inspect.StateInspectSemanticSchema;
 import io.cobble.flink.common.inspect.StateInspectType;
+import io.cobble.flink.inspect.internal.*;
 
 import org.apache.avro.Schema;
 import org.apache.avro.generic.GenericRecord;

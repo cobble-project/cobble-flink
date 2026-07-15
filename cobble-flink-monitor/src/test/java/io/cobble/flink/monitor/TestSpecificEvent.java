@@ -1,5 +1,7 @@
 package io.cobble.flink.monitor;
 
+import io.cobble.flink.inspect.internal.*;
+
 import org.apache.avro.Schema;
 import org.apache.avro.specific.SpecificRecord;
 

@@ -6,6 +6,7 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import io.cobble.flink.common.inspect.decode.FlinkDataInputDecoder;
+import io.cobble.flink.inspect.internal.*;
 
 import org.apache.avro.Schema;
 import org.apache.avro.generic.GenericDatumReader;
