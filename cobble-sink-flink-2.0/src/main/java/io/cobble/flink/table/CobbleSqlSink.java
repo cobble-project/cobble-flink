@@ -5,7 +5,9 @@ import io.cobble.GlobalSnapshot;
 import io.cobble.PendingSnapshot;
 import io.cobble.ShardSnapshot;
 import io.cobble.SnapshotTools;
+import io.cobble.flink.common.CobbleConnectorMetrics;
 import io.cobble.flink.common.CobbleLoader;
+import io.cobble.flink.common.CobbleNativeMetrics;
 import io.cobble.structured.Db;
 
 import org.apache.flink.api.common.typeinfo.Types;
@@ -92,6 +94,8 @@ final class CobbleSqlSink
         private final CobbleRowDataCodecs.RuntimeKeyEncoder keyEncoder;
         private final List<CobbleRowDataCodecs.RuntimeFieldEncoder> valueEncoders;
         private final Db db;
+        private final CobbleConnectorMetrics.SinkMetrics metrics;
+        private final CobbleNativeMetrics.Monitor nativeMetrics;
         private boolean hasStateToRetain;
         private boolean dirty;
         private CobbleShardCommittable endOfInputCommittable;
@@ -111,30 +115,60 @@ final class CobbleSqlSink
             for (CobbleDynamicTableSink.SerializableField field : config.valueFields) {
                 this.valueEncoders.add(new CobbleRowDataCodecs.RuntimeFieldEncoder(field));
             }
-            OpenedDb openedDb = restoreOrCreateDb(config, context);
-            this.db = openedDb.db;
-            this.hasStateToRetain = openedDb.restoredFromSnapshot;
-            this.dirty = false;
+            OpenedDb openedDb = null;
+            CobbleNativeMetrics.Monitor monitor = null;
+            try {
+                openedDb = restoreOrCreateDb(config, context);
+                monitor = CobbleNativeMetrics.register(context.metricGroup(), openedDb.db::metrics);
+                this.db = openedDb.db;
+                this.nativeMetrics = monitor;
+                this.metrics = CobbleConnectorMetrics.sink(context.metricGroup());
+                this.hasStateToRetain = openedDb.restoredFromSnapshot;
+                this.dirty = false;
+            } catch (IOException | RuntimeException | LinkageError e) {
+                try {
+                    if (monitor != null) {
+                        monitor.close();
+                    }
+                } finally {
+                    if (openedDb != null) {
+                        openedDb.db.close();
+                    }
+                }
+                throw e;
+            }
         }
 
         @Override
         public void write(RowData element, Context context) throws IOException {
-            byte[] encodedKey = keyEncoder.encode(element);
-            int bucket = hashFixedBucket(encodedKey, totalBuckets);
-            if (bucket < ownedRangeStart || bucket > ownedRangeEnd) {
-                throw new IOException(
-                        "Record bucket "
-                                + bucket
-                                + " is outside writer-owned range ["
-                                + ownedRangeStart
-                                + ", "
-                                + ownedRangeEnd
-                                + "] for subtask "
-                                + subtaskId
-                                + ".");
+            try {
+                byte[] encodedKey = keyEncoder.encode(element);
+                int bucket = hashFixedBucket(encodedKey, totalBuckets);
+                if (bucket < ownedRangeStart || bucket > ownedRangeEnd) {
+                    throw new IOException(
+                            "Record bucket "
+                                    + bucket
+                                    + " is outside writer-owned range ["
+                                    + ownedRangeStart
+                                    + ", "
+                                    + ownedRangeEnd
+                                    + "] for subtask "
+                                    + subtaskId
+                                    + ".");
+                }
+                MutationStats stats =
+                        applyRowChange(db, valueEncoders, bucket, encodedKey, element);
+                dirty = true;
+                if (stats.mutated) {
+                    metrics.sent(stats.bytes);
+                }
+            } catch (IOException e) {
+                metrics.error();
+                throw e;
+            } catch (RuntimeException e) {
+                metrics.error();
+                throw e;
             }
-            applyRowChange(db, valueEncoders, bucket, encodedKey, element);
-            dirty = true;
         }
 
         @Override
@@ -188,7 +222,11 @@ final class CobbleSqlSink
 
         @Override
         public void close() throws Exception {
-            db.close();
+            try {
+                nativeMetrics.close();
+            } finally {
+                db.close();
+            }
         }
 
         private static OpenedDb restoreOrCreateDb(
@@ -914,7 +952,7 @@ final class CobbleSqlSink
         return Math.floorMod(java.util.Arrays.hashCode(encodedKey), totalBuckets);
     }
 
-    static void applyRowChange(
+    static MutationStats applyRowChange(
             Db db,
             List<CobbleRowDataCodecs.RuntimeFieldEncoder> valueEncoders,
             int bucket,
@@ -924,13 +962,12 @@ final class CobbleSqlSink
         switch (element.getRowKind()) {
             case INSERT:
             case UPDATE_AFTER:
-                upsertRow(db, valueEncoders, bucket, encodedKey, element);
-                return;
+                return upsertRow(db, valueEncoders, bucket, encodedKey, element);
             case UPDATE_BEFORE:
-                return;
+                return MutationStats.IGNORED;
             case DELETE:
                 deleteRow(db, valueEncoders, bucket, encodedKey);
-                return;
+                return new MutationStats(true, encodedKey.length);
             default:
                 throw new UnsupportedOperationException(
                         "Cobble SQL sink only supports INSERT, UPDATE_BEFORE, UPDATE_AFTER, and"
@@ -950,21 +987,24 @@ final class CobbleSqlSink
         return (int) ((((long) bucket + 1L) * (long) sinkParallelism - 1L) / (long) totalBuckets);
     }
 
-    private static void upsertRow(
+    private static MutationStats upsertRow(
             Db db,
             List<CobbleRowDataCodecs.RuntimeFieldEncoder> valueEncoders,
             int bucket,
             byte[] encodedKey,
             RowData element)
             throws IOException {
+        long bytes = encodedKey.length;
         for (CobbleRowDataCodecs.RuntimeFieldEncoder encoder : valueEncoders) {
             byte[] encodedValue = encoder.encodeNullable(element);
             if (encodedValue == null) {
                 db.delete(bucket, encodedKey, encoder.structuredColumnIndex);
             } else {
                 db.put(bucket, encodedKey, encoder.structuredColumnIndex, encodedValue);
+                bytes = CobbleConnectorMetrics.saturatingAdd(bytes, encodedValue.length);
             }
         }
+        return new MutationStats(true, bytes);
     }
 
     private static void deleteRow(
@@ -975,6 +1015,17 @@ final class CobbleSqlSink
             throws IOException {
         for (CobbleRowDataCodecs.RuntimeFieldEncoder encoder : valueEncoders) {
             db.delete(bucket, encodedKey, encoder.structuredColumnIndex);
+        }
+    }
+
+    static final class MutationStats {
+        private static final MutationStats IGNORED = new MutationStats(false, 0L);
+        final boolean mutated;
+        final long bytes;
+
+        private MutationStats(boolean mutated, long bytes) {
+            this.mutated = mutated;
+            this.bytes = bytes;
         }
     }
 }
