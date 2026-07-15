@@ -6,12 +6,35 @@
 
     <groupId>io.github.cobble-project</groupId>
     <artifactId>cobble-flink</artifactId>
-    <version>0.2.0-1-flink-1.17-SNAPSHOT</version>
+    <version>${cobble.java.version}-${patch.version}-flink-1.17-SNAPSHOT</version>
     <name>cobble-flink</name>
     <description>A lib that integrate Cobble with Apache Flink, providing state backends, source and sink, for storing
         and querying data use Cobble in Flink applications.</description>
     <url>https://github.com/cobble-project/cobble-flink</url>
     <packaging>pom</packaging>
+
+    <licenses>
+        <license>
+            <name>Apache License 2.0</name>
+            <url>https://www.apache.org/licenses/LICENSE-2.0.txt</url>
+            <distribution>repo</distribution>
+        </license>
+    </licenses>
+
+    <scm>
+        <connection>scm:git:https://github.com/cobble-project/cobble-flink.git</connection>
+        <developerConnection>scm:git:ssh://git@github.com/cobble-project/cobble-flink.git</developerConnection>
+        <url>https://github.com/cobble-project/cobble-flink</url>
+        <tag>HEAD</tag>
+    </scm>
+
+    <developers>
+        <developer>
+            <id>cobble-project</id>
+            <name>Cobble Project</name>
+            <url>https://github.com/cobble-project</url>
+        </developer>
+    </developers>
 
     <modules>
         <module>cobble-common</module>
@@ -35,6 +58,7 @@
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
         <flink.version>1.17.2</flink.version>
         <cobble.java.version>0.2.2</cobble.java.version>
+        <patch.version>1</patch.version>
         <junit.version>5.10.2</junit.version>
         <surefire.test.jvm.args></surefire.test.jvm.args>
     </properties>
@@ -103,6 +127,77 @@
                     --add-opens=java.base/java.lang=ALL-UNNAMED
                     --add-opens=java.base/java.util=ALL-UNNAMED</surefire.test.jvm.args>
             </properties>
+        </profile>
+
+        <profile>
+            <id>release-publish</id>
+            <build>
+                <plugins>
+                    <plugin>
+                        <groupId>org.sonatype.central</groupId>
+                        <artifactId>central-publishing-maven-plugin</artifactId>
+                        <version>0.9.0</version>
+                        <extensions>true</extensions>
+                        <configuration>
+                            <publishingServerId>central</publishingServerId>
+                            <autoPublish>true</autoPublish>
+                        </configuration>
+                    </plugin>
+                    <plugin>
+                        <groupId>org.apache.maven.plugins</groupId>
+                        <artifactId>maven-source-plugin</artifactId>
+                        <version>3.3.1</version>
+                        <configuration>
+                            <excludeResources>true</excludeResources>
+                            <forceCreation>true</forceCreation>
+                        </configuration>
+                        <executions>
+                            <execution>
+                                <id>attach-sources</id>
+                                <goals>
+                                    <goal>jar-no-fork</goal>
+                                </goals>
+                            </execution>
+                        </executions>
+                    </plugin>
+                    <plugin>
+                        <groupId>org.apache.maven.plugins</groupId>
+                        <artifactId>maven-javadoc-plugin</artifactId>
+                        <version>3.8.0</version>
+                        <configuration>
+                            <doclint>none</doclint>
+                        </configuration>
+                        <executions>
+                            <execution>
+                                <id>attach-javadocs</id>
+                                <goals>
+                                    <goal>jar</goal>
+                                </goals>
+                            </execution>
+                        </executions>
+                    </plugin>
+                    <plugin>
+                        <groupId>org.apache.maven.plugins</groupId>
+                        <artifactId>maven-gpg-plugin</artifactId>
+                        <version>3.2.7</version>
+                        <executions>
+                            <execution>
+                                <id>sign-artifacts</id>
+                                <phase>verify</phase>
+                                <goals>
+                                    <goal>sign</goal>
+                                </goals>
+                                <configuration>
+                                    <gpgArguments>
+                                        <arg>--pinentry-mode</arg>
+                                        <arg>loopback</arg>
+                                    </gpgArguments>
+                                </configuration>
+                            </execution>
+                        </executions>
+                    </plugin>
+                </plugins>
+            </build>
         </profile>
     </profiles>
 

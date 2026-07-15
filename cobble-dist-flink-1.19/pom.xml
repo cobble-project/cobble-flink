@@ -7,12 +7,12 @@
     <parent>
         <groupId>io.github.cobble-project</groupId>
         <artifactId>cobble-flink</artifactId>
-        <version>0.2.0-1-flink-1.17-SNAPSHOT</version>
+        <version>${cobble.java.version}-${patch.version}-flink-1.17-SNAPSHOT</version>
         <relativePath>../pom.xml</relativePath>
     </parent>
 
     <artifactId>cobble-flink-dist</artifactId>
-    <version>0.2.0-1-flink-1.19-SNAPSHOT</version>
+    <version>${cobble.java.version}-${patch.version}-flink-1.19-SNAPSHOT</version>
     <name>cobble-flink-dist (Flink 1.19)</name>
 
     <dependencies>
@@ -35,6 +35,25 @@
 
     <build>
         <plugins>
+            <!-- The distribution has no source tree, but Maven Central still requires a
+                 javadoc attachment for its shaded jar. -->
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-jar-plugin</artifactId>
+                <version>3.4.2</version>
+                <executions>
+                    <execution>
+                        <id>attach-empty-javadocs</id>
+                        <phase>package</phase>
+                        <goals>
+                            <goal>jar</goal>
+                        </goals>
+                        <configuration>
+                            <classifier>javadoc</classifier>
+                        </configuration>
+                    </execution>
+                </executions>
+            </plugin>
             <plugin>
                 <groupId>org.apache.maven.plugins</groupId>
                 <artifactId>maven-shade-plugin</artifactId>
