@@ -9,6 +9,7 @@ import io.cobble.flink.common.inspect.StateInspectSchemaStore;
 import io.cobble.flink.common.inspect.StateInspectSemanticSchema;
 
 import org.apache.flink.api.common.JobStatus;
+import org.apache.flink.configuration.Configuration;
 import org.apache.flink.core.fs.FSDataInputStream;
 import org.apache.flink.core.fs.FSDataOutputStream;
 import org.apache.flink.core.fs.FileSystem;
@@ -44,10 +45,17 @@ final class CobbleCompletedCheckpointStore implements CompletedCheckpointStore {
     private static final Logger LOG = LoggerFactory.getLogger(CobbleCompletedCheckpointStore.class);
 
     private final CompletedCheckpointStore delegate;
+    private final Configuration flinkConfig;
     private final Map<String, OperatorCoordinatorHandle> coordinatorsByOperatorDirectory;
 
     CobbleCompletedCheckpointStore(CompletedCheckpointStore delegate) throws Exception {
+        this(delegate, new Configuration());
+    }
+
+    CobbleCompletedCheckpointStore(CompletedCheckpointStore delegate, Configuration flinkConfig)
+            throws Exception {
         this.delegate = delegate;
+        this.flinkConfig = new Configuration(flinkConfig);
         this.coordinatorsByOperatorDirectory = new HashMap<>();
         recoverManagedSnapshots();
     }
@@ -416,7 +424,7 @@ final class CobbleCompletedCheckpointStore implements CompletedCheckpointStore {
         return schema.stateKind().name() + ":" + schema.stateName();
     }
 
-    private Config createCoordinatorConfig(String checkpointExternalPointer, String operatorIdHex) {
+    Config createCoordinatorConfig(String checkpointExternalPointer, String operatorIdHex) {
         String externalPointer = checkpointExternalPointer;
         if (externalPointer == null || externalPointer.trim().isEmpty()) {
             throw new IllegalStateException(
@@ -428,8 +436,12 @@ final class CobbleCompletedCheckpointStore implements CompletedCheckpointStore {
         config.snapshotRetention = null;
         // The coordinator only needs a root volume. Bucket ownership still comes from the shard
         // snapshots and the explicit totalBuckets argument passed during materialization.
-        config.addVolume(
-                CobblePathUtils.cobbleOperatorSnapshotDirectory(externalPointer, operatorIdHex));
+        String operatorDirectory =
+                CobblePathUtils.cobbleOperatorSnapshotDirectory(externalPointer, operatorIdHex);
+        Config.VolumeDescriptor volume = Config.VolumeDescriptor.singleVolume(operatorDirectory);
+        CobbleFlinkConfigMapper.applyCheckpointVolumeOptions(
+                volume, operatorDirectory, flinkConfig);
+        config.addVolume(volume);
         return config;
     }
 

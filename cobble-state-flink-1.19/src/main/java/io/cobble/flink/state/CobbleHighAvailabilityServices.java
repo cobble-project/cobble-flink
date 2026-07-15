@@ -1,5 +1,6 @@
 package io.cobble.flink.state;
 
+import org.apache.flink.configuration.Configuration;
 import org.apache.flink.runtime.highavailability.HighAvailabilityServices;
 
 import java.lang.reflect.InvocationHandler;
@@ -13,17 +14,21 @@ final class CobbleHighAvailabilityServices implements InvocationHandler {
     private static final String CHECKPOINT_RECOVERY_FACTORY_METHOD = "getCheckpointRecoveryFactory";
 
     private final HighAvailabilityServices delegate;
+    private final Configuration flinkConfig;
 
-    private CobbleHighAvailabilityServices(HighAvailabilityServices delegate) {
+    private CobbleHighAvailabilityServices(
+            HighAvailabilityServices delegate, Configuration flinkConfig) {
         this.delegate = delegate;
+        this.flinkConfig = new Configuration(flinkConfig);
     }
 
-    static HighAvailabilityServices wrap(HighAvailabilityServices delegate) {
+    static HighAvailabilityServices wrap(
+            HighAvailabilityServices delegate, Configuration flinkConfig) {
         return (HighAvailabilityServices)
                 Proxy.newProxyInstance(
                         delegate.getClass().getClassLoader(),
                         new Class<?>[] {HighAvailabilityServices.class},
-                        new CobbleHighAvailabilityServices(delegate));
+                        new CobbleHighAvailabilityServices(delegate, flinkConfig));
     }
 
     @Override
@@ -33,7 +38,8 @@ final class CobbleHighAvailabilityServices implements InvocationHandler {
         }
         if (CHECKPOINT_RECOVERY_FACTORY_METHOD.equals(method.getName())
                 && method.getParameterCount() == 0) {
-            return CobbleCheckpointRecoveryFactory.wrap(delegate.getCheckpointRecoveryFactory());
+            return CobbleCheckpointRecoveryFactory.wrap(
+                    delegate.getCheckpointRecoveryFactory(), flinkConfig);
         }
         try {
             return method.invoke(delegate, args);

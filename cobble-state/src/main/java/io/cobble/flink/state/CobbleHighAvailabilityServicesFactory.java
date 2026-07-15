@@ -77,7 +77,7 @@ public final class CobbleHighAvailabilityServicesFactory
                                 AddressResolution.NO_ADDRESS_RESOLUTION,
                                 RpcSystem.load(configuration),
                                 fatalErrorHandler("Cobble delegate HA service failed."));
-        return CobbleHighAvailabilityServices.wrap(delegate);
+        return CobbleHighAvailabilityServices.wrap(delegate, configuration);
     }
 
     @Override

@@ -1,5 +1,6 @@
 package io.cobble.flink.state;
 
+import org.apache.flink.configuration.Configuration;
 import org.apache.flink.runtime.checkpoint.CheckpointRecoveryFactory;
 
 import java.lang.reflect.InvocationHandler;
@@ -13,17 +14,21 @@ final class CobbleCheckpointRecoveryFactory implements InvocationHandler {
     private static final String RECOVERED_STORE_METHOD = "createRecoveredCompletedCheckpointStore";
 
     private final CheckpointRecoveryFactory delegate;
+    private final Configuration flinkConfig;
 
-    private CobbleCheckpointRecoveryFactory(CheckpointRecoveryFactory delegate) {
+    private CobbleCheckpointRecoveryFactory(
+            CheckpointRecoveryFactory delegate, Configuration flinkConfig) {
         this.delegate = delegate;
+        this.flinkConfig = new Configuration(flinkConfig);
     }
 
-    static CheckpointRecoveryFactory wrap(CheckpointRecoveryFactory delegate) {
+    static CheckpointRecoveryFactory wrap(
+            CheckpointRecoveryFactory delegate, Configuration flinkConfig) {
         return (CheckpointRecoveryFactory)
                 Proxy.newProxyInstance(
                         delegate.getClass().getClassLoader(),
                         new Class<?>[] {CheckpointRecoveryFactory.class},
-                        new CobbleCheckpointRecoveryFactory(delegate));
+                        new CobbleCheckpointRecoveryFactory(delegate, flinkConfig));
     }
 
     @Override
@@ -36,7 +41,8 @@ final class CobbleCheckpointRecoveryFactory implements InvocationHandler {
             if (RECOVERED_STORE_METHOD.equals(method.getName())
                     && method.getParameterCount() == 5) {
                 return new CobbleCompletedCheckpointStore(
-                        (org.apache.flink.runtime.checkpoint.CompletedCheckpointStore) result);
+                        (org.apache.flink.runtime.checkpoint.CompletedCheckpointStore) result,
+                        flinkConfig);
             }
             return result;
         } catch (InvocationTargetException e) {

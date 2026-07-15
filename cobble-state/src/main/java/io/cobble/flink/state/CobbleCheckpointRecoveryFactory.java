@@ -1,6 +1,7 @@
 package io.cobble.flink.state;
 
 import org.apache.flink.api.common.JobID;
+import org.apache.flink.configuration.Configuration;
 import org.apache.flink.runtime.checkpoint.CheckpointIDCounter;
 import org.apache.flink.runtime.checkpoint.CheckpointRecoveryFactory;
 import org.apache.flink.runtime.checkpoint.CompletedCheckpointStore;
@@ -13,9 +14,11 @@ import java.util.concurrent.Executor;
 final class CobbleCheckpointRecoveryFactory implements CheckpointRecoveryFactory {
 
     private final CheckpointRecoveryFactory delegate;
+    private final Configuration flinkConfig;
 
-    CobbleCheckpointRecoveryFactory(CheckpointRecoveryFactory delegate) {
+    CobbleCheckpointRecoveryFactory(CheckpointRecoveryFactory delegate, Configuration flinkConfig) {
         this.delegate = delegate;
+        this.flinkConfig = new Configuration(flinkConfig);
     }
 
     @Override
@@ -32,7 +35,8 @@ final class CobbleCheckpointRecoveryFactory implements CheckpointRecoveryFactory
                         maxNumberOfCheckpointsToRetain,
                         sharedStateRegistryFactory,
                         ioExecutor,
-                        restoreMode));
+                        restoreMode),
+                flinkConfig);
     }
 
     @Override

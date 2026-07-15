@@ -3,6 +3,7 @@ package io.cobble.flink.state;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertInstanceOf;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -708,6 +709,43 @@ class CobbleHighAvailabilityServicesTest {
         } finally {
             services.close();
         }
+    }
+
+    @Test
+    void completedCheckpointStoreCoordinatorConfigCopiesS3CheckpointOptions() throws Exception {
+        Configuration flinkConfig = new Configuration();
+        flinkConfig.setString("s3.endpoint", "http://127.0.0.1:9000");
+        flinkConfig.setString("s3.region", "us-east-1");
+        flinkConfig.setString("s3.access-key", "test-access-key");
+        flinkConfig.setString("s3.secret-key", "test-secret-key");
+        flinkConfig.setString("s3.path.style.access", "true");
+
+        CobbleCompletedCheckpointStore store =
+                new CobbleCompletedCheckpointStore(
+                        createInnerStore(new ArrayList<>(), 1), flinkConfig);
+
+        // The store must retain the configuration it was constructed with, not a mutable caller
+        // view.
+        flinkConfig.setString("s3.endpoint", "http://mutated.invalid:9000");
+        flinkConfig.setString("s3.region", "mutated-region");
+
+        String checkpointPointer = "s3://cobble-test/checkpoints/chk-42";
+        String operatorIdHex = "0123456789abcdef0123456789abcdef";
+        Config coordinatorConfig = store.createCoordinatorConfig(checkpointPointer, operatorIdHex);
+
+        assertEquals(1, coordinatorConfig.volumes.size());
+        Config.VolumeDescriptor volume = coordinatorConfig.volumes.get(0);
+        assertEquals(
+                CobblePathUtils.cobbleOperatorSnapshotDirectory(checkpointPointer, operatorIdHex),
+                volume.baseDir);
+        assertEquals("test-access-key", volume.accessId);
+        assertEquals("test-secret-key", volume.secretKey);
+        assertNotNull(volume.customOptions);
+        assertEquals("http://127.0.0.1:9000", volume.customOptions.get("endpoint"));
+        assertEquals("us-east-1", volume.customOptions.get("region"));
+        assertEquals("false", volume.customOptions.get("enable_virtual_host_style"));
+        assertEquals("true", volume.customOptions.get("disable_config_load"));
+        assertEquals("true", volume.customOptions.get("disable_ec2_metadata"));
     }
 
     @Test
