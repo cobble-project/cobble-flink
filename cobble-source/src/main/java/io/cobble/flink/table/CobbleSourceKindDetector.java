@@ -2,6 +2,7 @@ package io.cobble.flink.table;
 
 import io.cobble.flink.common.CobbleConnectorStorageOptions;
 import io.cobble.flink.common.CobbleMetadataFileIO;
+import io.cobble.flink.common.CobbleNativeSavepoint;
 import io.cobble.flink.common.inspect.InspectSchemaRegistryLayout;
 import io.cobble.flink.common.inspect.SinkInspectSchemaStore;
 import io.cobble.flink.common.inspect.StateInspectSchemaStore;
@@ -59,6 +60,7 @@ final class CobbleSourceKindDetector {
     enum Probe {
         SINK,
         STATE_CHECKPOINT,
+        NATIVE_SAVEPOINT,
         STATE_OPERATOR,
         AMBIGUOUS,
         UNKNOWN
@@ -96,22 +98,27 @@ final class CobbleSourceKindDetector {
         try {
             probe = probeTableRoot(pathUri, storageOptions);
         } catch (ValidationException tableFailure) {
-            if (requestedKind == CobbleSourceKind.AUTO
-                    && probeStatePath(pathUri, false) == Probe.STATE_CHECKPOINT) {
-                return resolveState(pathUri, StateSourceConfig.Layout.CHECKPOINT_ROOT);
+            if (requestedKind == CobbleSourceKind.AUTO) {
+                Probe stateProbe = probeStatePath(pathUri, false);
+                if (stateProbe == Probe.NATIVE_SAVEPOINT) {
+                    return resolveState(pathUri, StateSourceConfig.Layout.NATIVE_SAVEPOINT);
+                }
+                if (stateProbe == Probe.STATE_CHECKPOINT) {
+                    return resolveState(pathUri, StateSourceConfig.Layout.CHECKPOINT_ROOT);
+                }
             }
             throw tableFailure;
         }
         if (probe == Probe.UNKNOWN) {
             Probe stateProbe = probeStatePath(pathUri, false);
-            if (stateProbe == Probe.STATE_CHECKPOINT || stateProbe == Probe.STATE_OPERATOR) {
+            if (isStateCheckpointProbe(stateProbe) || stateProbe == Probe.STATE_OPERATOR) {
                 probe = stateProbe;
             }
         }
 
         switch (requestedKind) {
             case SINK:
-                if (probe == Probe.STATE_CHECKPOINT || probe == Probe.STATE_OPERATOR) {
+                if (isStateCheckpointProbe(probe) || probe == Probe.STATE_OPERATOR) {
                     throw new ValidationException(
                             "source.kind='sink' was requested, but path appears to be a Cobble"
                                     + " state checkpoint.");
@@ -120,7 +127,7 @@ final class CobbleSourceKindDetector {
             case STATE:
                 throw new IllegalStateException("State source should have been resolved earlier.");
             case RAW:
-                if (probe == Probe.STATE_CHECKPOINT || probe == Probe.STATE_OPERATOR) {
+                if (isStateCheckpointProbe(probe) || probe == Probe.STATE_OPERATOR) {
                     throw new ValidationException(
                             "source.kind='raw' expects a Cobble table root. For Cobble Flink keyed"
                                     + " state, use source.kind='state'.");
@@ -183,6 +190,9 @@ final class CobbleSourceKindDetector {
         if (!exists(fileSystem, root, pathUri)) {
             return Probe.UNKNOWN;
         }
+        if (hasNativeSavepointLayout(fileSystem, root)) {
+            return Probe.NATIVE_SAVEPOINT;
+        }
         if (hasCheckpointLayout(fileSystem, root, pathUri)) {
             return Probe.STATE_CHECKPOINT;
         }
@@ -197,6 +207,9 @@ final class CobbleSourceKindDetector {
     }
 
     static CobbleResolvedSource resolveExplicitState(String pathUri, Probe stateProbe) {
+        if (stateProbe == Probe.NATIVE_SAVEPOINT) {
+            return resolveState(pathUri, StateSourceConfig.Layout.NATIVE_SAVEPOINT);
+        }
         if (stateProbe == Probe.STATE_CHECKPOINT) {
             return resolveState(pathUri, StateSourceConfig.Layout.CHECKPOINT_ROOT);
         }
@@ -271,6 +284,8 @@ final class CobbleSourceKindDetector {
                 return CobbleResolvedSource.sink(sinkDiagnostics(pathUri));
             case STATE_CHECKPOINT:
                 return resolveState(pathUri, StateSourceConfig.Layout.CHECKPOINT_ROOT);
+            case NATIVE_SAVEPOINT:
+                return resolveState(pathUri, StateSourceConfig.Layout.NATIVE_SAVEPOINT);
             case STATE_OPERATOR:
                 return resolveState(pathUri, StateSourceConfig.Layout.OPERATOR_ROOT);
             case AMBIGUOUS:
@@ -316,6 +331,10 @@ final class CobbleSourceKindDetector {
                 return "Detected Cobble state checkpoint root at "
                         + pathUri
                         + " (chk-* with _metadata and Cobble manifest).";
+            case NATIVE_SAVEPOINT:
+                return "Detected Flink NATIVE savepoint at "
+                        + pathUri
+                        + " (Cobble keyed-state metadata embedded in _metadata).";
             case OPERATOR_ROOT:
                 return "Detected Cobble state operator root at "
                         + pathUri
@@ -378,6 +397,23 @@ final class CobbleSourceKindDetector {
             }
         }
         return false;
+    }
+
+    /** A savepoint is native only when its Flink metadata contains Cobble's keyed-state payload. */
+    private static boolean hasNativeSavepointLayout(FileSystem fs, Path root) {
+        if (!exists(fs, new Path(root, FLINK_METADATA), root.toString())) {
+            return false;
+        }
+        try {
+            CobbleNativeSavepoint.load(root);
+            return true;
+        } catch (IOException | RuntimeException ignored) {
+            return false;
+        }
+    }
+
+    private static boolean isStateCheckpointProbe(Probe probe) {
+        return probe == Probe.STATE_CHECKPOINT || probe == Probe.NATIVE_SAVEPOINT;
     }
 
     private static boolean hasCobbleManifest(FileSystem fs, Path chkDir, String pathUri) {

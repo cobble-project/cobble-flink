@@ -26,6 +26,9 @@ final class StateSourceConfig implements Serializable {
         /** A Flink checkpoint root: a directory containing {@code chk-*} subdirectories. */
         CHECKPOINT_ROOT,
 
+        /** A Flink NATIVE savepoint directory containing only {@code _metadata} and task state. */
+        NATIVE_SAVEPOINT,
+
         /**
          * A single state operator inspect-schema root. It lacks checkpoint root / shared-volume
          * context, so reads must be pointed at the enclosing checkpoint root instead.

@@ -1,5 +1,7 @@
 package io.cobble.flink.monitor;
 
+import io.cobble.flink.common.CobbleNativeSavepoint;
+
 import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -11,6 +13,7 @@ final class OperatorEntry {
     final String operatorSnapshotDirectory;
     final List<String> readerVolumeDirectories;
     final boolean globalSnapshotLayout;
+    final CobbleNativeSavepoint.OperatorSnapshot nativeSavepoint;
 
     OperatorEntry(String operatorId, String manifestCopyPath, String operatorSnapshotDirectory) {
         this(
@@ -18,7 +21,8 @@ final class OperatorEntry {
                 manifestCopyPath,
                 operatorSnapshotDirectory,
                 Collections.singletonList(operatorSnapshotDirectory),
-                false);
+                false,
+                null);
     }
 
     OperatorEntry(
@@ -31,7 +35,8 @@ final class OperatorEntry {
                 manifestCopyPath,
                 operatorSnapshotDirectory,
                 readerVolumeDirectories,
-                false);
+                false,
+                null);
     }
 
     OperatorEntry(
@@ -40,11 +45,33 @@ final class OperatorEntry {
             String operatorSnapshotDirectory,
             List<String> readerVolumeDirectories,
             boolean globalSnapshotLayout) {
+        this(
+                operatorId,
+                manifestCopyPath,
+                operatorSnapshotDirectory,
+                readerVolumeDirectories,
+                globalSnapshotLayout,
+                null);
+    }
+
+    private OperatorEntry(
+            String operatorId,
+            String manifestCopyPath,
+            String operatorSnapshotDirectory,
+            List<String> readerVolumeDirectories,
+            boolean globalSnapshotLayout,
+            CobbleNativeSavepoint.OperatorSnapshot nativeSavepoint) {
         this.operatorId = operatorId;
         this.manifestCopyPath = manifestCopyPath;
         this.operatorSnapshotDirectory = operatorSnapshotDirectory;
         this.readerVolumeDirectories = readerVolumeDirectories;
         this.globalSnapshotLayout = globalSnapshotLayout;
+        this.nativeSavepoint = nativeSavepoint;
+    }
+
+    static OperatorEntry nativeSavepoint(CobbleNativeSavepoint.OperatorSnapshot snapshot) {
+        return new OperatorEntry(
+                snapshot.operatorId(), null, null, Collections.emptyList(), false, snapshot);
     }
 
     Map<String, Object> toJson() {
@@ -54,6 +81,7 @@ final class OperatorEntry {
         output.put("operator_snapshot_directory", operatorSnapshotDirectory);
         output.put("reader_volume_directories", readerVolumeDirectories);
         output.put("global_snapshot_layout", globalSnapshotLayout);
+        output.put("native_savepoint", nativeSavepoint != null);
         return output;
     }
 }

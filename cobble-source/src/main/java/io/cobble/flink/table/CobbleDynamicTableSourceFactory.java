@@ -260,7 +260,7 @@ public final class CobbleDynamicTableSourceFactory implements DynamicTableSource
         StateSourceOptions stateOptions = StateSourceOptions.parseForState(options);
         StateSourceResolvedSchema resolved =
                 StateSourceSchemaResolver.resolve(
-                        pathUri, stateOptions, checkpointId, resolvedSchema);
+                        pathUri, detected.layout(), stateOptions, checkpointId, resolvedSchema);
 
         StateSourceLookupKeyContract lookupKeyContract =
                 StateSourceLookupKeyContract.derive(

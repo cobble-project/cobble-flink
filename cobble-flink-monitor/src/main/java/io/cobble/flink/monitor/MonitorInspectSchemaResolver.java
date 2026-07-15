@@ -47,6 +47,16 @@ final class MonitorInspectSchemaResolver {
      * registry.
      */
     static SchemaResolveResult resolve(CheckpointEntry checkpoint, OperatorEntry operator) {
+        if (operator.nativeSavepoint != null) {
+            StateInspectSchemaStore store = operator.nativeSavepoint.schemaStore();
+            if (store.isEmpty()) {
+                return SchemaResolveResult.missing(
+                        "No inspect schema embedded in native savepoint metadata for operator "
+                                + operator.operatorId);
+            }
+            return SchemaResolveResult.available(
+                    store, "embedded native savepoint metadata", null, null, checkpoint.id);
+        }
         if (!operator.globalSnapshotLayout) {
             return SchemaResolveResult.unsupported(
                     "Schema registry resolution is not available for non-global-snapshot operators.");

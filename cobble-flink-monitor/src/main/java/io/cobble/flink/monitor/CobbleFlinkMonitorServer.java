@@ -1,6 +1,7 @@
 package io.cobble.flink.monitor;
 
 import io.cobble.Config;
+import io.cobble.DbCoordinator;
 import io.cobble.GlobalSnapshot;
 import io.cobble.ReadOptions;
 import io.cobble.Reader;
@@ -8,6 +9,7 @@ import io.cobble.ScanCursor;
 import io.cobble.ScanOptions;
 import io.cobble.ShardSnapshot;
 import io.cobble.flink.common.CobbleConnectorStorageOptions;
+import io.cobble.flink.common.CobbleNativeSavepoint;
 import io.cobble.flink.common.inspect.StateInspectSemanticSchema;
 import io.cobble.flink.common.inspect.StateInspectType;
 
@@ -331,6 +333,9 @@ public final class CobbleFlinkMonitorServer {
                 return new ReaderHandle(
                         Reader.open(cobbleConfig, checkpoint.id), Collections.emptyList());
             }
+            if (operator.nativeSavepoint != null) {
+                return openNativeSavepointReader(config, checkpoint, operator);
+            }
             if (operator.globalSnapshotLayout) {
                 return openGlobalSnapshotReader(config, checkpoint, operator);
             }
@@ -419,6 +424,70 @@ public final class CobbleFlinkMonitorServer {
                 }
                 deleteTemporaryDirectories(temporaryDirectories);
                 throw e;
+            }
+        }
+
+        private static ReaderHandle openNativeSavepointReader(
+                ServerConfig config, CheckpointEntry checkpoint, OperatorEntry operator) {
+            List<File> temporaryDirectories = new ArrayList<>();
+            try {
+                CobbleNativeSavepoint.OperatorSnapshot nativeSnapshot = operator.nativeSavepoint;
+                if (nativeSnapshot.maxParallelism() <= 0) {
+                    throw new InputException(
+                            "Native savepoint operator "
+                                    + operator.operatorId
+                                    + " has invalid maxParallelism "
+                                    + nativeSnapshot.maxParallelism());
+                }
+                File unifiedVolume =
+                        java.nio.file.Files.createTempDirectory(
+                                        "cobble-flink-native-savepoint-"
+                                                + checkpoint.id
+                                                + "-"
+                                                + safeFileName(operator.operatorId)
+                                                + "-")
+                                .toFile();
+                temporaryDirectories.add(unifiedVolume);
+                Config coordinatorConfig =
+                        CobbleReaderConfigs.base(nativeSnapshot.maxParallelism());
+                CobbleReaderConfigs.addVolume(
+                        coordinatorConfig,
+                        pathToCobbleConfigString(unifiedVolume),
+                        config.storageOptions);
+                try (DbCoordinator coordinator = DbCoordinator.open(coordinatorConfig)) {
+                    coordinator.materializeGlobalSnapshot(
+                            nativeSnapshot.maxParallelism(),
+                            checkpoint.id,
+                            nativeSnapshot.shards());
+                }
+
+                Config readerConfig = CobbleReaderConfigs.base(nativeSnapshot.maxParallelism());
+                CobbleReaderConfigs.addVolume(
+                        readerConfig,
+                        pathToCobbleConfigString(unifiedVolume),
+                        config.storageOptions);
+                Map<String, String> shardVolumes = new LinkedHashMap<>();
+                for (ShardSnapshot shard : nativeSnapshot.shards()) {
+                    String shardVolume = copyShardMetadata(shard, unifiedVolume);
+                    if (shardVolume != null) {
+                        shardVolumes.putIfAbsent(shardVolume, shardVolume);
+                    }
+                }
+                for (String root : shardVolumes.values()) {
+                    CobbleReaderConfigs.addVolume(readerConfig, root, config.storageOptions);
+                }
+                return new ReaderHandle(
+                        Reader.open(readerConfig, checkpoint.id), temporaryDirectories);
+            } catch (InputException e) {
+                deleteTemporaryDirectories(temporaryDirectories);
+                throw e;
+            } catch (IOException | RuntimeException e) {
+                deleteTemporaryDirectories(temporaryDirectories);
+                throw new InputException(
+                        "Failed to prepare Cobble NATIVE savepoint for operator "
+                                + operator.operatorId
+                                + ": "
+                                + e.getMessage());
             }
         }
 
@@ -962,10 +1031,13 @@ public final class CobbleFlinkMonitorServer {
             List<File> previousTemporaryDirectories = this.readerTemporaryDirectories;
             this.reader = next.reader;
             this.readerTemporaryDirectories = next.temporaryDirectories;
-            if (previous != null) {
-                previous.close();
+            try {
+                if (previous != null) {
+                    previous.close();
+                }
+            } finally {
+                deleteTemporaryDirectories(previousTemporaryDirectories);
             }
-            deleteTemporaryDirectories(previousTemporaryDirectories);
         }
 
         private void ensureSourceOpen() {
@@ -1291,12 +1363,15 @@ public final class CobbleFlinkMonitorServer {
 
         @Override
         public synchronized void close() {
-            if (reader != null) {
-                reader.close();
-                reader = null;
+            try {
+                if (reader != null) {
+                    reader.close();
+                    reader = null;
+                }
+            } finally {
+                deleteTemporaryDirectories(readerTemporaryDirectories);
+                readerTemporaryDirectories = Collections.emptyList();
             }
-            deleteTemporaryDirectories(readerTemporaryDirectories);
-            readerTemporaryDirectories = Collections.emptyList();
         }
 
         private static SchemaResolveResult resolveSchema(
@@ -1734,6 +1809,22 @@ public final class CobbleFlinkMonitorServer {
                 throw new InputException(
                         "--checkpoint must point to a checkpoint directory: " + checkpointRoot);
             }
+            try {
+                if (fileSystem.exists(new Path(requested, "_metadata"))) {
+                    try {
+                        return discoverNativeSavepoint(requested, storageOptions);
+                    } catch (InputException ignored) {
+                        // A non-Cobble savepoint or ordinary chk-* directory still has a valid
+                        // legacy discovery path below.
+                    }
+                }
+            } catch (IOException e) {
+                throw new InputException(
+                        "Failed to inspect savepoint metadata at "
+                                + requested
+                                + ": "
+                                + e.getMessage());
+            }
 
             List<Path> checkpointDirectories = discoverCheckpointDirectories(fileSystem, requested);
             Map<Long, Path> checkpointDirectoryById = new HashMap<>();
@@ -1801,6 +1892,34 @@ public final class CobbleFlinkMonitorServer {
             }
             return new CheckpointCatalog(
                     root.toString(), "checkpoint", checkpoints, storageOptions);
+        }
+
+        private static CheckpointCatalog discoverNativeSavepoint(
+                Path savepointDirectory, CobbleConnectorStorageOptions storageOptions) {
+            final CobbleNativeSavepoint savepoint;
+            try {
+                savepoint = CobbleNativeSavepoint.load(savepointDirectory);
+            } catch (IOException | RuntimeException e) {
+                throw new InputException(
+                        "No readable Cobble NATIVE savepoint state found at "
+                                + savepointDirectory
+                                + ": "
+                                + e.getMessage());
+            }
+            List<OperatorEntry> operators = new ArrayList<>();
+            for (CobbleNativeSavepoint.OperatorSnapshot operator : savepoint.operators().values()) {
+                operators.add(OperatorEntry.nativeSavepoint(operator));
+            }
+            operators.sort(Comparator.comparing(operator -> operator.operatorId));
+            return new CheckpointCatalog(
+                    pathToStorageString(savepointDirectory),
+                    "native_savepoint",
+                    Collections.singletonList(
+                            new CheckpointEntry(
+                                    savepoint.checkpointId(),
+                                    pathToStorageString(savepointDirectory),
+                                    operators)),
+                    storageOptions);
         }
 
         private static CheckpointCatalog discoverDataSourceRoot(

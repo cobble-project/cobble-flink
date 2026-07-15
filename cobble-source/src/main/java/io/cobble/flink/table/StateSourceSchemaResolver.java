@@ -1,5 +1,6 @@
 package io.cobble.flink.table;
 
+import io.cobble.flink.common.CobbleNativeSavepoint;
 import io.cobble.flink.common.inspect.InspectSchemaRegistryLayout;
 import io.cobble.flink.common.inspect.SerializerInspectSchema;
 import io.cobble.flink.common.inspect.StateInspectField;
@@ -67,6 +68,24 @@ final class StateSourceSchemaResolver {
             StateSourceOptions stateOptions,
             String scanCheckpointId,
             ResolvedSchema ddlSchema) {
+        return resolve(
+                checkpointRootUri,
+                StateSourceConfig.Layout.CHECKPOINT_ROOT,
+                stateOptions,
+                scanCheckpointId,
+                ddlSchema);
+    }
+
+    static StateSourceResolvedSchema resolve(
+            String checkpointRootUri,
+            StateSourceConfig.Layout layout,
+            StateSourceOptions stateOptions,
+            String scanCheckpointId,
+            ResolvedSchema ddlSchema) {
+        if (layout == StateSourceConfig.Layout.NATIVE_SAVEPOINT) {
+            return resolveNativeSavepoint(
+                    checkpointRootUri, stateOptions, scanCheckpointId, ddlSchema);
+        }
         Path root = new Path(checkpointRootUri);
         Path cobbleDir = new Path(root, COBBLE_DIR);
         FileSystem fs = fileSystem(cobbleDir, checkpointRootUri);
@@ -89,7 +108,48 @@ final class StateSourceSchemaResolver {
         InspectSchemaRegistryLayout.SchemaEvent event =
                 selectEvent(fs, eventsDir, scanCheckpointId, operatorId, checkpointRootUri);
         StateInspectSchemaStore store = readStore(fs, blobsDir, event, operatorId);
+        return resolveStore(store, operatorId, event.checkpointId(), stateOptions, ddlSchema);
+    }
 
+    private static StateSourceResolvedSchema resolveNativeSavepoint(
+            String savepointUri,
+            StateSourceOptions stateOptions,
+            String scanCheckpointId,
+            ResolvedSchema ddlSchema) {
+        CobbleNativeSavepoint savepoint;
+        try {
+            savepoint = CobbleNativeSavepoint.load(new Path(savepointUri));
+        } catch (IOException | RuntimeException e) {
+            throw new ValidationException(
+                    "Failed to read Cobble NATIVE savepoint metadata at " + savepointUri + '.', e);
+        }
+        if (!"latest".equals(scanCheckpointId)
+                && savepoint.checkpointId() != Long.parseLong(scanCheckpointId)) {
+            throw new ValidationException(
+                    "Cobble NATIVE savepoint checkpoint id is "
+                            + savepoint.checkpointId()
+                            + ", not requested "
+                            + scanCheckpointId
+                            + ".");
+        }
+        List<String> operators = new ArrayList<>(savepoint.operators().keySet());
+        String operatorId = selectOperator(operators, stateOptions.operatorId(), savepointUri);
+        StateInspectSchemaStore store = savepoint.operator(operatorId).schemaStore();
+        if (store.isEmpty()) {
+            throw new ValidationException(
+                    "Cobble NATIVE savepoint operator '"
+                            + operatorId
+                            + "' has no embedded inspect schema.");
+        }
+        return resolveStore(store, operatorId, savepoint.checkpointId(), stateOptions, ddlSchema);
+    }
+
+    private static StateSourceResolvedSchema resolveStore(
+            StateInspectSchemaStore store,
+            String operatorId,
+            long schemaCheckpointId,
+            StateSourceOptions stateOptions,
+            ResolvedSchema ddlSchema) {
         StateInspectSchema stateSchema = store.byStateName().get(stateOptions.stateName());
         if (stateSchema == null) {
             throw new ValidationException(
@@ -99,7 +159,6 @@ final class StateSourceSchemaResolver {
                             + availableStateNames(store)
                             + ".");
         }
-
         StateKind stateKind = stateSchema.stateKind();
         if (stateOptions.stateKindHint() != null && stateOptions.stateKindHint() != stateKind) {
             throw new ValidationException(
@@ -111,7 +170,6 @@ final class StateSourceSchemaResolver {
                             + stateKind.name()
                             + ".");
         }
-
         StateInspectSemanticSchema semanticSchema = store.semanticSchema(stateOptions.stateName());
         if (semanticSchema == null || semanticSchema.isEmpty()) {
             throw new ValidationException(
@@ -120,16 +178,14 @@ final class StateSourceSchemaResolver {
                             + "' has inspect metadata but no semantic schema. Cobble state source"
                             + " requires semantic schema metadata.");
         }
-
         List<StateSourceField> outputFields =
                 deriveOutputFields(stateOptions.stateName(), stateSchema, semanticSchema);
         validateDdl(stateOptions.stateName(), outputFields, ddlSchema);
-
         return new StateSourceResolvedSchema(
                 operatorId,
                 stateOptions.stateName(),
                 stateKind,
-                event.checkpointId(),
+                schemaCheckpointId,
                 outputFields,
                 stateSchema,
                 semanticSchema);

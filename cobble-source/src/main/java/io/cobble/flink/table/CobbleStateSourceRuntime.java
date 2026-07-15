@@ -1,12 +1,14 @@
 package io.cobble.flink.table;
 
 import io.cobble.Config;
+import io.cobble.DbCoordinator;
 import io.cobble.GlobalSnapshot;
 import io.cobble.ReadOptions;
 import io.cobble.Reader;
 import io.cobble.ScanOptions;
 import io.cobble.ShardSnapshot;
 import io.cobble.flink.common.CobbleLoader;
+import io.cobble.flink.common.CobbleNativeSavepoint;
 import io.cobble.flink.common.inspect.InspectSchemaRegistryLayout;
 import io.cobble.flink.common.inspect.StateInspectSchema;
 import io.cobble.flink.common.inspect.StateInspectSchemaStore;
@@ -50,6 +52,20 @@ final class CobbleStateSourceRuntime {
     private CobbleStateSourceRuntime() {}
 
     static long resolveCheckpointId(StateSourceConfig config) throws IOException {
+        if (config.layout() == StateSourceConfig.Layout.NATIVE_SAVEPOINT) {
+            CobbleNativeSavepoint savepoint = loadNativeSavepoint(config);
+            long checkpointId = savepoint.checkpointId();
+            if (!"latest".equals(config.scanCheckpointId())
+                    && checkpointId != Long.parseLong(config.scanCheckpointId())) {
+                throw new IOException(
+                        "Cobble NATIVE savepoint checkpoint id is "
+                                + checkpointId
+                                + ", not requested "
+                                + config.scanCheckpointId()
+                                + ".");
+            }
+            return checkpointId;
+        }
         if (!"latest".equals(config.scanCheckpointId())) {
             long checkpointId = Long.parseLong(config.scanCheckpointId());
             Path checkpointDir = checkpointDir(config.pathUri(), checkpointId);
@@ -149,6 +165,9 @@ final class CobbleStateSourceRuntime {
 
     static ReaderHandle openReader(StateSourceConfig config, long checkpointId) throws IOException {
         CobbleLoader.ensureCobbleLoaded();
+        if (config.layout() == StateSourceConfig.Layout.NATIVE_SAVEPOINT) {
+            return openNativeSavepointReader(config, checkpointId);
+        }
         Path checkpointDir = checkpointDir(config.pathUri(), checkpointId);
         Path operatorSnapshotDir = operatorSnapshotDir(config.pathUri(), config.operatorId());
         File unifiedVolume =
@@ -262,6 +281,16 @@ final class CobbleStateSourceRuntime {
 
     private static StateInspectSchemaStore readSchemaStore(StateSourceConfig config)
             throws IOException {
+        if (config.layout() == StateSourceConfig.Layout.NATIVE_SAVEPOINT) {
+            StateInspectSchemaStore store = nativeOperator(config).schemaStore();
+            if (store.isEmpty()) {
+                throw new IOException(
+                        "Cobble NATIVE savepoint has no inspect schema for operator '"
+                                + config.operatorId()
+                                + "'.");
+            }
+            return store;
+        }
         Path eventsDir =
                 new Path(
                         new Path(
@@ -321,6 +350,72 @@ final class CobbleStateSourceRuntime {
             throw new IOException("Cobble state inspect schema blob parsed as an empty store.");
         }
         return store;
+    }
+
+    private static ReaderHandle openNativeSavepointReader(
+            StateSourceConfig config, long checkpointId) throws IOException {
+        CobbleNativeSavepoint.OperatorSnapshot operator = nativeOperator(config);
+        if (operator.maxParallelism() <= 0) {
+            throw new IOException(
+                    "Cobble NATIVE savepoint operator '"
+                            + config.operatorId()
+                            + "' has invalid maxParallelism "
+                            + operator.maxParallelism()
+                            + ".");
+        }
+        File unifiedVolume =
+                Files.createTempDirectory(
+                                "cobble-native-savepoint-"
+                                        + checkpointId
+                                        + "-"
+                                        + safeFileName(config.operatorId())
+                                        + "-")
+                        .toFile();
+        try {
+            Config coordinatorConfig = baseConfig(config, operator.maxParallelism());
+            addVolume(coordinatorConfig, pathToCobbleConfigString(unifiedVolume));
+            try (DbCoordinator coordinator = DbCoordinator.open(coordinatorConfig)) {
+                coordinator.materializeGlobalSnapshot(
+                        operator.maxParallelism(), checkpointId, operator.shards());
+            }
+
+            Config readerConfig = baseConfig(config, operator.maxParallelism());
+            addVolume(readerConfig, pathToCobbleConfigString(unifiedVolume));
+            Map<String, String> shardVolumes = new LinkedHashMap<>();
+            for (ShardSnapshot shard : operator.shards()) {
+                String shardVolume = copyShardMetadata(shard, unifiedVolume);
+                if (shardVolume != null) {
+                    shardVolumes.putIfAbsent(shardVolume, shardVolume);
+                }
+            }
+            for (String shardVolume : shardVolumes.values()) {
+                addVolume(readerConfig, shardVolume);
+            }
+            return new ReaderHandle(Reader.open(readerConfig, checkpointId), unifiedVolume);
+        } catch (IOException | RuntimeException e) {
+            deleteRecursively(unifiedVolume);
+            throw e;
+        }
+    }
+
+    private static CobbleNativeSavepoint loadNativeSavepoint(StateSourceConfig config)
+            throws IOException {
+        return CobbleNativeSavepoint.load(new Path(config.pathUri()));
+    }
+
+    private static CobbleNativeSavepoint.OperatorSnapshot nativeOperator(StateSourceConfig config)
+            throws IOException {
+        CobbleNativeSavepoint savepoint = loadNativeSavepoint(config);
+        CobbleNativeSavepoint.OperatorSnapshot operator = savepoint.operator(config.operatorId());
+        if (operator == null) {
+            throw new IOException(
+                    "Cobble NATIVE savepoint has no Cobble operator '"
+                            + config.operatorId()
+                            + "'. Available operators: "
+                            + String.join(", ", savepoint.operators().keySet())
+                            + ".");
+        }
+        return operator;
     }
 
     private static int validateSnapshot(
@@ -645,8 +740,11 @@ final class CobbleStateSourceRuntime {
 
         @Override
         public void close() {
-            reader.close();
-            deleteRecursively(temporaryDirectory);
+            try {
+                reader.close();
+            } finally {
+                deleteRecursively(temporaryDirectory);
+            }
         }
     }
 
