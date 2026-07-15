@@ -11,6 +11,24 @@ Cobble Flink lets you use Cobble inside Flink in three common ways:
 - as a **source** to read Cobble data in Flink SQL
 - as a **sink** to write Flink SQL results into Cobble
 
+## Why Choose Cobble Flink
+
+Flink managed state is usually treated as an internal part of a running job.
+Cobble Flink keeps the recovery workflow while making persisted state more
+useful outside that narrow path:
+
+- Inspect checkpoint state and sink snapshots in the web monitor, organized by
+  operator, state, key, and semantic field.
+- Read supported keyed state and Cobble sink tables through Flink SQL using
+  scans or exact-key lookups.
+- Reuse structured columns captured from Flink serializers and SQL schemas,
+  instead of treating every key and value as opaque bytes.
+
+The result is more visible and consumable storage: operators can inspect what a
+job stored, and Flink users can build new queries and pipelines from the same
+persisted data. Tables written by the Cobble sink get the same benefits: their
+snapshots remain inspectable and can be read back through the Cobble source.
+
 ## The Supported Usage Pattern
 
 Using Cobble Flink usually means choosing one of these two packaging styles:

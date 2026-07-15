@@ -16,6 +16,27 @@ Cobble Flink currently provides:
 
 For complete details, see the [documentation](https://cobble-project.github.io/cobble-flink/).
 
+## Why Cobble Flink
+
+Flink state is essential to a stateful job, but it is often visible only to the
+running job and restore tooling. Cobble Flink makes persisted state easier to
+understand and reuse:
+
+- **See what Flink stored.** The web monitor can browse checkpoints and sink
+  snapshots by operator and state, then decode keys and values into semantic
+  fields when schema information is available.
+- **Consume state as data.** The SQL source can scan or look up Cobble sink
+  tables and supported keyed state directly, including structured semantic
+  columns. Persisted state is no longer useful only for job recovery.
+- **Use one storage layer across workflows.** State backend, source, sink,
+  metrics, and remote storage support work together, making it easier to debug
+  a job, validate its state, and build new Flink pipelines from existing data.
+
+This brings a different experience to stateful Flink: managed state remains
+part of the runtime while becoming observable and consumable. The same applies
+to tables written by the Cobble sink: users can inspect their snapshots and
+read the data back through the Cobble source.
+
 ## Download and Versioning
 
 You can get Cobble Flink artifacts from a Maven repository, or build them from
