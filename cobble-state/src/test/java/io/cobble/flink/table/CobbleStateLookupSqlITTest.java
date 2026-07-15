@@ -2,10 +2,22 @@ package io.cobble.flink.table;
 
 import static org.apache.flink.runtime.testutils.CommonTestUtils.waitForAllTaskRunning;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import io.cobble.flink.common.inspect.InspectSchemaRegistryLayout;
 import io.cobble.flink.common.inspect.StateInspectSchemaStore;
+import io.cobble.flink.inspect.CobbleInspectClient;
+import io.cobble.flink.inspect.FieldValue;
+import io.cobble.flink.inspect.InspectOverviewItem;
+import io.cobble.flink.inspect.InspectSelection;
+import io.cobble.flink.inspect.InspectSession;
+import io.cobble.flink.inspect.LookupKey;
+import io.cobble.flink.inspect.LookupRequest;
+import io.cobble.flink.inspect.LookupResult;
+import io.cobble.flink.inspect.StateKey;
+import io.cobble.flink.inspect.TypedLookupKey;
+import io.cobble.flink.inspect.TypedValue;
 import io.cobble.flink.state.CobbleHighAvailabilityServicesFactory;
 import io.cobble.flink.state.CobbleOptions;
 import io.cobble.flink.state.CobbleStateBackend;
@@ -87,6 +99,68 @@ class CobbleStateLookupSqlITTest {
     private static final int VALUES_PER_KEY = 3;
 
     @TempDir private Path tempDir;
+
+    @Test
+    void generatedOverviewDdlExecutesStateLookupJoin() throws Exception {
+        CheckpointInfo checkpoint = runStatefulJob();
+        String ddl;
+        try (CobbleInspectClient client = CobbleInspectClient.builder().build();
+                InspectSession session =
+                        client.open(
+                                InspectSelection.checkpoint(
+                                        checkpoint.rootUri,
+                                        checkpoint.checkpointId,
+                                        checkpoint.operatorId))) {
+            InspectOverviewItem valueState =
+                    session.overview().items().stream()
+                            .filter(item -> "value-state".equals(item.id()))
+                            .findFirst()
+                            .orElseThrow(() -> new AssertionError("value-state overview missing"));
+            assertTrue(valueState.sourceSql().exactLookupSupported());
+            ddl = valueState.sourceSql().ddl();
+            assertTrue(ddl.contains("'scan.checkpoint-id' = '" + checkpoint.checkpointId + "'"));
+
+            LookupResult sdkLookup =
+                    session.lookup(
+                            new LookupRequest(
+                                    "value-state",
+                                    Arrays.asList(
+                                            LookupKey.typed(
+                                                    TypedLookupKey.state(scalarStateKey(0))),
+                                            LookupKey.typed(
+                                                    TypedLookupKey.state(scalarStateKey(999))))));
+            assertTrue(sdkLookup.rows().get(0).found());
+            assertFalse(sdkLookup.rows().get(1).found());
+        }
+
+        StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment();
+        StreamTableEnvironment tableEnv = newTableEnv(env);
+        tableEnv.executeSql(ddl);
+        registerProbe(
+                env,
+                tableEnv,
+                "generated_probes",
+                Arrays.asList(
+                        Row.ofKind(RowKind.INSERT, 0),
+                        Row.ofKind(RowKind.INSERT, 1),
+                        Row.ofKind(RowKind.INSERT, 999)),
+                Types.ROW_NAMED(new String[] {"key"}, Types.INT));
+
+        String query =
+                "SELECT p.key, d.`value` "
+                        + "FROM generated_probes AS p "
+                        + "LEFT JOIN `value_state` FOR SYSTEM_TIME AS OF p.pt AS d "
+                        + "ON p.key = d.`key`";
+        assertTrue(tableEnv.explainSql(query).contains("LookupJoin"));
+        assertEquals(Arrays.asList("0,12", "1,15", "999,null"), collectRows(tableEnv, query));
+    }
+
+    private static StateKey scalarStateKey(int key) {
+        return new StateKey(
+                Collections.singletonList(new FieldValue("key", TypedValue.integer(key))),
+                Collections.emptyList(),
+                Collections.emptyList());
+    }
 
     // ------------------------------------------------------------------------------------------
     //  Tests — value-like states

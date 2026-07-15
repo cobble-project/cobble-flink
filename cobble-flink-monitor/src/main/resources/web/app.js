@@ -1225,7 +1225,20 @@ function semanticTableFields(type) {
 }
 
 function semanticDisplayTypeLabel(type) {
-  return overviewTypeLabel(type).replace(/`/g, '')
+  if (!type || type.kind === 'UNKNOWN') return 'BYTES'
+  if (type.logical_type) return type.logical_type
+  if (Array.isArray(type.fields) && type.fields.length > 0) {
+    return `ROW<${type.fields.map((field, index) => (
+      `${field?.name || `f${index}`} ${semanticDisplayTypeLabel(field?.type)}`
+    )).join(', ')}>`
+  }
+  if (type.kind === 'LIST' && type.element_type) {
+    return `ARRAY<${semanticDisplayTypeLabel(type.element_type)}>`
+  }
+  if (type.kind === 'MAP' && type.key_type && type.value_type) {
+    return `MAP<${semanticDisplayTypeLabel(type.key_type)}, ${semanticDisplayTypeLabel(type.value_type)}>`
+  }
+  return 'BYTES'
 }
 
 function renderTypeLabel(typeLabel) {
@@ -1918,171 +1931,20 @@ function renderOverview() {
 }
 
 function overviewItems(meta = state.meta) {
-  const targets = meta?.inspect_targets || []
-  return targets
-    .filter((target) => target?.kind === 'sink' || target?.kind === 'state' || target?.kind === 'timer')
-    .map((target) => (
-      target.kind === 'sink'
-        ? sinkOverviewItem(target, meta)
-        : stateOverviewItem(target, meta)
-    ))
+  return (meta?.overview?.items || []).map((item) => {
+    const sourceSql = item.source_sql || item.sourceSql || {}
+    return {
+      ...item,
+      fields: (item.fields || []).map((field) => ({ ...field, type: field.logical_type || field.logicalType })),
+      sql: sourceSql.ddl || null,
+      sqlHeading: sourceSql.ddl ? 'Flink SQL source' : 'Flink SQL source unavailable',
+      note: sourceSql.note || sourceSql.unavailable_reason || sourceSql.unavailableReason,
+    }
+  })
 }
 
-function sinkOverviewItem(target, meta) {
-  const keyFields = target.key_fields || []
-  const valueFields = target.value_fields || []
-  return {
-    id: target.id || 'sink',
-    title: 'sink',
-    kind: 'Sink',
-    detail: 'Cobble SQL sink snapshot',
-    fields: [
-      ...keyFields.map((field) => ({ role: 'Primary key', name: field.name, type: field.logical_type })),
-      ...valueFields.map((field) => ({ role: 'Column', name: field.name, type: field.logical_type })),
-    ],
-    sql: sinkSourceSql(target, meta),
-    note: sinkSourceNote(keyFields),
-  }
-}
-
-function stateOverviewItem(target, meta) {
-  const groups = stateOverviewGroups(target)
-  const sql = stateSourceSql(target, meta, groups)
-  return {
-    id: target.id || target.name,
-    title: target.name || target.id,
-    kind: target.kind === 'timer' ? 'Timer' : (target.state_kind || 'State'),
-    detail: target.kind === 'timer'
-      ? 'Cobble-backed Flink timer queue'
-      : `${target.state_kind || 'Raw'} keyed state`,
-    fields: groups.flatMap((group) => (
-      group.fields.map((field) => ({ role: group.label, name: field.name, type: field.logical_type }))
-    )),
-    sql,
-    sqlHeading: sql ? 'Flink SQL source' : 'Flink SQL source unavailable',
-    note: stateSourceNote(target, groups, Boolean(sql)),
-  }
-}
-
-function stateOverviewGroups(target) {
-  const parts = target?.semantic_parts || target?.semanticParts || {}
-  const valuePartLabel = target?.value_part_label || target?.valuePartLabel || 'Value'
-  const groups = [
-    { id: 'state_key', label: 'State key', type: parts.state_key },
-    { id: 'namespace', label: 'Namespace', type: parts.namespace },
-    { id: 'map_key', label: 'Map key', type: parts.map_key },
-    { id: 'value', label: valuePartLabel, type: parts.value },
-    { id: 'list_element', label: 'List element', type: parts.list_element },
-    { id: 'map_value', label: 'Map value', type: parts.map_value },
-  ]
-  const semanticGroups = groups
-    .filter((group) => group.type)
-    .filter((group) => group.id !== 'namespace' || !isVoidNamespaceTarget(target))
-    .map((group) => ({ ...group, fields: overviewFieldsFromType(group.id, group.type) }))
-    .filter((group) => group.fields.length > 0)
-  return semanticGroups.length > 0 ? semanticGroups : rawStateOverviewGroups(target)
-}
-
-function rawStateOverviewGroups(target) {
-  const groups = [
-    { id: 'state_key', label: 'State key', fields: [{ name: 'key', logical_type: 'BYTES' }] },
-  ]
-  if (!isVoidNamespaceTarget(target)) {
-    groups.push({
-      id: 'namespace',
-      label: 'Namespace',
-      fields: [{ name: 'namespace', logical_type: 'BYTES' }],
-    })
-  }
-  if (target?.state_kind === 'MAP') {
-    groups.push({
-      id: 'map_key',
-      label: 'Map key',
-      fields: [{ name: 'map_key', logical_type: 'BYTES' }],
-    })
-    groups.push({
-      id: 'map_value',
-      label: 'Map value',
-      fields: [{ name: 'map_value', logical_type: 'BYTES' }],
-    })
-  } else if (target?.state_kind === 'LIST') {
-    groups.push({
-      id: 'list_element',
-      label: 'List element',
-      fields: [{ name: 'value', logical_type: 'BYTES' }],
-    })
-  } else if (target?.kind === 'timer' || target?.state_kind === 'TIMER') {
-    groups.push({
-      id: 'timestamp',
-      label: 'Timestamp',
-      fields: [{ name: 'timestamp', logical_type: 'BIGINT' }],
-    })
-  } else {
-    groups.push({
-      id: 'value',
-      label: target?.state_kind === 'AGGREGATING' ? 'Accumulator' : 'Value',
-      fields: [{ name: 'value', logical_type: 'BYTES' }],
-    })
-  }
-  return groups
-}
-
-function overviewFieldsFromType(groupId, type) {
-  if (!type || type.kind === 'UNKNOWN') {
-    return [{ name: overviewFallbackFieldName(groupId), logical_type: 'BYTES' }]
-  }
-  if (Array.isArray(type.fields) && type.fields.length > 0) {
-    return type.fields.map((field, index) => ({
-      name: field?.name || `f${index}`,
-      logical_type: field?.type?.logical_type || overviewNestedTypeLabel(field?.type),
-    }))
-  }
-  if (type.kind === 'LIST' && type.element_type) {
-    return [{
-      name: overviewFallbackFieldName(groupId),
-      logical_type: `ARRAY<${overviewTypeLabel(type.element_type)}>`,
-    }]
-  }
-  return [{
-    name: overviewFallbackFieldName(groupId),
-    logical_type: type.logical_type || overviewTypeLabel(type),
-  }]
-}
-
-function overviewFallbackFieldName(groupId) {
-  // Column names must match what the Cobble state source connector
-  // (StateSourceSchemaResolver) expects: state key is "key", list element is "value".
-  const names = {
-    state_key: 'key',
-    namespace: 'namespace',
-    map_key: 'map_key',
-    value: 'value',
-    list_element: 'value',
-    map_value: 'map_value',
-    timestamp: 'timestamp',
-  }
-  return names[groupId] || 'value'
-}
-
-function overviewTypeLabel(type) {
-  if (!type || type.kind === 'UNKNOWN') return 'BYTES'
-  if (type.logical_type) return type.logical_type
-  if (Array.isArray(type.fields) && type.fields.length > 0) {
-    return `ROW<${type.fields.map((field, index) => (
-      `${quoteSqlIdentifier(field?.name || `f${index}`)} ${overviewTypeLabel(field?.type)}`
-    )).join(', ')}>`
-  }
-  if (type.kind === 'LIST' && type.element_type) {
-    return `ARRAY<${overviewTypeLabel(type.element_type)}>`
-  }
-  if (type.kind === 'MAP' && type.key_type && type.value_type) {
-    return `MAP<${overviewTypeLabel(type.key_type)}, ${overviewTypeLabel(type.value_type)}>`
-  }
-  return 'BYTES'
-}
-
-function overviewNestedTypeLabel(type) {
-  return type && type.kind !== 'UNKNOWN' ? overviewTypeLabel(type) : 'BYTES'
+function normalizedStateKind(target) {
+  return String(target?.state_kind || target?.stateKind || '').toUpperCase()
 }
 
 function renderOverviewItem(item) {
@@ -2156,230 +2018,6 @@ function renderOverviewFields(fields) {
       `).join('')}
     </div>
   `
-}
-
-function sinkSourceNote(keyFields) {
-  if (!keyFields.length) {
-    return 'Use this source table for scan queries. Lookup joins require primary-key metadata, which is not available here.'
-  }
-  const keys = keyFields.map((field) => quoteSqlIdentifier(field.name)).join(', ')
-  return `Use this same source table for scan queries and temporal lookup joins. Lookup joins require equality predicates for every primary-key column: ${keys}.`
-}
-
-function sinkSourceSql(target, meta = state.meta) {
-  const keyFields = target.key_fields || []
-  const valueFields = target.value_fields || []
-  // The sink source connector validates that DDL physical column order matches the persisted
-  // sink schema rowIndex layout. Sort all fields by row_index so the generated DDL is accepted
-  // by the connector without manual reordering.
-  const fields = [...keyFields, ...valueFields].sort((a, b) => {
-    const ra = a?.row_index ?? a?.rowIndex ?? 0
-    const rb = b?.row_index ?? b?.rowIndex ?? 0
-    return ra - rb
-  })
-  const tableName = quoteSqlIdentifier(sourceTableName('cobble_source', meta?.source_path))
-  const columnLines = fields.map((field) => (
-    `  ${quoteSqlIdentifier(field.name)} ${field.logical_type || 'BYTES'}`
-  ))
-  const primaryKey = keyFields.map((field) => quoteSqlIdentifier(field.name)).join(', ')
-  if (primaryKey) {
-    columnLines.push(`  PRIMARY KEY (${primaryKey}) NOT ENFORCED`)
-  }
-  return [
-    `CREATE TABLE ${tableName} (`,
-    columnLines.join(',\n'),
-    `) WITH (`,
-    `  'connector' = 'cobble',`,
-    `  'path' = '${escapeSqlString(meta?.source_path || '')}',`,
-    `  'scan.checkpoint-id' = '${escapeSqlString(selectedCheckpointForSql(meta))}',`,
-    `  'scan.mode' = 'batch'`,
-    `);`,
-  ].join('\n')
-}
-
-function stateSourceNote(target, groups, hasSql) {
-  if (!hasSql) {
-    if (!(target?.kind === 'timer' || normalizedStateKind(target) === 'TIMER')) {
-      return 'This state can be inspected in the monitor, but its semantic metadata is not complete enough to derive a Cobble SQL state source DDL.'
-    }
-    return 'Timer state is visible in the monitor, but the Cobble SQL state source does not read timer queues yet.'
-  }
-  if (!stateLookupSupportedKind(target)) {
-    return 'Use this state source table for batch scan queries. Lookup joins are not available for this state kind yet.'
-  }
-  if (!stateExactLookupSupported(target)) {
-    const reason = target?.exact_lookup_reason || target?.exactLookupReason || 'this key serializer cannot be reconstructed exactly'
-    return `Use this state source table for batch scan queries. Lookup joins are unavailable because ${reason}.`
-  }
-  const keys = stateSourcePrimaryKeyFields(target, groups)
-    .map((field) => quoteSqlIdentifier(field.name))
-    .join(', ')
-  return `Use this state source table for batch scan queries and exact-key temporal lookup joins. Lookup joins require equality predicates for every primary-key column: ${keys}.`
-}
-
-function stateSourceSql(target, meta = state.meta, groups = stateOverviewGroups(target)) {
-  if (target?.kind === 'timer' || normalizedStateKind(target) === 'TIMER') {
-    return null
-  }
-  if (!stateSourceSemanticReady(target)) {
-    return null
-  }
-  const fields = stateSourceFields(groups)
-  if (fields.length === 0) return null
-  if (hasDuplicateStateSourceFieldNames(fields)) return null
-  const tableName = quoteSqlIdentifier(sourceTableName(target?.name || target?.id || 'cobble_state', null))
-  const columnLines = fields.map((field) => (
-    `  ${quoteSqlIdentifier(field.name)} ${field.logical_type || 'BYTES'}`
-  ))
-  const primaryKeyFields = stateExactLookupSupported(target)
-    ? stateSourcePrimaryKeyFields(target, groups)
-    : []
-  if (primaryKeyFields.length > 0) {
-    columnLines.push(
-      `  PRIMARY KEY (${primaryKeyFields.map((field) => quoteSqlIdentifier(field.name)).join(', ')}) NOT ENFORCED`,
-    )
-  }
-  const optionLines = [
-    `  'connector' = 'cobble'`,
-    `  'source.kind' = 'state'`,
-    `  'path' = '${escapeSqlString(stateSourcePathForSql(meta))}'`,
-  ]
-  const operatorId = target?.operator_id || target?.operatorId || meta?.selected_operator_id
-  if (operatorId) {
-    optionLines.push(`  'state.operator-id' = '${escapeSqlString(operatorId)}'`)
-  }
-  optionLines.push(
-    `  'state.name' = '${escapeSqlString(target?.name || target?.id || '')}'`,
-    `  'state.kind' = '${escapeSqlString(normalizedStateKind(target).toLowerCase())}'`,
-    `  'scan.checkpoint-id' = '${escapeSqlString(selectedCheckpointForSql(meta))}'`,
-    `  'scan.mode' = 'batch'`,
-  )
-  return [
-    `CREATE TABLE ${tableName} (`,
-    columnLines.join(',\n'),
-    `) WITH (`,
-    optionLines.join(',\n'),
-    `);`,
-  ].join('\n')
-}
-
-function stateExactLookupSupported(target) {
-  return stateLookupSupportedKind(target)
-    && target?.exact_lookup_supported !== false
-    && target?.exactLookupSupported !== false
-}
-
-function stateSourcePathForSql(meta = state.meta) {
-  return checkpointRootFromDirectory(
-    meta?.selected_checkpoint_directory
-      || meta?.selectedCheckpointDirectory
-      || '',
-  )
-    || meta?.checkpoint_root
-    || meta?.checkpointRoot
-    || meta?.source_path
-    || ''
-}
-
-function checkpointRootFromDirectory(directory) {
-  const text = String(directory || '').replace(/\/+$/, '')
-  return /\/chk-\d+$/.test(text) ? text.replace(/\/chk-\d+$/, '') : text
-}
-
-function stateSourceFields(groups) {
-  return groups.flatMap((group) => group.fields.map((field) => ({
-    ...field,
-    groupId: group.id,
-  })))
-}
-
-function hasDuplicateStateSourceFieldNames(fields) {
-  const seen = new Set()
-  for (const field of fields) {
-    if (seen.has(field.name)) return true
-    seen.add(field.name)
-  }
-  return false
-}
-
-function stateSourcePrimaryKeyFields(target, groups) {
-  const keyGroupIds = normalizedStateKind(target) === 'MAP'
-    ? ['state_key', 'namespace', 'map_key']
-    : ['state_key', 'namespace']
-  return stateSourceFields(groups).filter((field) => keyGroupIds.includes(field.groupId))
-}
-
-function stateLookupSupportedKind(target) {
-  return ['VALUE', 'REDUCING', 'AGGREGATING', 'MAP'].includes(normalizedStateKind(target))
-}
-
-function normalizedStateKind(target) {
-  return String(target?.state_kind || target?.stateKind || target?.kind || '').toUpperCase()
-}
-
-function stateSourceSemanticReady(target) {
-  const parts = target?.semantic_parts || target?.semanticParts
-  if (!parts) return false
-  const requiredPartIds = stateSourceRequiredPartIds(target)
-  if (requiredPartIds.length === 0) return false
-  if (!isVoidNamespaceTarget(target)) {
-    requiredPartIds.splice(1, 0, 'namespace')
-  }
-  return requiredPartIds.every((partId) => stateSourceTypeUsable(parts[partId]))
-}
-
-function stateSourceRequiredPartIds(target) {
-  switch (normalizedStateKind(target)) {
-    case 'VALUE':
-    case 'REDUCING':
-    case 'AGGREGATING':
-      return ['state_key', 'value']
-    case 'LIST':
-      return ['state_key', 'list_element']
-    case 'MAP':
-      return ['state_key', 'map_key', 'map_value']
-    default:
-      return []
-  }
-}
-
-function stateSourceTypeUsable(type) {
-  if (!type || type.kind === 'UNKNOWN' || type.kind === 'LIST' || type.kind === 'MAP') return false
-  if (Array.isArray(type.fields)) {
-    return type.fields.every((field) => field?.type && field.type.kind === 'SCALAR')
-  }
-  return true
-}
-
-function sourceTableName(fallback, path) {
-  const name = String(path || '')
-    .split(/[/?#]/)
-    .filter(Boolean)
-    .pop()
-  return sanitizeSqlIdentifier(name || fallback || 'cobble_source')
-}
-
-function sanitizeSqlIdentifier(value) {
-  const sanitized = String(value || '')
-    .replace(/[^A-Za-z0-9_]/g, '_')
-    .replace(/^_+|_+$/g, '')
-  const normalized = sanitized || 'field'
-  return /^[0-9]/.test(normalized) ? `_${normalized}` : normalized
-}
-
-function quoteSqlIdentifier(value) {
-  return `\`${String(value).replaceAll('`', '``')}\``
-}
-
-function escapeSqlString(value) {
-  return String(value == null ? '' : value).replaceAll("'", "''")
-}
-
-function selectedCheckpointForSql(meta = state.meta) {
-  if (!meta) return 'latest'
-  return meta.selected_checkpoint === 'latest'
-    ? 'latest'
-    : String(meta.selected_checkpoint_id || meta.selected_checkpoint || 'latest')
 }
 
 function splitLines(value) {

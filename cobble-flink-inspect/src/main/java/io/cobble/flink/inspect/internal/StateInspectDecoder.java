@@ -811,6 +811,114 @@ public final class StateInspectDecoder {
         return keyGroupForSerializedKey(target.schema, output.getCopyOfBuffer(), totalKeyGroups);
     }
 
+    public static EncodedStateKey encodeExactStateKey(
+            InspectTarget target,
+            List<String> stateKeyValues,
+            List<String> namespaceValues,
+            List<String> mapKeyValues,
+            int totalKeyGroups)
+            throws IOException {
+        if (target == null || target.schema == null || target.semanticSchema == null) {
+            throw new IOException("State semantic metadata is required for typed exact lookup");
+        }
+        StateInspectSchema schema = target.schema;
+        if (schema.stateKind() == StateKind.TIMER || schema.stateKind() == StateKind.LIST) {
+            throw new IOException(
+                    schema.stateKind() + " state does not support typed exact lookup");
+        }
+        EncodedSemanticGroup stateKey =
+                encodeSemanticGroup(
+                        target.semanticSchema.stateKey(),
+                        schema.keySerializer(),
+                        stateKeyValues,
+                        "state key");
+        byte[] namespace;
+        if (isVoidNamespaceSerializer(schema.namespaceSerializer())) {
+            if (namespaceValues != null && !namespaceValues.isEmpty()) {
+                throw new IOException("VoidNamespace does not accept namespace fields");
+            }
+            namespace = new byte[] {0};
+        } else {
+            namespace =
+                    encodeSemanticGroup(
+                                    target.semanticSchema.namespace(),
+                                    schema.namespaceSerializer(),
+                                    namespaceValues,
+                                    "namespace")
+                            .bytes;
+        }
+        byte[] rowKey;
+        if (schema.stateKind() == StateKind.MAP) {
+            EncodedSemanticGroup mapKey =
+                    encodeSemanticGroup(
+                            target.semanticSchema.mapUserKey(),
+                            schema.mapUserKeySerializer(),
+                            mapKeyValues,
+                            "map key");
+            rowKey = encodeMapStateKeyPrefix(schema, stateKey.bytes, namespace, mapKey.bytes);
+        } else {
+            if (mapKeyValues != null && !mapKeyValues.isEmpty()) {
+                throw new IOException("Map key fields are only valid for MapState");
+            }
+            rowKey = encodeKeyAndNamespace(schema, stateKey.bytes, namespace);
+        }
+        return new EncodedStateKey(
+                KeyGroupRangeAssignment.assignToKeyGroup(stateKey.value, totalKeyGroups), rowKey);
+    }
+
+    private static EncodedSemanticGroup encodeSemanticGroup(
+            StateInspectType type,
+            SerializerInspectSchema serializerSchema,
+            List<String> values,
+            String label)
+            throws IOException {
+        List<StateInspectType> fieldTypes = semanticFilterFieldTypes(type, label);
+        if (values == null || values.size() != fieldTypes.size()) {
+            throw new IOException("All " + label + " fields are required for exact lookup");
+        }
+        Object value;
+        if (type.kind() == StateInspectTypeKind.SCALAR) {
+            value = parseTextValue(serializerSchema, values.get(0), label);
+        } else if (type.kind() == StateInspectTypeKind.ROW) {
+            GenericRowData row = new GenericRowData(values.size());
+            for (int index = 0; index < values.size(); index++) {
+                LogicalType logicalType =
+                        LogicalTypeParser.parse(
+                                fieldTypes.get(index).logicalType(),
+                                StateInspectDecoder.class.getClassLoader());
+                row.setField(
+                        index, SinkInspectDecoder.parseFieldInput(logicalType, values.get(index)));
+            }
+            value = row;
+        } else {
+            throw new IOException(
+                    "Typed exact lookup does not support " + type.kind() + " " + label);
+        }
+        DataOutputSerializer output = new DataOutputSerializer(64);
+        restore(serializerSchema).serialize(value, output);
+        return new EncodedSemanticGroup(value, output.getCopyOfBuffer());
+    }
+
+    public static final class EncodedStateKey {
+        public final int keyGroup;
+        public final byte[] rowKey;
+
+        private EncodedStateKey(int keyGroup, byte[] rowKey) {
+            this.keyGroup = keyGroup;
+            this.rowKey = rowKey;
+        }
+    }
+
+    private static final class EncodedSemanticGroup {
+        private final Object value;
+        private final byte[] bytes;
+
+        private EncodedSemanticGroup(Object value, byte[] bytes) {
+            this.value = value;
+            this.bytes = bytes;
+        }
+    }
+
     @SuppressWarnings("unchecked")
     public static boolean matchesSemanticPartFilter(
             Map<String, Object> decodedParts,

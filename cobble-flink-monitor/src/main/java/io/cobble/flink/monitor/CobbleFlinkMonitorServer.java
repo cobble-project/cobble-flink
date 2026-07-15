@@ -14,6 +14,7 @@ import io.cobble.flink.inspect.internal.CheckpointEntry;
 import io.cobble.flink.inspect.internal.CobbleDataSourceDiscovery;
 import io.cobble.flink.inspect.internal.DisplayLong;
 import io.cobble.flink.inspect.internal.FlinkInspectFileSystems;
+import io.cobble.flink.inspect.internal.InspectOverviewGenerator;
 import io.cobble.flink.inspect.internal.InspectReaderOperations;
 import io.cobble.flink.inspect.internal.InspectTarget;
 import io.cobble.flink.inspect.internal.LookupItem;
@@ -407,6 +408,16 @@ public final class CobbleFlinkMonitorServer {
             output.put("inspect_kind", inspectKind(current, selectedSchema, selectedSinkSchema));
             output.put(
                     "inspect_targets", inspectTargets(current, selectedSchema, selectedSinkSchema));
+            output.put(
+                    "overview",
+                    selectedCheckpoint == null || selectedOperator == null
+                            ? null
+                            : InspectOverviewGenerator.generate(
+                                    catalog.rootDirectory,
+                                    selectedCheckpoint.id,
+                                    selectedOperator.operatorId,
+                                    StateInspectTargetBuilder.build(
+                                            current, selectedSchema, selectedSinkSchema)));
             output.put("schema", selectedSchema == null ? null : selectedSchema.toJson());
             output.put(
                     "sink_schema", selectedSinkSchema == null ? null : selectedSinkSchema.toJson());

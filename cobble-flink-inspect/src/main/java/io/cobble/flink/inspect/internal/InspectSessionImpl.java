@@ -5,11 +5,14 @@ import io.cobble.ReadOptions;
 import io.cobble.Reader;
 import io.cobble.ScanOptions;
 import io.cobble.flink.common.CobbleConnectorStorageOptions;
+import io.cobble.flink.common.inspect.StateInspectExactLookupSupport;
+import io.cobble.flink.common.inspect.StateKind;
 import io.cobble.flink.inspect.DecodeIssue;
 import io.cobble.flink.inspect.DecodedValue;
 import io.cobble.flink.inspect.InspectCatalog;
 import io.cobble.flink.inspect.InspectErrorCode;
 import io.cobble.flink.inspect.InspectException;
+import io.cobble.flink.inspect.InspectOverview;
 import io.cobble.flink.inspect.InspectPage;
 import io.cobble.flink.inspect.InspectRow;
 import io.cobble.flink.inspect.InspectSelection;
@@ -20,9 +23,14 @@ import io.cobble.flink.inspect.LookupRequest;
 import io.cobble.flink.inspect.LookupResult;
 import io.cobble.flink.inspect.PageToken;
 import io.cobble.flink.inspect.RawBytes;
+import io.cobble.flink.inspect.ScanFilter;
 import io.cobble.flink.inspect.ScanRequest;
+import io.cobble.flink.inspect.StateKey;
+import io.cobble.flink.inspect.TypedLookupKey;
 
 import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Base64;
@@ -40,6 +48,7 @@ final class InspectSessionImpl implements InspectSession {
     private final InspectCatalog catalog;
     private final InspectSelection selection;
     private final MonitorReaderSession readerSession;
+    private final String sourcePath;
     private final ClassLoader userClassLoader;
     private final List<InspectTarget> internalTargets;
     private final List<io.cobble.flink.inspect.InspectTarget> targets;
@@ -60,6 +69,7 @@ final class InspectSessionImpl implements InspectSession {
         this.catalog = catalog;
         this.selection = selection;
         this.readerSession = readerSession;
+        this.sourcePath = sourceRoot;
         this.userClassLoader = userClassLoader;
 
         Reader reader = readerSession.reader();
@@ -102,6 +112,13 @@ final class InspectSessionImpl implements InspectSession {
     }
 
     @Override
+    public InspectOverview overview() {
+        ensureOpen();
+        return InspectOverviewGenerator.generate(
+                sourcePath, selection.checkpointId(), selection.operatorId(), internalTargets);
+    }
+
+    @Override
     public InspectPage scan(ScanRequest request) {
         ensureOpen();
         validateScan(request);
@@ -109,21 +126,21 @@ final class InspectSessionImpl implements InspectSession {
         int limit = request.limit();
         int[] columns = target.allowsColumns ? request.columns() : null;
         validateColumns(request.columns(), target);
-        byte[] prefix = rawPrefix(request.prefix());
+        ScanPlan plan = scanPlan(request, target);
+        byte[] prefix = plan.prefix;
         byte[] end = prefix.length == 0 ? MAX_KEY : prefixUpperBound(prefix);
         if (end == null) {
             throw invalid("Scan prefix has no finite upper bound");
         }
-        CursorPosition position = CursorPosition.parse(request.pageToken(), request.targetId());
+        String requestIdentity = scanIdentity(request, plan);
+        CursorPosition position = CursorPosition.parse(request.pageToken(), requestIdentity);
         int firstBucket =
-                position == null
-                        ? request.bucket() == null ? 0 : request.bucket()
-                        : position.bucket;
+                position == null ? plan.bucket == null ? 0 : plan.bucket : position.bucket;
         if (firstBucket < 0 || firstBucket >= totalBuckets) {
             throw invalid("Bucket must be between 0 and " + (totalBuckets - 1));
         }
-        int lastBucket = request.bucket() == null ? totalBuckets - 1 : request.bucket();
-        if (position != null && request.bucket() != null && position.bucket != request.bucket()) {
+        int lastBucket = plan.bucket == null ? totalBuckets - 1 : plan.bucket;
+        if (position != null && plan.bucket != null && position.bucket != plan.bucket) {
             throw invalid("Page token does not belong to the requested bucket");
         }
 
@@ -142,9 +159,15 @@ final class InspectSessionImpl implements InspectSession {
                         start,
                         end,
                         skipPosition ? position.key : null,
-                        scanOptions(target.columnFamily, columns, limit + 1),
+                        scanOptions(
+                                target.columnFamily,
+                                columns,
+                                plan.filter == null ? limit + 1 : Integer.MAX_VALUE),
                         limit + 1 - rows.size(),
                         (entryBucket, key, entryColumns) -> {
+                            if (!plan.matches(key, entryColumns)) {
+                                return false;
+                            }
                             rows.add(row(target, entryBucket, key, entryColumns, columns, true));
                             return true;
                         });
@@ -159,7 +182,7 @@ final class InspectSessionImpl implements InspectSession {
         PageToken next =
                 hasMore && !rows.isEmpty()
                         ? CursorPosition.encode(
-                                request.targetId(),
+                                requestIdentity,
                                 rows.get(rows.size() - 1).bucket(),
                                 rows.get(rows.size() - 1).key().value())
                         : null;
@@ -181,22 +204,26 @@ final class InspectSessionImpl implements InspectSession {
         List<InspectRow> rows = new ArrayList<>(request.keys().size());
         try (ReadOptions options = readOptions(target.columnFamily, columns)) {
             for (LookupKey key : request.keys()) {
-                if (key == null || key.key() == null || key.key().value() == null) {
-                    throw invalid("Lookup key bytes must not be null");
-                }
-                if (key.bucket() < 0 || key.bucket() >= totalBuckets) {
+                ResolvedLookup resolved = resolveLookup(target, key);
+                if (resolved.bucket < 0 || resolved.bucket >= totalBuckets) {
                     throw invalid("Bucket must be between 0 and " + (totalBuckets - 1));
                 }
-                byte[] rawKey = key.key().value();
                 byte[][] values;
                 try {
                     values =
                             InspectReaderOperations.lookup(
-                                    readerSession.reader(), key.bucket(), rawKey, options);
+                                    readerSession.reader(), resolved.bucket, resolved.key, options);
                 } catch (RuntimeException error) {
                     throw unreadable("Failed to look up key", error);
                 }
-                rows.add(row(target, key.bucket(), rawKey, values, columns, values != null));
+                rows.add(
+                        row(
+                                target,
+                                resolved.bucket,
+                                resolved.key,
+                                values,
+                                columns,
+                                values != null));
             }
         }
         return new LookupResult(rows);
@@ -293,6 +320,345 @@ final class InspectSessionImpl implements InspectSession {
             throw invalid("Scan prefix bytes must not be null");
         }
         return bytes;
+    }
+
+    private ScanPlan scanPlan(ScanRequest request, InspectTarget target) {
+        ScanFilter filter = request.filter();
+        if (filter == null) {
+            return new ScanPlan(rawPrefix(request.prefix()), request.bucket(), null);
+        }
+        if (request.prefix() != null) {
+            throw invalid("Raw prefix cannot be combined with a typed scan filter");
+        }
+        validateFilterShape(filter);
+        if (!filter.sinkKeyFields().isEmpty()) {
+            if (target.sinkSchema == null || filter.stateKey() != null) {
+                throw invalid("Sink key filters require a sink target");
+            }
+            List<String> values =
+                    TypedInputs.sink(filter.sinkKeyFields(), target.sinkSchema.keyFields(), false);
+            try {
+                List<String> encodedPrefixValues =
+                        values.subList(0, Math.max(0, values.size() - 1));
+                String lastField =
+                        filter.sinkKeyFields().get(filter.sinkKeyFields().size() - 1).name();
+                String lastPrefix = values.get(values.size() - 1);
+                return new ScanPlan(
+                        SinkInspectDecoder.encodeKeyPrefix(target, encodedPrefixValues),
+                        request.bucket(),
+                        (key, columns) ->
+                                sinkKeyStartsWith(
+                                        SinkInspectDecoder.decode(target, key, columns, null),
+                                        lastField,
+                                        lastPrefix));
+            } catch (java.io.IOException error) {
+                throw invalid("Failed to encode sink scan filter: " + message(error));
+            }
+        }
+        if (filter.stateKey() == null || target.schema == null || target.semanticSchema == null) {
+            throw invalid("State filters require a schema-aware state target");
+        }
+        StateFilterValues stateFilter =
+                validateStateFilter(target, filter.stateKey(), filter.autoKeyGroup());
+        List<String> stateValues = stateFilter.stateValues;
+        List<String> namespaceValues = stateFilter.namespaceValues;
+        List<String> mapValues = stateFilter.mapValues;
+        boolean stateExact = stateFilter.stateExact;
+        boolean namespaceExact = stateFilter.namespaceExact;
+        Integer bucket = request.bucket();
+        if (filter.autoKeyGroup()) {
+            List<String> completeState =
+                    TypedInputs.semantic(
+                            filter.stateKey().stateKeyFields(),
+                            target.semanticSchema.stateKey(),
+                            "key",
+                            true,
+                            "state key");
+            try {
+                int calculated =
+                        UserClassLoaderScope.call(
+                                userClassLoader,
+                                () -> {
+                                    try {
+                                        return StateInspectDecoder.keyGroupForSemanticStateKey(
+                                                target, completeState, totalBuckets);
+                                    } catch (java.io.IOException error) {
+                                        throw new TypedEncodingException(error);
+                                    }
+                                });
+                if (bucket != null && bucket.intValue() != calculated) {
+                    throw invalid(
+                            "Requested bucket "
+                                    + bucket
+                                    + " does not match calculated Key Group "
+                                    + calculated);
+                }
+                bucket = calculated;
+            } catch (TypedEncodingException error) {
+                throw invalid("Failed to calculate Key Group: " + message(error.getCause()));
+            }
+        }
+        RowFilter rowFilter =
+                (key, entryColumns) -> {
+                    StateInspectDecoder.DecodedRow decoded =
+                            UserClassLoaderScope.call(
+                                    userClassLoader,
+                                    () -> StateInspectDecoder.decode(target, key, entryColumns));
+                    return matchesPart(
+                                    decoded.decodedParts,
+                                    "state_key",
+                                    target.semanticSchema.stateKey(),
+                                    stateValues,
+                                    stateExact)
+                            && matchesPart(
+                                    decoded.decodedParts,
+                                    "namespace",
+                                    target.semanticSchema.namespace(),
+                                    namespaceValues,
+                                    namespaceExact)
+                            && matchesPart(
+                                    decoded.decodedParts,
+                                    "map_key",
+                                    target.semanticSchema.mapUserKey(),
+                                    mapValues,
+                                    false);
+                };
+        return new ScanPlan(EMPTY_KEY, bucket, rowFilter);
+    }
+
+    static StateFilterValues validateStateFilter(
+            InspectTarget target, StateKey state, boolean autoKeyGroup) {
+        if (state == null) {
+            throw invalid("State scan filter key is required");
+        }
+        if (state.stateKeyFields().isEmpty()
+                && state.namespaceFields().isEmpty()
+                && state.mapKeyFields().isEmpty()) {
+            throw invalid("Typed state scan filter must include at least one field");
+        }
+        if (state.stateKeyFields().isEmpty()
+                && (!state.namespaceFields().isEmpty() || !state.mapKeyFields().isEmpty())) {
+            throw invalid("State key fields are required before namespace or map key fields");
+        }
+        boolean hasNamespace = !state.namespaceFields().isEmpty();
+        boolean hasMapKey = !state.mapKeyFields().isEmpty();
+        boolean stateExact = hasNamespace || hasMapKey || autoKeyGroup;
+        boolean namespaceExact = hasMapKey;
+        List<String> stateValues =
+                TypedInputs.semantic(
+                        state.stateKeyFields(),
+                        target.semanticSchema.stateKey(),
+                        "key",
+                        stateExact,
+                        "state key");
+        List<String> namespaceValues =
+                voidNamespace(target)
+                        ? requireEmpty(state.namespaceFields(), "VoidNamespace")
+                        : TypedInputs.semantic(
+                                state.namespaceFields(),
+                                target.semanticSchema.namespace(),
+                                "namespace",
+                                namespaceExact,
+                                "namespace");
+        List<String> mapValues =
+                target.schema.stateKind() == StateKind.MAP
+                        ? TypedInputs.semantic(
+                                state.mapKeyFields(),
+                                target.semanticSchema.mapUserKey(),
+                                "map_key",
+                                false,
+                                "map key")
+                        : requireEmpty(state.mapKeyFields(), "Non-map state");
+        return new StateFilterValues(
+                stateValues, namespaceValues, mapValues, stateExact, namespaceExact);
+    }
+
+    static void validateFilterShape(ScanFilter filter) {
+        if (filter == null) {
+            return;
+        }
+        if (filter.sinkKeyFields().isEmpty() && filter.stateKey() == null) {
+            throw invalid("Typed scan filter must include sink or state key fields");
+        }
+        if (!filter.sinkKeyFields().isEmpty() && filter.stateKey() != null) {
+            throw invalid("Sink and state scan filters are mutually exclusive");
+        }
+    }
+
+    private ResolvedLookup resolveLookup(InspectTarget target, LookupKey lookup) {
+        if (lookup == null) {
+            throw invalid("Lookup key must not be null");
+        }
+        if (!lookup.typed()) {
+            if (lookup.key() == null || lookup.key().value() == null) {
+                throw invalid("Lookup key bytes must not be null");
+            }
+            return new ResolvedLookup(lookup.bucket(), lookup.key().value());
+        }
+        TypedLookupKey typed = lookup.typedKey();
+        if (target.sinkSchema != null) {
+            if (typed.kind() != TypedLookupKey.Kind.SINK) {
+                throw invalid("A sink target requires a typed sink key");
+            }
+            List<String> values =
+                    TypedInputs.sink(typed.sinkKeyFields(), target.sinkSchema.keyFields(), true);
+            try {
+                byte[] key = SinkInspectDecoder.encodeKeyPrefix(target, values);
+                return new ResolvedLookup(Math.floorMod(Arrays.hashCode(key), totalBuckets), key);
+            } catch (java.io.IOException error) {
+                throw invalid("Failed to encode sink lookup key: " + message(error));
+            }
+        }
+        if (target.schema == null || target.semanticSchema == null) {
+            throw invalid("Typed lookup requires schema metadata");
+        }
+        if (typed.kind() != TypedLookupKey.Kind.STATE || typed.stateKey() == null) {
+            throw invalid("A state target requires a typed state key");
+        }
+        StateKind kind = target.schema.stateKind();
+        if (kind == StateKind.TIMER || kind == StateKind.LIST) {
+            throw invalid(kind + " state does not support typed exact lookup");
+        }
+        StateInspectExactLookupSupport.Result support =
+                StateInspectExactLookupSupport.evaluate(target.schema, target.semanticSchema);
+        if (!support.supported()) {
+            throw invalid("Typed exact lookup is unavailable: " + support.reason());
+        }
+        StateKey state = typed.stateKey();
+        List<String> stateValues =
+                TypedInputs.semantic(
+                        state.stateKeyFields(),
+                        target.semanticSchema.stateKey(),
+                        "key",
+                        true,
+                        "state key");
+        List<String> namespaceValues =
+                voidNamespace(target)
+                        ? requireEmpty(state.namespaceFields(), "VoidNamespace")
+                        : TypedInputs.semantic(
+                                state.namespaceFields(),
+                                target.semanticSchema.namespace(),
+                                "namespace",
+                                true,
+                                "namespace");
+        List<String> mapValues =
+                kind == StateKind.MAP
+                        ? TypedInputs.semantic(
+                                state.mapKeyFields(),
+                                target.semanticSchema.mapUserKey(),
+                                "map_key",
+                                true,
+                                "map key")
+                        : requireEmpty(state.mapKeyFields(), "Non-map state");
+        try {
+            StateInspectDecoder.EncodedStateKey encoded =
+                    UserClassLoaderScope.call(
+                            userClassLoader,
+                            () -> {
+                                try {
+                                    return StateInspectDecoder.encodeExactStateKey(
+                                            target,
+                                            stateValues,
+                                            namespaceValues,
+                                            mapValues,
+                                            totalBuckets);
+                                } catch (java.io.IOException error) {
+                                    throw new TypedEncodingException(error);
+                                }
+                            });
+            return new ResolvedLookup(encoded.keyGroup, encoded.rowKey);
+        } catch (TypedEncodingException error) {
+            throw invalid("Failed to encode state lookup key: " + message(error.getCause()));
+        }
+    }
+
+    private static boolean matchesPart(
+            Map<String, Object> decoded,
+            String name,
+            io.cobble.flink.common.inspect.StateInspectType type,
+            List<String> values,
+            boolean exact) {
+        return values == null
+                || values.isEmpty()
+                || StateInspectDecoder.matchesSemanticPartFilter(
+                        decoded, name, type, values, exact);
+    }
+
+    private static boolean sinkKeyStartsWith(
+            SinkInspectDecoder.DecodedRow decoded, String fieldName, String prefix) {
+        if (decoded.decodedKey == null) {
+            return false;
+        }
+        for (Map<String, Object> field : decoded.decodedKey) {
+            if (!fieldName.equals(field.get("name"))) {
+                continue;
+            }
+            Object value = field.get("value");
+            if (value == null) {
+                return false;
+            }
+            if (value instanceof Map) {
+                Object utf8 = ((Map<?, ?>) value).get("utf8");
+                if (utf8 != null) {
+                    return String.valueOf(utf8).startsWith(prefix);
+                }
+                Object b64 = ((Map<?, ?>) value).get("b64");
+                return b64 != null && String.valueOf(b64).startsWith(prefix);
+            }
+            return String.valueOf(value).startsWith(prefix);
+        }
+        return false;
+    }
+
+    private static List<String> requireEmpty(
+            List<io.cobble.flink.inspect.FieldValue> values, String label) {
+        if (values != null && !values.isEmpty()) {
+            throw invalid(label + " does not accept these fields");
+        }
+        return Collections.emptyList();
+    }
+
+    private static boolean voidNamespace(InspectTarget target) {
+        return target.schema.namespaceSerializer() != null
+                && "org.apache.flink.runtime.state.VoidNamespaceSerializer"
+                        .equals(target.schema.namespaceSerializer().serializerClassName());
+    }
+
+    private static String scanIdentity(ScanRequest request, ScanPlan plan) {
+        StringBuilder identity =
+                new StringBuilder(request.targetId())
+                        .append('|')
+                        .append(plan.bucket)
+                        .append('|')
+                        .append(Base64.getEncoder().encodeToString(plan.prefix))
+                        .append('|')
+                        .append(Arrays.toString(request.columns()));
+        ScanFilter filter = request.filter();
+        if (filter != null) {
+            identity.append('|').append(TypedInputs.identity(filter.sinkKeyFields()));
+            if (filter.stateKey() != null) {
+                identity.append('|')
+                        .append(TypedInputs.identity(filter.stateKey().stateKeyFields()))
+                        .append('|')
+                        .append(TypedInputs.identity(filter.stateKey().namespaceFields()))
+                        .append('|')
+                        .append(TypedInputs.identity(filter.stateKey().mapKeyFields()))
+                        .append('|')
+                        .append(filter.autoKeyGroup());
+            }
+        }
+        return digest(identity.toString());
+    }
+
+    private static String digest(String value) {
+        try {
+            byte[] hash =
+                    MessageDigest.getInstance("SHA-256")
+                            .digest(value.getBytes(StandardCharsets.UTF_8));
+            return Base64.getUrlEncoder().withoutPadding().encodeToString(Arrays.copyOf(hash, 16));
+        } catch (NoSuchAlgorithmException error) {
+            throw new IllegalStateException("SHA-256 is unavailable", error);
+        }
     }
 
     private static void validateColumns(int[] columns, InspectTarget target) {
@@ -403,7 +769,7 @@ final class InspectSessionImpl implements InspectSession {
         return key;
     }
 
-    private static InspectException invalid(String message) {
+    static InspectException invalid(String message) {
         return new InspectException(InspectErrorCode.INVALID_INPUT, message);
     }
 
@@ -412,12 +778,12 @@ final class InspectSessionImpl implements InspectSession {
                 InspectErrorCode.UNREADABLE, message + ": " + message(error), error);
     }
 
-    private static String message(Throwable error) {
+    static String message(Throwable error) {
         return error.getMessage() == null ? error.getClass().getName() : error.getMessage();
     }
 
     private static final class CursorPosition {
-        private static final String VERSION = "v1";
+        private static final String VERSION = "v2";
 
         private final int bucket;
         private final byte[] key;
@@ -427,16 +793,12 @@ final class InspectSessionImpl implements InspectSession {
             this.key = key;
         }
 
-        private static PageToken encode(String targetId, int bucket, byte[] key) {
-            String target =
-                    Base64.getUrlEncoder()
-                            .withoutPadding()
-                            .encodeToString(targetId.getBytes(StandardCharsets.UTF_8));
+        private static PageToken encode(String identity, int bucket, byte[] key) {
             String encodedKey = Base64.getUrlEncoder().withoutPadding().encodeToString(key);
-            return new PageToken(VERSION + "." + target + "." + bucket + "." + encodedKey);
+            return new PageToken(VERSION + "." + identity + "." + bucket + "." + encodedKey);
         }
 
-        private static CursorPosition parse(PageToken token, String targetId) {
+        private static CursorPosition parse(PageToken token, String identity) {
             if (token == null) {
                 return null;
             }
@@ -445,16 +807,71 @@ final class InspectSessionImpl implements InspectSession {
                 throw invalid("Invalid scan page token");
             }
             try {
-                String target =
-                        new String(Base64.getUrlDecoder().decode(parts[1]), StandardCharsets.UTF_8);
-                if (!targetId.equals(target)) {
-                    throw invalid("Page token belongs to a different target");
+                if (!identity.equals(parts[1])) {
+                    throw invalid("Page token belongs to different scan filters or projection");
                 }
                 return new CursorPosition(
                         Integer.parseInt(parts[2]), Base64.getUrlDecoder().decode(parts[3]));
             } catch (IllegalArgumentException error) {
                 throw invalid("Invalid scan page token");
             }
+        }
+    }
+
+    private interface RowFilter {
+        boolean matches(byte[] key, byte[][] columns);
+    }
+
+    private static final class ScanPlan {
+        private final byte[] prefix;
+        private final Integer bucket;
+        private final RowFilter filter;
+
+        private ScanPlan(byte[] prefix, Integer bucket, RowFilter filter) {
+            this.prefix = prefix;
+            this.bucket = bucket;
+            this.filter = filter;
+        }
+
+        private boolean matches(byte[] key, byte[][] columns) {
+            return filter == null || filter.matches(key, columns);
+        }
+    }
+
+    private static final class ResolvedLookup {
+        private final int bucket;
+        private final byte[] key;
+
+        private ResolvedLookup(int bucket, byte[] key) {
+            this.bucket = bucket;
+            this.key = key;
+        }
+    }
+
+    static final class StateFilterValues {
+        final List<String> stateValues;
+        final List<String> namespaceValues;
+        final List<String> mapValues;
+        final boolean stateExact;
+        final boolean namespaceExact;
+
+        private StateFilterValues(
+                List<String> stateValues,
+                List<String> namespaceValues,
+                List<String> mapValues,
+                boolean stateExact,
+                boolean namespaceExact) {
+            this.stateValues = stateValues;
+            this.namespaceValues = namespaceValues;
+            this.mapValues = mapValues;
+            this.stateExact = stateExact;
+            this.namespaceExact = namespaceExact;
+        }
+    }
+
+    private static final class TypedEncodingException extends RuntimeException {
+        private TypedEncodingException(Throwable cause) {
+            super(cause);
         }
     }
 }

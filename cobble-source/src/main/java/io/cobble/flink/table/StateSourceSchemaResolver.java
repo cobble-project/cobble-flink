@@ -3,13 +3,11 @@ package io.cobble.flink.table;
 import io.cobble.flink.common.CobbleEmbeddedCheckpoint;
 import io.cobble.flink.common.inspect.InspectSchemaRegistryLayout;
 import io.cobble.flink.common.inspect.SerializerInspectSchema;
-import io.cobble.flink.common.inspect.StateInspectField;
 import io.cobble.flink.common.inspect.StateInspectSchema;
 import io.cobble.flink.common.inspect.StateInspectSchemaStore;
 import io.cobble.flink.common.inspect.StateInspectSemanticSchema;
-import io.cobble.flink.common.inspect.StateInspectType;
-import io.cobble.flink.common.inspect.StateInspectTypeKind;
 import io.cobble.flink.common.inspect.StateKind;
+import io.cobble.flink.common.inspect.StateSourceSchemaLayout;
 
 import org.apache.flink.core.fs.FSDataInputStream;
 import org.apache.flink.core.fs.FileStatus;
@@ -24,9 +22,7 @@ import org.apache.flink.table.types.logical.utils.LogicalTypeParser;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.util.ArrayList;
-import java.util.LinkedHashMap;
 import java.util.List;
-import java.util.Map;
 import java.util.TreeSet;
 
 /**
@@ -196,8 +192,7 @@ final class StateSourceSchemaResolver {
                             + "' has inspect metadata but no semantic schema. Cobble state source"
                             + " requires semantic schema metadata.");
         }
-        List<StateSourceField> outputFields =
-                deriveOutputFields(stateOptions.stateName(), stateSchema, semanticSchema);
+        List<StateSourceField> outputFields = deriveOutputFields(stateSchema, semanticSchema);
         validateDdl(stateOptions.stateName(), outputFields, ddlSchema);
         return new StateSourceResolvedSchema(
                 operatorId,
@@ -398,183 +393,21 @@ final class StateSourceSchemaResolver {
     // ------------------------------------------------------------------------------------------
 
     private static List<StateSourceField> deriveOutputFields(
-            String stateName,
-            StateInspectSchema stateSchema,
-            StateInspectSemanticSchema semanticSchema) {
-        OutputFields output = new OutputFields(stateName);
-        boolean hasNamespace = !isVoidNamespace(stateSchema.namespaceSerializer());
-
-        switch (stateSchema.stateKind()) {
-            case VALUE:
-            case REDUCING:
-            case AGGREGATING:
-                output.addGroup(StateSourceField.Group.STATE_KEY, semanticSchema.stateKey(), "key");
-                if (hasNamespace) {
-                    output.addGroup(
-                            StateSourceField.Group.NAMESPACE,
-                            semanticSchema.namespace(),
-                            "namespace");
-                }
-                output.addGroup(StateSourceField.Group.VALUE, semanticSchema.value(), "value");
-                break;
-            case LIST:
-                output.addGroup(StateSourceField.Group.STATE_KEY, semanticSchema.stateKey(), "key");
-                if (hasNamespace) {
-                    output.addGroup(
-                            StateSourceField.Group.NAMESPACE,
-                            semanticSchema.namespace(),
-                            "namespace");
-                }
-                output.addGroup(
-                        StateSourceField.Group.LIST_ELEMENT, semanticSchema.listElement(), "value");
-                break;
-            case MAP:
-                output.addGroup(StateSourceField.Group.STATE_KEY, semanticSchema.stateKey(), "key");
-                if (hasNamespace) {
-                    output.addGroup(
-                            StateSourceField.Group.NAMESPACE,
-                            semanticSchema.namespace(),
-                            "namespace");
-                }
-                output.addGroup(
-                        StateSourceField.Group.MAP_KEY, semanticSchema.mapUserKey(), "map_key");
-                output.addGroup(
-                        StateSourceField.Group.MAP_VALUE,
-                        semanticSchema.mapUserValue(),
-                        "map_value");
-                break;
-            case TIMER:
-                output.addGroup(StateSourceField.Group.STATE_KEY, semanticSchema.stateKey(), "key");
-                if (hasNamespace) {
-                    output.addGroup(
-                            StateSourceField.Group.NAMESPACE,
-                            semanticSchema.namespace(),
-                            "namespace");
-                }
-                output.addField(StateSourceField.Group.TIMER_TIMESTAMP, "timestamp", "BIGINT", 0);
-                break;
-            default:
-                throw new ValidationException(
-                        "Cobble state source does not support state kind "
-                                + stateSchema.stateKind()
-                                + " for state '"
-                                + stateName
-                                + "'.");
-        }
-        return output.fields();
-    }
-
-    /** Accumulates output fields and fails fast on duplicate column names across parts. */
-    private static final class OutputFields {
-        private final String stateName;
-        private final List<StateSourceField> fields = new ArrayList<>();
-        private final Map<String, StateSourceField.Group> seen = new LinkedHashMap<>();
-
-        OutputFields(String stateName) {
-            this.stateName = stateName;
-        }
-
-        void addGroup(StateSourceField.Group group, StateInspectType type, String scalarName) {
-            if (type == null || type.kind() == StateInspectTypeKind.UNKNOWN) {
-                throw new ValidationException(
-                        "Cobble state '"
-                                + stateName
-                                + "' "
-                                + groupLabel(group)
-                                + " semantic type is not available; cannot derive output columns.");
+            StateInspectSchema stateSchema, StateInspectSemanticSchema semanticSchema) {
+        try {
+            List<StateSourceField> fields = new ArrayList<>();
+            for (StateSourceSchemaLayout.Field field :
+                    StateSourceSchemaLayout.derive(stateSchema, semanticSchema)) {
+                fields.add(
+                        new StateSourceField(
+                                field.name(),
+                                field.logicalType(),
+                                StateSourceField.Group.valueOf(field.group().name()),
+                                field.groupFieldIndex()));
             }
-            switch (type.kind()) {
-                case SCALAR:
-                    addField(group, scalarName, type.logicalType(), 0);
-                    break;
-                case ROW:
-                case TUPLE:
-                    addStructuredFields(group, type);
-                    break;
-                case LIST:
-                    throw new ValidationException(
-                            "Cobble state '"
-                                    + stateName
-                                    + "' "
-                                    + groupLabel(group)
-                                    + " is a nested list, which is not supported as a SQL source"
-                                    + " column yet.");
-                default:
-                    throw new ValidationException(
-                            "Cobble state '"
-                                    + stateName
-                                    + "' "
-                                    + groupLabel(group)
-                                    + " has an unsupported semantic type "
-                                    + type.kind()
-                                    + ".");
-            }
-        }
-
-        private void addStructuredFields(StateSourceField.Group group, StateInspectType type) {
-            List<StateInspectField> structuredFields = type.fields();
-            for (int index = 0; index < structuredFields.size(); index++) {
-                StateInspectField field = structuredFields.get(index);
-                if (field.type().kind() != StateInspectTypeKind.SCALAR) {
-                    throw new ValidationException(
-                            "Cobble state '"
-                                    + stateName
-                                    + "' "
-                                    + groupLabel(group)
-                                    + " field '"
-                                    + field.name()
-                                    + "' has a nested non-scalar type, which is not supported as a"
-                                    + " SQL source column yet.");
-                }
-                addField(group, field.name(), field.type().logicalType(), index);
-            }
-        }
-
-        void addField(
-                StateSourceField.Group group,
-                String name,
-                String logicalType,
-                int groupFieldIndex) {
-            StateSourceField.Group existing = seen.get(name);
-            if (existing != null) {
-                throw new ValidationException(
-                        "Cobble state '"
-                                + stateName
-                                + "' produces duplicate output column name '"
-                                + name
-                                + "' across "
-                                + groupLabel(existing)
-                                + " and "
-                                + groupLabel(group)
-                                + "; this state shape is not supported as a SQL source yet.");
-            }
-            seen.put(name, group);
-            fields.add(new StateSourceField(name, logicalType, group, groupFieldIndex));
-        }
-
-        List<StateSourceField> fields() {
             return fields;
-        }
-    }
-
-    private static String groupLabel(StateSourceField.Group group) {
-        switch (group) {
-            case STATE_KEY:
-                return "state key";
-            case NAMESPACE:
-                return "namespace";
-            case VALUE:
-                return "value";
-            case LIST_ELEMENT:
-                return "list element";
-            case MAP_KEY:
-                return "map key";
-            case MAP_VALUE:
-                return "map value";
-            case TIMER_TIMESTAMP:
-                return "timer timestamp";
-            default:
-                return group.name();
+        } catch (IllegalArgumentException error) {
+            throw new ValidationException(error.getMessage(), error);
         }
     }
 

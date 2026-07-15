@@ -11,6 +11,8 @@ public interface InspectSession extends AutoCloseable {
     /** Targets resolved for the session's pinned checkpoint and operator. */
     List<InspectTarget> targets();
 
+    InspectOverview overview();
+
     InspectPage scan(ScanRequest request);
 
     LookupResult lookup(LookupRequest request);
