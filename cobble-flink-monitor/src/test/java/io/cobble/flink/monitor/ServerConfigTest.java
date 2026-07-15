@@ -107,12 +107,20 @@ class ServerConfigTest {
                             "--total-buckets", "128",
                             "--inspect-default-limit", "5",
                             "--inspect-max-limit", "50",
+                            "--max-sessions", "9",
+                            "--session-idle-timeout-seconds", "30",
+                            "--request-body-max-bytes", "4096",
+                            "--lookup-max-keys", "17",
                         });
         assertEquals(9090, config.port);
         assertEquals("0.0.0.0", config.bindAddress);
         assertEquals(128, config.totalBuckets);
         assertEquals(5, config.inspectDefaultLimit);
         assertEquals(50, config.inspectMaxLimit);
+        assertEquals(9, config.maxSessions);
+        assertEquals(30, config.sessionIdleTimeoutSeconds);
+        assertEquals(4096, config.requestBodyMaxBytes);
+        assertEquals(17, config.lookupMaxKeys);
     }
 
     @Test
@@ -172,12 +180,12 @@ class ServerConfigTest {
     @Test
     void rejectsMalformedAndUnknownStorageOptionsWithoutLeakingValues() {
         assertThrows(
-                InspectInputException.class,
+                InputException.class,
                 () -> ServerConfig.parse(new String[] {"--storage-option", "missing-equals"}));
 
-        InspectInputException unknown =
+        InputException unknown =
                 assertThrows(
-                        InspectInputException.class,
+                        InputException.class,
                         () ->
                                 ServerConfig.parse(
                                         new String[] {
@@ -185,9 +193,9 @@ class ServerConfigTest {
                                         }));
         assertFalse(unknown.getMessage().contains("very-secret"));
 
-        InspectInputException extraVolume =
+        InputException extraVolume =
                 assertThrows(
-                        InspectInputException.class,
+                        InputException.class,
                         () ->
                                 ServerConfig.parse(
                                         new String[] {
@@ -196,9 +204,9 @@ class ServerConfigTest {
                                         }));
         assertTrue(extraVolume.getMessage().contains("storage.volume.0.path"));
 
-        InspectInputException exactStorageOption =
+        InputException exactStorageOption =
                 assertThrows(
-                        InspectInputException.class,
+                        InputException.class,
                         () ->
                                 ServerConfig.parse(
                                         new String[] {

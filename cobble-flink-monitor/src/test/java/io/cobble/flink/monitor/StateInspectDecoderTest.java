@@ -563,7 +563,7 @@ class StateInspectDecoderTest {
         StateInspectDecoder.DecodedRow row = StateInspectDecoder.decode(target, rowKey, columns);
 
         assertNull(row.decodeError);
-        assertEquals(CobbleFlinkMonitorServer.bytesJson(new byte[] {1, 2, 3}), row.decodedValue);
+        assertEquals(MonitorTestJson.bytesJson(new byte[] {1, 2, 3}), row.decodedValue);
     }
 
     @Test
@@ -810,7 +810,7 @@ class StateInspectDecoderTest {
                         target, rowKey, new byte[][] {mapValueBytes(IntSerializer.INSTANCE, 7)});
         assertNull(row.decodeError);
         assertEquals(
-                CobbleFlinkMonitorServer.bytesJson(new byte[] {1, 2, 3}),
+                MonitorTestJson.bytesJson(new byte[] {1, 2, 3}),
                 ((Map<?, ?>) row.decodedKey).get("map_key"));
     }
 
@@ -962,7 +962,7 @@ class StateInspectDecoderTest {
         assertNull(row.decodeError);
         Object decodedValue = ((Map<?, ?>) row.decodedParts.get("value")).get("value");
         assertEquals(Long.toString(Long.MAX_VALUE), decodedValue.toString());
-        assertEquals("\"" + Long.MAX_VALUE + "\"", CobbleFlinkMonitorServer.toJson(decodedValue));
+        assertEquals("\"" + Long.MAX_VALUE + "\"", MonitorTestJson.toJson(decodedValue));
     }
 
     @Test

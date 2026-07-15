@@ -1,5 +1,9 @@
 const state = {
   meta: null,
+  sessionId: null,
+  sourcePath: null,
+  selectedLatest: true,
+  catalog: null,
   snapshots: [],
   inspectMode: 'scan',
   lastScanData: null,
@@ -36,12 +40,25 @@ const COPY_POPOVER_MS = 1400
 const $ = (id) => document.getElementById(id)
 
 async function request(path, options = {}) {
-  const response = await fetch(path, options)
+  const headers = { ...(options.headers || {}) }
+  if (options.body && !headers['Content-Type']) headers['Content-Type'] = 'application/json'
+  const response = await fetch(path, { ...options, headers })
   const data = await response.json().catch(() => ({}))
   if (!response.ok) {
-    throw new Error(data.error || `HTTP ${response.status}`)
+    const error = new Error(data.message || `HTTP ${response.status}`)
+    error.code = data.code
+    error.requestId = data.request_id
+    throw error
   }
   return data
+}
+
+function post(path, body) {
+  return request(path, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  })
 }
 
 function showError(error, source = 'global') {
@@ -86,12 +103,26 @@ function setLoading(loading) {
 async function refresh() {
   setLoading(true)
   try {
-    const [meta, snapshots] = await Promise.all([
-      request('/api/v1/meta'),
-      request('/api/v1/snapshots'),
+    if (!state.sessionId || !state.sourcePath) {
+      state.meta = null
+      state.snapshots = []
+      renderMeta()
+      renderSnapshots()
+      return
+    }
+    const catalog = await post('/api/v1/discovery', { source: state.sourcePath })
+    const latest = catalog.checkpoints?.[0]
+    if (state.selectedLatest
+        && latest
+        && Number(latest.checkpoint_id) > Number(state.meta?.selected_checkpoint_id)) {
+      await replaceSession('latest', state.meta?.selected_operator_id || '', state.sourcePath, catalog)
+      return
+    }
+    const [session, overview] = await Promise.all([
+      request(`/api/v1/sessions/${state.sessionId}`),
+      request(`/api/v1/sessions/${state.sessionId}/overview`),
     ])
-    state.meta = meta
-    state.snapshots = snapshots.snapshots || []
+    applySession(session, catalog, overview)
     renderMeta()
     renderSnapshots()
     scheduleInspectAutoRefresh()
@@ -100,6 +131,27 @@ async function refresh() {
     showError(error, 'refresh')
   } finally {
     setLoading(false)
+  }
+}
+
+function applySession(session, catalog, overview) {
+  state.catalog = catalog
+  state.sourcePath = session.source
+  state.snapshots = (catalog?.checkpoints || []).map((checkpoint) => ({
+    id: checkpoint.checkpoint_id,
+    directory: checkpoint.directory,
+    operators: checkpoint.operators || [],
+  }))
+  state.meta = {
+    source_open: true,
+    source_path: session.source,
+    source_kind: session.source_kind,
+    selected_checkpoint: state.selectedLatest ? 'latest' : String(session.checkpoint_id),
+    selected_checkpoint_id: session.checkpoint_id,
+    selected_operator_id: session.operator_id,
+    inspect_targets: session.targets || [],
+    total_buckets: session.total_buckets || 0,
+    overview,
   }
 }
 
@@ -191,17 +243,14 @@ function renderInspectTargets() {
 
 function renderStateFilterControls() {
   const target = activeTarget()
-  const schemaState = isSchemaStateTarget(target)
-  const mapState = schemaState && target.state_kind === 'MAP'
-  const voidNamespace = schemaState && isVoidNamespaceTarget(target)
   const sinkKeyFilter = isSinkKeyFilterTarget(target)
   const semanticKeyFilter = isSemanticStateKeyFilterTarget(target)
-  $('state-key-control').classList.toggle('hidden', !schemaState || semanticKeyFilter)
-  $('namespace-control').classList.toggle('hidden', !schemaState || voidNamespace || semanticKeyFilter)
-  $('map-key-control').classList.toggle('hidden', !mapState || semanticKeyFilter)
+  $('state-key-control').classList.add('hidden')
+  $('namespace-control').classList.add('hidden')
+  $('map-key-control').classList.add('hidden')
   $('state-semantic-key-control').classList.toggle('hidden', !semanticKeyFilter)
   $('sink-key-control').classList.toggle('hidden', !sinkKeyFilter)
-  $('prefix-control').classList.toggle('hidden', schemaState || sinkKeyFilter || semanticKeyFilter)
+  $('prefix-control').classList.toggle('hidden', sinkKeyFilter || semanticKeyFilter)
   $('state-field-table-control').classList.toggle(
     'hidden',
     !isSemanticStateTableTarget(target),
@@ -209,14 +258,6 @@ function renderStateFilterControls() {
   $('state-field-table').checked = state.stateFieldTableEnabled
   if (semanticKeyFilter) renderSemanticStateKeyInputs(target)
   if (sinkKeyFilter) renderSinkKeyInputs(target)
-  if (schemaState) {
-    $('state-key-label').textContent = `State key (${serializerLabel(target.serializer_classes?.key)})`
-    $('state-key').removeAttribute('placeholder')
-    $('namespace-label').textContent = `Namespace (${serializerLabel(target.serializer_classes?.namespace)})`
-    $('namespace').placeholder = serializerPlaceholder(target.serializer_classes?.namespace)
-    $('map-key-label').textContent = `Map key prefix (${serializerLabel(target.serializer_classes?.map_key)})`
-    $('map-key').removeAttribute('placeholder')
-  }
 }
 
 function isSemanticStateKeyFilterTarget(target) {
@@ -439,22 +480,39 @@ async function switchSource(
 ) {
   setLoading(true)
   try {
-    const body = { checkpoint: checkpointId }
-    if (operatorId) body.operator_id = operatorId
-    if (source) body.source = source
-    await request('/api/v1/mode', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(body),
-    })
-    resetScanState()
-    clearTrackedLookups()
-    await refresh()
+    await replaceSession(checkpointId, operatorId, source || state.sourcePath)
     clearError('source')
   } catch (error) {
     showError(error, 'source')
   } finally {
     setLoading(false)
+  }
+}
+
+async function replaceSession(checkpointId, operatorId, source, discovered = null) {
+  if (!source) throw new Error('Enter a checkpoint root or Cobble data source path.')
+  const catalog = discovered || await post('/api/v1/discovery', { source })
+  const body = { source, checkpoint: checkpointId }
+  if (operatorId) body.operator_id = operatorId
+  const replacement = await post('/api/v1/sessions', body)
+  let replacementOverview
+  try {
+    replacementOverview = await request(`/api/v1/sessions/${replacement.session_id}/overview`)
+  } catch (error) {
+    request(`/api/v1/sessions/${replacement.session_id}`, { method: 'DELETE' }).catch(() => {})
+    throw error
+  }
+  const previousId = state.sessionId
+  state.sessionId = replacement.session_id
+  state.selectedLatest = checkpointId === 'latest'
+  applySession(replacement, catalog, replacementOverview)
+  resetScanState()
+  clearTrackedLookups()
+  renderMeta()
+  renderSnapshots()
+  scheduleInspectAutoRefresh()
+  if (previousId) {
+    request(`/api/v1/sessions/${previousId}`, { method: 'DELETE' }).catch(() => {})
   }
 }
 
@@ -479,6 +537,88 @@ function activeTargetId() {
 
 function activeColumns() {
   return activeTarget()?.allows_columns ? $('columns').value.trim() : ''
+}
+
+function parseColumns(value) {
+  if (!value) return null
+  const columns = String(value).split(',').map((item) => Number(item.trim()))
+  if (columns.some((item) => !Number.isInteger(item) || item < 0)) {
+    throw new Error('Columns must be comma-separated non-negative integers.')
+  }
+  return columns
+}
+
+function typedGroupFields(target, groupId, values) {
+  const group = semanticKeyFilterGroups(target).find((candidate) => candidate.id === groupId)
+  if (!group) return []
+  return values.map((value, index) => typedField(group.fields[index], value))
+}
+
+function typedField(field, value) {
+  const logicalType = String(field?.logical_type || field?.type?.logical_type || '').toUpperCase()
+  let kind = 'STRING'
+  if (/^(TINYINT|SMALLINT|INT|INTEGER|BIGINT)\b/.test(logicalType)) kind = 'INTEGER'
+  else if (/^(FLOAT|DOUBLE)\b/.test(logicalType)) kind = 'FLOAT'
+  else if (/^DECIMAL\b/.test(logicalType)) kind = 'DECIMAL'
+  else if (/^BOOLEAN\b/.test(logicalType)) kind = 'BOOLEAN'
+  else if (/^(BINARY|VARBINARY|BYTES)\b/.test(logicalType)) kind = 'BYTES'
+  else if (/^DATE\b/.test(logicalType)) kind = 'DATE'
+  else if (/^TIME\b/.test(logicalType)) kind = 'TIME'
+  else if (/^TIMESTAMP/.test(logicalType)) kind = 'TIMESTAMP'
+  let typedValue = value
+  if (kind === 'INTEGER') {
+    if (!/^-?(0|[1-9][0-9]*)$/.test(value)) {
+      throw new Error(`Invalid integer for ${field.name}`)
+    }
+    const integer = BigInt(value)
+    if (integer < -9223372036854775808n || integer > 9223372036854775807n) {
+      throw new Error(`Integer is outside the 64-bit range for ${field.name}`)
+    }
+    typedValue = integer.toString()
+  } else if (kind === 'FLOAT') {
+    typedValue = Number(value)
+    if (!Number.isFinite(typedValue)) throw new Error(`Invalid number for ${field.name}`)
+  } else if (kind === 'BOOLEAN') {
+    if (value !== 'true' && value !== 'false') throw new Error(`Use true or false for ${field.name}`)
+    typedValue = value === 'true'
+  }
+  return { name: field.name, value: { kind, value: typedValue } }
+}
+
+function utf8Base64(value) {
+  const bytes = new TextEncoder().encode(String(value))
+  let binary = ''
+  bytes.forEach((byte) => { binary += String.fromCharCode(byte) })
+  return btoa(binary)
+}
+
+function rawBytes(b64) {
+  if (b64 == null) return null
+  let utf8 = null
+  try {
+    const binary = atob(b64)
+    const bytes = Uint8Array.from(binary, (character) => character.charCodeAt(0))
+    utf8 = new TextDecoder('utf-8', { fatal: true }).decode(bytes)
+  } catch (error) {
+    utf8 = null
+  }
+  return { b64, utf8 }
+}
+
+function wireRow(row) {
+  const columns = (row.columns_b64 || []).map(rawBytes)
+  return {
+    ...row,
+    key_utf8: rawBytes(row.key_b64)?.utf8 || null,
+    value: rawBytes(row.value_b64),
+    columns,
+    decoded_key: row.decoded_key,
+    decoded_value: row.decoded_value,
+    decoded_columns: row.decoded_columns,
+    decoded_parts: row.decoded_parts,
+    decode_issues: row.decode_issues || [],
+    decode_error: null,
+  }
 }
 
 function activeScanContext() {
@@ -513,46 +653,52 @@ async function runScan(direction = 'reset') {
   applyPageMove(direction)
   setLoading(true)
   try {
-    const query = new URLSearchParams()
-    query.set('mode', 'scan')
-    const bucket = $('bucket').value.trim()
-    if (bucket && bucket.toLowerCase() !== 'all') query.set('bucket', bucket)
     const target = activeTarget()
-    if (isSchemaStateTarget(target) || isSemanticStateKeyFilterTarget(target)) {
-      if (isSemanticStateKeyFilterTarget(target)) {
-        const filters = activeSemanticStateKeyFilters(target)
-        Object.entries(filters).forEach(([part, values]) => {
-          values.forEach((value) => query.append(`${part}_field`, value))
-        })
-      } else {
-        const stateKey = $('state-key').value.trim()
-        const namespace = $('namespace').value.trim()
-        const mapKey = $('map-key').value.trim()
-        if (stateKey) query.set('state_key', stateKey)
-        if (namespace) query.set('namespace', namespace)
-        if (mapKey) query.set('map_key', mapKey)
+    const body = {
+      target_id: activeTargetId(),
+      limit: Number($('limit').value || 50),
+    }
+    const bucket = $('bucket').value.trim()
+    if (bucket && bucket.toLowerCase() !== 'all') body.bucket = Number(bucket)
+    const columns = parseColumns(activeColumns())
+    if (columns) body.columns = columns
+    if (state.currentPageCursor) body.page_token = state.currentPageCursor
+
+    if (isSemanticStateKeyFilterTarget(target)) {
+      const values = activeSemanticStateKeyFilters(target)
+      const stateKey = {
+        state_key_fields: typedGroupFields(target, 'state_key', values.state_key || []),
+        namespace_fields: typedGroupFields(target, 'namespace', values.namespace || []),
+        map_key_fields: typedGroupFields(target, 'map_key', values.map_key || []),
+      }
+      const hasFields = Object.values(stateKey).some((fields) => fields.length > 0)
+      if (hasFields) {
+        body.filter = {
+          kind: 'state',
+          auto_key_group: Boolean($('key-group-auto').checked),
+          state_key: stateKey,
+        }
       }
     } else if (isSinkKeyFilterTarget(target)) {
-      activeSinkKeyValues(target).forEach((value) => query.append('sink_key', value))
+      const values = activeSinkKeyValues(target)
+      if (values.length > 0) {
+        body.filter = {
+          kind: 'sink',
+          fields: values.map((value, index) => typedField(target.key_fields[index], value)),
+        }
+      }
     } else {
-      query.set('prefix', $('prefix').value || '')
+      body.prefix_b64 = utf8Base64($('prefix').value || '')
     }
-    if (!bucket && isDecodedTarget(target)) {
-      query.set('auto_key_group', 'true')
-      if ($('key-group-auto').checked) query.set('key_group_last_complete', 'true')
+
+    const response = await post(`/api/v1/sessions/${state.sessionId}/scan`, body)
+    const items = (response.rows || []).map(wireRow)
+    const data = {
+      scan: { items, next_page_token: response.next_page_token },
+      inspect_target: target,
     }
-    query.set('limit', $('limit').value || '50')
-    if (activeTargetId()) query.set('target', activeTargetId())
-    if (activeColumns()) query.set('columns', activeColumns())
     const scanContext = activeScanContext()
-    if (state.currentPageCursor?.bucket != null) {
-      query.set('start_bucket', String(state.currentPageCursor.bucket))
-    }
-    if (state.currentPageCursor?.keyB64) {
-      query.set('start_after_b64', state.currentPageCursor.keyB64)
-    }
-    const data = await request(`/api/v1/inspect?${query}`)
-    state.nextPageCursor = nextCursorFromScan(data.scan)
+    state.nextPageCursor = response.next_page_token || null
     state.scanHasResult = true
     state.lastScanData = data
     state.lastScanContext = scanContext
@@ -569,7 +715,6 @@ async function runScan(direction = 'reset') {
     setLoading(false)
   }
 }
-
 async function runLookup() {
   if (state.trackedLookups.length === 0) {
     renderLookupResult()
@@ -579,25 +724,30 @@ async function runLookup() {
   try {
     const groups = groupedTrackedLookups()
     for (const group of groups) {
-      const query = new URLSearchParams()
-      query.set('mode', 'lookup')
-      query.set('target', group.targetId)
-      if (group.columns) query.set('columns', group.columns)
-      query.set(
-        'lookup_items',
-        JSON.stringify(group.items.map((item) => ({ bucket: item.bucket, key_b64: item.keyB64 }))),
-      )
-      const data = await request(`/api/v1/inspect?${query}`)
-      const lookupItems = data.lookup || []
-      lookupItems.forEach((result, index) => {
+      const body = {
+        target_id: group.targetId,
+        keys: group.items.map((item) => ({
+          kind: 'raw',
+          bucket: item.bucket,
+          key_b64: item.keyB64,
+        })),
+      }
+      const columns = parseColumns(group.columns)
+      if (columns) body.columns = columns
+      const response = await post(`/api/v1/sessions/${state.sessionId}/lookup`, body)
+      ;(response.rows || []).forEach((wire, index) => {
+        const result = wireRow(wire)
         const tracked = group.items[index]
         tracked.keyUtf8 = result.key_utf8 ?? tracked.keyUtf8
-        tracked.value = result.value
+        tracked.value = result.found
+          ? (result.columns.length > 0 ? result.columns : result.value)
+          : null
+        tracked.found = result.found
         tracked.decodedKey = result.decoded_key || null
         tracked.decodedColumns = result.decoded_columns || null
         tracked.decodedValue = result.decoded_value ?? null
         tracked.decodedParts = result.decoded_parts || null
-        tracked.decodeError = result.decode_error || null
+        tracked.decodeError = null
         tracked.decodeIssues = result.decode_issues || null
       })
     }
@@ -612,7 +762,6 @@ async function runLookup() {
     setLoading(false)
   }
 }
-
 function scheduleInspectAutoRefresh() {
   if (state.inspectRefreshTimer) {
     clearInterval(state.inspectRefreshTimer)
@@ -628,6 +777,20 @@ function scheduleInspectAutoRefresh() {
     if (state.inspectMode === 'lookup' && state.trackedLookups.length === 0) return
     state.inspectRefreshInFlight = true
     try {
+      if (state.selectedLatest && state.sourcePath) {
+        const catalog = await post('/api/v1/discovery', { source: state.sourcePath })
+        const latest = catalog.checkpoints?.[0]
+        if (latest
+            && Number(latest.checkpoint_id) > Number(state.meta?.selected_checkpoint_id)) {
+          await replaceSession(
+            'latest',
+            state.meta?.selected_operator_id || '',
+            state.sourcePath,
+            catalog,
+          )
+          return
+        }
+      }
       if (state.inspectMode === 'lookup') {
         await runLookup()
       } else {
@@ -790,14 +953,6 @@ function applyPageMove(direction) {
     state.currentPageCursor = state.previousPageCursors.pop() || null
     state.nextPageCursor = null
     state.pageNumber = Math.max(1, state.pageNumber - 1)
-  }
-}
-
-function nextCursorFromScan(scan) {
-  if (!scan?.next_start_after_b64) return null
-  return {
-    bucket: scan.next_start_bucket,
-    keyB64: scan.next_start_after_b64,
   }
 }
 
@@ -1774,14 +1929,9 @@ function trackedTarget(item) {
   }
 }
 
-function isSchemaStateTarget(target) {
-  return target?.kind === 'state' && Boolean(target?.state_kind) && Boolean(target?.serializer_classes)
-}
-
 function isDecodedTarget(target) {
   return (target?.kind === 'state' || target?.kind === 'timer')
     && Boolean(target?.state_kind)
-    && Boolean(target?.serializer_classes)
 }
 
 function isTimerTarget(target) {
@@ -1803,7 +1953,8 @@ function isSinkTarget(target) {
 }
 
 function isVoidNamespaceTarget(target) {
-  return isVoidSerializerClass(target?.serializer_classes?.namespace)
+  const parts = target?.semantic_parts || target?.semanticParts || {}
+  return !parts.namespace || parts.namespace.kind === 'UNKNOWN'
 }
 
 function isVoidSerializerClass(className) {
@@ -1823,15 +1974,6 @@ function serializerLabel(className) {
     Double: 'double',
   }
   return labels[simple] || simple || 'raw'
-}
-
-function serializerPlaceholder(className) {
-  const label = serializerLabel(className)
-  if (label === 'int' || label === 'long' || label === 'short' || label === 'byte') return '42'
-  if (label === 'float' || label === 'double') return '3.14'
-  if (label === 'boolean') return 'true'
-  if (label === 'string') return 'user-1'
-  return 'use serialized bytes via API *_b64'
 }
 
 function simpleSerializerName(className = '') {
@@ -2120,4 +2262,10 @@ $('new-source-path').addEventListener('keydown', (event) => {
 })
 
 switchInspectMode('scan')
-refresh()
+const initialSource = window.COBBLE_MONITOR_INITIAL_SOURCE
+if (initialSource) {
+  $('new-source-path').value = initialSource
+  switchSource('latest', '', initialSource)
+} else {
+  refresh()
+}

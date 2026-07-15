@@ -11,22 +11,15 @@ import java.io.File;
 public final class FlinkInspectFileSystems {
     private FlinkInspectFileSystems() {}
 
-    public static Configuration initialize(String flinkConfPath) {
-        Configuration flinkConfiguration;
+    public static void initialize(String flinkConfPath) {
         if (flinkConfPath == null) {
-            flinkConfiguration = new Configuration();
-        } else {
-            File path = new File(flinkConfPath);
-            String configDirectory = path.isFile() ? path.getParent() : flinkConfPath;
-            flinkConfiguration = GlobalConfiguration.loadConfiguration(configDirectory);
+            CobbleLoader.ensureCobbleLoaded();
+            return;
         }
-        initialize(flinkConfiguration);
-        return flinkConfiguration;
-    }
-
-    public static void initialize(Configuration flinkConfiguration) {
-        FileSystem.initialize(
-                flinkConfiguration == null ? new Configuration() : flinkConfiguration);
+        File path = new File(flinkConfPath);
+        String configDirectory = path.isFile() ? path.getParent() : flinkConfPath;
+        Configuration flinkConfiguration = GlobalConfiguration.loadConfiguration(configDirectory);
+        FileSystem.initialize(flinkConfiguration);
         CobbleLoader.ensureCobbleLoaded();
     }
 }

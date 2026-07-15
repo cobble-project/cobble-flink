@@ -10,8 +10,6 @@ import io.cobble.flink.inspect.internal.MonitorReaderSession;
 import io.cobble.flink.inspect.internal.OperatorEntry;
 import io.cobble.flink.inspect.internal.UserClasspath;
 
-import org.apache.flink.configuration.Configuration;
-
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
@@ -22,15 +20,15 @@ public final class CobbleInspectClient implements AutoCloseable {
     private final UserClasspath userClasspath;
     private final int totalBuckets;
     private final List<InspectSession> sessions = new ArrayList<>();
-    private boolean closed;
+    private volatile boolean closed;
 
     private CobbleInspectClient(
             CobbleConnectorStorageOptions storageOptions,
             List<String> userClasspathEntries,
             int totalBuckets,
-            Configuration flinkConfiguration) {
+            String flinkConfigPath) {
         this.storageOptions = storageOptions;
-        FlinkInspectFileSystems.initialize(flinkConfiguration);
+        FlinkInspectFileSystems.initialize(flinkConfigPath);
         this.userClasspath = UserClasspath.create(userClasspathEntries);
         this.totalBuckets = totalBuckets;
     }
@@ -119,8 +117,9 @@ public final class CobbleInspectClient implements AutoCloseable {
         InspectSelection pinned =
                 new InspectSelection(
                         selection.sourcePath(), checkpoint.id, operator.operatorId, false);
+        InspectSession session = null;
         try {
-            InspectSession session =
+            session =
                     InspectSessions.open(
                             toCatalog(
                                     discovery.sourceKind,
@@ -135,12 +134,18 @@ public final class CobbleInspectClient implements AutoCloseable {
                             storageOptions,
                             userClasspath.classLoader(),
                             totalBuckets);
+            InspectSession managed = new ManagedSession(session);
             synchronized (sessions) {
-                sessions.add(session);
+                ensureOpen();
+                sessions.add(managed);
             }
-            return session;
+            return managed;
         } catch (RuntimeException error) {
-            readerSession.close();
+            if (session == null) {
+                readerSession.close();
+            } else {
+                session.close();
+            }
             throw error;
         }
     }
@@ -157,18 +162,38 @@ public final class CobbleInspectClient implements AutoCloseable {
 
     @Override
     public void close() {
-        if (!closed) {
-            closed = true;
-            try {
-                synchronized (sessions) {
-                    for (InspectSession session : sessions) {
-                        session.close();
-                    }
-                    sessions.clear();
-                }
-            } finally {
-                userClasspath.close();
+        List<InspectSession> openSessions;
+        synchronized (sessions) {
+            if (closed) {
+                return;
             }
+            closed = true;
+            openSessions = new ArrayList<>(sessions);
+            sessions.clear();
+        }
+        RuntimeException failure = null;
+        for (InspectSession session : openSessions) {
+            try {
+                session.close();
+            } catch (RuntimeException error) {
+                if (failure == null) {
+                    failure = error;
+                } else {
+                    failure.addSuppressed(error);
+                }
+            }
+        }
+        try {
+            userClasspath.close();
+        } catch (RuntimeException error) {
+            if (failure == null) {
+                failure = error;
+            } else {
+                failure.addSuppressed(error);
+            }
+        }
+        if (failure != null) {
+            throw failure;
         }
     }
 
@@ -207,13 +232,69 @@ public final class CobbleInspectClient implements AutoCloseable {
                 InspectErrorCode.NOT_FOUND, "Unknown checkpoint id " + checkpointId);
     }
 
+    private final class ManagedSession implements InspectSession {
+        private final InspectSession delegate;
+        private boolean sessionClosed;
+
+        private ManagedSession(InspectSession delegate) {
+            this.delegate = delegate;
+        }
+
+        @Override
+        public InspectCatalog catalog() {
+            return delegate.catalog();
+        }
+
+        @Override
+        public InspectSessionInfo info() {
+            return delegate.info();
+        }
+
+        @Override
+        public List<InspectTarget> targets() {
+            return delegate.targets();
+        }
+
+        @Override
+        public InspectOverview overview() {
+            return delegate.overview();
+        }
+
+        @Override
+        public InspectPage scan(ScanRequest request) {
+            return delegate.scan(request);
+        }
+
+        @Override
+        public LookupResult lookup(LookupRequest request) {
+            return delegate.lookup(request);
+        }
+
+        @Override
+        public void close() {
+            synchronized (this) {
+                if (sessionClosed) {
+                    return;
+                }
+                sessionClosed = true;
+            }
+            try {
+                delegate.close();
+            } finally {
+                synchronized (sessions) {
+                    sessions.remove(this);
+                }
+            }
+        }
+    }
+
     /** Builder for a client whose resources are owned by {@link #close()}. */
     public static final class Builder {
         private CobbleConnectorStorageOptions storageOptions =
                 CobbleConnectorStorageOptions.empty();
         private List<String> userClasspathEntries = Collections.emptyList();
         private int totalBuckets = 32768;
-        private Configuration flinkConfiguration = new Configuration();
+        private String flinkConfigPath;
 
         public Builder storageOptions(CobbleConnectorStorageOptions storageOptions) {
             this.storageOptions =
@@ -233,11 +314,8 @@ public final class CobbleInspectClient implements AutoCloseable {
             return userClasspathEntries(userJars);
         }
 
-        public Builder flinkConfiguration(Configuration flinkConfiguration) {
-            this.flinkConfiguration =
-                    flinkConfiguration == null
-                            ? new Configuration()
-                            : new Configuration(flinkConfiguration);
+        public Builder flinkConfigPath(String flinkConfigPath) {
+            this.flinkConfigPath = flinkConfigPath;
             return this;
         }
 
@@ -251,10 +329,7 @@ public final class CobbleInspectClient implements AutoCloseable {
 
         public CobbleInspectClient build() {
             return new CobbleInspectClient(
-                    storageOptions,
-                    userClasspathEntries,
-                    totalBuckets,
-                    new Configuration(flinkConfiguration));
+                    storageOptions, userClasspathEntries, totalBuckets, flinkConfigPath);
         }
     }
 }

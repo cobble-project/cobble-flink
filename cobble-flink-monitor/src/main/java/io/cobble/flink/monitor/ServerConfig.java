@@ -2,8 +2,6 @@ package io.cobble.flink.monitor;
 
 import io.cobble.flink.common.CobbleConnectorStorageOptions;
 
-import org.apache.flink.configuration.Configuration;
-
 import java.io.File;
 import java.io.FileInputStream;
 import java.io.IOException;
@@ -18,6 +16,10 @@ final class ServerConfig {
     private static final int DEFAULT_TOTAL_BUCKETS = 32768;
     private static final int DEFAULT_INSPECT_LIMIT = 100;
     private static final int DEFAULT_INSPECT_MAX_LIMIT = 1000;
+    private static final int DEFAULT_MAX_SESSIONS = 32;
+    private static final int DEFAULT_SESSION_IDLE_TIMEOUT_SECONDS = 900;
+    private static final int DEFAULT_REQUEST_BODY_MAX_BYTES = 1024 * 1024;
+    private static final int DEFAULT_LOOKUP_MAX_KEYS = 256;
 
     String bindAddress = "127.0.0.1";
     int port = DEFAULT_PORT;
@@ -25,13 +27,16 @@ final class ServerConfig {
     int totalBuckets = DEFAULT_TOTAL_BUCKETS;
     int inspectDefaultLimit = DEFAULT_INSPECT_LIMIT;
     int inspectMaxLimit = DEFAULT_INSPECT_MAX_LIMIT;
+    int maxSessions = DEFAULT_MAX_SESSIONS;
+    int sessionIdleTimeoutSeconds = DEFAULT_SESSION_IDLE_TIMEOUT_SECONDS;
+    int requestBodyMaxBytes = DEFAULT_REQUEST_BODY_MAX_BYTES;
+    int lookupMaxKeys = DEFAULT_LOOKUP_MAX_KEYS;
     String flinkConfPath;
-    Configuration flinkConfiguration = new Configuration();
     List<String> userJars = new ArrayList<>();
     CobbleConnectorStorageOptions storageOptions = CobbleConnectorStorageOptions.empty();
     int storageOptionCount;
 
-    private ServerConfig() {}
+    ServerConfig() {}
 
     static ServerConfig parse(String[] args) {
         ServerConfig config = new ServerConfig();
@@ -51,6 +56,24 @@ final class ServerConfig {
         if (values.containsKey("inspect-max-limit")) {
             config.inspectMaxLimit =
                     parsePositiveInt(last(values, "inspect-max-limit"), "inspect-max-limit");
+        }
+        if (values.containsKey("max-sessions")) {
+            config.maxSessions = parsePositiveInt(last(values, "max-sessions"), "max-sessions");
+        }
+        if (values.containsKey("session-idle-timeout-seconds")) {
+            config.sessionIdleTimeoutSeconds =
+                    parsePositiveInt(
+                            last(values, "session-idle-timeout-seconds"),
+                            "session-idle-timeout-seconds");
+        }
+        if (values.containsKey("request-body-max-bytes")) {
+            config.requestBodyMaxBytes =
+                    parsePositiveInt(
+                            last(values, "request-body-max-bytes"), "request-body-max-bytes");
+        }
+        if (values.containsKey("lookup-max-keys")) {
+            config.lookupMaxKeys =
+                    parsePositiveInt(last(values, "lookup-max-keys"), "lookup-max-keys");
         }
         config.flinkConfPath = blankToNull(last(values, "flink-conf"));
         if (config.inspectDefaultLimit > config.inspectMaxLimit) {
@@ -166,6 +189,10 @@ final class ServerConfig {
                         + "  --total-buckets N              default 32768\n"
                         + "  --inspect-default-limit N      default 100\n"
                         + "  --inspect-max-limit N          default 1000\n"
+                        + "  --max-sessions N               default 32\n"
+                        + "  --session-idle-timeout-seconds N  default 900\n"
+                        + "  --request-body-max-bytes N     default 1048576\n"
+                        + "  --lookup-max-keys N            default 256\n"
                         + "  --user-jar PATH                user job jar (repeatable) for live serializer restore\n"
                         + "  --user-classpath PATHS         path-separator-joined user jars (alias for --user-jar)");
         System.exit(0);

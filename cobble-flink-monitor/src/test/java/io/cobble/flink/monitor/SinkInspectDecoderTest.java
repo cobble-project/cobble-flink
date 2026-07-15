@@ -81,7 +81,7 @@ class SinkInspectDecoderTest {
         assertEquals(Long.toString(Long.MIN_VALUE), decodedValue.toString());
         assertEquals(
                 "[\"" + Long.MAX_VALUE + "\",\"" + Long.MIN_VALUE + "\"]",
-                CobbleFlinkMonitorServer.toJson(Arrays.asList(decodedKey, decodedValue)));
+                MonitorTestJson.toJson(Arrays.asList(decodedKey, decodedValue)));
     }
 
     @Test
@@ -139,8 +139,7 @@ class SinkInspectDecoderTest {
         assertNotNull(row.decodeError);
         assertTrue(row.decodeError.contains("score"));
         assertEquals(
-                CobbleFlinkMonitorServer.bytesJson(new byte[] {1}),
-                row.decodedColumns.get(0).get("value"));
+                MonitorTestJson.bytesJson(new byte[] {1}), row.decodedColumns.get(0).get("value"));
     }
 
     @Test

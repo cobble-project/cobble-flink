@@ -62,7 +62,10 @@ public final class InspectPathUtils {
         // For file:// URIs, extract the local path portion.
         URI uri = path.toUri();
         String scheme = uri.getScheme();
-        if (scheme == null || scheme.trim().isEmpty() || "file".equalsIgnoreCase(scheme)) {
+        if (scheme == null || scheme.trim().isEmpty()) {
+            return new File(path.toString()).getAbsoluteFile().toPath().normalize().toString();
+        }
+        if ("file".equalsIgnoreCase(scheme)) {
             return new File(uri).getAbsoluteFile().toPath().normalize().toString();
         }
         return path.toString();

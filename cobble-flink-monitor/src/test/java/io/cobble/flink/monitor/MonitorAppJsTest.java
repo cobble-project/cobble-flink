@@ -16,6 +16,26 @@ import java.nio.file.Paths;
 class MonitorAppJsTest {
 
     @Test
+    void usesOnlySessionApiAndSwapsLatestAfterReplacementOverviewSucceeds() throws Exception {
+        String appJs = readAppJs();
+
+        assertFalse(appJs.contains("/api/v1/meta"));
+        assertFalse(appJs.contains("/api/v1/mode"));
+        assertFalse(appJs.contains("/api/v1/inspect"));
+        assertTrue(appJs.contains("/api/v1/discovery"));
+        assertTrue(appJs.contains("/api/v1/sessions"));
+        int overview = appJs.indexOf("replacementOverview = await request");
+        int swap = appJs.indexOf("state.sessionId = replacement.session_id");
+        int deleteOld = appJs.indexOf("/api/v1/sessions/${previousId}");
+        assertTrue(overview >= 0 && overview < swap);
+        assertTrue(swap < deleteOld);
+        assertTrue(appJs.contains("window.COBBLE_MONITOR_INITIAL_SOURCE"));
+        assertTrue(appJs.contains("result.found"));
+        assertTrue(appJs.contains("BigInt(value)"));
+        assertTrue(appJs.contains("typedValue = integer.toString()"));
+    }
+
+    @Test
     void semanticTableGroupsUsesAccumulatorLabelForAggregatingAndValueForOthers() throws Exception {
         String appJs = readAppJs();
         String harness =

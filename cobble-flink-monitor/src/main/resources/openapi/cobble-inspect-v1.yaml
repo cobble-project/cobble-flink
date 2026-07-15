@@ -1,0 +1,397 @@
+openapi: 3.0.3
+info:
+  title: Cobble Flink Inspect API
+  version: v1
+  description: Unauthenticated read-only inspection API. The server binds to loopback by default.
+paths:
+  /healthz:
+    get:
+      responses:
+        '200':
+          description: Healthy
+          content:
+            application/json:
+              example: {status: ok}
+  /api/v1/discovery:
+    post:
+      description: Discover checkpoints or snapshots without retaining a reader.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/DiscoveryRequest'}
+            example: {source: 'file:///checkpoints/job-1'}
+      responses:
+        '200':
+          description: Inspectable checkpoints
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/DiscoveryResponse'}
+        '413': {$ref: '#/components/responses/RequestTooLarge'}
+  /api/v1/sessions:
+    post:
+      description: Open a reader pinned to one concrete checkpoint and operator.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/SessionCreateRequest'}
+            example:
+              source: 'file:///checkpoints/job-1'
+              checkpoint: latest
+              operator_id: '0123456789abcdef'
+      responses:
+        '201':
+          description: Pinned inspection session
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Session'}
+        '429': {$ref: '#/components/responses/SessionLimit'}
+  /api/v1/sessions/{session_id}:
+    parameters:
+      - {$ref: '#/components/parameters/SessionId'}
+    get:
+      responses:
+        '200':
+          description: Pinned session and targets
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Session'}
+        '410': {$ref: '#/components/responses/SessionExpired'}
+    delete:
+      responses:
+        '204': {description: Session retired; active requests may finish}
+        '410': {$ref: '#/components/responses/SessionExpired'}
+  /api/v1/sessions/{session_id}/overview:
+    parameters:
+      - {$ref: '#/components/parameters/SessionId'}
+    get:
+      responses:
+        '200':
+          description: Overview and pinned source SQL examples
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Overview'}
+        '410': {$ref: '#/components/responses/SessionExpired'}
+  /api/v1/sessions/{session_id}/scan:
+    parameters:
+      - {$ref: '#/components/parameters/SessionId'}
+    post:
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/ScanRequest'}
+            example: {target_id: raw, limit: 50, bucket: 0, prefix_b64: YQ==}
+      responses:
+        '200':
+          description: Rows plus an opaque next_page_token
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ScanResponse'}
+        '400': {$ref: '#/components/responses/InvalidInput'}
+        '410': {$ref: '#/components/responses/SessionExpired'}
+  /api/v1/sessions/{session_id}/lookup:
+    parameters:
+      - {$ref: '#/components/parameters/SessionId'}
+    post:
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/LookupRequest'}
+            example:
+              target_id: raw
+              keys: [{kind: raw, bucket: 0, key_b64: YWxwaGE=}]
+      responses:
+        '200':
+          description: Ordered hit and miss rows
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/LookupResponse'}
+        '400': {$ref: '#/components/responses/InvalidInput'}
+        '410': {$ref: '#/components/responses/SessionExpired'}
+components:
+  parameters:
+    SessionId:
+      name: session_id
+      in: path
+      required: true
+      schema: {type: string, minLength: 22}
+  schemas:
+    DiscoveryRequest:
+      type: object
+      required: [source]
+      properties:
+        source:
+          type: string
+          minLength: 1
+          description: Path or URI without embedded credentials or query parameters; configure storage credentials on the server.
+    DiscoveryResponse:
+      type: object
+      required: [source_kind, root_directory, checkpoints, available]
+      properties:
+        source_kind: {type: string, enum: [checkpoint, data_source]}
+        root_directory: {type: string}
+        checkpoints:
+          type: array
+          items: {$ref: '#/components/schemas/Checkpoint'}
+        available: {type: boolean}
+    Checkpoint:
+      type: object
+      required: [checkpoint_id, directory, operators]
+      properties:
+        checkpoint_id: {type: integer, format: int64, minimum: 0}
+        directory: {type: string}
+        operators:
+          type: array
+          items: {$ref: '#/components/schemas/Operator'}
+    Operator:
+      type: object
+      required: [operator_id, global_snapshot_available, embedded_metadata_available]
+      properties:
+        operator_id: {type: string}
+        global_snapshot_available: {type: boolean}
+        embedded_metadata_available: {type: boolean}
+    SessionCreateRequest:
+      type: object
+      required: [source]
+      properties:
+        source:
+          type: string
+          minLength: 1
+          description: Path or URI without embedded credentials or query parameters; configure storage credentials on the server.
+        checkpoint:
+          oneOf:
+            - {type: string, enum: [latest]}
+            - {type: integer, format: int64, minimum: 0}
+        operator_id: {type: string, minLength: 1}
+    Session:
+      type: object
+      required: [session_id, source_kind, root_directory, source, checkpoint_id, pinned, targets, total_buckets]
+      properties:
+        session_id: {type: string}
+        source_kind: {type: string}
+        root_directory: {type: string}
+        source: {type: string}
+        checkpoint_id: {type: integer, format: int64}
+        operator_id: {type: string, nullable: true}
+        pinned: {type: boolean}
+        total_buckets: {type: integer, minimum: 1}
+        targets:
+          type: array
+          items: {$ref: '#/components/schemas/Target'}
+    Target:
+      type: object
+      required: [id, name, kind, allows_columns, exact_lookup_supported, semantic_parts, key_fields, value_fields]
+      properties:
+        id: {type: string}
+        name: {type: string}
+        kind: {type: string, enum: [raw, sink, state, timer]}
+        column_family: {type: string, nullable: true}
+        state_kind: {type: string, nullable: true}
+        allows_columns: {type: boolean}
+        exact_lookup_supported: {type: boolean}
+        exact_lookup_diagnostic: {type: string, nullable: true}
+        semantic_parts: {type: object, additionalProperties: {$ref: '#/components/schemas/SemanticType'}}
+        key_fields: {type: array, items: {$ref: '#/components/schemas/SemanticField'}}
+        value_fields: {type: array, items: {$ref: '#/components/schemas/SemanticField'}}
+    SemanticField:
+      type: object
+      required: [name, type, logical_type]
+      properties:
+        name: {type: string}
+        logical_type: {type: string}
+        type: {$ref: '#/components/schemas/SemanticType'}
+    SemanticType:
+      type: object
+      required: [kind, fields]
+      properties:
+        kind: {type: string, enum: [UNKNOWN, SCALAR, ROW, TUPLE, LIST, MAP]}
+        logical_type: {type: string, nullable: true}
+        fields: {type: array, items: {$ref: '#/components/schemas/SemanticField'}}
+        element_type: {$ref: '#/components/schemas/SemanticType'}
+        key_type: {$ref: '#/components/schemas/SemanticType'}
+        value_type: {$ref: '#/components/schemas/SemanticType'}
+    Overview:
+      type: object
+      required: [checkpoint_id, items]
+      properties:
+        checkpoint_id: {type: integer, format: int64}
+        operator_id: {type: string, nullable: true}
+        items:
+          type: array
+          items:
+            type: object
+            required: [id, title, kind, fields, source_sql]
+            properties:
+              id: {type: string}
+              title: {type: string}
+              kind: {type: string}
+              detail: {type: string, nullable: true}
+              fields: {type: array, items: {type: object}}
+              source_sql: {$ref: '#/components/schemas/SourceSql'}
+    SourceSql:
+      type: object
+      required: [batch_scan_supported, exact_lookup_supported, required_lookup_fields]
+      properties:
+        ddl: {type: string, nullable: true}
+        batch_scan_supported: {type: boolean}
+        exact_lookup_supported: {type: boolean}
+        required_lookup_fields: {type: array, items: {type: string}}
+        unavailable_reason: {type: string, nullable: true}
+        note: {type: string, nullable: true}
+    ScanRequest:
+      type: object
+      required: [target_id]
+      properties:
+        target_id: {type: string}
+        limit: {type: integer, minimum: 1}
+        page_token: {type: string, description: Opaque and bound to session, target, filters, and projection}
+        bucket: {type: integer, minimum: 0}
+        prefix_b64: {type: string, format: byte}
+        columns: {type: array, items: {type: integer, minimum: 0}}
+        filter:
+          oneOf:
+            - {$ref: '#/components/schemas/SinkFilter'}
+            - {$ref: '#/components/schemas/StateFilter'}
+    SinkFilter:
+      type: object
+      required: [kind, fields]
+      properties:
+        kind: {type: string, enum: [sink]}
+        fields: {type: array, minItems: 1, items: {$ref: '#/components/schemas/FieldValue'}}
+    StateFilter:
+      type: object
+      required: [kind, state_key]
+      properties:
+        kind: {type: string, enum: [state]}
+        auto_key_group: {type: boolean}
+        state_key: {$ref: '#/components/schemas/StateKey'}
+    StateKey:
+      type: object
+      properties:
+        state_key_fields: {type: array, items: {$ref: '#/components/schemas/FieldValue'}}
+        namespace_fields: {type: array, items: {$ref: '#/components/schemas/FieldValue'}}
+        map_key_fields: {type: array, items: {$ref: '#/components/schemas/FieldValue'}}
+    FieldValue:
+      type: object
+      required: [name, value]
+      properties:
+        name: {type: string}
+        value: {$ref: '#/components/schemas/TypedValue'}
+    TypedValue:
+      type: object
+      required: [kind, value]
+      properties:
+        kind: {type: string, enum: [STRING, BOOLEAN, INTEGER, FLOAT, DECIMAL, BYTES, DATE, TIME, TIMESTAMP]}
+        value:
+          description: JSON boolean/number/string selected by kind. INTEGER also accepts a base-10 string for exact 64-bit values; BYTES uses base64.
+          oneOf: [{type: boolean}, {type: number}, {type: string}]
+    LookupRequest:
+      type: object
+      required: [target_id, keys]
+      properties:
+        target_id: {type: string}
+        columns: {type: array, items: {type: integer, minimum: 0}}
+        keys:
+          type: array
+          minItems: 1
+          items:
+            oneOf:
+              - {$ref: '#/components/schemas/RawLookupKey'}
+              - {$ref: '#/components/schemas/SinkLookupKey'}
+              - {$ref: '#/components/schemas/StateLookupKey'}
+    RawLookupKey:
+      type: object
+      required: [kind, bucket, key_b64]
+      properties:
+        kind: {type: string, enum: [raw]}
+        bucket: {type: integer, minimum: 0}
+        key_b64: {type: string, format: byte}
+    SinkLookupKey:
+      type: object
+      required: [kind, fields]
+      properties:
+        kind: {type: string, enum: [sink]}
+        fields: {type: array, minItems: 1, items: {$ref: '#/components/schemas/FieldValue'}}
+    StateLookupKey:
+      type: object
+      required: [kind, state_key]
+      properties:
+        kind: {type: string, enum: [state]}
+        state_key: {$ref: '#/components/schemas/StateKey'}
+    ScanResponse:
+      type: object
+      required: [rows, next_page_token]
+      properties:
+        rows: {type: array, items: {$ref: '#/components/schemas/Row'}}
+        next_page_token: {type: string, nullable: true}
+    LookupResponse:
+      type: object
+      required: [rows]
+      properties:
+        rows: {type: array, items: {$ref: '#/components/schemas/Row'}}
+    Row:
+      type: object
+      required: [bucket, key_b64, found, columns_b64, decoded_columns, decoded_parts, decode_issues]
+      properties:
+        bucket: {type: integer}
+        key_b64: {type: string, format: byte}
+        found: {type: boolean}
+        value_b64: {type: string, format: byte, nullable: true}
+        columns_b64: {type: array, items: {type: string, format: byte}}
+        decoded_key: {$ref: '#/components/schemas/DecodedValue'}
+        decoded_value: {$ref: '#/components/schemas/DecodedValue'}
+        decoded_columns: {type: array, items: {$ref: '#/components/schemas/DecodedValue'}}
+        decoded_parts: {type: object, additionalProperties: {$ref: '#/components/schemas/DecodedValue'}}
+        decode_issues: {type: array, items: {$ref: '#/components/schemas/DecodeIssue'}}
+    DecodedValue:
+      type: object
+      nullable: true
+      properties:
+        kind: {type: string}
+        logical_type: {type: string, nullable: true}
+        value: {}
+        raw_b64: {type: string, format: byte, nullable: true}
+        fields: {type: array, items: {type: object}}
+        elements: {type: array, items: {$ref: '#/components/schemas/DecodedValue'}}
+        entries: {type: array, items: {type: object}}
+    DecodeIssue:
+      type: object
+      required: [kind, part, message]
+      properties:
+        kind: {type: string}
+        part: {type: string}
+        message: {type: string}
+    Error:
+      type: object
+      required: [code, message, request_id]
+      properties:
+        code: {type: string}
+        message: {type: string}
+        request_id: {type: string}
+        details: {type: object}
+  responses:
+    InvalidInput:
+      description: Invalid request
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/Error'}
+          example: {code: INVALID_INPUT, message: limit must be between 1 and 1000, request_id: s8vJ4G3YI1w}
+    SessionExpired:
+      description: Session missing, deleted, or expired
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/Error'}
+          example: {code: SESSION_EXPIRED, message: Unknown or expired inspect session, request_id: s8vJ4G3YI1w}
+    SessionLimit:
+      description: Configured concurrent session limit reached
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/Error'}
+    RequestTooLarge:
+      description: Request body exceeded the configured streaming limit
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/Error'}

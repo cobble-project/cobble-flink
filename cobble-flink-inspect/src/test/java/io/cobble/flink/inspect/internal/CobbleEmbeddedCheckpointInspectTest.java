@@ -1,7 +1,8 @@
-package io.cobble.flink.monitor;
+package io.cobble.flink.inspect.internal;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import io.cobble.Config;
@@ -16,7 +17,6 @@ import io.cobble.flink.common.inspect.StateInspectSchema;
 import io.cobble.flink.common.inspect.StateInspectSchemaStore;
 import io.cobble.flink.common.inspect.StateInspectSemanticSchema;
 import io.cobble.flink.common.inspect.StateInspectType;
-import io.cobble.flink.inspect.internal.*;
 import io.cobble.structured.Db;
 
 import org.apache.flink.api.common.typeutils.base.IntSerializer;
@@ -37,7 +37,6 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
 import java.io.DataOutputStream;
-import java.lang.reflect.Method;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.util.Arrays;
@@ -45,94 +44,76 @@ import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.UUID;
 
-/** Catalog and embedded-schema coverage for a direct Flink metadata monitor target. */
-class CobbleEmbeddedCheckpointMonitorTest {
+class CobbleEmbeddedCheckpointInspectTest {
 
     @TempDir java.nio.file.Path tempDir;
 
     @Test
-    void discoversEmbeddedCheckpointCatalogAndUsesEmbeddedSchema() throws Exception {
+    void discoversAndReadsEmbeddedCheckpointWithoutSidecars() throws Exception {
         OperatorID operatorId = new OperatorID(11L, 13L);
-        ReadableSavepoint fixture = writeSavepoint("chk-3", operatorId);
-        java.nio.file.Path savepoint = fixture.directory;
-        CobbleFlinkMonitorServer.CheckpointCatalog catalog =
-                CobbleFlinkMonitorServer.CheckpointCatalog.discover(
-                        savepoint.toUri().toString(), CobbleConnectorStorageOptions.empty());
+        try (ReadableCheckpoint fixture = writeCheckpoint(operatorId)) {
+            InspectCatalogDiscovery.Result catalog =
+                    InspectCatalogDiscovery.discover(
+                            fixture.directory.toUri().toString(),
+                            CobbleConnectorStorageOptions.empty());
+            CheckpointEntry checkpoint = catalog.checkpoints.get(0);
+            OperatorEntry operator = checkpoint.findOperator(operatorId.toHexString());
 
-        CheckpointEntry checkpoint = catalog.checkpoints.get(0);
-        OperatorEntry operator = checkpoint.findOperator(operatorId.toHexString());
-        SchemaResolveResult schema = MonitorInspectSchemaResolver.resolve(checkpoint, operator);
-        assertEquals("checkpoint", catalog.sourceKind);
-        assertEquals(3L, checkpoint.id);
-        assertEquals(SchemaResolveResult.STATUS_AVAILABLE, schema.status);
-        assertEquals(1, schema.store.schemas().size());
-        try {
-            ServerConfig config =
-                    ServerConfig.parse(
-                            new String[] {
-                                "--checkpoint", savepoint.toUri().toString(), "--total-buckets", "4"
-                            });
-            Class<?> state =
-                    Class.forName("io.cobble.flink.monitor.CobbleFlinkMonitorServer$MonitorState");
-            Method open =
-                    state.getDeclaredMethod(
-                            "openEmbeddedCheckpointReader",
-                            ServerConfig.class,
-                            CheckpointEntry.class,
-                            OperatorEntry.class);
-            open.setAccessible(true);
-            ReaderHandle handle = (ReaderHandle) open.invoke(null, config, checkpoint, operator);
-            try {
-                assertEquals(
-                        "value",
-                        new String(handle.reader.get(0, "key".getBytes("UTF-8"), 0), "UTF-8"));
-            } finally {
-                handle.reader.close();
-                Method cleanup =
-                        CobbleFlinkMonitorServer.class.getDeclaredMethod(
-                                "deleteTemporaryDirectories", java.util.List.class);
-                cleanup.setAccessible(true);
-                cleanup.invoke(null, handle.temporaryDirectories);
-                for (java.io.File directory : handle.temporaryDirectories) {
-                    assertFalse(directory.exists());
-                }
+            SchemaResolveResult schema = MonitorInspectSchemaResolver.resolve(checkpoint, operator);
+            assertEquals("checkpoint", catalog.sourceKind);
+            assertEquals(3L, checkpoint.id);
+            assertEquals(SchemaResolveResult.STATUS_AVAILABLE, schema.status);
+            assertEquals(1, schema.store.schemas().size());
+
+            MonitorReaderSession reader =
+                    MonitorReaderSession.open(
+                            4,
+                            CobbleConnectorStorageOptions.empty(),
+                            catalog.sourceKind,
+                            checkpoint,
+                            operator);
+            java.util.List<java.io.File> temporaryDirectories = reader.temporaryDirectories();
+            assertTrue(
+                    temporaryDirectories
+                            .get(0)
+                            .getName()
+                            .startsWith("cobble-flink-embedded-checkpoint-"));
+            assertEquals("value", utf8(reader.reader().get(0, utf8("key"), 0)));
+            reader.close();
+            for (java.io.File directory : temporaryDirectories) {
+                assertFalse(directory.exists());
             }
-        } finally {
-            fixture.close();
         }
     }
 
     @Test
     void globalEntryFallsBackToEmbeddedSchemaWhenRegistryIsAbsent() throws Exception {
         OperatorID operatorId = new OperatorID(21L, 23L);
-        ReadableSavepoint fixture = writeSavepoint("chk-3", operatorId);
-        try {
+        try (ReadableCheckpoint fixture = writeCheckpoint(operatorId)) {
             CheckpointEntry merged = mergedGlobalEntry(fixture, operatorId, false);
-            OperatorEntry operator = merged.findOperator(operatorId.toHexString());
 
-            SchemaResolveResult result = MonitorInspectSchemaResolver.resolve(merged, operator);
+            SchemaResolveResult result =
+                    MonitorInspectSchemaResolver.resolve(
+                            merged, merged.findOperator(operatorId.toHexString()));
 
             assertEquals(SchemaResolveResult.STATUS_AVAILABLE, result.status);
             assertEquals("embedded Flink checkpoint metadata", result.eventPath);
             assertEquals(1, result.store.schemas().size());
             assertTrue(result.warning.contains("Schema registry missing"));
-        } finally {
-            fixture.close();
         }
     }
 
     @Test
-    void globalRegistryRemainsPreferredOverEmbeddedSchema() throws Exception {
+    void matchingRegistryRemainsPreferredOverEmbeddedSchema() throws Exception {
         OperatorID operatorId = new OperatorID(25L, 27L);
-        ReadableSavepoint fixture = writeSavepoint("chk-3", operatorId);
-        try {
+        try (ReadableCheckpoint fixture = writeCheckpoint(operatorId)) {
             CheckpointEntry merged = mergedGlobalEntry(fixture, operatorId, false);
-            StateInspectSchemaStore registryStore =
+            StateInspectSchemaStore embedded =
                     CobbleEmbeddedCheckpoint.select(new Path(fixture.directory.toUri()), "3")
                             .checkpoint()
                             .operator(operatorId.toHexString())
                             .schemaStore();
-            writeRegistry(tempDir, operatorId.toHexString(), 3L, registryStore);
+            writeRegistry(operatorId.toHexString(), 3L, embedded);
 
             SchemaResolveResult result =
                     MonitorInspectSchemaResolver.resolve(
@@ -141,19 +122,16 @@ class CobbleEmbeddedCheckpointMonitorTest {
             assertEquals(SchemaResolveResult.STATUS_AVAILABLE, result.status);
             assertTrue(result.eventPath.contains("inspect-schema/events"));
             assertEquals(3L, result.schemaCheckpointId);
-            assertEquals(null, result.warning);
-        } finally {
-            fixture.close();
+            assertNull(result.warning);
         }
     }
 
     @Test
-    void staleRegistrySchemaIsReplacedByExactEmbeddedSchema() throws Exception {
+    void staleRegistryIsReplacedByExactEmbeddedSchema() throws Exception {
         OperatorID operatorId = new OperatorID(26L, 28L);
-        ReadableSavepoint fixture = writeSavepoint("chk-3", operatorId);
-        try {
+        try (ReadableCheckpoint fixture = writeCheckpoint(operatorId)) {
             CheckpointEntry merged = mergedGlobalEntry(fixture, operatorId, false);
-            StateInspectSchemaStore staleStore =
+            StateInspectSchemaStore stale =
                     new StateInspectSchemaStore(
                             Collections.singletonList(
                                     StateInspectSchema.forValue(
@@ -163,7 +141,7 @@ class CobbleEmbeddedCheckpointMonitorTest {
                                             IntSerializer.INSTANCE,
                                             VoidNamespaceSerializer.INSTANCE,
                                             IntSerializer.INSTANCE)));
-            writeRegistry(tempDir, operatorId.toHexString(), 2L, staleStore);
+            writeRegistry(operatorId.toHexString(), 2L, stale);
 
             SchemaResolveResult result =
                     MonitorInspectSchemaResolver.resolve(
@@ -174,128 +152,96 @@ class CobbleEmbeddedCheckpointMonitorTest {
             assertEquals("state", result.store.schemas().get(0).stateName());
             assertEquals(3L, result.schemaCheckpointId);
             assertTrue(result.warning.contains("stale or mismatched"));
-        } finally {
-            fixture.close();
         }
     }
 
     @Test
-    void globalReaderRemainsPreferredWhenEmbeddedMetadataIsAlsoPresent() throws Exception {
+    void globalReaderRemainsPreferredWhenEmbeddedMetadataIsAttached() throws Exception {
         OperatorID operatorId = new OperatorID(29L, 31L);
-        ReadableSavepoint fixture = writeSavepoint("chk-3", operatorId);
-        try {
+        try (ReadableCheckpoint fixture = writeCheckpoint(operatorId)) {
             CheckpointEntry merged = mergedGlobalEntry(fixture, operatorId, true);
-            CobbleFlinkMonitorServer.CheckpointCatalog catalog =
-                    CobbleFlinkMonitorServer.CheckpointCatalog.discover(
-                            fixture.directory.toUri().toString(),
-                            CobbleConnectorStorageOptions.empty());
-            ReaderHandle handle = openReader(catalog, merged, operatorId.toHexString());
-            try {
-                assertTrue(
-                        handle.temporaryDirectories
-                                .get(0)
-                                .getName()
-                                .startsWith("cobble-flink-monitor-"));
-                assertEquals(
-                        "value",
-                        new String(handle.reader.get(0, "key".getBytes("UTF-8"), 0), "UTF-8"));
-            } finally {
-                closeReader(handle);
+            MonitorReaderSession reader = openReader(merged, operatorId);
+            java.util.List<java.io.File> temporaryDirectories = reader.temporaryDirectories();
+            assertTrue(temporaryDirectories.get(0).getName().startsWith("cobble-flink-monitor-"));
+            assertEquals("value", utf8(reader.reader().get(0, utf8("key"), 0)));
+            reader.close();
+            for (java.io.File directory : temporaryDirectories) {
+                assertFalse(directory.exists());
             }
-        } finally {
-            fixture.close();
         }
     }
 
     @Test
-    void embeddedReaderIsUsedWhenTheGlobalReaderCannotOpen() throws Exception {
+    void embeddedReaderIsFallbackWhenGlobalReaderCannotOpen() throws Exception {
         OperatorID operatorId = new OperatorID(33L, 35L);
-        ReadableSavepoint fixture = writeSavepoint("chk-3", operatorId);
-        try {
+        try (ReadableCheckpoint fixture = writeCheckpoint(operatorId)) {
             CheckpointEntry merged = mergedGlobalEntry(fixture, operatorId, false);
-            CobbleFlinkMonitorServer.CheckpointCatalog catalog =
-                    CobbleFlinkMonitorServer.CheckpointCatalog.discover(
-                            fixture.directory.toUri().toString(),
-                            CobbleConnectorStorageOptions.empty());
-            ReaderHandle handle = openReader(catalog, merged, operatorId.toHexString());
-            try {
-                assertTrue(
-                        handle.temporaryDirectories
-                                .get(0)
-                                .getName()
-                                .startsWith("cobble-flink-embedded-checkpoint-"));
-                assertEquals(
-                        "value",
-                        new String(handle.reader.get(0, "key".getBytes("UTF-8"), 0), "UTF-8"));
-            } finally {
-                closeReader(handle);
+            MonitorReaderSession reader = openReader(merged, operatorId);
+            java.util.List<java.io.File> temporaryDirectories = reader.temporaryDirectories();
+            assertTrue(
+                    temporaryDirectories
+                            .get(0)
+                            .getName()
+                            .startsWith("cobble-flink-embedded-checkpoint-"));
+            assertEquals("value", utf8(reader.reader().get(0, utf8("key"), 0)));
+            reader.close();
+            for (java.io.File directory : temporaryDirectories) {
+                assertFalse(directory.exists());
             }
-        } finally {
-            fixture.close();
         }
     }
 
     @Test
-    void directMetadataEntryKeepsGlobalSidecarAndEmbeddedFallback() throws Exception {
+    void directMetadataDiscoversGlobalSidecarAndEmbeddedFallback() throws Exception {
         OperatorID operatorId = new OperatorID(37L, 39L);
-        ReadableSavepoint fixture = writeSavepoint("chk-3", operatorId);
-        try {
+        try (ReadableCheckpoint fixture = writeCheckpoint(operatorId)) {
             mergedGlobalEntry(fixture, operatorId, true);
-            CobbleFlinkMonitorServer.CheckpointCatalog catalog =
-                    CobbleFlinkMonitorServer.CheckpointCatalog.discover(
+
+            InspectCatalogDiscovery.Result catalog =
+                    InspectCatalogDiscovery.discover(
                             fixture.directory.resolve("_metadata").toUri().toString(),
                             CobbleConnectorStorageOptions.empty());
-
             OperatorEntry operator =
                     catalog.checkpoints.get(0).findOperator(operatorId.toHexString());
+
             assertTrue(operator.globalSnapshotLayout);
             assertTrue(operator.embeddedCheckpoint != null);
             assertTrue(operator.manifestCopyPath != null);
-        } finally {
-            fixture.close();
         }
     }
 
     @Test
-    void directMetadataEntryWithoutSidecarRemainsEmbeddedOnly() throws Exception {
+    void directMetadataWithoutSidecarRemainsEmbeddedOnly() throws Exception {
         OperatorID operatorId = new OperatorID(41L, 43L);
-        ReadableSavepoint fixture = writeSavepoint("chk-3", operatorId);
-        try {
-            CobbleFlinkMonitorServer.CheckpointCatalog catalog =
-                    CobbleFlinkMonitorServer.CheckpointCatalog.discover(
+        try (ReadableCheckpoint fixture = writeCheckpoint(operatorId)) {
+            InspectCatalogDiscovery.Result catalog =
+                    InspectCatalogDiscovery.discover(
                             fixture.directory.resolve("_metadata").toUri().toString(),
                             CobbleConnectorStorageOptions.empty());
-
             OperatorEntry operator =
                     catalog.checkpoints.get(0).findOperator(operatorId.toHexString());
+
             assertFalse(operator.globalSnapshotLayout);
             assertTrue(operator.embeddedCheckpoint != null);
-        } finally {
-            fixture.close();
         }
     }
 
     private CheckpointEntry mergedGlobalEntry(
-            ReadableSavepoint fixture, OperatorID operatorId, boolean materializeGlobalSnapshot)
+            ReadableCheckpoint fixture, OperatorID operatorId, boolean materializeGlobalSnapshot)
             throws Exception {
         CobbleEmbeddedCheckpoint.Location location =
                 CobbleEmbeddedCheckpoint.select(new Path(fixture.directory.toUri()), "3");
-        String operatorDirectory =
-                tempDir.resolve("cobble").resolve(operatorId.toHexString()).toUri().toString();
+        java.nio.file.Path operatorPath =
+                tempDir.resolve("cobble").resolve(operatorId.toHexString());
+        String operatorDirectory = operatorPath.toUri().toString();
         if (materializeGlobalSnapshot) {
-            Config coordinatorConfig = new Config().totalBuckets(4);
-            coordinatorConfig.governanceMode = Config.GovernanceMode.NOOP;
-            coordinatorConfig.logConsole = false;
-            coordinatorConfig.addVolume(new Path(operatorDirectory).getPath());
+            Config coordinatorConfig = nativeConfig(operatorPath, 4);
             try (DbCoordinator coordinator = DbCoordinator.open(coordinatorConfig)) {
                 coordinator.materializeGlobalSnapshot(
                         4, 3L, Collections.singletonList(fixture.db.snapshot()));
             }
             Files.copy(
-                    tempDir.resolve("cobble")
-                            .resolve(operatorId.toHexString())
-                            .resolve("snapshot")
-                            .resolve("SNAPSHOT-3"),
+                    operatorPath.resolve("snapshot/SNAPSHOT-3"),
                     fixture.directory.resolve(
                             "COBBLE-SNAPSHOT-" + operatorId.toHexString() + "-MANIFEST"));
         }
@@ -310,56 +256,24 @@ class CobbleEmbeddedCheckpointMonitorTest {
                                         operatorDirectory,
                                         Collections.singletonList(operatorDirectory),
                                         true)));
-        return CobbleFlinkMonitorServer.CheckpointCatalog.mergeEmbeddedCheckpoint(
-                sidecar, location);
+        return InspectCatalogDiscovery.mergeEmbeddedCheckpoint(sidecar, location);
     }
 
-    private ReaderHandle openReader(
-            CobbleFlinkMonitorServer.CheckpointCatalog catalog,
-            CheckpointEntry checkpoint,
-            String operatorId)
-            throws Exception {
-        ServerConfig config =
-                ServerConfig.parse(
-                        new String[] {
-                            "--checkpoint", tempDir.toUri().toString(), "--total-buckets", "4"
-                        });
-        Class<?> state =
-                Class.forName("io.cobble.flink.monitor.CobbleFlinkMonitorServer$MonitorState");
-        Method open =
-                state.getDeclaredMethod(
-                        "openReader",
-                        ServerConfig.class,
-                        CobbleFlinkMonitorServer.CheckpointCatalog.class,
-                        CheckpointEntry.class,
-                        OperatorEntry.class);
-        open.setAccessible(true);
-        return (ReaderHandle)
-                open.invoke(null, config, catalog, checkpoint, checkpoint.findOperator(operatorId));
+    private MonitorReaderSession openReader(CheckpointEntry checkpoint, OperatorID operatorId) {
+        return MonitorReaderSession.open(
+                4,
+                CobbleConnectorStorageOptions.empty(),
+                "checkpoint",
+                checkpoint,
+                checkpoint.findOperator(operatorId.toHexString()));
     }
 
-    private void closeReader(ReaderHandle handle) throws Exception {
-        handle.reader.close();
-        Method cleanup =
-                CobbleFlinkMonitorServer.class.getDeclaredMethod(
-                        "deleteTemporaryDirectories", java.util.List.class);
-        cleanup.setAccessible(true);
-        cleanup.invoke(null, handle.temporaryDirectories);
-        for (java.io.File directory : handle.temporaryDirectories) {
-            assertFalse(directory.exists());
-        }
-    }
-
-    private void writeRegistry(
-            java.nio.file.Path root,
-            String operatorId,
-            long checkpointId,
-            StateInspectSchemaStore store)
+    private void writeRegistry(String operatorId, long checkpointId, StateInspectSchemaStore store)
             throws Exception {
         byte[] bytes = store.toBytes();
         String hash = InspectSchemaRegistryLayout.sha256(bytes);
         java.nio.file.Path schema =
-                root.resolve("cobble").resolve(operatorId).resolve("inspect-schema");
+                tempDir.resolve("cobble").resolve(operatorId).resolve("inspect-schema");
         Files.createDirectories(schema.resolve("events"));
         Files.createDirectories(schema.resolve("blobs"));
         Files.write(
@@ -372,19 +286,15 @@ class CobbleEmbeddedCheckpointMonitorTest {
                 StandardCharsets.UTF_8);
     }
 
-    private ReadableSavepoint writeSavepoint(String directoryName, OperatorID operatorId)
-            throws Exception {
-        java.nio.file.Path directory = Files.createDirectory(tempDir.resolve(directoryName));
+    private ReadableCheckpoint writeCheckpoint(OperatorID operatorId) throws Exception {
+        java.nio.file.Path directory = Files.createDirectory(tempDir.resolve("chk-3"));
         java.nio.file.Path volume = Files.createDirectory(directory.resolve("volume"));
-        Config config = new Config().numColumns(1).totalBuckets(4);
-        config.governanceMode = Config.GovernanceMode.NOOP;
-        config.logConsole = false;
-        config.addVolume(volume.toString());
+        Config config = nativeConfig(volume, 4);
         Db db = Db.open(config, 0, 3);
-        db.put(0, "key".getBytes("UTF-8"), 0, "value".getBytes("UTF-8"));
+        db.put(0, utf8("key"), 0, utf8("value"));
         ShardSnapshot shard = db.asyncSnapshot().get();
         db.retainSnapshot(shard.snapshotId);
-        java.nio.file.Path state = directory.resolve("task-state");
+
         StateInspectSchema stateSchema =
                 StateInspectSchema.forValue(
                         "state",
@@ -400,6 +310,7 @@ class CobbleEmbeddedCheckpointMonitorTest {
                         StateInspectType.scalar("INT"),
                         StateInspectType.unknown(),
                         StateInspectType.scalar("INT")));
+        java.nio.file.Path state = directory.resolve("task-state");
         try (DataOutputStream output = new DataOutputStream(Files.newOutputStream(state))) {
             CobbleSnapshotMetadataCodec.write(
                     new CobbleSnapshotMetadataPayload(
@@ -431,14 +342,30 @@ class CobbleEmbeddedCheckpointMonitorTest {
                             3L, Collections.singletonList(operator), Collections.emptyList()),
                     output);
         }
-        return new ReadableSavepoint(directory, db);
+        return new ReadableCheckpoint(directory, db);
     }
 
-    private static final class ReadableSavepoint implements AutoCloseable {
+    private Config nativeConfig(java.nio.file.Path volume, int totalBuckets) {
+        Config config = new Config().numColumns(1).totalBuckets(totalBuckets);
+        config.governanceMode = Config.GovernanceMode.NOOP;
+        config.logConsole = false;
+        config.addVolume(volume.toString());
+        return config;
+    }
+
+    private static byte[] utf8(String value) {
+        return value.getBytes(StandardCharsets.UTF_8);
+    }
+
+    private static String utf8(byte[] value) {
+        return new String(value, StandardCharsets.UTF_8);
+    }
+
+    private static final class ReadableCheckpoint implements AutoCloseable {
         private final java.nio.file.Path directory;
         private final Db db;
 
-        private ReadableSavepoint(java.nio.file.Path directory, Db db) {
+        private ReadableCheckpoint(java.nio.file.Path directory, Db db) {
             this.directory = directory;
             this.db = db;
         }

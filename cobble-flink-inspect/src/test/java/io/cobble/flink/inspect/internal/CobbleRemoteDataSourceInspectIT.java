@@ -1,4 +1,4 @@
-package io.cobble.flink.monitor;
+package io.cobble.flink.inspect.internal;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 
@@ -8,16 +8,12 @@ import io.cobble.flink.common.inspect.InspectSchemaRegistryLayout;
 import io.cobble.flink.common.inspect.SinkInspectField;
 import io.cobble.flink.common.inspect.SinkInspectSchema;
 import io.cobble.flink.common.inspect.SinkInspectSchemaStore;
+import io.cobble.flink.inspect.CobbleInspectClient;
+import io.cobble.flink.inspect.InspectCatalog;
 
-import com.google.gson.JsonObject;
-import com.google.gson.JsonParser;
 import org.junit.jupiter.api.Assumptions;
 import org.junit.jupiter.api.Test;
 
-import java.net.URI;
-import java.net.http.HttpClient;
-import java.net.http.HttpRequest;
-import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
 import java.util.Arrays;
 import java.util.Collections;
@@ -25,14 +21,14 @@ import java.util.HashMap;
 import java.util.Map;
 import java.util.UUID;
 
-class CobbleRemoteDataSourceIT {
+class CobbleRemoteDataSourceInspectIT {
 
     @Test
-    void httpDiscoversRemoteDataSourceWithConnectorOnlyStorageOptions() throws Exception {
+    void sdkDiscoversRemoteDataSourceAndSchemaWithConnectorOnlyStorageOptions() throws Exception {
         Assumptions.assumeTrue(Boolean.getBoolean("cobble.test.s3.enabled"));
         String endpoint = System.getProperty("cobble.test.s3.endpoint", "http://127.0.0.1:9000");
         String bucket = System.getProperty("cobble.test.s3.bucket", "cobble-test");
-        String root = "s3://" + bucket + "/cobble-monitor-data-source-" + UUID.randomUUID();
+        String root = "s3://" + bucket + "/cobble-inspect-data-source-" + UUID.randomUUID();
         Map<String, String> values = new HashMap<>();
         values.put("s3.endpoint", endpoint);
         values.put("s3.access-key", System.getProperty("cobble.test.s3.access-key", "eeeeeeee"));
@@ -55,38 +51,16 @@ class CobbleRemoteDataSourceIT {
                 fileIO.write("inspect-schema/blobs/" + blob, schema);
             }
 
-            ServerConfig config = new ServerConfig();
-            config.port = 0;
-            config.totalBuckets = 1;
-            config.storageOptions = options;
-            try (CobbleFlinkMonitorServer.RunningServer server =
-                    CobbleFlinkMonitorServer.start(config)) {
-                URI endpointUri =
-                        URI.create(
-                                "http://127.0.0.1:"
-                                        + server.address().getPort()
-                                        + "/api/v1/discovery");
-                HttpResponse<String> response =
-                        HttpClient.newHttpClient()
-                                .send(
-                                        HttpRequest.newBuilder(endpointUri)
-                                                .header("Content-Type", "application/json")
-                                                .POST(
-                                                        HttpRequest.BodyPublishers.ofString(
-                                                                "{\"source\":\"" + root + "\"}"))
-                                                .build(),
-                                        HttpResponse.BodyHandlers.ofString());
-                assertEquals(200, response.statusCode(), response.body());
-                JsonObject catalog = JsonParser.parseString(response.body()).getAsJsonObject();
-                assertEquals("data_source", catalog.get("source_kind").getAsString());
-                assertEquals(
-                        7L,
-                        catalog.getAsJsonArray("checkpoints")
-                                .get(0)
-                                .getAsJsonObject()
-                                .get("checkpoint_id")
-                                .getAsLong());
+            try (CobbleInspectClient client =
+                    CobbleInspectClient.builder().storageOptions(options).totalBuckets(1).build()) {
+                InspectCatalog catalog = client.discover(root);
+                assertEquals("data_source", catalog.sourceKind());
+                assertEquals(1, catalog.checkpoints().size());
+                assertEquals(7L, catalog.checkpoints().get(0).checkpointId());
             }
+            SinkSchemaResolveResult resolved = SinkInspectSchemaResolver.resolve(root, 7L, options);
+            assertEquals(SinkSchemaResolveResult.STATUS_AVAILABLE, resolved.status);
+            assertEquals("name", resolved.store.schema().valueFields().get(0).name());
         } finally {
             cleanup(root, options, event, blob);
         }
