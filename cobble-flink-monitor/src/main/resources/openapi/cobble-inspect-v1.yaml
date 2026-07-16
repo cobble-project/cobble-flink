@@ -90,7 +90,7 @@ paths:
             application/json:
               schema: {$ref: '#/components/schemas/ScanResponse'}
         '400': {$ref: '#/components/responses/InvalidInput'}
-        '410': {$ref: '#/components/responses/SessionExpired'}
+        '410': {$ref: '#/components/responses/ScanLookupUnavailable'}
   /api/v1/sessions/{session_id}/lookup:
     parameters:
       - {$ref: '#/components/parameters/SessionId'}
@@ -110,7 +110,7 @@ paths:
             application/json:
               schema: {$ref: '#/components/schemas/LookupResponse'}
         '400': {$ref: '#/components/responses/InvalidInput'}
-        '410': {$ref: '#/components/responses/SessionExpired'}
+        '410': {$ref: '#/components/responses/ScanLookupUnavailable'}
 components:
   parameters:
     SessionId:
@@ -385,6 +385,16 @@ components:
         application/json:
           schema: {$ref: '#/components/schemas/Error'}
           example: {code: SESSION_EXPIRED, message: Unknown or expired inspect session, request_id: s8vJ4G3YI1w}
+    ScanLookupUnavailable:
+      description: Session expired or the pinned checkpoint is incomplete or expired
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/Error'}
+          examples:
+            session_expired:
+              value: {code: SESSION_EXPIRED, message: Unknown or expired inspect session, request_id: s8vJ4G3YI1w}
+            checkpoint_unavailable:
+              value: {code: CHECKPOINT_UNAVAILABLE, message: The checkpoint is incomplete or expired, request_id: s8vJ4G3YI1w}
     SessionLimit:
       description: Configured concurrent session limit reached
       content:

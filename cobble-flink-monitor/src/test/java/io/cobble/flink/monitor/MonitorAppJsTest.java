@@ -36,6 +36,163 @@ class MonitorAppJsTest {
     }
 
     @Test
+    void latestSessionFailuresRecoverOnceAndPreserveRequestState() throws Exception {
+        String appJs = readAppJs();
+        String harness =
+                "const elements = {};\n"
+                        + "const element = () => ({\n"
+                        + "  value: '', checked: false, disabled: false, textContent: '', innerHTML: '', dataset: {},\n"
+                        + "  classList: { toggle() {}, add() {}, remove() {}, contains() { return false } },\n"
+                        + "  addEventListener() {}, appendChild() {}, querySelectorAll() { return [] },\n"
+                        + "  querySelector() { return element() }, setAttribute() {}, closest() { return null },\n"
+                        + "});\n"
+                        + "const document = {\n"
+                        + "  getElementById: (id) => elements[id] || (elements[id] = element()),\n"
+                        + "  createElement: () => element(), querySelectorAll: () => [], querySelector: () => element(),\n"
+                        + "  addEventListener() {},\n"
+                        + "};\n"
+                        + "const window = { addEventListener() {} };\n"
+                        + "let fetch = async () => { throw new Error('unexpected fetch') };\n"
+                        + appJs
+                        + "\nconst target = { id: 'raw', name: 'raw', kind: 'state', allows_columns: false };\n"
+                        + "const catalog = { checkpoints: [{ checkpoint_id: 11, directory: '/chk-11', operators: [{ id: 'op' }] }] };\n"
+                        + "const replacement = { session_id: 'new', source: 'file:///root', source_kind: 'checkpoint', checkpoint_id: 11, operator_id: 'op', targets: [target], total_buckets: 1 };\n"
+                        + "const success = (body) => ({ ok: true, status: 200, json: async () => body });\n"
+                        + "const gone = (code) => ({ ok: false, status: 410, json: async () => ({ code, message: code }) });\n"
+                        + "const setup = (selectedLatest = true) => {\n"
+                        + "  state.sessionId = 'old'; state.sourcePath = 'file:///root'; state.selectedLatest = selectedLatest;\n"
+                        + "  state.sessionRecoveryPromise = null; state.inspectMode = 'scan'; state.trackedLookups = [];\n"
+                        + "  state.meta = { source_open: true, source: 'file:///root', source_kind: 'checkpoint', selected_checkpoint_id: 10, selected_operator_id: 'op', inspect_targets: [target], total_buckets: 1, overview: {} };\n"
+                        + "  state.previousPageCursors = []; state.currentPageCursor = null; state.nextPageCursor = null; state.pageNumber = 1; state.scanHasResult = false;\n"
+                        + "  elements['inspect-target'].value = 'raw'; elements['limit'].value = '50'; elements['bucket'].value = 'all'; elements['prefix'].value = 'keep-filter';\n"
+                        + "};\n"
+                        + "const installFetch = (failureCode, calls, retryFailureCode = null) => {\n"
+                        + "  fetch = async (path, options = {}) => {\n"
+                        + "    const body = options.body ? JSON.parse(options.body) : null; calls.push({ path, method: options.method || 'GET', body });\n"
+                        + "    if (path === '/api/v1/discovery') return success(catalog);\n"
+                        + "    if (path === '/api/v1/sessions' && options.method === 'POST') return success(replacement);\n"
+                        + "    if (path === '/api/v1/sessions/new/overview') return success({ items: [] });\n"
+                        + "    if (path.includes('/scan')) return path.includes('/old/') ? gone(failureCode) : retryFailureCode ? gone(retryFailureCode) : success({ rows: [] });\n"
+                        + "    if (path.includes('/lookup')) return path.includes('/old/') ? gone(failureCode) : retryFailureCode ? gone(retryFailureCode) : success({ rows: [{ key_b64: 'aw==', value_b64: 'dg==', found: true }] });\n"
+                        + "    if (path.includes('/concurrent-')) return path.includes('/old/') ? gone(failureCode) : success({});\n"
+                        + "    return success({});\n"
+                        + "  };\n"
+                        + "};\n"
+                        + "setup(true);\n"
+                        + "state.previousPageCursors = [null]; state.currentPageCursor = 'old-page'; state.nextPageCursor = 'next-page'; state.pageNumber = 2; state.scanHasResult = true;\n"
+                        + "const scanCalls = []; installFetch('SESSION_EXPIRED', scanCalls); await runScan('refresh');\n"
+                        + "const scanRequests = scanCalls.filter((call) => call.path.includes('/scan'));\n"
+                        + "const latest410 = scanRequests.length === 2 && scanRequests[0].body.page_token === 'old-page' && !('page_token' in scanRequests[1].body) && state.pageNumber === 1 && elements['prefix'].value === 'keep-filter';\n"
+                        + "const singleRetry = scanCalls.filter((call) => call.path === '/api/v1/sessions' && call.method === 'POST').length === 1;\n"
+                        + "setup(true); state.inspectMode = 'lookup'; const tracked = { id: 'tracked', targetId: 'raw', columns: '', bucket: 0, keyB64: 'aw==', keyUtf8: 'k' }; state.trackedLookups = [tracked];\n"
+                        + "const lookupCalls = []; installFetch('CHECKPOINT_UNAVAILABLE', lookupCalls); await runLookup();\n"
+                        + "const lookupPreserved = state.trackedLookups.length === 1 && state.trackedLookups[0] === tracked && state.trackedLookups[0].found === true;\n"
+                        + "const latestMissingFile = lookupCalls.filter((call) => call.path.includes('/lookup')).length === 2 && lookupCalls.filter((call) => call.path === '/api/v1/sessions' && call.method === 'POST').length === 1;\n"
+                        + "const fixedCheckpointMessage = 'The selected checkpoint is incomplete or expired. Choose Latest or open another checkpoint.';\n"
+                        + "const fixedCheckpoint = async (code) => { setup(false); const calls = []; installFetch(code, calls); let message = ''; try { await withSessionRecovery(() => request(`/api/v1/sessions/${state.sessionId}/scan`)); } catch (error) { message = error.message; } return message === fixedCheckpointMessage && calls.filter((call) => call.path === '/api/v1/discovery').length === 0; };\n"
+                        + "const fixedCheckpointUnavailable = await fixedCheckpoint('CHECKPOINT_UNAVAILABLE');\n"
+                        + "const fixedSessionExpired = await fixedCheckpoint('SESSION_EXPIRED');\n"
+                        + "const retryStopsAfterRecovery = async (code) => { setup(true); const calls = []; installFetch(code, calls, code); let retryCode = ''; try { await withSessionRecovery(() => request(`/api/v1/sessions/${state.sessionId}/scan`)); } catch (error) { retryCode = error.code; } const scans = calls.filter((call) => call.path.includes('/scan')); const replacements = calls.filter((call) => call.path === '/api/v1/sessions' && call.method === 'POST'); return retryCode === code && scans.length === 2 && replacements.length === 1; };\n"
+                        + "const retrySessionExpiredStops = await retryStopsAfterRecovery('SESSION_EXPIRED');\n"
+                        + "const retryCheckpointUnavailableStops = await retryStopsAfterRecovery('CHECKPOINT_UNAVAILABLE');\n"
+                        + "setup(true); const concurrentCalls = []; installFetch('SESSION_EXPIRED', concurrentCalls); await Promise.all([withSessionRecovery(() => request(`/api/v1/sessions/${state.sessionId}/concurrent-a`)), withSessionRecovery(() => request(`/api/v1/sessions/${state.sessionId}/concurrent-b`))]);\n"
+                        + "const concurrentDedup = concurrentCalls.filter((call) => call.path === '/api/v1/sessions' && call.method === 'POST').length === 1;\n"
+                        + "console.log(JSON.stringify({ latest410, latestMissingFile, fixedCheckpointUnavailable, fixedSessionExpired, singleRetry, retrySessionExpiredStops, retryCheckpointUnavailableStops, concurrentDedup, lookupPreserved }));\n";
+
+        Process process = new ProcessBuilder("node", "--input-type=module", "-").start();
+        process.getOutputStream().write(harness.getBytes(StandardCharsets.UTF_8));
+        process.getOutputStream().close();
+        String stdout = new String(process.getInputStream().readAllBytes(), StandardCharsets.UTF_8);
+        String stderr = new String(process.getErrorStream().readAllBytes(), StandardCharsets.UTF_8);
+        int exit = process.waitFor();
+
+        assertEquals(0, exit, stderr);
+        assertTrue(stdout.contains("\"latest410\":true"));
+        assertTrue(stdout.contains("\"latestMissingFile\":true"));
+        assertTrue(stdout.contains("\"fixedCheckpointUnavailable\":true"));
+        assertTrue(stdout.contains("\"fixedSessionExpired\":true"));
+        assertTrue(stdout.contains("\"singleRetry\":true"));
+        assertTrue(stdout.contains("\"retrySessionExpiredStops\":true"));
+        assertTrue(stdout.contains("\"retryCheckpointUnavailableStops\":true"));
+        assertTrue(stdout.contains("\"concurrentDedup\":true"));
+        assertTrue(stdout.contains("\"lookupPreserved\":true"));
+    }
+
+    @Test
+    void latestRecoveryFollowsOnlyNewCheckpointIds() throws Exception {
+        String appJs = readAppJs();
+        String harness =
+                "const elements = {};\n"
+                        + "const element = () => ({\n"
+                        + "  value: '', checked: false, disabled: false, textContent: '', innerHTML: '', dataset: {},\n"
+                        + "  classList: { toggle() {}, add() {}, remove() {}, contains() { return false } },\n"
+                        + "  addEventListener() {}, appendChild() {}, querySelectorAll() { return [] },\n"
+                        + "  querySelector() { return element() }, setAttribute() {}, closest() { return null },\n"
+                        + "});\n"
+                        + "const document = {\n"
+                        + "  getElementById: (id) => elements[id] || (elements[id] = element()),\n"
+                        + "  createElement: () => element(), querySelectorAll: () => [], querySelector: () => element(),\n"
+                        + "  addEventListener() {},\n"
+                        + "};\n"
+                        + "const window = { addEventListener() {} };\n"
+                        + "let fetch = async () => { throw new Error('unexpected fetch') };\n"
+                        + appJs
+                        + "\nconst target = { id: 'raw', name: 'raw', kind: 'state', allows_columns: false };\n"
+                        + "const success = (body) => ({ ok: true, status: 200, json: async () => body });\n"
+                        + "const gone = () => ({ ok: false, status: 410, json: async () => ({ code: 'SESSION_EXPIRED', message: 'expired' }) });\n"
+                        + "const setup = (checkpointId = 10) => {\n"
+                        + "  state.sessionId = `session-${checkpointId}`; state.sourcePath = 'file:///root'; state.selectedLatest = true; state.sessionRecoveryPromise = null; state.sessionRecoveryCheckpointId = null;\n"
+                        + "  state.meta = { source_open: true, source: 'file:///root', source_kind: 'checkpoint', selected_checkpoint_id: checkpointId, selected_operator_id: 'op', inspect_targets: [target], total_buckets: 1, overview: {} };\n"
+                        + "  state.trackedLookups = []; state.previousPageCursors = []; state.currentPageCursor = null; state.nextPageCursor = null; state.pageNumber = 1; state.scanHasResult = false;\n"
+                        + "  elements['inspect-target'].value = 'raw'; elements['limit'].value = '50'; elements['bucket'].value = 'all'; elements['prefix'].value = '';\n"
+                        + "};\n"
+                        + "const installTransitions = (latestIds, failingSessionIds, calls) => {\n"
+                        + "  let discoveryIndex = 0; let latestId = null;\n"
+                        + "  fetch = async (path, options = {}) => {\n"
+                        + "    calls.push({ path, method: options.method || 'GET' });\n"
+                        + "    if (path === '/api/v1/discovery') { latestId = latestIds[Math.min(discoveryIndex, latestIds.length - 1)]; discoveryIndex += 1; return success({ checkpoints: [{ checkpoint_id: latestId, directory: `/chk-${latestId}`, operators: [{ id: 'op' }] }] }); }\n"
+                        + "    if (path === '/api/v1/sessions' && options.method === 'POST') return success({ session_id: `session-${latestId}`, source: 'file:///root', source_kind: 'checkpoint', checkpoint_id: latestId, operator_id: 'op', targets: [target], total_buckets: 1 });\n"
+                        + "    if (path.includes('/overview')) return success({ items: [] });\n"
+                        + "    if (path.includes('/operation/')) { const sessionId = path.split('/').pop(); return failingSessionIds.has(sessionId) ? gone() : success({}); }\n"
+                        + "    return success({});\n"
+                        + "  };\n"
+                        + "};\n"
+                        + "const operation = () => withSessionRecovery(() => request(`/operation/${state.sessionId}`));\n"
+                        + "const attempts = (calls) => calls.filter((call) => call.path.includes('/operation/')).map((call) => call.path.split('/').pop());\n"
+                        + "const replacements = (calls) => calls.filter((call) => call.path === '/api/v1/sessions' && call.method === 'POST').length;\n"
+                        + "setup(); const sameCalls = []; installTransitions([10], new Set(['session-10']), sameCalls); let sameError = null; try { await operation(); } catch (error) { sameError = error; }\n"
+                        + "const sameIdStops = sameError?.code === 'SESSION_EXPIRED' && attempts(sameCalls).length === 1 && replacements(sameCalls) === 0;\n"
+                        + "setup(); const lowerCalls = []; installTransitions([9], new Set(['session-10']), lowerCalls); let lowerError = null; try { await operation(); } catch (error) { lowerError = error; }\n"
+                        + "const lowerIdStops = lowerError?.code === 'SESSION_EXPIRED' && attempts(lowerCalls).length === 1 && replacements(lowerCalls) === 0;\n"
+                        + "setup(); const sequenceCalls = []; installTransitions([11, 12], new Set(['session-10', 'session-11']), sequenceCalls); await operation(); const sequenceAttempts = attempts(sequenceCalls);\n"
+                        + "const newerSequenceSucceeds = sequenceAttempts.join(',') === 'session-10,session-11,session-12' && replacements(sequenceCalls) === 2;\n"
+                        + "const noCheckpointTwice = new Set(sequenceAttempts).size === sequenceAttempts.length;\n"
+                        + "setup(); const cappedCalls = []; installTransitions([11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21], new Set(['session-10', 'session-11', 'session-12', 'session-13', 'session-14', 'session-15', 'session-16', 'session-17', 'session-18', 'session-19', 'session-20']), cappedCalls); let cappedError = null; try { await operation(); } catch (error) { cappedError = error; }\n"
+                        + "const transitionCapStops = cappedError?.code === 'SESSION_EXPIRED' && attempts(cappedCalls).length === 11 && replacements(cappedCalls) === 10;\n"
+                        + "setup(); const concurrentCalls = []; installTransitions([11, 12], new Set(['session-10', 'session-11']), concurrentCalls); await Promise.all([operation(), operation()]);\n"
+                        + "const concurrentTransitionsShared = replacements(concurrentCalls) === 2 && concurrentCalls.filter((call) => call.path === '/api/v1/discovery').length === 2;\n"
+                        + "setup(11); const overlapCalls = []; installTransitions([12], new Set(['session-11']), overlapCalls); state.sessionRecoveryPromise = new Promise(() => {}); state.sessionRecoveryCheckpointId = 10; await Promise.all([operation(), operation()]);\n"
+                        + "const crossGenerationDedup = replacements(overlapCalls) === 1 && overlapCalls.filter((call) => call.path === '/api/v1/discovery').length === 1 && state.sessionId === 'session-12';\n"
+                        + "console.log(JSON.stringify({ sameIdStops, lowerIdStops, newerSequenceSucceeds, transitionCapStops, noCheckpointTwice, concurrentTransitionsShared, crossGenerationDedup }));\n";
+
+        Process process = new ProcessBuilder("node", "--input-type=module", "-").start();
+        process.getOutputStream().write(harness.getBytes(StandardCharsets.UTF_8));
+        process.getOutputStream().close();
+        String stdout = new String(process.getInputStream().readAllBytes(), StandardCharsets.UTF_8);
+        String stderr = new String(process.getErrorStream().readAllBytes(), StandardCharsets.UTF_8);
+        int exit = process.waitFor();
+
+        assertEquals(0, exit, stderr);
+        assertTrue(stdout.contains("\"sameIdStops\":true"));
+        assertTrue(stdout.contains("\"lowerIdStops\":true"));
+        assertTrue(stdout.contains("\"newerSequenceSucceeds\":true"));
+        assertTrue(stdout.contains("\"transitionCapStops\":true"));
+        assertTrue(stdout.contains("\"noCheckpointTwice\":true"));
+        assertTrue(stdout.contains("\"concurrentTransitionsShared\":true"));
+        assertTrue(stdout.contains("\"crossGenerationDedup\":true"));
+    }
+
+    @Test
     void semanticTableGroupsUsesAccumulatorLabelForAggregatingAndValueForOthers() throws Exception {
         String appJs = readAppJs();
         String harness =

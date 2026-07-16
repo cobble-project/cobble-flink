@@ -774,8 +774,11 @@ final class InspectSessionImpl implements InspectSession {
     }
 
     private static InspectException unreadable(String message, RuntimeException error) {
-        return new InspectException(
-                InspectErrorCode.UNREADABLE, message + ": " + message(error), error);
+        InspectErrorCode code =
+                CheckpointUnavailableClassifier.isCheckpointUnavailable(error)
+                        ? InspectErrorCode.CHECKPOINT_UNAVAILABLE
+                        : InspectErrorCode.UNREADABLE;
+        return new InspectException(code, message + ": " + message(error), error);
     }
 
     static String message(Throwable error) {

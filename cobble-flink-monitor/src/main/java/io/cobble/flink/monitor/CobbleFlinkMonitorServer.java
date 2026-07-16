@@ -507,6 +507,14 @@ public final class CobbleFlinkMonitorServer {
                     "The inspect session is closed",
                     requestId,
                     null);
+        } else if (code == InspectErrorCode.CHECKPOINT_UNAVAILABLE) {
+            sendError(
+                    exchange,
+                    410,
+                    "CHECKPOINT_UNAVAILABLE",
+                    "The checkpoint is incomplete or expired",
+                    requestId,
+                    null);
         } else if (code == InspectErrorCode.UNREADABLE) {
             sendError(
                     exchange,

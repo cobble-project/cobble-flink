@@ -18,6 +18,8 @@ const state = {
   trackedLookups: [],
   inspectRefreshTimer: null,
   inspectRefreshInFlight: false,
+  sessionRecoveryPromise: null,
+  sessionRecoveryCheckpointId: null,
   inspectAutoRefreshEnabled: false,
   inspectAutoRefreshSeconds: 5,
   errorSource: null,
@@ -36,6 +38,7 @@ const state = {
 const MAX_VALUE_DISPLAY_LENGTH = 300
 const LIST_VALUE_PAGE_SIZE = 100
 const COPY_POPOVER_MS = 1400
+const MAX_SESSION_RECOVERY_TRANSITIONS = 10
 
 const $ = (id) => document.getElementById(id)
 
@@ -118,10 +121,10 @@ async function refresh() {
       await replaceSession('latest', state.meta?.selected_operator_id || '', state.sourcePath, catalog)
       return
     }
-    const [session, overview] = await Promise.all([
+    const [session, overview] = await withSessionRecovery(() => Promise.all([
       request(`/api/v1/sessions/${state.sessionId}`),
       request(`/api/v1/sessions/${state.sessionId}/overview`),
-    ])
+    ]))
     applySession(session, catalog, overview)
     renderMeta()
     renderSnapshots()
@@ -489,7 +492,7 @@ async function switchSource(
   }
 }
 
-async function replaceSession(checkpointId, operatorId, source, discovered = null) {
+async function replaceSession(checkpointId, operatorId, source, discovered = null, options = {}) {
   if (!source) throw new Error('Enter a checkpoint root or Cobble data source path.')
   const catalog = discovered || await post('/api/v1/discovery', { source })
   const body = { source, checkpoint: checkpointId }
@@ -507,12 +510,119 @@ async function replaceSession(checkpointId, operatorId, source, discovered = nul
   state.selectedLatest = checkpointId === 'latest'
   applySession(replacement, catalog, replacementOverview)
   resetScanState()
-  clearTrackedLookups()
+  if (!options.preserveTrackedLookups) clearTrackedLookups()
   renderMeta()
   renderSnapshots()
   scheduleInspectAutoRefresh()
   if (previousId) {
     request(`/api/v1/sessions/${previousId}`, { method: 'DELETE' }).catch(() => {})
+  }
+  return replacement
+}
+
+function isSessionRecoveryError(error) {
+  return error?.code === 'SESSION_EXPIRED' || error?.code === 'CHECKPOINT_UNAVAILABLE'
+}
+
+function fixedCheckpointError(error) {
+  error.message = 'The selected checkpoint is incomplete or expired. Choose Latest or open another checkpoint.'
+  return error
+}
+
+async function recoverLatestSession(failedCheckpointId) {
+  if (state.sessionRecoveryPromise
+      && sameCheckpointId(state.sessionRecoveryCheckpointId, failedCheckpointId)) {
+    return state.sessionRecoveryPromise
+  }
+  const recovery = (async () => {
+    const source = state.sourcePath
+    if (!source) throw new Error('The latest checkpoint source is no longer available.')
+    const catalog = await post('/api/v1/discovery', { source })
+    const latestCheckpointId = catalog.checkpoints?.[0]?.checkpoint_id
+    if (!isNewerCheckpointId(failedCheckpointId, latestCheckpointId)
+        || !sameCheckpointId(selectedCheckpointId(), failedCheckpointId)) {
+      return { changed: false, checkpointId: selectedCheckpointId() }
+    }
+    const replacement = await replaceSession(
+      'latest',
+      state.meta?.selected_operator_id || '',
+      source,
+      catalog,
+      { preserveTrackedLookups: true },
+    )
+    const checkpointId = replacement.checkpoint_id
+    return {
+      changed: isNewerCheckpointId(failedCheckpointId, checkpointId),
+      checkpointId,
+    }
+  })()
+  state.sessionRecoveryPromise = recovery
+  state.sessionRecoveryCheckpointId = failedCheckpointId
+  try {
+    return await recovery
+  } finally {
+    if (state.sessionRecoveryPromise === recovery) {
+      state.sessionRecoveryPromise = null
+      state.sessionRecoveryCheckpointId = null
+    }
+  }
+}
+
+function selectedCheckpointId() {
+  return state.meta?.selected_checkpoint_id ?? null
+}
+
+function sameCheckpointId(left, right) {
+  return left != null && right != null && String(left) === String(right)
+}
+
+function isNewerCheckpointId(current, candidate) {
+  if (current == null || candidate == null) return false
+  try {
+    return BigInt(String(candidate)) > BigInt(String(current))
+  } catch (error) {
+    return false
+  }
+}
+
+async function withSessionRecovery(operation) {
+  const attemptedCheckpointIds = new Set()
+  let transitions = 0
+  let lastRecoveryError = null
+  while (true) {
+    const checkpointId = selectedCheckpointId()
+    if (checkpointId == null || attemptedCheckpointIds.has(String(checkpointId))) {
+      throw lastRecoveryError || new Error('The latest checkpoint could not be recovered.')
+    }
+    attemptedCheckpointIds.add(String(checkpointId))
+    try {
+      return await operation()
+    } catch (error) {
+      if (!isSessionRecoveryError(error)) throw error
+      if (!state.selectedLatest) throw fixedCheckpointError(error)
+      lastRecoveryError = error
+
+      const currentCheckpointId = selectedCheckpointId()
+      if (!sameCheckpointId(checkpointId, currentCheckpointId)) {
+        if (!isNewerCheckpointId(checkpointId, currentCheckpointId)
+            || transitions >= MAX_SESSION_RECOVERY_TRANSITIONS
+            || attemptedCheckpointIds.has(String(currentCheckpointId))) {
+          throw error
+        }
+        transitions += 1
+        continue
+      }
+      if (transitions >= MAX_SESSION_RECOVERY_TRANSITIONS) throw error
+
+      const recovery = await recoverLatestSession(checkpointId)
+      if (!recovery.changed
+          || recovery.checkpointId == null
+          || !isNewerCheckpointId(checkpointId, recovery.checkpointId)
+          || attemptedCheckpointIds.has(String(recovery.checkpointId))) {
+        throw error
+      }
+      transitions += 1
+    }
   }
 }
 
@@ -650,49 +760,52 @@ async function runScan(direction = 'reset') {
   if (direction === 'next' && !state.nextPageCursor) return
   if (direction === 'previous' && state.previousPageCursors.length === 0) return
   const previousPagination = snapshotPagination()
+  const previousSessionId = state.sessionId
   applyPageMove(direction)
   setLoading(true)
   try {
-    const target = activeTarget()
-    const body = {
-      target_id: activeTargetId(),
-      limit: Number($('limit').value || 50),
-    }
-    const bucket = $('bucket').value.trim()
-    if (bucket && bucket.toLowerCase() !== 'all') body.bucket = Number(bucket)
-    const columns = parseColumns(activeColumns())
-    if (columns) body.columns = columns
-    if (state.currentPageCursor) body.page_token = state.currentPageCursor
+    const response = await withSessionRecovery(() => {
+      const target = activeTarget()
+      const body = {
+        target_id: activeTargetId(),
+        limit: Number($('limit').value || 50),
+      }
+      const bucket = $('bucket').value.trim()
+      if (bucket && bucket.toLowerCase() !== 'all') body.bucket = Number(bucket)
+      const columns = parseColumns(activeColumns())
+      if (columns) body.columns = columns
+      if (state.currentPageCursor) body.page_token = state.currentPageCursor
 
-    if (isSemanticStateKeyFilterTarget(target)) {
-      const values = activeSemanticStateKeyFilters(target)
-      const stateKey = {
-        state_key_fields: typedGroupFields(target, 'state_key', values.state_key || []),
-        namespace_fields: typedGroupFields(target, 'namespace', values.namespace || []),
-        map_key_fields: typedGroupFields(target, 'map_key', values.map_key || []),
-      }
-      const hasFields = Object.values(stateKey).some((fields) => fields.length > 0)
-      if (hasFields) {
-        body.filter = {
-          kind: 'state',
-          auto_key_group: Boolean($('key-group-auto').checked),
-          state_key: stateKey,
+      if (isSemanticStateKeyFilterTarget(target)) {
+        const values = activeSemanticStateKeyFilters(target)
+        const stateKey = {
+          state_key_fields: typedGroupFields(target, 'state_key', values.state_key || []),
+          namespace_fields: typedGroupFields(target, 'namespace', values.namespace || []),
+          map_key_fields: typedGroupFields(target, 'map_key', values.map_key || []),
         }
-      }
-    } else if (isSinkKeyFilterTarget(target)) {
-      const values = activeSinkKeyValues(target)
-      if (values.length > 0) {
-        body.filter = {
-          kind: 'sink',
-          fields: values.map((value, index) => typedField(target.key_fields[index], value)),
+        const hasFields = Object.values(stateKey).some((fields) => fields.length > 0)
+        if (hasFields) {
+          body.filter = {
+            kind: 'state',
+            auto_key_group: Boolean($('key-group-auto').checked),
+            state_key: stateKey,
+          }
         }
+      } else if (isSinkKeyFilterTarget(target)) {
+        const values = activeSinkKeyValues(target)
+        if (values.length > 0) {
+          body.filter = {
+            kind: 'sink',
+            fields: values.map((value, index) => typedField(target.key_fields[index], value)),
+          }
+        }
+      } else {
+        body.prefix_b64 = utf8Base64($('prefix').value || '')
       }
-    } else {
-      body.prefix_b64 = utf8Base64($('prefix').value || '')
-    }
-
-    const response = await post(`/api/v1/sessions/${state.sessionId}/scan`, body)
+      return post(`/api/v1/sessions/${state.sessionId}/scan`, body)
+    })
     const items = (response.rows || []).map(wireRow)
+    const target = activeTarget()
     const data = {
       scan: { items, next_page_token: response.next_page_token },
       inspect_target: target,
@@ -708,7 +821,7 @@ async function runScan(direction = 'reset') {
     renderLastUpdates()
     clearError('inspect')
   } catch (error) {
-    restorePagination(previousPagination)
+    if (state.sessionId === previousSessionId) restorePagination(previousPagination)
     renderPager()
     showError(error, 'inspect')
   } finally {
@@ -734,7 +847,8 @@ async function runLookup() {
       }
       const columns = parseColumns(group.columns)
       if (columns) body.columns = columns
-      const response = await post(`/api/v1/sessions/${state.sessionId}/lookup`, body)
+      const response = await withSessionRecovery(() =>
+        post(`/api/v1/sessions/${state.sessionId}/lookup`, body))
       ;(response.rows || []).forEach((wire, index) => {
         const result = wireRow(wire)
         const tracked = group.items[index]

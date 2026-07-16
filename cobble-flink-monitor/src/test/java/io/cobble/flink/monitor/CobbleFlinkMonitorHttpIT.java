@@ -513,6 +513,7 @@ class CobbleFlinkMonitorHttpIT {
         assertTrue(contract.contains("DecodedValue:"));
         assertTrue(contract.contains("key_b64"));
         assertTrue(contract.contains("next_page_token"));
+        assertTrue(contract.contains("CHECKPOINT_UNAVAILABLE"));
     }
 
     private JsonObject createSession(HttpClient http, URI base, Path source) throws Exception {
