@@ -31,6 +31,8 @@ import java.util.NoSuchElementException;
 final class CobbleMapState<K, N, UK, UV> extends AbstractCobbleState<K, N, Map<UK, UV>>
         implements InternalMapState<K, N, UK, UV> {
 
+    private static final int MAP_ITERATION_READ_AHEAD_BYTES = 64 * 1024;
+
     private final TypeSerializer<UK> userKeySerializer;
     private final TypeSerializer<UV> userValueSerializer;
     /**
@@ -41,6 +43,7 @@ final class CobbleMapState<K, N, UK, UV> extends AbstractCobbleState<K, N, Map<U
 
     private final ScanOptions emptyCheckScanOptions;
     private final ScanOptions emptyCheckFastScanOptions;
+    private final ScanOptions mapIterationScanOptions;
     // Fixed user-key length from serializer.getLength(); -1 means variable.
     private final int userKeyFixedLength;
     // Whether map row-key trailer persists key length / namespace length.
@@ -73,6 +76,10 @@ final class CobbleMapState<K, N, UK, UV> extends AbstractCobbleState<K, N, Map<U
         this.emptyCheckScanOptions = ScanOptions.defaults().columnFamily(columnFamily);
         this.emptyCheckFastScanOptions =
                 ScanOptions.defaults().columnFamily(columnFamily).maxRows(1);
+        this.mapIterationScanOptions =
+                ScanOptions.defaults()
+                        .columnFamily(columnFamily)
+                        .readAheadBytes(MAP_ITERATION_READ_AHEAD_BYTES);
         this.userKeyFixedLength = CobbleStateKeySerializer.maybeFixedLength(userKeySerializer);
         int keyFixedLength = CobbleStateKeySerializer.maybeFixedLength(keySerializer);
         int namespaceFixedLength = CobbleStateKeySerializer.maybeFixedLength(namespaceSerializer);
@@ -226,12 +233,13 @@ final class CobbleMapState<K, N, UK, UV> extends AbstractCobbleState<K, N, Map<U
         byte[] keyNamespacePrefix = mapKeyNamespacePrefix(key, namespace);
         DirectScanBounds directScanBounds = prepareDirectScanBounds(keyNamespacePrefix);
         DirectScanCursor cursor =
-                scanDirectRows(
+                scanDirectRowsWithOptions(
                         bucket,
                         directScanBounds.startKeyBuffer,
                         directScanBounds.startKeyLength,
                         directScanBounds.endKeyBuffer,
-                        directScanBounds.endKeyLength);
+                        directScanBounds.endKeyLength,
+                        mapIterationScanOptions);
         return new StreamingMapEntryIterator<>(
                 cursor,
                 keyNamespacePrefix,
@@ -402,12 +410,16 @@ final class CobbleMapState<K, N, UK, UV> extends AbstractCobbleState<K, N, Map<U
     @Override
     public void close() {
         try {
-            emptyCheckFastScanOptions.close();
+            mapIterationScanOptions.close();
         } finally {
             try {
-                emptyCheckScanOptions.close();
+                emptyCheckFastScanOptions.close();
             } finally {
-                super.close();
+                try {
+                    emptyCheckScanOptions.close();
+                } finally {
+                    super.close();
+                }
             }
         }
     }
@@ -429,12 +441,13 @@ final class CobbleMapState<K, N, UK, UV> extends AbstractCobbleState<K, N, Map<U
 
         DirectScanBounds directScanBounds = prepareDirectScanBounds(keyNamespacePrefix);
         try (DirectScanCursor cursor =
-                scanDirectRows(
+                scanDirectRowsWithOptions(
                         bucket,
                         directScanBounds.startKeyBuffer,
                         directScanBounds.startKeyLength,
                         directScanBounds.endKeyBuffer,
-                        directScanBounds.endKeyLength)) {
+                        directScanBounds.endKeyLength,
+                        mapIterationScanOptions)) {
             boolean done = false;
             while (!done) {
                 DirectScanRow row = cursor.nextRow();

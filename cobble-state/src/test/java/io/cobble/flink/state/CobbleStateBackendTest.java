@@ -3076,7 +3076,8 @@ class CobbleStateBackendTest {
     }
 
     @Test
-    void mapStateIteratorSetValueThrowsUnsupported(@TempDir Path tempDir) throws Exception {
+    void mapStateIteratorDrainsBeforeBackendCloseAndEntriesStayImmutable(@TempDir Path tempDir)
+            throws Exception {
         try (TestBackendContext context =
                 createBackendContext(tempDir, false, null, MemorySize.ofMebiBytes(1))) {
             CobbleKeyedStateBackend<Integer> backend = context.cobbleBackend;
@@ -3101,6 +3102,7 @@ class CobbleStateBackendTest {
             while (it.hasNext()) {
                 it.next();
             }
+            assertFalse(it.hasNext());
         }
     }
 
