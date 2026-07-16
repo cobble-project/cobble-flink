@@ -194,9 +194,9 @@ backend.
 | `state.backend.cobble.compaction.remote.addr` | none | Address (`host:port`) of a Cobble remote compactor. When unset, compaction runs locally in the TaskManager. |
 | `state.backend.cobble.compaction.remote.timeout` | `300s` | Timeout for a single remote compaction request. |
 | `state.backend.cobble.compaction.threads` | `4` | Number of Cobble compaction worker threads on the writer (TaskManager) side. When compaction runs locally this is the local compaction thread pool; when remote compaction is enabled this sizes the writer's remote-compaction submission runtime. The remote compactor process has its own worker pool, configured by `compaction_threads` in its Cobble config (see [Remote Compaction](#remote-compaction)). |
-| `state.backend.cobble.sst.bloom-filter.enabled` | `false` | Whether SST bloom filters are enabled. |
+| `state.backend.cobble.sst.bloom-filter.enabled` | `true` | Whether SST bloom filters are enabled. |
 | `state.backend.cobble.sst.bloom-filter.bits-per-key` | `10` | Bloom-filter density used when bloom filters are enabled. |
-| `state.backend.cobble.sst.partitioned-index.enabled` | `false` | Whether partitioned SST index/filter blocks are enabled. |
+| `state.backend.cobble.sst.partitioned-index.enabled` | `true` | Whether partitioned SST index/filter blocks are enabled. |
 | `state.backend.cobble.value-separation.threshold` | `1kb` | Values larger than this threshold are separated into Cobble's value log. |
 | `state.backend.cobble.direct-io.buffer-size` | `2kb` | Size of each pooled direct I/O buffer used by Cobble reads. |
 | `state.backend.cobble.direct-io.pool-max-size` | `64` | Maximum number of pooled direct I/O buffers. |
@@ -204,7 +204,7 @@ backend.
 | `state.backend.cobble.log.keep-files` | `3` | Number of Cobble log files to retain. |
 | `state.backend.cobble.log.level` | `info` | Cobble native log level. Supported values are `trace`, `debug`, `info`, `warn`, `error`, and `off`. |
 | `state.backend.cobble.snapshot.retention` | none | Automatically expire older snapshots after this many newer snapshots have completed. |
-| `state.backend.cobble.localdir.primary-high-priority` | `false` | Whether the local Cobble directory stays a high-priority primary volume even when checkpoint storage is configured. |
+| `state.backend.cobble.localdir.primary-high-priority` | `false` | Use the local Cobble directory as the high-priority active-state volume. Checkpoint storage remains a low-priority fallback and stores metadata and snapshots. |
 
 For a first deployment, most users can start with just these keys:
 

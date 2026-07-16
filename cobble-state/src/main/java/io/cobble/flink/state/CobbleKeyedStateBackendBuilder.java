@@ -221,7 +221,9 @@ final class CobbleKeyedStateBackendBuilder<K> {
                         normalizedCheckpointDirectory, checkpointScopeDirectoryName);
         checkpointVolume.kinds =
                 Arrays.asList(
-                        Config.VolumeUsageKind.PRIMARY_DATA_PRIORITY_HIGH,
+                        localDirPrimaryHighPriority
+                                ? Config.VolumeUsageKind.PRIMARY_DATA_PRIORITY_LOW
+                                : Config.VolumeUsageKind.PRIMARY_DATA_PRIORITY_HIGH,
                         Config.VolumeUsageKind.META,
                         Config.VolumeUsageKind.SNAPSHOT);
         CobbleFlinkConfigMapper.applyCheckpointVolumeOptions(

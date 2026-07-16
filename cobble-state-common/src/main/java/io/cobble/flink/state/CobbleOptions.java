@@ -131,7 +131,7 @@ public final class CobbleOptions {
     public static final ConfigOption<Boolean> SST_BLOOM_FILTER_ENABLED =
             ConfigOptions.key("state.backend.cobble.sst.bloom-filter.enabled")
                     .booleanType()
-                    .defaultValue(false)
+                    .defaultValue(true)
                     .withDescription("Whether Cobble should enable bloom filters for SST files.");
 
     /** Bloom filter bits per key when SST bloom filters are enabled. */
@@ -146,7 +146,7 @@ public final class CobbleOptions {
     public static final ConfigOption<Boolean> SST_PARTITIONED_INDEX_ENABLED =
             ConfigOptions.key("state.backend.cobble.sst.partitioned-index.enabled")
                     .booleanType()
-                    .defaultValue(false)
+                    .defaultValue(true)
                     .withDescription(
                             "Whether Cobble should enable partitioned index/filter blocks for SST files.");
 
@@ -208,8 +208,8 @@ public final class CobbleOptions {
                             "Automatically expire older Cobble snapshots after this many newer snapshots have completed.");
 
     /**
-     * Whether the local Cobble working directory should remain a high-priority primary volume when
-     * a Flink checkpoint directory is configured.
+     * Whether the local Cobble working directory should be the high-priority primary volume when a
+     * Flink checkpoint directory is configured.
      */
     public static final ConfigOption<Boolean> LOCAL_DIR_PRIMARY_HIGH_PRIORITY =
             ConfigOptions.key("state.backend.cobble.localdir.primary-high-priority")
@@ -217,7 +217,8 @@ public final class CobbleOptions {
                     .defaultValue(false)
                     .withDescription(
                             "If enabled and a Flink checkpoint directory is configured, the local Cobble working "
-                                    + "directory is registered as a high-priority primary volume instead of a cache volume.");
+                                    + "directory is registered as the high-priority primary volume. Checkpoint storage "
+                                    + "remains a low-priority primary fallback and stores metadata and snapshots.");
 
     private CobbleOptions() {}
 }

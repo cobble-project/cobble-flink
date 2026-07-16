@@ -1750,6 +1750,11 @@ class CobbleStateBackendTest {
 
         assertEquals(2, volumes.size());
         assertEquals("s3://bucket/checkpoints/shared/" + CHECKPOINT_SCOPE, volumes.get(0).baseDir);
+        assertVolumeKinds(
+                volumes.get(0),
+                Config.VolumeUsageKind.PRIMARY_DATA_PRIORITY_LOW,
+                Config.VolumeUsageKind.META,
+                Config.VolumeUsageKind.SNAPSHOT);
         assertVolumeKinds(volumes.get(1), Config.VolumeUsageKind.PRIMARY_DATA_PRIORITY_HIGH);
     }
 
@@ -2105,6 +2110,17 @@ class CobbleStateBackendTest {
             assertEquals(late, restoredQueue.poll());
             assertTrue(restoredQueue.isEmpty());
         }
+    }
+
+    @Test
+    void flinkDefaultsFavorStatePointLookups() {
+        Config config = new Config();
+
+        CobbleFlinkConfigMapper.applyExposedOptions(config, new Configuration());
+
+        assertEquals(2, new CobbleMemoryConfiguration().getMemtableBufferCount());
+        assertTrue(config.sstBloomFilterEnabled);
+        assertTrue(config.sstPartitionedIndex);
     }
 
     @Test
