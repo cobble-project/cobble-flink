@@ -1,6 +1,5 @@
 package io.cobble.flink.state;
 
-import static org.apache.flink.runtime.testutils.CommonTestUtils.getLatestCompletedCheckpointPath;
 import static org.apache.flink.runtime.testutils.CommonTestUtils.waitForAllTaskRunning;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 
@@ -29,7 +28,6 @@ import org.junit.jupiter.api.io.TempDir;
 import java.nio.file.Path;
 import java.time.Duration;
 import java.util.HashSet;
-import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
@@ -98,18 +96,12 @@ class CobbleRescaleCheckpointManuallyITTest {
                 () -> DefiniteKeySource.finishedSubtasks() == parallelism,
                 Duration.ofSeconds(30),
                 "all source subtasks finished emitting");
-        waitForCondition(
-                () -> completedCheckpoints(miniCluster, jobId) >= 2L,
-                Duration.ofSeconds(30),
-                "at least two completed checkpoints");
+        // Periodic checkpoints may contain partial state, so capture an exact post-emission
+        // checkpoint.
+        String checkpointPath = miniCluster.triggerCheckpoint(jobId).get(30, TimeUnit.SECONDS);
 
         miniCluster.cancelJob(jobId).get(30, TimeUnit.SECONDS);
-
-        Optional<String> checkpointPath = getLatestCompletedCheckpointPath(jobId, miniCluster);
-        if (!checkpointPath.isPresent()) {
-            throw new AssertionError("No completed checkpoint found for initial job.");
-        }
-        return checkpointPath.get();
+        return checkpointPath;
     }
 
     private void restoreAndAssert(
@@ -205,15 +197,6 @@ class CobbleRescaleCheckpointManuallyITTest {
         }
 
         throw new AssertionError("Timed out waiting for " + description + ".");
-    }
-
-    private long completedCheckpoints(MiniCluster miniCluster, JobID jobId) throws Exception {
-        return miniCluster
-                .getArchivedExecutionGraph(jobId)
-                .get()
-                .getCheckpointStatsSnapshot()
-                .getCounts()
-                .getNumberOfCompletedCheckpoints();
     }
 
     @FunctionalInterface
