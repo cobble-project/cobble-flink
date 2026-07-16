@@ -78,6 +78,10 @@ Useful options:
 --total-buckets 32768
 --inspect-default-limit 100
 --inspect-max-limit 1000
+--max-sessions 32
+--session-idle-timeout-seconds 900
+--request-body-max-bytes 1048576
+--lookup-max-keys 256
 --user-jar /path/to/job.jar
 --user-classpath /path/to/a.jar:/path/to/b.jar
 ```
@@ -193,23 +197,22 @@ After selecting a datasource, open `Inspect` and choose the matching guide:
 Both pages use `Scan` to browse rows and `Track` to keep selected rows visible
 while a snapshot changes. The monitor never writes to the datasource.
 
-## API
+## Programmatic Access
 
-The monitor exposes these endpoints:
+Use the [HTTP API](api/) to integrate with another process, or the
+[Java Inspect SDK](java-sdk/) to embed inspection directly in a Java
+application. Both expose the same discovery, pinned Overview, scan, exact
+lookup, decoded values, and row-level decode issues as the browser UI.
 
-- `GET /healthz`
-- `GET /api/v1/meta`
-- `GET /api/v1/snapshots`
-- `POST /api/v1/mode`
-- `GET /api/v1/inspect`
-
-Use the UI for normal inspection. The API is mainly useful for automation or
-for debugging the monitor itself.
+The HTTP API uses independent sessions, so multiple clients can inspect
+different paths and checkpoints without changing each other's selection. The
+server is unauthenticated and binds to loopback by default.
 
 ## Notes
 
 - The monitor never writes to the selected datasource.
-- `latest` is resolved from the current datasource list and can be refreshed.
+- Each open session pins `latest` to a concrete id. Refresh opens a replacement
+  session only after a newer checkpoint or snapshot is available.
 - Checkpoint datasources support operator discovery.
 - Schema-aware inspection depends on metadata written with the checkpoint or
   sink snapshot. Older or raw datasources still fall back to bytes.
