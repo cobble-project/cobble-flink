@@ -39,6 +39,8 @@ import java.util.TreeSet;
  */
 final class CobbleCanonicalStateIterator<K> implements KeyValueStateIterator {
 
+    private static final int CANONICAL_SCAN_READ_AHEAD_BYTES = 256 * 1024;
+
     private final Reader reader;
     private final List<CobbleCanonicalStateMeta> entries;
     private final KeyGroupRange keyGroupRange;
@@ -268,17 +270,23 @@ final class CobbleCanonicalStateIterator<K> implements KeyValueStateIterator {
      * empty state). Any other I/O error is propagated.
      */
     private boolean openKvState(int keyGroup, CobbleCanonicalStateMeta meta) throws IOException {
-        ScanOptions options = new ScanOptions().columnFamily(meta.columnFamily()).columns(0);
         // The plain Reader API rejects null start/end keys, so use an empty start (smallest
         // key) and a 0xFF-filled end (practical upper bound) to scan the entire bucket.
-        try {
-            currentScanCursor = reader.scanWithOptions(keyGroup, EMPTY_SCAN_KEY, MAX_SCAN_KEY, options);
-        } catch (RuntimeException e) {
-            if (isUnknownColumnFamily(e)) {
-                // Column family doesn't exist in this snapshot — no data for this state.
-                return false;
+        try (ScanOptions options =
+                new ScanOptions()
+                        .readAheadBytes(CANONICAL_SCAN_READ_AHEAD_BYTES)
+                        .columnFamily(meta.columnFamily())
+                        .columns(0)) {
+            try {
+                currentScanCursor =
+                        reader.scanWithOptions(keyGroup, EMPTY_SCAN_KEY, MAX_SCAN_KEY, options);
+            } catch (RuntimeException e) {
+                if (isUnknownColumnFamily(e)) {
+                    // Column family doesn't exist in this snapshot — no data for this state.
+                    return false;
+                }
+                throw e;
             }
-            throw e;
         }
         currentEntryIterator = currentScanCursor.iterator();
         return true;
@@ -359,8 +367,12 @@ final class CobbleCanonicalStateIterator<K> implements KeyValueStateIterator {
         TreeSet<byte[]> sortedKeys = new TreeSet<>(CobbleTimerSerializationContext::compareSerializedKeys);
 
         ScanCursor scan = null;
-        try {
-            scan = reader.scan(keyGroup, EMPTY_SCAN_KEY, MAX_SCAN_KEY, meta.columnFamily());
+        try (ScanOptions options =
+                new ScanOptions()
+                        .readAheadBytes(CANONICAL_SCAN_READ_AHEAD_BYTES)
+                        .columnFamily(meta.columnFamily())
+                        .columns(0)) {
+            scan = reader.scanWithOptions(keyGroup, EMPTY_SCAN_KEY, MAX_SCAN_KEY, options);
             for (ScanCursor.Entry entry : scan) {
                 sortedKeys.add(entry.key);
             }
