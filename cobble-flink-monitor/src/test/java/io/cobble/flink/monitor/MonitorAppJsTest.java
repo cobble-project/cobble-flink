@@ -16,6 +16,39 @@ import java.nio.file.Paths;
 class MonitorAppJsTest {
 
     @Test
+    void semanticScalarTypedInputsUseStateLookupWireNames() throws Exception {
+        String appJs = readAppJs();
+        String harness =
+                "const document = {\n"
+                        + "  getElementById: () => ({ addEventListener() {}, classList: { toggle() {}, remove() {}, add() {} }, setAttribute() {} }),\n"
+                        + "  querySelectorAll: () => [], querySelector: () => ({ classList: { toggle() {} } }), addEventListener() {},\n"
+                        + "};\n"
+                        + "const window = { addEventListener() {} };\n"
+                        + "async function fetch() { return { ok: true, json: async () => ({}) }; }\n"
+                        + appJs
+                        + "\nconst scalar = { kind: 'INTEGER', logical_type: 'BIGINT', fields: [] };\n"
+                        + "const target = { state_kind: 'MAP', semantic_parts: { state_key: scalar, namespace: scalar, map_key: scalar } };\n"
+                        + "const body = { target_id: 'large-map', keys: [{ kind: 'state', state_key: {\n"
+                        + "  state_key_fields: typedGroupFields(target, 'state_key', ['7']),\n"
+                        + "  namespace_fields: typedGroupFields(target, 'namespace', ['8']),\n"
+                        + "  map_key_fields: typedGroupFields(target, 'map_key', ['9']),\n"
+                        + "} }] };\n"
+                        + "console.log(JSON.stringify(body));\n";
+
+        Process process = new ProcessBuilder("node", "--input-type=module", "-").start();
+        process.getOutputStream().write(harness.getBytes(StandardCharsets.UTF_8));
+        process.getOutputStream().close();
+        String stdout = new String(process.getInputStream().readAllBytes(), StandardCharsets.UTF_8);
+        String stderr = new String(process.getErrorStream().readAllBytes(), StandardCharsets.UTF_8);
+        int exit = process.waitFor();
+
+        assertEquals(0, exit, stderr);
+        assertTrue(stdout.contains("\"state_key_fields\":[{\"name\":\"key\""));
+        assertTrue(stdout.contains("\"namespace_fields\":[{\"name\":\"namespace\""));
+        assertTrue(stdout.contains("\"map_key_fields\":[{\"name\":\"map_key\""));
+    }
+
+    @Test
     void usesOnlySessionApiAndSwapsLatestAfterReplacementOverviewSucceeds() throws Exception {
         String appJs = readAppJs();
 

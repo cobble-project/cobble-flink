@@ -661,7 +661,18 @@ function parseColumns(value) {
 function typedGroupFields(target, groupId, values) {
   const group = semanticKeyFilterGroups(target).find((candidate) => candidate.id === groupId)
   if (!group) return []
-  return values.map((value, index) => typedField(group.fields[index], value))
+  return values.map((value, index) => typedSemanticKeyField(group, group.fields[index], value))
+}
+
+function typedSemanticKeyField(group, field, value) {
+  const typed = typedField(field, value)
+  if (Array.isArray(group.type?.fields) && group.type.fields.length > 0) return typed
+  const scalarNames = {
+    state_key: 'key',
+    namespace: 'namespace',
+    map_key: 'map_key',
+  }
+  return { ...typed, name: scalarNames[group.id] || typed.name }
 }
 
 function typedField(field, value) {
