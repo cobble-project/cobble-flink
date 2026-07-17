@@ -206,6 +206,7 @@ final class CobbleKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
                     SnapshotExecutionType.ASYNCHRONOUS);
         }
 
+        advancePrefetchedTimerBatches();
         io.cobble.PendingSnapshot<io.cobble.ShardSnapshot> pending = cobbleDb.startAsyncSnapshot();
         long snapshotId = pending.snapshotId();
         io.cobble.ShardSnapshot shardSnapshot;
@@ -544,8 +545,7 @@ final class CobbleKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
     @Override
     public boolean requiresLegacySynchronousTimerSnapshots(SnapshotType checkpointType) {
         // Heap queues already rely on Flink's timer snapshot path. Cobble queues use that same
-        // path for the prefetched overlay because pollBatchDirect() has already advanced the
-        // native cursor before snapshotting the shard.
+        // path: exporting a key group advances its prefetched overlay before the shard snapshot.
         return true;
     }
 
@@ -839,6 +839,12 @@ final class CobbleKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
     private boolean hasCobblePriorityQueues() {
         return priorityQueueFactory instanceof CobblePriorityQueueSetFactory
                 && ((CobblePriorityQueueSetFactory) priorityQueueFactory).hasQueues();
+    }
+
+    private void advancePrefetchedTimerBatches() {
+        if (priorityQueueFactory instanceof CobblePriorityQueueSetFactory) {
+            ((CobblePriorityQueueSetFactory) priorityQueueFactory).advancePrefetchedBatches();
+        }
     }
 
     /**

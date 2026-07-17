@@ -21,6 +21,9 @@ import io.cobble.flink.common.inspect.StateInspectSchemaStore;
 import io.cobble.flink.common.inspect.StateInspectSemanticSchema;
 import io.cobble.flink.common.inspect.StateInspectType;
 import io.cobble.flink.common.inspect.StateKind;
+import io.cobble.structured.DirectPriorityQueueBatch;
+import io.cobble.structured.DirectPriorityQueueEntry;
+import io.cobble.structured.PriorityQueue;
 import io.cobble.structured.Schema;
 
 import org.apache.flink.api.common.functions.AggregateFunction;
@@ -113,6 +116,7 @@ import java.io.File;
 import java.io.IOException;
 import java.io.UncheckedIOException;
 import java.lang.reflect.Proxy;
+import java.nio.ByteBuffer;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
@@ -1879,6 +1883,313 @@ class CobbleStateBackendTest {
 
             backend.setCurrentKey(1);
             assertEquals(later, queue.poll());
+            assertTrue(queue.isEmpty());
+        }
+    }
+
+    @Test
+    void overlayTimerDetachesFromMutatedCallerElement(@TempDir Path tempDir) throws Exception {
+        try (TestBackendContext context = createBackendContext(tempDir, false, null)) {
+            KeyGroupedInternalPriorityQueue<TestTimerElement> queue =
+                    context.cobbleBackend.create(
+                            "mutable-overlay-timer-state", new TestTimerElementSerializer());
+            TestTimerElement timer = new TestTimerElement(10L, 1);
+
+            queue.add(timer);
+            assertEquals(timer, queue.peek());
+            assertEquals(timer, queue.poll());
+
+            assertTrue(queue.add(timer));
+            timer.key = 2;
+
+            assertEquals(new TestTimerElement(10L, 1), queue.poll());
+        }
+    }
+
+    @Test
+    void nativePhysicalBatchesAreNotSafeOrderedPrefixes(@TempDir Path tempDir) throws Exception {
+        final int bucket = 0;
+        final int timerCount = 4_096;
+        try (TestBackendContext context =
+                createBackendContext(
+                        tempDir,
+                        false,
+                        null,
+                        MemorySize.parse("256kb"),
+                        TtlTimeProvider.DEFAULT,
+                        false,
+                        Collections.emptyList(),
+                        KeyGroupRange.of(0, 0))) {
+            try (PriorityQueue polledQueue =
+                            context.cobbleBackend
+                                    .getCobbleDb()
+                                    .getOrNewPriorityQueue("native-poll-batches");
+                    PriorityQueue advancedPollQueue =
+                            context.cobbleBackend
+                                    .getCobbleDb()
+                                    .getOrNewPriorityQueue("native-poll-advance-batches");
+                    PriorityQueue peekedQueue =
+                            context.cobbleBackend
+                                    .getCobbleDb()
+                                    .getOrNewPriorityQueue("native-peek-advance-batches");
+                    PriorityQueue fixedPeekedQueue =
+                            context.cobbleBackend
+                                    .getCobbleDb()
+                                    .getOrNewPriorityQueue("native-fixed-peek-advance-batches")) {
+                populateNativePriorityQueue(polledQueue, bucket, timerCount);
+                NativePriorityQueueBatch firstPolledBatch =
+                        pollNativePriorityQueueBatch(polledQueue, bucket);
+                NativePriorityQueueBatch secondPolledBatch =
+                        pollNativePriorityQueueBatch(polledQueue, bucket);
+                assertTrue(firstPolledBatch.size > 0);
+                assertTrue(firstPolledBatch.size < timerCount);
+                assertEquals(0, secondPolledBatch.size);
+                assertTrue(Arrays.equals(firstPolledBatch.lastKey, polledQueue.cursor(bucket)));
+
+                populateNativePriorityQueue(advancedPollQueue, bucket, timerCount);
+                NativePriorityQueueBatch firstAdvancedPollBatch =
+                        pollNativePriorityQueueBatch(advancedPollQueue, bucket);
+                advancedPollQueue.advance(bucket, firstAdvancedPollBatch.lastKey);
+                NativePriorityQueueBatch secondAdvancedPollBatch =
+                        pollNativePriorityQueueBatch(advancedPollQueue, bucket);
+                // pollBatchDirect() consumes the first native physical batch and leaves the
+                // queue stopped at its boundary. Advancing the returned last key cannot clear
+                // that boundary, so callers that cache a batch must use peekBatchDirect().
+                assertEquals(0, secondAdvancedPollBatch.size);
+
+                populateNativePriorityQueue(peekedQueue, bucket, timerCount);
+                NativePriorityQueueBatch physicalPeekBatch =
+                        peekNativePriorityQueueBatch(peekedQueue, bucket);
+                assertTrue(physicalPeekBatch.size > 0);
+                assertTrue(physicalPeekBatch.size < timerCount);
+                peekedQueue.advance(bucket, physicalPeekBatch.lastKey);
+                assertEquals(0, peekNativePriorityQueueBatch(peekedQueue, bucket).size);
+                assertTrue(Arrays.equals(physicalPeekBatch.lastKey, peekedQueue.cursor(bucket)));
+
+                populateNativePriorityQueue(fixedPeekedQueue, bucket, timerCount);
+                int fixedPeekedTimerCount = 0;
+                int fixedPeekedBatchCount = 0;
+                while (true) {
+                    NativePriorityQueueBatch batch =
+                            peekNativePriorityQueueBatch(fixedPeekedQueue, bucket, 256);
+                    if (batch.size == 0) {
+                        break;
+                    }
+                    fixedPeekedTimerCount += batch.size;
+                    fixedPeekedBatchCount++;
+                    fixedPeekedQueue.advance(bucket, batch.lastKey);
+                }
+                assertTrue(fixedPeekedBatchCount > 1);
+                assertEquals(timerCount, fixedPeekedTimerCount);
+            }
+        }
+    }
+
+    @Test
+    void timerStateDrainsAllFixedPrefetchBatches(@TempDir Path tempDir) throws Exception {
+        final int timerCount = 2_048;
+        final int key = findKeyForGroup(0);
+        try (TestBackendContext context =
+                createBackendContext(
+                        tempDir,
+                        false,
+                        null,
+                        MemorySize.parse("256kb"),
+                        TtlTimeProvider.DEFAULT,
+                        false,
+                        Collections.emptyList(),
+                        KeyGroupRange.of(0, 0))) {
+            KeyGroupedInternalPriorityQueue<TestTimerElement> queue =
+                    context.cobbleBackend.create(
+                            "fixed-prefetch-timer-state", new TestTimerElementSerializer());
+            for (int timestamp = 0; timestamp < timerCount; timestamp++) {
+                queue.add(new TestTimerElement(timestamp, key));
+            }
+
+            for (int timestamp = 0; timestamp < timerCount; timestamp++) {
+                assertEquals(new TestTimerElement(timestamp, key), queue.poll());
+            }
+            assertTrue(queue.isEmpty());
+        }
+    }
+
+    @Test
+    void timerStateDrainsInterleavedSnapshotSourcesInPriorityOrder(@TempDir Path tempDir)
+            throws Exception {
+        final int timerCount = 4_096;
+        final int key = findKeyForGroup(0);
+        try (TestBackendContext context =
+                createBackendContext(
+                        tempDir,
+                        false,
+                        null,
+                        MemorySize.parse("256kb"),
+                        TtlTimeProvider.DEFAULT,
+                        false,
+                        Collections.emptyList(),
+                        KeyGroupRange.of(0, 0))) {
+            KeyGroupedInternalPriorityQueue<TestTimerElement> queue =
+                    context.cobbleBackend.create(
+                            "interleaved-prefetch-timer-state", new TestTimerElementSerializer());
+
+            for (int residue = 0; residue < 4; residue++) {
+                for (int timestamp = residue; timestamp < timerCount; timestamp += 4) {
+                    queue.add(new TestTimerElement(timestamp, key));
+                }
+                context.cobbleBackend.getCobbleDb().snapshot();
+            }
+
+            for (int timestamp = 0; timestamp < timerCount; timestamp++) {
+                assertEquals(new TestTimerElement(timestamp, key), queue.poll());
+            }
+            assertTrue(queue.isEmpty());
+        }
+    }
+
+    @Test
+    void timerStateDoesNotResurrectLastRemovedPrefetchedTimer(@TempDir Path tempDir)
+            throws Exception {
+        int key = findKeyForGroup(0);
+        try (TestBackendContext context =
+                createBackendContext(
+                        tempDir,
+                        false,
+                        null,
+                        MemorySize.parse("256kb"),
+                        TtlTimeProvider.DEFAULT,
+                        false,
+                        Collections.emptyList(),
+                        KeyGroupRange.of(0, 0))) {
+            KeyGroupedInternalPriorityQueue<TestTimerElement> queue =
+                    context.cobbleBackend.create(
+                            "remove-prefetched-timers", new TestTimerElementSerializer());
+            TestTimerElement first = new TestTimerElement(0, key);
+            TestTimerElement second = new TestTimerElement(1, key);
+            TestTimerElement third = new TestTimerElement(2, key);
+
+            queue.add(first);
+            queue.add(second);
+            queue.add(third);
+            assertEquals(first, queue.poll());
+            assertEquals(second, queue.peek());
+
+            assertTrue(queue.remove(second));
+            assertTrue(queue.remove(third));
+            assertTrue(queue.isEmpty());
+            assertNull(queue.poll());
+        }
+    }
+
+    @Test
+    void timerStateManagedCheckpointKeepsPrefetchedNativeBatch(@TempDir Path tempDir)
+            throws Exception {
+        final int timerCount = 2_048;
+        final int key = findKeyForGroup(0);
+        String checkpointDirectory = tempDir.resolve("checkpoints").toString();
+        KeyedStateHandle snapshotHandle;
+
+        try (TestBackendContext context =
+                createBackendContext(
+                        tempDir.resolve("source"),
+                        false,
+                        checkpointDirectory,
+                        MemorySize.parse("256kb"),
+                        TtlTimeProvider.DEFAULT,
+                        false,
+                        Collections.emptyList(),
+                        KeyGroupRange.of(0, 0))) {
+            KeyGroupedInternalPriorityQueue<TestTimerElement> queue =
+                    context.cobbleBackend.create(
+                            "managed-only-prefetch-timer-state", new TestTimerElementSerializer());
+            for (int timestamp = 0; timestamp < timerCount; timestamp++) {
+                queue.add(new TestTimerElement(timestamp, key));
+            }
+
+            assertEquals(new TestTimerElement(0, key), queue.poll());
+            assertEquals(new TestTimerElement(1, key), queue.peek());
+            snapshotHandle = runCheckpointSnapshot(context.cobbleBackend, 90L);
+        }
+
+        try (TestBackendContext context =
+                createBackendContext(
+                        tempDir.resolve("restored"),
+                        false,
+                        checkpointDirectory,
+                        MemorySize.parse("256kb"),
+                        TtlTimeProvider.DEFAULT,
+                        false,
+                        Collections.singletonList(snapshotHandle),
+                        KeyGroupRange.of(0, 0))) {
+            KeyGroupedInternalPriorityQueue<TestTimerElement> queue =
+                    context.cobbleBackend.create(
+                            "managed-only-prefetch-timer-state", new TestTimerElementSerializer());
+
+            assertEquals(timerCount - 1, queue.size());
+            for (int timestamp = 1; timestamp < timerCount; timestamp++) {
+                assertEquals(new TestTimerElement(timestamp, key), queue.poll());
+            }
+            assertTrue(queue.isEmpty());
+        }
+    }
+
+    @Test
+    void timerStateSnapshotPreservesPrefetchedBatchExactlyOnce(@TempDir Path tempDir)
+            throws Exception {
+        final int timerCount = 2_048;
+        final int key = findKeyForGroup(0);
+        String checkpointDirectory = tempDir.resolve("checkpoints").toString();
+        KeyedStateHandle snapshotHandle;
+        Set<TestTimerElement> overlaySnapshot;
+
+        try (TestBackendContext context =
+                createBackendContext(
+                        tempDir.resolve("source"),
+                        false,
+                        checkpointDirectory,
+                        MemorySize.parse("256kb"),
+                        TtlTimeProvider.DEFAULT,
+                        false,
+                        Collections.emptyList(),
+                        KeyGroupRange.of(0, 0))) {
+            KeyGroupedInternalPriorityQueue<TestTimerElement> queue =
+                    context.cobbleBackend.create(
+                            "snapshot-prefetch-timer-state", new TestTimerElementSerializer());
+            for (int timestamp = 0; timestamp < timerCount; timestamp++) {
+                queue.add(new TestTimerElement(timestamp, key));
+            }
+
+            // Adding the first timer primes the child head. Once it is consumed, the next peek
+            // refills one fixed batch beginning at timestamp 1.
+            assertEquals(new TestTimerElement(0, key), queue.poll());
+            assertEquals(new TestTimerElement(1, key), queue.peek());
+            overlaySnapshot = queue.getSubsetForKeyGroup(0);
+            assertFalse(overlaySnapshot.isEmpty());
+            assertTrue(overlaySnapshot.size() < timerCount - 1);
+            for (int timestamp = 1; timestamp <= overlaySnapshot.size(); timestamp++) {
+                assertTrue(overlaySnapshot.contains(new TestTimerElement(timestamp, key)));
+            }
+            snapshotHandle = runCheckpointSnapshot(context.cobbleBackend, 91L);
+        }
+
+        try (TestBackendContext context =
+                createBackendContext(
+                        tempDir.resolve("restored"),
+                        false,
+                        checkpointDirectory,
+                        MemorySize.parse("256kb"),
+                        TtlTimeProvider.DEFAULT,
+                        false,
+                        Collections.singletonList(snapshotHandle),
+                        KeyGroupRange.of(0, 0))) {
+            KeyGroupedInternalPriorityQueue<TestTimerElement> queue =
+                    context.cobbleBackend.create(
+                            "snapshot-prefetch-timer-state", new TestTimerElementSerializer());
+            queue.addAll(overlaySnapshot);
+
+            assertEquals(timerCount - 1, queue.size());
+            for (int timestamp = 1; timestamp < timerCount; timestamp++) {
+                assertEquals(new TestTimerElement(timestamp, key), queue.poll());
+            }
             assertTrue(queue.isEmpty());
         }
     }
@@ -7187,6 +7498,54 @@ class CobbleStateBackendTest {
                 metricGroup);
     }
 
+    private static void populateNativePriorityQueue(
+            PriorityQueue queue, int bucket, int timerCount) {
+        for (long timer = 0; timer < timerCount; timer++) {
+            queue.offer(bucket, nativePriorityQueueKey(timer), new byte[0]);
+        }
+    }
+
+    private static NativePriorityQueueBatch pollNativePriorityQueueBatch(
+            PriorityQueue queue, int bucket) {
+        try (DirectPriorityQueueBatch batch = queue.pollBatchDirect(bucket)) {
+            return copyNativePriorityQueueBatch(batch);
+        }
+    }
+
+    private static NativePriorityQueueBatch peekNativePriorityQueueBatch(
+            PriorityQueue queue, int bucket) {
+        try (DirectPriorityQueueBatch batch = queue.peekBatchDirect(bucket)) {
+            return copyNativePriorityQueueBatch(batch);
+        }
+    }
+
+    private static NativePriorityQueueBatch peekNativePriorityQueueBatch(
+            PriorityQueue queue, int bucket, int batchSize) {
+        try (DirectPriorityQueueBatch batch = queue.peekBatchDirect(bucket, batchSize)) {
+            return copyNativePriorityQueueBatch(batch);
+        }
+    }
+
+    private static NativePriorityQueueBatch copyNativePriorityQueueBatch(
+            DirectPriorityQueueBatch batch) {
+        int count = 0;
+        byte[] lastKey = null;
+        for (DirectPriorityQueueEntry entry : batch) {
+            ByteBuffer key = entry.getKey().duplicate();
+            byte[] copiedKey = new byte[key.remaining()];
+            key.get(copiedKey);
+            lastKey = copiedKey;
+            count++;
+        }
+        return new NativePriorityQueueBatch(count, lastKey);
+    }
+
+    private static byte[] nativePriorityQueueKey(long timer) {
+        ByteBuffer key = ByteBuffer.allocate(64);
+        key.putLong(timer);
+        return key.array();
+    }
+
     private TestBackendContext createBackendContext(
             Path tempDir,
             boolean localDirPrimaryHighPriority,
@@ -8066,7 +8425,7 @@ class CobbleStateBackendTest {
                     PriorityComparable<TestTimerElement>,
                     Keyed<Integer> {
         private final long timestamp;
-        private final int key;
+        private int key;
         private int internalIndex = HeapPriorityQueueElement.NOT_CONTAINED;
 
         private TestTimerElement(long timestamp, int key) {
@@ -8118,7 +8477,7 @@ class CobbleStateBackendTest {
 
         @Override
         public boolean isImmutableType() {
-            return true;
+            return false;
         }
 
         @Override
@@ -8655,6 +9014,17 @@ class CobbleStateBackendTest {
         assertFalse(mapState(backend, "map-all", "ns-a").contains("k2-a"));
         assertNull(reducingState(backend, "reducing-all", "ns-a").get());
         assertNull(aggregatingState(backend, "aggregating-all", "ns-a").get());
+    }
+
+    /** Copied metadata for one direct native priority-queue batch. */
+    private static final class NativePriorityQueueBatch {
+        private final int size;
+        private final byte[] lastKey;
+
+        private NativePriorityQueueBatch(int size, byte[] lastKey) {
+            this.size = size;
+            this.lastKey = lastKey;
+        }
     }
 
     /** Context holding a non-Cobble backend and its environment for cleanup. */

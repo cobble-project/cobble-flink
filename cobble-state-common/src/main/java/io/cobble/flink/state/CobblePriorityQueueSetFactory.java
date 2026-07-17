@@ -132,6 +132,12 @@ final class CobblePriorityQueueSetFactory implements PriorityQueueSetFactory {
         return !queues.isEmpty();
     }
 
+    void advancePrefetchedBatches() {
+        for (CobbleTimerPriorityQueue<?> queue : queues.values()) {
+            queue.advancePrefetchedBatches();
+        }
+    }
+
     /**
      * Returns the timer priority queue registered for the given state name, or {@code null} if none
      * is registered. Used by the canonical savepoint iterator to access in-memory overlay timers.

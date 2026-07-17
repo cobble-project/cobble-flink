@@ -30,9 +30,9 @@ import java.util.Set;
  *
  * <p>The inherited implementation would export each child queue's complete iterator from {@link
  * #getSubsetForKeyGroup(int)}. Cobble instead exports only each child queue's overlay. The native
- * shard snapshot already retains timers that have not yet been prefetched, while prefetched timers
- * have been removed from the native queue by {@link PriorityQueue#pollBatchDirect(int)} and must
- * therefore be checkpointed through Flink's legacy timer snapshot path.
+ * shard snapshot retains timers that have not yet been prefetched. Exporting a key group advances
+ * its prefetched batch into the overlay first, so Flink's legacy timer snapshot owns that prefix
+ * before the Cobble shard snapshot captures the native tail.
  */
 final class CobbleTimerPriorityQueue<
                 T extends HeapPriorityQueueElement & PriorityComparable<? super T> & Keyed<?>>
@@ -96,6 +96,12 @@ final class CobbleTimerPriorityQueue<
         serializationContext.updateSerializer(serializer);
     }
 
+    void advancePrefetchedBatches() {
+        for (CobbleCachingPriorityQueueSet<T> queue : queuesByKeyGroup.values()) {
+            queue.advancePrefetchedBatch();
+        }
+    }
+
     /** Releases child queues and closes the native priority-queue handle. */
     void close() {
         RuntimeException error = null;
@@ -129,7 +135,9 @@ final class CobbleTimerPriorityQueue<
         if (!keyGroupRange.contains(keyGroup)) {
             return Collections.emptySet();
         }
-        return new HashSet<>(queuesByKeyGroup.get(keyGroup).overlaySnapshotElements());
+        CobbleCachingPriorityQueueSet<T> queue = queuesByKeyGroup.get(keyGroup);
+        queue.advancePrefetchedBatch();
+        return new HashSet<>(queue.overlaySnapshotElements());
     }
 
     /** Exposes the fixed Cobble bucket selected for a Flink key group in focused tests. */

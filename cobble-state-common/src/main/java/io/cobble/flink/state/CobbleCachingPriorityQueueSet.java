@@ -31,18 +31,19 @@ import java.util.TreeSet;
  *
  * <p>1. Native Cobble storage keeps the future tail for this key group.
  *
- * <p>2. {@code overlay} keeps the current hot prefix that has already been removed from the native
- * queue with one {@link PriorityQueue#pollBatchDirect(int)} call.
+ * <p>2. {@code overlay} keeps one ordered hot prefix read with {@link
+ * PriorityQueue#peekBatchDirect(int, int)}. Native storage remains the durable owner until the
+ * overlay is drained or exported for a snapshot.
  *
- * <p>Polling a native batch advances the Cobble truncation cursor immediately and then places the
- * deserialized timers into {@code overlay}. This matches the desired timer semantics for Flink:
- * prefetched timers disappear from native snapshots right away, while the overlay is exported
- * through Flink's legacy timer snapshot and therefore survives checkpoint/restore.
+ * <p>The fixed-size batch is deliberately used instead of the physical-boundary overload. A
+ * physical batch may not be a contiguous key prefix across merged sources, so advancing to its
+ * last key could hide timers that were not prefetched.
  */
 final class CobbleCachingPriorityQueueSet<T>
         implements InternalPriorityQueue<T>, HeapPriorityQueueElement {
 
     private static final ByteBuffer EMPTY_DIRECT_VALUE = ByteBuffer.allocateDirect(0);
+    private static final int PREFETCH_BATCH_SIZE = 1_024;
 
     private final Db db;
     private final PriorityQueue priorityQueue;
@@ -57,6 +58,7 @@ final class CobbleCachingPriorityQueueSet<T>
     private boolean nativeExhausted;
     private boolean cursorInitialized;
     private byte[] cursor;
+    private byte[] pendingAdvanceKey;
 
     CobbleCachingPriorityQueueSet(
             Db db,
@@ -111,6 +113,9 @@ final class CobbleCachingPriorityQueueSet<T>
         if (cachedSize >= 0) {
             cachedSize--;
         }
+        if (overlay.isEmpty()) {
+            advancePrefetchedBatch();
+        }
         return head.element;
     }
 
@@ -128,14 +133,13 @@ final class CobbleCachingPriorityQueueSet<T>
         CobbleTimerSerializationContext.SerializedKey serializedKey =
                 serializationContext.serializeElementKey(element);
 
-        if (isTruncated(serializedKey.heapBytes)) {
-            // The native queue is monotonic behind its truncation cursor, so a key at or behind the
-            // cursor would be hidden if written back to Cobble. The cursor is only the ownership
-            // boundary: native storage owns keys after it, and the checkpointed overlay owns keys
-            // at or before it. Native residual files may still contain rows already handed to the
-            // overlay by pollBatchDirect(), and a later add for the same timer is a valid
-            // re-registration.
-            boolean added = overlay.add(new OverlayTimer<>(serializedKey.heapBytes, element));
+        if (isOwnedByOverlay(serializedKey.heapBytes)) {
+            // The native queue is monotonic behind its truncation cursor. A prefetched batch is
+            // likewise owned by the overlay until its pending cursor advance, so re-registering a
+            // timer at or behind either boundary must remain in memory.
+            // Detach from caller-owned keys that Flink operators may reuse after add() returns.
+            T stableElement = serializationContext.deserializeElement(serializedKey.heapBytes);
+            boolean added = overlay.add(new OverlayTimer<>(serializedKey.heapBytes, stableElement));
             if (added && cachedSize >= 0) {
                 cachedSize++;
             }
@@ -158,10 +162,9 @@ final class CobbleCachingPriorityQueueSet<T>
     @Override
     public boolean remove(T element) {
         Preconditions.checkNotNull(element, "Timer element must not be null.");
-        // A timer may already have been prefetched out of Cobble by pollBatchDirect() even if this
-        // child queue has not exposed it as the global head yet. Refill the hot prefix before
-        // deciding that a cursor-covered key is gone; otherwise Flink session-window merges can
-        // fail to delete old cleanup timers and later fire stale windows.
+        // A timer may already be owned by a prefetched overlay even if this child queue has not
+        // exposed it as the global head yet. Refill the hot prefix before deciding that a covered
+        // key is gone; otherwise Flink session-window merges can fail to delete old cleanup timers.
         ensureLoaded();
         initializeCursor();
 
@@ -171,10 +174,13 @@ final class CobbleCachingPriorityQueueSet<T>
             if (cachedSize >= 0) {
                 cachedSize--;
             }
+            if (overlay.isEmpty()) {
+                advancePrefetchedBatch();
+            }
             return true;
         }
 
-        if (isTruncated(serializedKey.heapBytes) || !existsInDb(serializedKey.heapBytes)) {
+        if (isOwnedByOverlay(serializedKey.heapBytes) || !existsInDb(serializedKey.heapBytes)) {
             return false;
         }
         priorityQueue.delete(bucket, serializedKey.heapBytes);
@@ -192,6 +198,7 @@ final class CobbleCachingPriorityQueueSet<T>
     @Override
     public int size() {
         if (cachedSize < 0) {
+            advancePrefetchedBatch();
             cachedSize = overlay.size();
             try (ScanCursor scan = db.scan(bucket, null, null, priorityQueue.columnFamily())) {
                 for (Row ignored : scan) {
@@ -214,6 +221,7 @@ final class CobbleCachingPriorityQueueSet<T>
 
     @Override
     public CloseableIterator<T> iterator() {
+        advancePrefetchedBatch();
         List<T> elements = overlayElements();
         try (ScanCursor scan = db.scan(bucket, null, null, priorityQueue.columnFamily())) {
             for (Row row : scan) {
@@ -240,15 +248,15 @@ final class CobbleCachingPriorityQueueSet<T>
     }
 
     /**
-     * Pulls one physical-boundary-sized batch out of Cobble and immediately hands ownership to the
-     * overlay.
+     * Prefetches one ordered fixed-size batch and hands logical ownership to the overlay.
      *
      * <p>The direct entry key views are valid only while the batch is open, so the serialized key
      * bytes are copied before closing the batch. The timer element itself is kept exactly as the
      * Flink serializer returns it.
      */
     private void reload() {
-        try (DirectPriorityQueueBatch prefetched = priorityQueue.pollBatchDirect(bucket)) {
+        try (DirectPriorityQueueBatch prefetched =
+                priorityQueue.peekBatchDirect(bucket, PREFETCH_BATCH_SIZE)) {
             if (prefetched.isEmpty()) {
                 nativeExhausted = true;
                 initializeCursor();
@@ -267,10 +275,20 @@ final class CobbleCachingPriorityQueueSet<T>
                 lastKey = heapKey;
             }
 
-            cursor = lastKey;
-            cursorInitialized = true;
+            pendingAdvanceKey = lastKey;
             nativeExhausted = false;
         }
+    }
+
+    /** Moves the native cursor after the overlay has consumed, or snapshot has captured, its batch. */
+    void advancePrefetchedBatch() {
+        if (pendingAdvanceKey == null) {
+            return;
+        }
+        priorityQueue.advance(bucket, pendingAdvanceKey);
+        cursor = pendingAdvanceKey;
+        cursorInitialized = true;
+        pendingAdvanceKey = null;
     }
 
     private void initializeCursor() {
@@ -284,6 +302,14 @@ final class CobbleCachingPriorityQueueSet<T>
         return cursor != null
                 && CobbleTimerSerializationContext.compareSerializedKeys(serializedKey, cursor)
                         <= 0;
+    }
+
+    private boolean isOwnedByOverlay(byte[] serializedKey) {
+        return isTruncated(serializedKey)
+                || (pendingAdvanceKey != null
+                        && CobbleTimerSerializationContext.compareSerializedKeys(
+                                        serializedKey, pendingAdvanceKey)
+                                <= 0);
     }
 
     private boolean existsInDb(byte[] serializedKey) {
