@@ -1,5 +1,7 @@
 package io.cobble.flink.state;
 
+import io.cobble.Config;
+
 import org.apache.flink.configuration.ClusterOptions;
 import org.apache.flink.configuration.ConfigOption;
 import org.apache.flink.configuration.ConfigOptions;
@@ -149,6 +151,16 @@ public final class CobbleOptions {
                     .defaultValue(true)
                     .withDescription(
                             "Whether Cobble should enable partitioned index/filter blocks for SST files.");
+
+    /** Caching policy for decoded SST footer and index-partition metadata. */
+    public static final ConfigOption<Config.SstReadMetadataCacheMode>
+            SST_READ_METADATA_CACHE_MODE =
+                    ConfigOptions.key("state.backend.cobble.sst.read-metadata-cache.mode")
+                    .enumType(Config.SstReadMetadataCacheMode.class)
+                    .defaultValue(Config.SstReadMetadataCacheMode.EAGER)
+                    .withDescription(
+                            "Caching policy for decoded SST footer and index-partition metadata. "
+                                    + "Supported values: eager, lazy, off.");
 
     /** Threshold above which values are separated into the value log. */
     public static final ConfigOption<MemorySize> VALUE_SEPARATION_THRESHOLD =

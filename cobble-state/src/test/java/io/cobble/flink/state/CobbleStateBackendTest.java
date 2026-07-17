@@ -2121,6 +2121,20 @@ class CobbleStateBackendTest {
         assertEquals(2, new CobbleMemoryConfiguration().getMemtableBufferCount());
         assertTrue(config.sstBloomFilterEnabled);
         assertTrue(config.sstPartitionedIndex);
+        assertEquals(Config.SstReadMetadataCacheMode.EAGER, config.sstReadMetadataCacheMode);
+    }
+
+    @Test
+    void flinkMapsEverySstReadMetadataCacheMode() {
+        for (Config.SstReadMetadataCacheMode mode : Config.SstReadMetadataCacheMode.values()) {
+            Configuration flinkConfig = new Configuration();
+            flinkConfig.set(CobbleOptions.SST_READ_METADATA_CACHE_MODE, mode);
+            Config config = new Config();
+
+            CobbleFlinkConfigMapper.applyExposedOptions(config, flinkConfig);
+
+            assertEquals(mode, config.sstReadMetadataCacheMode);
+        }
     }
 
     @Test
@@ -2132,6 +2146,8 @@ class CobbleStateBackendTest {
         overrides.set(CobbleOptions.SST_BLOOM_FILTER_ENABLED, true);
         overrides.set(CobbleOptions.SST_BLOOM_FILTER_BITS_PER_KEY, 15);
         overrides.set(CobbleOptions.SST_PARTITIONED_INDEX_ENABLED, true);
+        overrides.set(
+                CobbleOptions.SST_READ_METADATA_CACHE_MODE, Config.SstReadMetadataCacheMode.LAZY);
         overrides.set(CobbleOptions.DIRECT_IO_BUFFER_SIZE, MemorySize.parse("8kb"));
         overrides.set(CobbleOptions.DIRECT_IO_BUFFER_POOL_MAX_SIZE, 128);
         overrides.set(CobbleOptions.LOG_LEVEL, "debug");
@@ -2157,6 +2173,7 @@ class CobbleStateBackendTest {
             assertTrue(config.sstBloomFilterEnabled);
             assertEquals(15, config.sstBloomBitsPerKey.intValue());
             assertTrue(config.sstPartitionedIndex);
+            assertEquals(Config.SstReadMetadataCacheMode.LAZY, config.sstReadMetadataCacheMode);
             assertEquals(8 * 1024, config.jniDirectBufferSize.intValue());
             assertEquals(128, config.jniDirectBufferPoolSize.intValue());
             assertEquals("DEBUG", config.logLevel);

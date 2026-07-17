@@ -29,6 +29,8 @@ final class CobbleFlinkConfigMapper {
                         CobbleOptions.SST_BLOOM_FILTER_BITS_PER_KEY.key(),
                         flinkConfig.get(CobbleOptions.SST_BLOOM_FILTER_BITS_PER_KEY));
         config.sstPartitionedIndex = flinkConfig.get(CobbleOptions.SST_PARTITIONED_INDEX_ENABLED);
+        config.sstReadMetadataCacheMode =
+                flinkConfig.get(CobbleOptions.SST_READ_METADATA_CACHE_MODE);
         config.jniDirectBufferSize =
                 toPositiveIntBytes(
                         CobbleOptions.DIRECT_IO_BUFFER_SIZE.key(),

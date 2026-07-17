@@ -197,6 +197,7 @@ backend.
 | `state.backend.cobble.sst.bloom-filter.enabled` | `true` | Whether SST bloom filters are enabled. |
 | `state.backend.cobble.sst.bloom-filter.bits-per-key` | `10` | Bloom-filter density used when bloom filters are enabled. |
 | `state.backend.cobble.sst.partitioned-index.enabled` | `true` | Whether partitioned SST index/filter blocks are enabled. |
+| `state.backend.cobble.sst.read-metadata-cache.mode` | `EAGER` | Decoded SST metadata cache mode: `EAGER`, `LAZY`, or `OFF`. |
 | `state.backend.cobble.value-separation.threshold` | `1kb` | Values larger than this threshold are separated into Cobble's value log. |
 | `state.backend.cobble.direct-io.buffer-size` | `2kb` | Size of each pooled direct I/O buffer used by Cobble reads. |
 | `state.backend.cobble.direct-io.pool-max-size` | `64` | Maximum number of pooled direct I/O buffers. |
@@ -205,6 +206,9 @@ backend.
 | `state.backend.cobble.log.level` | `info` | Cobble native log level. Supported values are `trace`, `debug`, `info`, `warn`, `error`, and `off`. |
 | `state.backend.cobble.snapshot.retention` | none | Automatically expire older snapshots after this many newer snapshots have completed. |
 | `state.backend.cobble.localdir.primary-high-priority` | `false` | Use the local Cobble directory as the high-priority active-state volume. Checkpoint storage remains a low-priority fallback and stores metadata and snapshots. |
+
+`EAGER` attaches decoded SST metadata when Cobble writes a new file and is the recommended default.
+`LAZY` caches the metadata on the first read, while `OFF` rebuilds it for each reader.
 
 For a first deployment, most users can start with just these keys:
 
