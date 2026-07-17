@@ -2113,12 +2113,13 @@ class CobbleStateBackendTest {
     }
 
     @Test
-    void flinkDefaultsFavorStatePointLookups() {
+    void flinkDefaultsSupportPointLookupsAndRangeScans() {
         Config config = new Config();
 
         CobbleFlinkConfigMapper.applyExposedOptions(config, new Configuration());
 
         assertEquals(2, new CobbleMemoryConfiguration().getMemtableBufferCount());
+        assertEquals(Config.MemtableType.SKIPLIST, config.memtableType);
         assertTrue(config.sstBloomFilterEnabled);
         assertTrue(config.sstPartitionedIndex);
         assertEquals(Config.SstReadMetadataCacheMode.EAGER, config.sstReadMetadataCacheMode);

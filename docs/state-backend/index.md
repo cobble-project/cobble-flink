@@ -188,7 +188,7 @@ backend.
 | `state.backend.cobble.memory.fixed-per-slot` | none | Fixed memory budget per slot. Use this when you want to override managed-memory-based sizing. |
 | `state.backend.cobble.memory.memtable-buffer-ratio` | `0.5` | Fraction of the Cobble memory budget reserved for memtable buffers. |
 | `state.backend.cobble.memory.memtable-buffer-count` | `2` | Number of in-memory memtable buffers. |
-| `state.backend.cobble.memtable.type` | `hash` | Memtable implementation. Supported values are `hash`, `skiplist`, and `vec`. |
+| `state.backend.cobble.memtable.type` | `skiplist` | Memtable implementation. `skiplist` supports both point lookups and the range scans used by `MapState`; `hash` is available for point-lookup-only workloads. |
 | `state.backend.cobble.compaction.policy` | `round_robin` | Compaction policy. Supported values are `round_robin`, `min_overlap`, and `score_priority`. |
 | `state.backend.cobble.compaction.read-ahead.enabled` | `true` | Whether Cobble compaction read-ahead is enabled. |
 | `state.backend.cobble.compaction.remote.addr` | none | Address (`host:port`) of a Cobble remote compactor. When unset, compaction runs locally in the TaskManager. |

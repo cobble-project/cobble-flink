@@ -259,7 +259,7 @@ final class CobbleFlinkConfigMapper {
 
     private static Config.MemtableType parseMemtableType(String memtableType) {
         if (memtableType == null) {
-            return Config.MemtableType.HASH;
+            return Config.MemtableType.SKIPLIST;
         }
         switch (memtableType.trim().toLowerCase(Locale.ROOT)) {
             case "hash":

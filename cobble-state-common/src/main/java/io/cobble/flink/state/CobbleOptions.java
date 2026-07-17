@@ -67,7 +67,7 @@ public final class CobbleOptions {
     public static final ConfigOption<String> MEMTABLE_TYPE =
             ConfigOptions.key("state.backend.cobble.memtable.type")
                     .stringType()
-                    .defaultValue("hash")
+                    .defaultValue("skiplist")
                     .withDescription(
                             "The memtable implementation used by Cobble. Supported values: hash, skiplist, vec.");
 
