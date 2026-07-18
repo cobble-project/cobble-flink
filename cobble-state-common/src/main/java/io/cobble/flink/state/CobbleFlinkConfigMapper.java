@@ -23,6 +23,10 @@ final class CobbleFlinkConfigMapper {
         config.memtableType = parseMemtableType(flinkConfig.get(CobbleOptions.MEMTABLE_TYPE));
         config.compactionPolicy =
                 parseCompactionPolicy(flinkConfig.get(CobbleOptions.COMPACTION_POLICY));
+        config.l0FileLimit =
+                requirePositive(
+                        CobbleOptions.L0_FILE_LIMIT.key(),
+                        flinkConfig.get(CobbleOptions.L0_FILE_LIMIT));
         config.sstBloomFilterEnabled = flinkConfig.get(CobbleOptions.SST_BLOOM_FILTER_ENABLED);
         config.sstBloomBitsPerKey =
                 requirePositive(

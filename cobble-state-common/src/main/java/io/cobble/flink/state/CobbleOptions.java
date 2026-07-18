@@ -79,6 +79,14 @@ public final class CobbleOptions {
                     .withDescription(
                             "The compaction policy used by Cobble. Supported values: round_robin, min_overlap, score_priority.");
 
+    /** Number of L0 files that triggers a Cobble compaction. */
+    public static final ConfigOption<Integer> L0_FILE_LIMIT =
+            ConfigOptions.key("state.backend.cobble.compaction.l0-file-limit")
+                    .intType()
+                    .defaultValue(2)
+                    .withDescription(
+                            "The number of L0 files that triggers Cobble compaction. Defaults to 2.");
+
     /**
      * Whether Cobble compaction read-ahead is enabled. Mirrors Cobble's
      * {@code compaction_read_ahead_enabled}.

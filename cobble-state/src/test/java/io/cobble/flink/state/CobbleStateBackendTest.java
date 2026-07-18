@@ -2431,6 +2431,7 @@ class CobbleStateBackendTest {
 
         assertEquals(2, new CobbleMemoryConfiguration().getMemtableBufferCount());
         assertEquals(Config.MemtableType.SKIPLIST, config.memtableType);
+        assertEquals(2, config.l0FileLimit.intValue());
         assertTrue(config.sstBloomFilterEnabled);
         assertTrue(config.sstPartitionedIndex);
         assertEquals(Config.SstReadMetadataCacheMode.EAGER, config.sstReadMetadataCacheMode);
@@ -2455,6 +2456,7 @@ class CobbleStateBackendTest {
         Configuration overrides = new Configuration();
         overrides.set(CobbleOptions.MEMTABLE_TYPE, "skiplist");
         overrides.set(CobbleOptions.COMPACTION_POLICY, "min_overlap");
+        overrides.set(CobbleOptions.L0_FILE_LIMIT, 3);
         overrides.set(CobbleOptions.SST_BLOOM_FILTER_ENABLED, true);
         overrides.set(CobbleOptions.SST_BLOOM_FILTER_BITS_PER_KEY, 15);
         overrides.set(CobbleOptions.SST_PARTITIONED_INDEX_ENABLED, true);
@@ -2482,6 +2484,7 @@ class CobbleStateBackendTest {
             Config config = context.cobbleBackend.getCobbleConfig();
             assertEquals(Config.MemtableType.SKIPLIST, config.memtableType);
             assertEquals(Config.CompactionPolicyKind.MIN_OVERLAP, config.compactionPolicy);
+            assertEquals(3, config.l0FileLimit.intValue());
             assertTrue(config.sstBloomFilterEnabled);
             assertEquals(15, config.sstBloomBitsPerKey.intValue());
             assertTrue(config.sstPartitionedIndex);
@@ -2548,6 +2551,27 @@ class CobbleStateBackendTest {
     void nonPositiveCompactionThreadsIsRejectedBeforeDbOpen(@TempDir Path tempDir) {
         Configuration overrides = new Configuration();
         overrides.set(CobbleOptions.COMPACTION_THREADS, 0);
+
+        assertThrows(
+                Exception.class,
+                () ->
+                        createBackendContext(
+                                        tempDir,
+                                        false,
+                                        null,
+                                        null,
+                                        TtlTimeProvider.DEFAULT,
+                                        false,
+                                        Collections.emptyList(),
+                                        KeyGroupRange.of(0, 15),
+                                        overrides)
+                                .close());
+    }
+
+    @Test
+    void nonPositiveL0FileLimitIsRejectedBeforeDbOpen(@TempDir Path tempDir) {
+        Configuration overrides = new Configuration();
+        overrides.set(CobbleOptions.L0_FILE_LIMIT, 0);
 
         assertThrows(
                 Exception.class,
