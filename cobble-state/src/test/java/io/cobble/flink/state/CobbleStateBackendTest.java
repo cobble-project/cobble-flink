@@ -2431,6 +2431,7 @@ class CobbleStateBackendTest {
 
         assertEquals(2, new CobbleMemoryConfiguration().getMemtableBufferCount());
         assertEquals(Config.MemtableType.SKIPLIST, config.memtableType);
+        assertEquals(Config.CompactionPolicyKind.SCORE_PRIORITY, config.compactionPolicy);
         assertEquals(2, config.l0FileLimit.intValue());
         assertTrue(config.sstBloomFilterEnabled);
         assertTrue(config.sstPartitionedIndex);

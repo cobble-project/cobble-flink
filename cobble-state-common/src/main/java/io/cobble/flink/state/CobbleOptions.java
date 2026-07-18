@@ -75,7 +75,7 @@ public final class CobbleOptions {
     public static final ConfigOption<String> COMPACTION_POLICY =
             ConfigOptions.key("state.backend.cobble.compaction.policy")
                     .stringType()
-                    .defaultValue("round_robin")
+                    .defaultValue("score_priority")
                     .withDescription(
                             "The compaction policy used by Cobble. Supported values: round_robin, min_overlap, score_priority.");
 
