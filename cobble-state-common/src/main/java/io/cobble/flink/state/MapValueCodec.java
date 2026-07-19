@@ -26,8 +26,7 @@ import java.nio.ByteBuffer;
  * any non-zero leading byte as "present null" on decode so bytes written by a differently tuned
  * serializer flavor still round-trip.
  *
- * <p>Cobble Flink is unreleased; this is the only Cobble MapState row-value format. There is no
- * backward-compatibility branch for the previous raw-value encoding.
+ * <p>This is the only Cobble MapState row-value format.
  *
  * <p>Note: all decode entry points return Java {@code null} for a present-null entry. Call sites
  * distinguish "absent row" from "present-null row" by checking row presence separately (e.g. via

@@ -152,7 +152,7 @@ final class CobbleStateSourceSplit implements SourceSplit, Serializable {
 
     /** Serializer for checkpointing state source split metadata. */
     static final class Serializer implements SimpleVersionedSerializer<CobbleStateSourceSplit> {
-        private static final int VERSION = 2;
+        private static final int VERSION = 1;
 
         @Override
         public int getVersion() {

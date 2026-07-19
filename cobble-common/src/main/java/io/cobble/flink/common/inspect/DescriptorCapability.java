@@ -12,8 +12,7 @@ package io.cobble.flink.common.inspect;
  *   <li>{@code UNSUPPORTED} - the descriptor cannot decode any row; fall back entirely.
  * </ul>
  *
- * <p>Enum ordinals are persisted in the inspect schema store. The store format is not
- * backward-compatible across releases (see {@link StateInspectSchemaStore} version).
+ * <p>Enum ordinals are persisted inside the versioned {@link StateInspectSchemaStore} format.
  */
 public enum DescriptorCapability {
     FULLY_CLASSLESS,

@@ -4,9 +4,7 @@ package io.cobble.flink.common.inspect;
  * Kind tag for {@link InspectDecoderDescriptor}. Identifies which classless decode strategy the
  * monitor should use for a given serializer snapshot.
  *
- * <p>Enum ordinals are persisted in the inspect schema store. The store format is not
- * backward-compatible across releases (see {@link StateInspectSchemaStore} version), so ordinals
- * need not be frozen indefinitely.
+ * <p>Enum ordinals are persisted inside the versioned {@link StateInspectSchemaStore} format.
  *
  * <ul>
  *   <li>{@code PORTABLE_SNAPSHOT} - the monitor can restore a Flink built-in serializer from the

@@ -125,8 +125,7 @@ class ServerConfigTest {
 
     @Test
     void duplicateScalarOptionUsesLastValue() {
-        // Scalar options preserve the legacy "last wins" semantics (the old Map.put overwrote
-        // duplicates). Only --user-jar / --user-classpath are list-valued.
+        // Scalar options use the last supplied value. Only user-jar options accumulate.
         ServerConfig config = ServerConfig.parse(new String[] {"--port", "9090", "--port", "9191"});
         assertEquals(9191, config.port);
     }

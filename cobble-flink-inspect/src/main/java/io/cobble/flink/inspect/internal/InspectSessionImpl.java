@@ -786,7 +786,7 @@ final class InspectSessionImpl implements InspectSession {
     }
 
     private static final class CursorPosition {
-        private static final String VERSION = "v2";
+        private static final String VERSION = "v1";
 
         private final int bucket;
         private final byte[] key;

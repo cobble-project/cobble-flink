@@ -73,7 +73,7 @@ final class CobbleSourceSplit implements SourceSplit, Serializable {
 
     /** Serializer for checkpointing split metadata without embedding raw ScanSplit payloads. */
     static final class Serializer implements SimpleVersionedSerializer<CobbleSourceSplit> {
-        private static final int VERSION = 6;
+        private static final int VERSION = 1;
 
         @Override
         public int getVersion() {

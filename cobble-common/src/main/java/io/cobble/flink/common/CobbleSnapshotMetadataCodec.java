@@ -23,7 +23,7 @@ public final class CobbleSnapshotMetadataCodec {
     /** Identifies a Cobble keyed-state payload inside a Flink metadata stream. */
     public static final int MAGIC = 0x43425348;
 
-    public static final int VERSION = 2;
+    public static final int VERSION = 1;
     private static final int MAX_STATE_DESCRIPTORS = 100_000;
     public static final int MAX_SCHEMA_BYTES = 16 * 1024 * 1024;
 
