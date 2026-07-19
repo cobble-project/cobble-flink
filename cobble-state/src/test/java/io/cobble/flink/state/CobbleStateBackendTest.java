@@ -15,6 +15,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import io.cobble.CancelledError;
 import io.cobble.Config;
 import io.cobble.ShardSnapshot;
+import io.cobble.flink.common.CobbleStateDescriptor;
 import io.cobble.flink.common.inspect.InspectSchemaRegistryLayout;
 import io.cobble.flink.common.inspect.StateInspectSchema;
 import io.cobble.flink.common.inspect.StateInspectSchemaStore;
@@ -3879,6 +3880,8 @@ class CobbleStateBackendTest {
             ValueState<Integer> valueState =
                     backend.getPartitionedState(
                             "void-state", StringSerializer.INSTANCE, snapDescriptor);
+            CobbleStateDescriptor runtimeDescriptor =
+                    ((AbstractCobbleState<?, ?, ?>) valueState).stateDescriptor();
             valueState.update(100);
 
             MemCheckpointStreamFactory streamFactory =
@@ -3909,6 +3912,23 @@ class CobbleStateBackendTest {
             StateInspectSchema schema = metadata.schemaStore().schemas().get(0);
             assertEquals("snap-state", schema.stateName());
             assertEquals(StateKind.VALUE, schema.stateKind());
+            assertEquals(1, metadata.stateDescriptors().size());
+            CobbleStateDescriptor stateDescriptor = metadata.stateDescriptors().get(0);
+            assertEquals(runtimeDescriptor, stateDescriptor);
+            assertEquals("snap-state", stateDescriptor.stateName());
+            assertEquals(CobbleStateDescriptor.StateKind.VALUE, stateDescriptor.stateKind());
+            assertEquals(
+                    CobbleStateDescriptor.RowKeyEncoding.KEY_NAMESPACE,
+                    stateDescriptor.rowKeyEncoding());
+            assertEquals(
+                    CobbleStateDescriptor.RowKeyEncoding.KEY_NAMESPACE.currentVersion(),
+                    stateDescriptor.rowKeyFormatVersion());
+            assertEquals(
+                    CobbleStateDescriptor.RowValueEncoding.SERIALIZED_VALUE,
+                    stateDescriptor.rowValueEncoding());
+            assertEquals(
+                    CobbleStateDescriptor.RowValueEncoding.SERIALIZED_VALUE.currentVersion(),
+                    stateDescriptor.rowValueFormatVersion());
         } finally {
             ctx.close();
         }
@@ -6166,6 +6186,17 @@ class CobbleStateBackendTest {
                         KeyGroupRange.of(keyGroup, keyGroup))) {
             CobbleKeyedStateBackend<Integer> backend = restored.cobbleBackend;
             backend.setCurrentKey(key);
+
+            assertEquals(1, backend.getStateDescriptors().size());
+            CobbleStateDescriptor restoredDescriptor = backend.getStateDescriptors().get(0);
+            assertEquals(
+                    CobbleStateDescriptor.StateKind.AGGREGATING, restoredDescriptor.stateKind());
+            assertEquals(
+                    restoredDescriptor.rowKeyEncoding().currentVersion(),
+                    restoredDescriptor.rowKeyFormatVersion());
+            assertEquals(
+                    restoredDescriptor.rowValueEncoding().currentVersion(),
+                    restoredDescriptor.rowValueFormatVersion());
 
             AggregatingState<Integer, String> state =
                     backend.getPartitionedState(

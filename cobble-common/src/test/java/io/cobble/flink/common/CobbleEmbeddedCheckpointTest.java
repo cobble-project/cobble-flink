@@ -168,7 +168,7 @@ class CobbleEmbeddedCheckpointTest {
                                 StandardOpenOption.CREATE_NEW,
                                 StandardOpenOption.WRITE))) {
             CobbleSnapshotMetadataCodec.write(
-                    new CobbleSnapshotMetadataPayload(shard, false, null),
+                    new CobbleSnapshotMetadataPayload(shard, false, Collections.emptyList(), null),
                     new DataOutputViewStreamWrapper(output));
         }
     }

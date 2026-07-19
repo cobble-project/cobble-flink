@@ -2,6 +2,7 @@ package io.cobble.flink.state;
 
 import io.cobble.Config;
 import io.cobble.flink.common.CobbleNativeMetrics;
+import io.cobble.flink.common.CobbleStateDescriptor;
 import io.cobble.structured.Db;
 
 import org.apache.flink.api.common.typeutils.TypeSerializer;
@@ -32,6 +33,7 @@ import java.util.Arrays;
 import java.util.Collection;
 import java.util.Collections;
 import java.util.Comparator;
+import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
@@ -127,6 +129,7 @@ final class CobbleKeyedStateBackendBuilder<K> {
             // queue objects. Mark their cached sizes unknown so size() discovers them lazily.
             boolean restoredNativeQueuesMayContainEntries =
                     restoreStateHandles != null && !restoreStateHandles.isEmpty();
+            List<CobbleStateDescriptor> restoredStateDescriptors = readRestoredStateDescriptors();
             CobbleKeyedStateBackend<K> backend =
                     new CobbleKeyedStateBackend<>(
                             kvStateRegistry,
@@ -146,7 +149,8 @@ final class CobbleKeyedStateBackendBuilder<K> {
                             manualTtlTimeProviderForTests,
                             restoredNativeQueuesMayContainEntries,
                             priorityQueueStateType,
-                            restoredCanonicalMetadata);
+                            restoredCanonicalMetadata,
+                            restoredStateDescriptors);
             success = true;
             return backend;
         } finally {
@@ -519,6 +523,32 @@ final class CobbleKeyedStateBackendBuilder<K> {
         restoreSources.sort(
                 Comparator.comparingInt(source -> source.keyGroupRange.getStartKeyGroup()));
         return restoreSources;
+    }
+
+    private List<CobbleStateDescriptor> readRestoredStateDescriptors() throws IOException {
+        if (restoreStateHandles == null
+                || restoreStateHandles.isEmpty()
+                || isCanonicalSavepointRestore()) {
+            return Collections.emptyList();
+        }
+        Map<String, CobbleStateDescriptor> descriptors = new LinkedHashMap<>();
+        for (RestoreSource source : readRestoreSources()) {
+            for (CobbleStateDescriptor descriptor : source.metadata.stateDescriptors()) {
+                String key = descriptor.stateIdentity();
+                CobbleStateDescriptor existing = descriptors.putIfAbsent(key, descriptor);
+                if (existing != null && !existing.equals(descriptor)) {
+                    throw new IOException(
+                            "Cobble restore found conflicting row format descriptors for state '"
+                                    + descriptor.stateName()
+                                    + "': "
+                                    + existing
+                                    + " and "
+                                    + descriptor
+                                    + '.');
+                }
+            }
+        }
+        return new ArrayList<>(descriptors.values());
     }
 
     private boolean isCanonicalSavepointRestore() {

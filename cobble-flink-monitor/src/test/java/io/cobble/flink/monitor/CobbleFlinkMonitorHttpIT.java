@@ -586,6 +586,7 @@ class CobbleFlinkMonitorHttpIT {
                     new CobbleSnapshotMetadataPayload(
                             shard,
                             false,
+                            Collections.emptyList(),
                             new StateInspectSchemaStore(
                                     Collections.singletonList(stateSchema), semantic)),
                     new DataOutputViewStreamWrapper(output));

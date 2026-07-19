@@ -3,12 +3,15 @@ package io.cobble.flink.state;
 import io.cobble.ShardSnapshot;
 import io.cobble.flink.common.CobbleSnapshotMetadataCodec;
 import io.cobble.flink.common.CobbleSnapshotMetadataPayload;
+import io.cobble.flink.common.CobbleStateDescriptor;
 import io.cobble.flink.common.inspect.StateInspectSchemaStore;
 
 import org.apache.flink.annotation.VisibleForTesting;
 import org.apache.flink.core.memory.DataInputView;
 import org.apache.flink.core.memory.DataOutputView;
+
 import java.io.IOException;
+import java.util.List;
 
 /** Serialized shard-snapshot payload uploaded through Flink checkpoint state handles. */
 final class CobbleSnapshotMetadata {
@@ -27,10 +30,11 @@ final class CobbleSnapshotMetadata {
     static CobbleSnapshotMetadata fromShardSnapshot(
             ShardSnapshot shardSnapshot,
             boolean containsCobbleTimers,
+            List<CobbleStateDescriptor> stateDescriptors,
             StateInspectSchemaStore schemaStore) {
         return new CobbleSnapshotMetadata(
                 new CobbleSnapshotMetadataPayload(
-                        shardSnapshot, containsCobbleTimers, schemaStore));
+                        shardSnapshot, containsCobbleTimers, stateDescriptors, schemaStore));
     }
 
     static CobbleSnapshotMetadata read(DataInputView input) throws IOException {
@@ -52,6 +56,10 @@ final class CobbleSnapshotMetadata {
 
     boolean containsCobbleTimers() {
         return payload.containsCobbleTimers();
+    }
+
+    List<CobbleStateDescriptor> stateDescriptors() {
+        return payload.stateDescriptors();
     }
 
     StateInspectSchemaStore schemaStore() {

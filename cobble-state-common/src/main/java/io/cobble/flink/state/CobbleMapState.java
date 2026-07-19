@@ -7,6 +7,7 @@ import io.cobble.structured.DirectScanRow;
 import io.cobble.structured.Row;
 import io.cobble.structured.ScanCursor;
 import io.cobble.structured.ScanOptions;
+import io.cobble.flink.common.CobbleStateDescriptor;
 
 import org.apache.flink.api.common.state.StateTtlConfig;
 import org.apache.flink.api.common.typeutils.TypeSerializer;
@@ -57,7 +58,7 @@ final class CobbleMapState<K, N, UK, UV> extends AbstractCobbleState<K, N, Map<U
     CobbleMapState(
             CobbleKeyedStateBackend<K> backend,
             Db db,
-            String columnFamily,
+            CobbleStateDescriptor stateDescriptor,
             TypeSerializer<K> keySerializer,
             TypeSerializer<N> namespaceSerializer,
             MapSerializer<UK, UV> mapSerializer,
@@ -65,7 +66,7 @@ final class CobbleMapState<K, N, UK, UV> extends AbstractCobbleState<K, N, Map<U
         super(
                 backend,
                 db,
-                columnFamily,
+                stateDescriptor,
                 keySerializer,
                 namespaceSerializer,
                 mapSerializer,
@@ -73,12 +74,12 @@ final class CobbleMapState<K, N, UK, UV> extends AbstractCobbleState<K, N, Map<U
         this.userKeySerializer = mapSerializer.getKeySerializer();
         this.userValueSerializer = mapSerializer.getValueSerializer();
         this.userValueRowCodec = MapValueCodec.adapterFor(this.userValueSerializer);
-        this.emptyCheckScanOptions = ScanOptions.defaults().columnFamily(columnFamily);
+        this.emptyCheckScanOptions = ScanOptions.defaults().columnFamily(this.columnFamily);
         this.emptyCheckFastScanOptions =
-                ScanOptions.defaults().columnFamily(columnFamily).maxRows(1);
+                ScanOptions.defaults().columnFamily(this.columnFamily).maxRows(1);
         this.mapIterationScanOptions =
                 ScanOptions.defaults()
-                        .columnFamily(columnFamily)
+                        .columnFamily(this.columnFamily)
                         .readAheadBytes(MAP_ITERATION_READ_AHEAD_BYTES);
         this.userKeyFixedLength = CobbleStateKeySerializer.maybeFixedLength(userKeySerializer);
         int keyFixedLength = CobbleStateKeySerializer.maybeFixedLength(keySerializer);

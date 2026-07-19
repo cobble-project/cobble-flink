@@ -69,7 +69,7 @@ class InspectCatalogDiscoveryTest {
         shard.ranges.add(range);
         try (DataOutputStream output = new DataOutputStream(Files.newOutputStream(stateFile))) {
             CobbleSnapshotMetadataCodec.write(
-                    new CobbleSnapshotMetadataPayload(shard, false, null),
+                    new CobbleSnapshotMetadataPayload(shard, false, Collections.emptyList(), null),
                     new DataOutputViewStreamWrapper(output));
         }
     }

@@ -210,10 +210,13 @@ public final class CobbleEmbeddedCheckpoint {
         Map<String, OperatorSnapshot> operators = new LinkedHashMap<>();
         for (OperatorState operatorState : metadata.getOperatorStates()) {
             Map<String, ShardSnapshot> shards = new LinkedHashMap<>();
+            List<CobbleStateDescriptor> stateDescriptors = new ArrayList<>();
             List<StateInspectSchemaStore> stores = new ArrayList<>();
             for (OperatorSubtaskState subtaskState : operatorState.getStates()) {
-                collectCobbleHandles(subtaskState.getManagedKeyedState(), shards, stores);
-                collectCobbleHandles(subtaskState.getRawKeyedState(), shards, stores);
+                collectCobbleHandles(
+                        subtaskState.getManagedKeyedState(), shards, stateDescriptors, stores);
+                collectCobbleHandles(
+                        subtaskState.getRawKeyedState(), shards, stateDescriptors, stores);
             }
             if (!shards.isEmpty()) {
                 String operatorId = operatorState.getOperatorID().toHexString();
@@ -223,6 +226,7 @@ public final class CobbleEmbeddedCheckpoint {
                                 operatorId,
                                 operatorState.getMaxParallelism(),
                                 new ArrayList<>(shards.values()),
+                                mergeStateDescriptors(stateDescriptors),
                                 mergeSchemaStores(stores)));
             }
         }
@@ -236,6 +240,7 @@ public final class CobbleEmbeddedCheckpoint {
     private static void collectCobbleHandles(
             Collection<KeyedStateHandle> handles,
             Map<String, ShardSnapshot> shards,
+            List<CobbleStateDescriptor> stateDescriptors,
             List<StateInspectSchemaStore> stores)
             throws IOException {
         for (KeyedStateHandle handle : handles) {
@@ -258,10 +263,31 @@ public final class CobbleEmbeddedCheckpoint {
             }
             ShardSnapshot shard = payload.shardSnapshot();
             shards.putIfAbsent(shard.dbId + ':' + shard.snapshotId, shard);
+            stateDescriptors.addAll(payload.stateDescriptors());
             if (!payload.schemaStore().isEmpty()) {
                 stores.add(payload.schemaStore());
             }
         }
+    }
+
+    private static List<CobbleStateDescriptor> mergeStateDescriptors(
+            List<CobbleStateDescriptor> descriptors) throws IOException {
+        Map<String, CobbleStateDescriptor> merged = new LinkedHashMap<>();
+        for (CobbleStateDescriptor descriptor : descriptors) {
+            String key = descriptor.stateIdentity();
+            CobbleStateDescriptor existing = merged.putIfAbsent(key, descriptor);
+            if (existing != null && !existing.equals(descriptor)) {
+                throw new IOException(
+                        "Cobble checkpoint contains conflicting row format descriptors for state '"
+                                + descriptor.stateName()
+                                + "': "
+                                + existing
+                                + " and "
+                                + descriptor
+                                + '.');
+            }
+        }
+        return Collections.unmodifiableList(new ArrayList<>(merged.values()));
     }
 
     private static StateInspectSchemaStore mergeSchemaStores(List<StateInspectSchemaStore> stores) {
@@ -365,16 +391,19 @@ public final class CobbleEmbeddedCheckpoint {
         private final String operatorId;
         private final int maxParallelism;
         private final List<ShardSnapshot> shards;
+        private final List<CobbleStateDescriptor> stateDescriptors;
         private final StateInspectSchemaStore schemaStore;
 
         private OperatorSnapshot(
                 String operatorId,
                 int maxParallelism,
                 List<ShardSnapshot> shards,
+                List<CobbleStateDescriptor> stateDescriptors,
                 StateInspectSchemaStore schemaStore) {
             this.operatorId = operatorId;
             this.maxParallelism = maxParallelism;
             this.shards = Collections.unmodifiableList(new ArrayList<>(shards));
+            this.stateDescriptors = stateDescriptors;
             this.schemaStore = schemaStore;
         }
 
@@ -388,6 +417,10 @@ public final class CobbleEmbeddedCheckpoint {
 
         public List<ShardSnapshot> shards() {
             return shards;
+        }
+
+        public List<CobbleStateDescriptor> stateDescriptors() {
+            return stateDescriptors;
         }
 
         public StateInspectSchemaStore schemaStore() {

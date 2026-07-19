@@ -2,6 +2,7 @@ package io.cobble.flink.state;
 
 import io.cobble.structured.Db;
 import io.cobble.structured.DirectEncodedRow;
+import io.cobble.flink.common.CobbleStateDescriptor;
 
 import org.apache.flink.api.common.state.StateTtlConfig;
 import org.apache.flink.api.common.typeutils.TypeSerializer;
@@ -22,7 +23,7 @@ final class CobbleValueState<K, N, V> extends AbstractCobbleState<K, N, V>
     CobbleValueState(
             CobbleKeyedStateBackend<K> backend,
             Db db,
-            String columnFamily,
+            CobbleStateDescriptor stateDescriptor,
             TypeSerializer<K> keySerializer,
             TypeSerializer<N> namespaceSerializer,
             TypeSerializer<V> valueSerializer,
@@ -31,7 +32,7 @@ final class CobbleValueState<K, N, V> extends AbstractCobbleState<K, N, V>
         super(
                 backend,
                 db,
-                columnFamily,
+                stateDescriptor,
                 keySerializer,
                 namespaceSerializer,
                 valueSerializer,

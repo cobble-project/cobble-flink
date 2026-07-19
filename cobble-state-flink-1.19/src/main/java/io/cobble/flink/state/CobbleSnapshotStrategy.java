@@ -3,6 +3,7 @@ package io.cobble.flink.state;
 import io.cobble.CancelledError;
 import io.cobble.PendingSnapshot;
 import io.cobble.ShardSnapshot;
+import io.cobble.flink.common.CobbleStateDescriptor;
 import io.cobble.flink.common.inspect.StateInspectSchemaStore;
 import io.cobble.structured.Db;
 
@@ -48,6 +49,7 @@ final class CobbleSnapshotStrategy
     private final KeyGroupRange keyGroupRange;
     private final Supplier<Boolean> hasRegisteredState;
     private final Supplier<Boolean> hasCobbleTimers;
+    private final Supplier<List<CobbleStateDescriptor>> stateDescriptorSupplier;
     private final Supplier<StateInspectSchemaStore> schemaStoreSupplier;
     private final UUID backendIdentifier;
     private final Map<Long, TrackedSnapshot> trackedSnapshots;
@@ -58,11 +60,13 @@ final class CobbleSnapshotStrategy
             KeyGroupRange keyGroupRange,
             Supplier<Boolean> hasRegisteredState,
             Supplier<Boolean> hasCobbleTimers,
+            Supplier<List<CobbleStateDescriptor>> stateDescriptorSupplier,
             Supplier<StateInspectSchemaStore> schemaStoreSupplier) {
         this.cobbleDb = cobbleDb;
         this.keyGroupRange = keyGroupRange;
         this.hasRegisteredState = hasRegisteredState;
         this.hasCobbleTimers = hasCobbleTimers;
+        this.stateDescriptorSupplier = stateDescriptorSupplier;
         this.schemaStoreSupplier = schemaStoreSupplier;
         this.backendIdentifier = UUID.randomUUID();
         this.trackedSnapshots = new ConcurrentHashMap<>();
@@ -167,8 +171,16 @@ final class CobbleSnapshotStrategy
         boolean success = false;
         try {
             ShardSnapshot shardSnapshot = snapshotResources.awaitSnapshot();
+            List<CobbleStateDescriptor> stateDescriptors = stateDescriptorSupplier.get();
+            if (stateDescriptors.isEmpty()) {
+                throw new IOException(
+                        "Cobble snapshot has registered state but no runtime row descriptors.");
+            }
             CobbleSnapshotMetadata.fromShardSnapshot(
-                            shardSnapshot, hasCobbleTimers.get(), schemaStoreSupplier.get())
+                            shardSnapshot,
+                            hasCobbleTimers.get(),
+                            stateDescriptors,
+                            schemaStoreSupplier.get())
                     .write(
                             new DataOutputViewStreamWrapper(
                                     streamProvider.getCheckpointOutputStream()));

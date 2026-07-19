@@ -1,5 +1,6 @@
 package io.cobble.flink.state;
 
+import io.cobble.flink.common.CobbleStateDescriptor;
 import io.cobble.structured.Db;
 import io.cobble.structured.DirectScanCursor;
 import io.cobble.structured.ReadOptions;
@@ -27,6 +28,7 @@ abstract class AbstractCobbleState<K, N, V> implements InternalKvState<K, N, V>,
     protected final CobbleKeyedStateBackend<K> backend;
     protected final Db db;
     protected final String columnFamily;
+    protected final CobbleStateDescriptor stateDescriptor;
     protected final TypeSerializer<K> keySerializer;
     protected final CobbleStateKeySerializer.ReusableSerializedKeyBuilder<K, N> rowKeyBuilder;
     protected final CobbleStateKeySerializer.ReusableSerializedDirectKeyBuilder<K, N>
@@ -50,14 +52,15 @@ abstract class AbstractCobbleState<K, N, V> implements InternalKvState<K, N, V>,
     AbstractCobbleState(
             CobbleKeyedStateBackend<K> backend,
             Db db,
-            String columnFamily,
+            CobbleStateDescriptor stateDescriptor,
             TypeSerializer<K> keySerializer,
             TypeSerializer<N> namespaceSerializer,
             TypeSerializer<V> valueSerializer,
             StateTtlConfig ttlConfig) {
         this.backend = backend;
         this.db = db;
-        this.columnFamily = columnFamily;
+        this.stateDescriptor = stateDescriptor;
+        this.columnFamily = stateDescriptor.columnFamily();
         this.keySerializer = keySerializer;
         this.rowKeyBuilder =
                 new CobbleStateKeySerializer.ReusableSerializedKeyBuilder<>(
@@ -90,6 +93,10 @@ abstract class AbstractCobbleState<K, N, V> implements InternalKvState<K, N, V>,
     @Override
     public final TypeSerializer<V> getValueSerializer() {
         return valueSerializer;
+    }
+
+    final CobbleStateDescriptor stateDescriptor() {
+        return stateDescriptor;
     }
 
     @Override

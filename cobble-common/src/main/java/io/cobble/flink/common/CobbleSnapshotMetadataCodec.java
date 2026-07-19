@@ -10,7 +10,9 @@ import org.slf4j.LoggerFactory;
 
 import java.io.EOFException;
 import java.io.IOException;
+import java.util.ArrayList;
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 
 /** Wire codec for the Cobble payload stored in Flink's generic checkpoint metadata stream. */
@@ -21,7 +23,8 @@ public final class CobbleSnapshotMetadataCodec {
     /** Identifies a Cobble keyed-state payload inside a Flink metadata stream. */
     public static final int MAGIC = 0x43425348;
 
-    public static final int VERSION = 1;
+    public static final int VERSION = 2;
+    private static final int MAX_STATE_DESCRIPTORS = 100_000;
     public static final int MAX_SCHEMA_BYTES = 16 * 1024 * 1024;
 
     private CobbleSnapshotMetadataCodec() {}
@@ -70,6 +73,20 @@ public final class CobbleSnapshotMetadataCodec {
         }
         output.writeBoolean(payload.containsCobbleTimers());
 
+        List<CobbleStateDescriptor> stateDescriptors = payload.stateDescriptors();
+        if (stateDescriptors.size() > MAX_STATE_DESCRIPTORS) {
+            throw new IOException(
+                    "Cobble state descriptor count "
+                            + stateDescriptors.size()
+                            + " exceeds "
+                            + MAX_STATE_DESCRIPTORS
+                            + '.');
+        }
+        output.writeInt(stateDescriptors.size());
+        for (CobbleStateDescriptor descriptor : stateDescriptors) {
+            writeStateDescriptor(descriptor, output);
+        }
+
         byte[] schemaBytes = payload.schemaStore().toBytes();
         if (schemaBytes.length > MAX_SCHEMA_BYTES) {
             schemaBytes = StateInspectSchemaStore.empty().toBytes();
@@ -111,7 +128,108 @@ public final class CobbleSnapshotMetadataCodec {
         shardSnapshot.columnFamilyIds = columnFamilyIds;
         boolean containsCobbleTimers = input.readBoolean();
         return new CobbleSnapshotMetadataPayload(
-                shardSnapshot, containsCobbleTimers, readSchemaPayload(input));
+                shardSnapshot,
+                containsCobbleTimers,
+                readStateDescriptors(input),
+                readSchemaPayload(input));
+    }
+
+    private static void writeStateDescriptor(
+            CobbleStateDescriptor descriptor, DataOutputView output) throws IOException {
+        output.writeUTF(descriptor.stateName());
+        output.writeUTF(descriptor.columnFamily());
+        output.writeInt(descriptor.stateKind().ordinal());
+        output.writeInt(descriptor.rowKeyEncoding().ordinal());
+        output.writeInt(descriptor.rowKeyFormatVersion());
+        output.writeInt(descriptor.rowValueEncoding().ordinal());
+        output.writeInt(descriptor.rowValueFormatVersion());
+    }
+
+    private static List<CobbleStateDescriptor> readStateDescriptors(DataInputView input)
+            throws IOException {
+        int descriptorCount = input.readInt();
+        if (descriptorCount < 0 || descriptorCount > MAX_STATE_DESCRIPTORS) {
+            throw new IOException(
+                    "Cobble state descriptor count "
+                            + descriptorCount
+                            + " is out of range [0, "
+                            + MAX_STATE_DESCRIPTORS
+                            + "].");
+        }
+        List<CobbleStateDescriptor> descriptors = new ArrayList<>(descriptorCount);
+        for (int index = 0; index < descriptorCount; index++) {
+            String stateName = input.readUTF();
+            String columnFamily = input.readUTF();
+            CobbleStateDescriptor.StateKind stateKind =
+                    enumValue(
+                            CobbleStateDescriptor.StateKind.values(),
+                            input.readInt(),
+                            "state kind",
+                            stateName);
+            CobbleStateDescriptor.RowKeyEncoding rowKeyEncoding =
+                    enumValue(
+                            CobbleStateDescriptor.RowKeyEncoding.values(),
+                            input.readInt(),
+                            "row-key encoding",
+                            stateName);
+            int rowKeyFormatVersion = input.readInt();
+            requireCurrentVersion(
+                    rowKeyEncoding.currentVersion(), rowKeyFormatVersion, "row-key", stateName);
+            CobbleStateDescriptor.RowValueEncoding rowValueEncoding =
+                    enumValue(
+                            CobbleStateDescriptor.RowValueEncoding.values(),
+                            input.readInt(),
+                            "row-value encoding",
+                            stateName);
+            int rowValueFormatVersion = input.readInt();
+            requireCurrentVersion(
+                    rowValueEncoding.currentVersion(),
+                    rowValueFormatVersion,
+                    "row-value",
+                    stateName);
+            descriptors.add(
+                    new CobbleStateDescriptor(
+                            stateName,
+                            columnFamily,
+                            stateKind,
+                            rowKeyEncoding,
+                            rowKeyFormatVersion,
+                            rowValueEncoding,
+                            rowValueFormatVersion));
+        }
+        return descriptors;
+    }
+
+    private static void requireCurrentVersion(
+            int currentVersion, int actualVersion, String role, String stateName)
+            throws IOException {
+        if (actualVersion != currentVersion) {
+            throw new IOException(
+                    "Unsupported Cobble "
+                            + role
+                            + " format version "
+                            + actualVersion
+                            + " for state '"
+                            + stateName
+                            + "' (expected "
+                            + currentVersion
+                            + ").");
+        }
+    }
+
+    private static <T> T enumValue(T[] values, int ordinal, String role, String stateName)
+            throws IOException {
+        if (ordinal < 0 || ordinal >= values.length) {
+            throw new IOException(
+                    "Invalid Cobble "
+                            + role
+                            + " ordinal "
+                            + ordinal
+                            + " for state '"
+                            + stateName
+                            + "'.");
+        }
+        return values[ordinal];
     }
 
     private static StateInspectSchemaStore readSchemaPayload(DataInputView input)

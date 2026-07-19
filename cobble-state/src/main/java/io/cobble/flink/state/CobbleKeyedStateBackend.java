@@ -3,6 +3,7 @@ package io.cobble.flink.state;
 import io.cobble.ColumnFamilyOptions;
 import io.cobble.Config;
 import io.cobble.flink.common.CobbleNativeMetrics;
+import io.cobble.flink.common.CobbleStateDescriptor;
 import io.cobble.flink.common.inspect.StateInspectSchema;
 import io.cobble.flink.common.inspect.StateInspectSchemaStore;
 import io.cobble.flink.common.inspect.StateInspectSemanticSchema;
@@ -79,6 +80,7 @@ final class CobbleKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
     private final Db cobbleDb;
     private final CobbleNativeMetrics.Monitor nativeMetricsMonitor;
     private final Map<String, StateDescriptor.Type> stateTypes;
+    private final LinkedHashMap<String, CobbleStateDescriptor> stateDescriptors;
     private final LinkedHashMap<String, StateInspectSchema> stateInspectSchemas;
     private final LinkedHashMap<String, StateInspectSemanticSchema> stateInspectSemanticSchemas;
     /**
@@ -115,7 +117,8 @@ final class CobbleKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
             boolean manualTtlTimeProviderForTests,
             boolean restoredNativeQueuesMayContainEntries,
             CobbleStateBackend.PriorityQueueStateType priorityQueueStateType,
-            Map<String, RestoredKeyedStateMetadata> restoredCanonicalMetadata) {
+            Map<String, RestoredKeyedStateMetadata> restoredCanonicalMetadata,
+            List<CobbleStateDescriptor> restoredStateDescriptors) {
         super(
                 kvStateRegistry,
                 keySerializer,
@@ -132,6 +135,10 @@ final class CobbleKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
         this.cobbleDb = cobbleDb;
         this.nativeMetricsMonitor = nativeMetricsMonitor;
         this.stateTypes = new HashMap<>();
+        this.stateDescriptors = new LinkedHashMap<>();
+        for (CobbleStateDescriptor descriptor : restoredStateDescriptors) {
+            registerStateDescriptor(descriptor);
+        }
         this.stateInspectSchemas = new LinkedHashMap<>();
         this.stateInspectSemanticSchemas = new LinkedHashMap<>();
         this.restoredCanonicalMetadata =
@@ -159,6 +166,7 @@ final class CobbleKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
                         keyGroupRange,
                         () -> !stateTypes.isEmpty() || hasCobblePriorityQueues(),
                         this::hasCobblePriorityQueues,
+                        this::stateDescriptorSnapshot,
                         this::buildSchemaStore);
         this.resourcesClosed = new AtomicBoolean(false);
         this.manualTtlTimeProviderForTests = manualTtlTimeProviderForTests;
@@ -302,6 +310,10 @@ final class CobbleKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
                 namespaceSerializer,
                 stateDesc.getSerializer(),
                 stateDesc.getName());
+        CobbleStateDescriptor runtimeDescriptor =
+                registerStateDescriptor(
+                        CobbleStateDescriptor.forKeyValue(
+                                stateDesc.getName(), stateDesc.getName(), stateDesc.getType()));
 
         String stateName = stateDesc.getName();
         boolean ttlEnabled =
@@ -317,7 +329,7 @@ final class CobbleKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
                         new CobbleValueState<>(
                                 this,
                                 cobbleDb,
-                                stateDesc.getName(),
+                                runtimeDescriptor,
                                 keySerializer,
                                 namespaceSerializer,
                                 valueStateDescriptor.getSerializer(),
@@ -328,7 +340,10 @@ final class CobbleKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
                 return (IS) valueState;
             case LIST:
                 IS listState =
-                        createListState(namespaceSerializer, (ListStateDescriptor<?>) stateDesc);
+                        createListState(
+                                namespaceSerializer,
+                                (ListStateDescriptor<?>) stateDesc,
+                                runtimeDescriptor);
                 registerListSchema(
                         stateName,
                         ttlEnabled,
@@ -339,7 +354,10 @@ final class CobbleKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
                 return listState;
             case MAP:
                 IS mapState =
-                        createMapState(namespaceSerializer, (MapStateDescriptor<?, ?>) stateDesc);
+                        createMapState(
+                                namespaceSerializer,
+                                (MapStateDescriptor<?, ?>) stateDesc,
+                                runtimeDescriptor);
                 registerMapSchema(
                         stateName,
                         ttlEnabled,
@@ -351,7 +369,9 @@ final class CobbleKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
             case REDUCING:
                 IS reducingState =
                         createReducingState(
-                                namespaceSerializer, (ReducingStateDescriptor<?>) stateDesc);
+                                namespaceSerializer,
+                                (ReducingStateDescriptor<?>) stateDesc,
+                                runtimeDescriptor);
                 registerReducingSchema(
                         stateName,
                         ttlEnabled,
@@ -364,7 +384,8 @@ final class CobbleKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
                 IS aggregatingState =
                         createAggregatingState(
                                 namespaceSerializer,
-                                (AggregatingStateDescriptor<?, ?, ?>) stateDesc);
+                                (AggregatingStateDescriptor<?, ?, ?>) stateDesc,
+                                runtimeDescriptor);
                 registerAggregatingSchema(
                         stateName,
                         ttlEnabled,
@@ -476,6 +497,10 @@ final class CobbleKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
             restoredCanonicalMetadata.remove(stateName);
             return queue;
         }
+        registerStateDescriptor(
+                CobbleStateDescriptor.forTimer(
+                        stateName,
+                        CobblePriorityQueueSetFactory.timerQueueColumnFamilyName(stateName)));
         registerTimerSchema(stateName, byteOrderedElementSerializer);
         canonicalMetadata.registerPriorityQueueState(
                 stateName,
@@ -626,6 +651,11 @@ final class CobbleKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
     }
 
     @VisibleForTesting
+    List<CobbleStateDescriptor> getStateDescriptors() {
+        return stateDescriptorSnapshot();
+    }
+
+    @VisibleForTesting
     boolean hasTrackedSnapshot(long checkpointId) {
         return snapshotStrategy.hasTrackedSnapshot(checkpointId);
     }
@@ -633,6 +663,26 @@ final class CobbleKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
     @VisibleForTesting
     Long snapshotIdForCheckpoint(long checkpointId) {
         return snapshotStrategy.snapshotIdForCheckpoint(checkpointId);
+    }
+
+    private CobbleStateDescriptor registerStateDescriptor(CobbleStateDescriptor stateDescriptor) {
+        String key = stateDescriptor.stateIdentity();
+        CobbleStateDescriptor existing = stateDescriptors.putIfAbsent(key, stateDescriptor);
+        if (existing != null && !existing.equals(stateDescriptor)) {
+            throw new IllegalStateException(
+                    "State '"
+                            + stateDescriptor.stateName()
+                            + "' was registered with conflicting Cobble row formats: "
+                            + existing
+                            + " and "
+                            + stateDescriptor
+                            + '.');
+        }
+        return existing == null ? stateDescriptor : existing;
+    }
+
+    private List<CobbleStateDescriptor> stateDescriptorSnapshot() {
+        return new ArrayList<>(stateDescriptors.values());
     }
 
     /** Exposes Flink's total key-group count so state wrappers can map to Cobble buckets. */
@@ -643,13 +693,15 @@ final class CobbleKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
     /** Creates the typed Cobble-backed Flink ListState wrapper. */
     @SuppressWarnings("unchecked")
     private <N, T, S extends State, IS extends S> IS createListState(
-            TypeSerializer<N> namespaceSerializer, ListStateDescriptor<?> stateDesc) {
+            TypeSerializer<N> namespaceSerializer,
+            ListStateDescriptor<?> stateDesc,
+            CobbleStateDescriptor runtimeDescriptor) {
         ListStateDescriptor<T> listStateDescriptor = (ListStateDescriptor<T>) stateDesc;
         return (IS)
                 new CobbleListState<>(
                         this,
                         cobbleDb,
-                        stateDesc.getName(),
+                        runtimeDescriptor,
                         keySerializer,
                         namespaceSerializer,
                         (ListSerializer<T>) listStateDescriptor.getSerializer(),
@@ -660,13 +712,15 @@ final class CobbleKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
     /** Creates the typed Cobble-backed Flink MapState wrapper. */
     @SuppressWarnings("unchecked")
     private <N, UK, UV, S extends State, IS extends S> IS createMapState(
-            TypeSerializer<N> namespaceSerializer, MapStateDescriptor<?, ?> stateDesc) {
+            TypeSerializer<N> namespaceSerializer,
+            MapStateDescriptor<?, ?> stateDesc,
+            CobbleStateDescriptor runtimeDescriptor) {
         MapStateDescriptor<UK, UV> mapStateDescriptor = (MapStateDescriptor<UK, UV>) stateDesc;
         return (IS)
                 new CobbleMapState<>(
                         this,
                         cobbleDb,
-                        stateDesc.getName(),
+                        runtimeDescriptor,
                         keySerializer,
                         namespaceSerializer,
                         (MapSerializer<UK, UV>) mapStateDescriptor.getSerializer(),
@@ -676,13 +730,15 @@ final class CobbleKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
     /** Creates the typed Cobble-backed Flink ReducingState wrapper. */
     @SuppressWarnings("unchecked")
     private <N, T, S extends State, IS extends S> IS createReducingState(
-            TypeSerializer<N> namespaceSerializer, ReducingStateDescriptor<?> stateDesc) {
+            TypeSerializer<N> namespaceSerializer,
+            ReducingStateDescriptor<?> stateDesc,
+            CobbleStateDescriptor runtimeDescriptor) {
         ReducingStateDescriptor<T> reducingStateDescriptor = (ReducingStateDescriptor<T>) stateDesc;
         return (IS)
                 new CobbleReducingState<>(
                         this,
                         cobbleDb,
-                        stateDesc.getName(),
+                        runtimeDescriptor,
                         keySerializer,
                         namespaceSerializer,
                         reducingStateDescriptor.getSerializer(),
@@ -696,14 +752,16 @@ final class CobbleKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
      */
     @SuppressWarnings({"unchecked", "rawtypes"})
     private <N, S extends State, IS extends S> IS createAggregatingState(
-            TypeSerializer<N> namespaceSerializer, AggregatingStateDescriptor<?, ?, ?> stateDesc) {
+            TypeSerializer<N> namespaceSerializer,
+            AggregatingStateDescriptor<?, ?, ?> stateDesc,
+            CobbleStateDescriptor runtimeDescriptor) {
         AggregatingStateDescriptor<Object, Object, Object> aggDescriptor =
                 (AggregatingStateDescriptor<Object, Object, Object>) stateDesc;
         return (IS)
                 new CobbleAggregatingState<K, N, Object, Object, Object>(
                         this,
                         cobbleDb,
-                        stateDesc.getName(),
+                        runtimeDescriptor,
                         keySerializer,
                         namespaceSerializer,
                         aggDescriptor.getSerializer(),

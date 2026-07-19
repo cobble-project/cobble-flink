@@ -2,6 +2,7 @@ package io.cobble.flink.state;
 
 import io.cobble.structured.Db;
 import io.cobble.structured.DirectEncodedRow;
+import io.cobble.flink.common.CobbleStateDescriptor;
 
 import org.apache.flink.api.common.functions.AggregateFunction;
 import org.apache.flink.api.common.state.StateTtlConfig;
@@ -61,7 +62,7 @@ final class CobbleAggregatingState<K, N, IN, ACC, OUT> extends AbstractCobbleSta
     CobbleAggregatingState(
             CobbleKeyedStateBackend<K> backend,
             Db db,
-            String columnFamily,
+            CobbleStateDescriptor stateDescriptor,
             TypeSerializer<K> keySerializer,
             TypeSerializer<N> namespaceSerializer,
             TypeSerializer<ACC> accumulatorSerializer,
@@ -70,7 +71,7 @@ final class CobbleAggregatingState<K, N, IN, ACC, OUT> extends AbstractCobbleSta
         super(
                 backend,
                 db,
-                columnFamily,
+                stateDescriptor,
                 keySerializer,
                 namespaceSerializer,
                 accumulatorSerializer,

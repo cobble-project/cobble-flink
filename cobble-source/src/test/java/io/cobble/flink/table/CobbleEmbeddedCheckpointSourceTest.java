@@ -220,6 +220,7 @@ class CobbleEmbeddedCheckpointSourceTest {
                     new CobbleSnapshotMetadataPayload(
                             shard,
                             false,
+                            Collections.emptyList(),
                             new StateInspectSchemaStore(
                                     Collections.singletonList(schema), semantic)),
                     new DataOutputViewStreamWrapper(output));
@@ -264,7 +265,7 @@ class CobbleEmbeddedCheckpointSourceTest {
         try (DataOutputStream output = new DataOutputStream(Files.newOutputStream(state))) {
             CobbleSnapshotMetadataCodec.write(
                     new CobbleSnapshotMetadataPayload(
-                            shard, false, StateInspectSchemaStore.empty()),
+                            shard, false, Collections.emptyList(), StateInspectSchemaStore.empty()),
                     new DataOutputViewStreamWrapper(output));
         }
         IncrementalRemoteKeyedStateHandle handle =
