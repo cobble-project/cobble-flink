@@ -2,8 +2,12 @@ name: Deploy Docs
 
 on:
   push:
+    branches: [main, master]
     tags:
       - "v*"
+    paths:
+      - "docs/**"
+      - ".github/workflows/docs-pages.yml"
 
 permissions:
   contents: write
@@ -21,12 +25,21 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Resolve release documentation path
+      - name: Resolve documentation path
         id: resolve
         shell: bash
         run: |
           set -euo pipefail
-          if [[ ! "${GITHUB_REF_NAME}" =~ ^v([0-9]+\.[0-9]+\.[0-9]+)-([0-9]+)$ ]]; then
+
+          if [[ "${GITHUB_REF_TYPE}" == "branch" ]]; then
+            echo "publish_kind=latest" >> "${GITHUB_OUTPUT}"
+            echo "docs_label=latest" >> "${GITHUB_OUTPUT}"
+            echo "docs_root=latest" >> "${GITHUB_OUTPUT}"
+            echo "cobble_version=" >> "${GITHUB_OUTPUT}"
+            exit 0
+          fi
+
+          if [[ "${GITHUB_REF_TYPE}" != "tag" || ! "${GITHUB_REF_NAME}" =~ ^v([0-9]+\.[0-9]+\.[0-9]+)-([0-9]+)$ ]]; then
             echo "Documentation tag must look like v0.2.3-1; got '${GITHUB_REF_NAME}'." >&2
             exit 1
           fi
@@ -37,7 +50,8 @@ jobs:
           docs_root="${release_version}"
 
           echo "cobble_version=${cobble_version}" >> "${GITHUB_OUTPUT}"
-          echo "release_version=${release_version}" >> "${GITHUB_OUTPUT}"
+          echo "publish_kind=release" >> "${GITHUB_OUTPUT}"
+          echo "docs_label=${release_version}" >> "${GITHUB_OUTPUT}"
           echo "docs_root=${docs_root}" >> "${GITHUB_OUTPUT}"
 
       - name: Setup Ruby
@@ -54,7 +68,7 @@ jobs:
         run: |
           set -euo pipefail
           root="${{ steps.resolve.outputs.docs_root }}"
-          release_version="${{ steps.resolve.outputs.release_version }}"
+          docs_label="${{ steps.resolve.outputs.docs_label }}"
           commit_short="$(git rev-parse --short=8 HEAD)"
           repo_name="${GITHUB_REPOSITORY#*/}"
           baseurl="/${repo_name}/${root}"
@@ -62,7 +76,7 @@ jobs:
           tmp_config="$(mktemp "${RUNNER_TEMP}/docs-build-meta.XXXXXX.yml")"
           trap 'rm -f "${tmp_config}"' EXIT
           cat > "${tmp_config}" <<EOF
-          docs_root_label: ${release_version}
+          docs_root_label: ${docs_label}
           docs_commit_label: ${commit_short}
           EOF
 
@@ -78,9 +92,10 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
+          publish_kind="${{ steps.resolve.outputs.publish_kind }}"
           root="${{ steps.resolve.outputs.docs_root }}"
           cobble_version="${{ steps.resolve.outputs.cobble_version }}"
-          release_version="${{ steps.resolve.outputs.release_version }}"
+          docs_label="${{ steps.resolve.outputs.docs_label }}"
           remote_url="https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
           publish_branch="gh-pages"
           tmp_dir="$(mktemp -d)"
@@ -98,60 +113,46 @@ jobs:
           rsync -a --delete "docs/_site/" "${tmp_dir}/${root}/"
           touch "${tmp_dir}/.nojekyll"
 
-          mkdir -p "${tmp_dir}/${cobble_version}" "${tmp_dir}/latest"
-          cat > "${tmp_dir}/${cobble_version}/index.html" <<EOF
+          if [[ "${publish_kind}" == "release" ]]; then
+            mkdir -p "${tmp_dir}/${cobble_version}"
+            cat > "${tmp_dir}/${cobble_version}/index.html" <<EOF
           <!doctype html>
           <html lang="en">
             <head>
               <meta charset="utf-8" />
               <meta http-equiv="refresh" content="0; url=../${root}/" />
               <meta name="robots" content="noindex" />
-              <title>Cobble Flink ${release_version} Docs</title>
+              <title>Cobble Flink ${docs_label} Docs</title>
             </head>
             <body>
-              <p>Redirecting to <a href="../${root}/">Cobble Flink ${release_version} docs</a>...</p>
+              <p>Redirecting to <a href="../${root}/">Cobble Flink ${docs_label} docs</a>...</p>
             </body>
           </html>
           EOF
-
-          find "${tmp_dir}/latest" -mindepth 1 -depth -delete
-          cat > "${tmp_dir}/latest/index.html" <<EOF
-          <!doctype html>
-          <html lang="en">
-            <head>
-              <meta charset="utf-8" />
-              <meta http-equiv="refresh" content="0; url=../${root}/" />
-              <meta name="robots" content="noindex" />
-              <title>Cobble Flink ${release_version} Docs</title>
-            </head>
-            <body>
-              <p>Redirecting to <a href="../${root}/">Cobble Flink ${release_version} docs</a>...</p>
-            </body>
-          </html>
-          EOF
+          fi
 
           cat > "${tmp_dir}/index.html" <<EOF
           <!doctype html>
           <html lang="en">
             <head>
               <meta charset="utf-8" />
-              <meta http-equiv="refresh" content="0; url=${root}/" />
+              <meta http-equiv="refresh" content="0; url=latest/" />
               <meta name="robots" content="noindex" />
               <title>Cobble Flink Docs</title>
             </head>
             <body>
-              <p>Redirecting to <a href="${root}/">Cobble Flink ${release_version} docs</a>...</p>
+              <p>Redirecting to <a href="latest/">latest docs</a>...</p>
             </body>
           </html>
           EOF
 
           git -C "${tmp_dir}" add -A
           if git -C "${tmp_dir}" diff --cached --quiet; then
-            echo "No docs changes to publish for Cobble Flink ${release_version}."
+            echo "No docs changes to publish for '${docs_label}'."
             exit 0
           fi
 
           git -C "${tmp_dir}" config user.name "github-actions[bot]"
           git -C "${tmp_dir}" config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git -C "${tmp_dir}" commit -m "docs: publish ${release_version}" >/dev/null
+          git -C "${tmp_dir}" commit -m "docs: publish ${docs_label}" >/dev/null
           git -C "${tmp_dir}" push origin "HEAD:${publish_branch}" >/dev/null

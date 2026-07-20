@@ -30,22 +30,22 @@ Then open `http://127.0.0.1:4000`.
 
 ### Trigger and root mapping
 
-`docs-pages.yml` publishes when a release tag matching
-`v<cobble-version>-<patch>` is pushed. The Cobble version and Cobble Flink patch
-form the versioned documentation directory.
+`docs-pages.yml` publishes `latest/` when documentation changes reach `main` or
+`master`. A release tag matching `v<cobble-version>-<patch>` publishes an
+immutable versioned directory.
 
 ### How to operate
 
-1. Create a release tag such as `v0.2.3-1`.
-2. Push the tag to GitHub.
-3. The workflow builds the tagged sources and publishes them to
-   `0.2.3-1/` on `gh-pages`.
+1. Merge documentation changes into `main` to update `latest/`.
+2. Create and push a release tag such as `v0.2.3-1`.
+3. The workflow publishes the tagged sources to `0.2.3-1/` on `gh-pages`.
 
 ### Versioned roots
 
 - `<cobble-version>-<patch>/`
 - `<cobble-version>/` redirects to its most recently published patch.
-- `latest/` and the site root redirect to the most recently published tag.
+- `latest/` contains the documentation built from `main` or `master`.
+- The site root redirects to `latest/`.
 
 Example URLs:
 
