@@ -29,6 +29,19 @@ job stored, and Flink users can build new queries and pipelines from the same
 persisted data. Tables written by the Cobble sink get the same benefits: their
 snapshots remain inspectable and can be read back through the Cobble source.
 
+## Showcase
+
+The diagram shows how Cobble connects Flink storage and consumption paths:
+
+- Flink jobs can persist managed state or sink tables in Cobble while
+  processing streams such as Kafka topics.
+- Other Flink jobs can scan or continuously read the persisted data, or use it
+  for exact-key lookup joins.
+- The web monitor reads the same snapshots so users can inspect keys, values,
+  and semantic columns without modifying the running job.
+
+![Cobble Flink state, source, sink, lookup, and web monitor workflows](../assets/images/cobble-flink-showcase.jpg)
+
 ## The Supported Usage Pattern
 
 Using Cobble Flink usually means choosing one of these two packaging styles:
