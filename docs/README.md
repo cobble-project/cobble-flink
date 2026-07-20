@@ -4,8 +4,7 @@ This directory hosts `cobble-flink` documentation using the `just-the-docs` Jeky
 
 ## Documentation structure
 
-- `index.md`: home page
-- `introduction/`: project overview and module map
+- `index.md`: introduction and project overview
 - `getting-started/`: installation, Maven dependencies, and first run
 - `state-backend/`: Cobble state backend and HA integration
 - `source/`: Cobble SQL source connector

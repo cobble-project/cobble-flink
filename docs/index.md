@@ -1,43 +1,69 @@
 ---
-title: Home
+title: Introduction
 layout: home
 nav_order: 1
 ---
 
-# Cobble Flink
+# Introduction
 
 Cobble Flink integrates [Cobble](https://github.com/cobble-project/cobble) with
-[Apache Flink](https://flink.apache.org/) so Cobble can be used as a Flink
+[Apache Flink®](https://flink.apache.org/), so you can use Cobble as a Flink
 state backend, SQL source, and SQL sink.
 
-**Cobble Flink** provides a practical integration layer between Cobble and
-Apache Flink. It lets you use Cobble as Flink state storage, read Cobble data
-through Flink SQL source tables, and write Flink SQL results back into Cobble.
-The default deployment model is simple: most users only need to download the
-runtime jar from Maven and place it into the Flink distribution.
+## Features
 
-Cobble Flink currently targets Flink `1.17.0` and later.
+Cobble Flink currently provides:
 
-> Note: Cobble Flink is still evolving together with Cobble. We try to keep the
-> documentation up to date, but for the latest behavior it is still worth
-> checking the code and tests.
+- a **state backend** for stateful Flink jobs
+- a **SQL source** for reading Cobble data in Flink SQL
+- a **SQL sink** for writing Flink SQL results into Cobble
+- a bundled **runtime jar** for Flink cluster deployment
+- a **web monitor** for inspecting checkpoint and sink snapshots
 
-## Key Features
+Cobble Flink supports Flink `1.17` and later. See
+[Getting Started](getting-started/) for the version matrix.
 
-- **Cobble state backend** for stateful Flink jobs
-- **Cobble SQL source** for reading existing Cobble data in Flink SQL
-- **Cobble SQL sink** for writing Flink SQL results into Cobble
-- **Shared-storage-friendly state usage** through Cobble's storage model
-- **Compatibility with Cobble source capabilities** for later consumption, lookup, and inspection workflows
+## Why Cobble Flink
+
+Flink state is essential to a stateful job, but it is often visible only to the
+running job and restore tooling. Cobble Flink makes persisted state easier to
+understand and reuse:
+
+- **See what Flink stored.** The web monitor can browse checkpoints and sink
+  snapshots by operator and state, then decode keys and values into semantic
+  fields when schema information is available.
+- **Consume state as data.** The SQL source can scan or look up Cobble sink
+  tables and supported keyed state directly, including structured semantic
+  columns. Persisted state is no longer useful only for job recovery.
+- **Use one storage layer across workflows.** State backend, source, sink,
+  metrics, and remote storage support work together, making it easier to debug
+  a job, validate its state, and build new Flink pipelines from existing data.
+
+This brings a different experience to stateful Flink: managed state remains
+part of the runtime while becoming observable and consumable. The same applies
+to tables written by the Cobble sink: users can inspect their snapshots and
+read the data back through the Cobble source.
+
+## Showcase
+
+The diagram shows how Cobble connects Flink storage and consumption paths:
+
+- Flink jobs can persist managed state or sink tables in Cobble while
+  processing streams such as Kafka topics.
+- Other Flink jobs can scan or continuously read the persisted data, or use it
+  for exact-key lookup joins.
+- The web monitor reads the same snapshots so users can inspect keys, values,
+  and semantic columns without modifying the running job.
+
+![Cobble Flink state, source, sink, lookup, and web monitor workflows](assets/images/cobble-flink-showcase.jpg)
 
 ## Documentation Structure
 
 | Chapter | Description |
-| ------- | ----------- |
-| [**Introduction**](introduction/) | What Cobble Flink provides and when to use each part |
-| [**Getting Started**](getting-started/) | The fastest way to install and configure Cobble Flink |
-| [**State Backend**](state-backend/) | How to use Cobble as Flink state storage |
-| [**Source**](source/) | How to read data from Cobble in Flink SQL |
-| [**Sink**](sink/) | How to write Flink SQL results into Cobble |
-| [**Web Monitor**](web-monitor/) | How to inspect Cobble checkpoints and sink snapshots in a browser |
-| [**Metrics**](metrics/) | Metrics exposed by the state backend, source, lookup, and sink |
+| --- | --- |
+| [Getting Started](getting-started/) | Install Cobble Flink and choose a version |
+| [State Backend](state-backend/) | Store Flink managed state in Cobble |
+| [Source](source/) | Read Cobble data from Flink SQL |
+| [Sink](sink/) | Write Flink SQL results to Cobble |
+| [Web Monitor](web-monitor/) | Inspect checkpoints and tables |
+| [Metrics](metrics/) | Monitor state backend and connector activity |
