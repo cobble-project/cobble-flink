@@ -1,4 +1,11 @@
 <p align="center"><img src="https://github.com/cobble-project/cobble/raw/main/logo.png" width="60%" alt="Cobble logo" /></p>
+<p align="center">
+  <a href="https://central.sonatype.com/artifact/io.github.cobble-project/cobble-flink-state"><img alt="Maven Central" src="https://img.shields.io/maven-central/v/io.github.cobble-project/cobble-flink-state?logo=apachemaven" /></a>
+  <a href="https://github.com/cobble-project/cobble-flink/blob/main/LICENSE"><img alt="GitHub License" src="https://img.shields.io/github/license/cobble-project/cobble-flink" /></a>
+  <a href="https://cobble-project.github.io/cobble-flink/latest/"><img alt="Documentation" src="https://img.shields.io/badge/docs-GitHub%20Pages-222222?logo=githubpages" /></a>
+  <a href="https://github.com/cobble-project/cobble-flink/actions/workflows/ci.yml"><img alt="GitHub CI" src="https://img.shields.io/github/actions/workflow/status/cobble-project/cobble-flink/ci.yml?label=CI&logo=githubactions" /></a>
+  <a href="https://cobble-project.github.io/cobble-flink/latest/getting-started/"><img alt="Flink compatibility" src="https://img.shields.io/badge/Flink-1.17%20to%202.0%2B-E6526F?logo=apacheflink" /></a>
+</p>
 
 Cobble-flink integrates [Cobble](https://github.com/cobble-project/cobble) with
 [Apache Flink®](https://flink.apache.org/), so you can use Cobble as a Flink
