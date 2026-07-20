@@ -5,7 +5,7 @@ logo: false
 docs_root_label: latest
 docs_commit_label: ""
 
-url: https://cobble-project.github.io/cobble-flink
+url: https://cobble-project.github.io
 # CI overrides baseurl via --baseurl flag; keep empty for local dev
 baseurl: ""
 
