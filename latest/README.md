@@ -4,8 +4,7 @@ This directory hosts `cobble-flink` documentation using the `just-the-docs` Jeky
 
 ## Documentation structure
 
-- `index.md`: home page
-- `introduction/`: project overview and module map
+- `index.md`: introduction and project overview
 - `getting-started/`: installation, Maven dependencies, and first run
 - `state-backend/`: Cobble state backend and HA integration
 - `source/`: Cobble SQL source connector
@@ -31,25 +30,24 @@ Then open `http://127.0.0.1:4000`.
 
 ### Trigger and root mapping
 
-`docs-pages.yml` publishes in these cases:
-
-1. Push to `main` / `master` with changes under `docs/**` -> publish `latest/`
-2. Push a version tag with `v` prefix (for example `v0.2.0`) -> publish `<version>/`
-
-All other refs are ignored by the deploy job.
+`docs-pages.yml` publishes `latest/` when documentation changes reach `main` or
+`master`. A release tag matching `v<cobble-version>-<patch>` publishes an
+immutable versioned directory.
 
 ### How to operate
 
-1. For `latest/`: update docs and push to `main` / `master`.
-2. For versioned docs: create and push a version tag (for example `v0.2.0`).
-3. Workflow auto-builds and publishes to the corresponding root on `gh-pages`.
+1. Merge documentation changes into `main` to update `latest/`.
+2. Create and push a release tag such as `v0.2.3-1`.
+3. The workflow publishes the tagged sources to `0.2.3-1/` on `gh-pages`.
 
 ### Versioned roots
 
-- `latest/`
-- `<semver>/`
+- `<cobble-version>-<patch>/`
+- `<cobble-version>/` redirects to its most recently published patch.
+- `latest/` contains the documentation built from `main` or `master`.
+- The site root redirects to `latest/`.
 
 Example URLs:
 
 - `https://cobble-project.github.io/cobble-flink/latest/`
-- `https://cobble-project.github.io/cobble-flink/0.2.0/`
+- `https://cobble-project.github.io/cobble-flink/0.2.3-1/`
