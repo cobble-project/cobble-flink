@@ -45,8 +45,8 @@ import java.util.stream.Stream;
  *     -Dsurefire.failIfNoSpecifiedTests=false
  * }</pre>
  *
- * <p>The companion script {@code .tmp/monitor-inspect-validation/cross-version-pojo-protocol.sh}
- * pre-checks jar availability and runs this validation.
+ * <p>The companion script {@code scripts/cross-version-pojo-protocol.sh} pre-checks jar
+ * availability and runs this validation.
  *
  * <p>Each test <strong>hard-fails</strong> (no {@code @EnabledIf}, no {@code assumeTrue}) if any
  * required jar is missing. Each isolated {@code URLClassLoader} independently loads the POJO
@@ -55,7 +55,12 @@ import java.util.stream.Stream;
  */
 class CrossVersionPojoProtocolValidation {
 
-    private static final String M2_HOME = System.getProperty("user.home") + "/.m2/repository";
+    private static final Path MAVEN_REPOSITORY =
+            Paths.get(
+                    System.getProperty(
+                            "cross.version.maven.repo",
+                            Paths.get(System.getProperty("user.home"), ".m2", "repository")
+                                    .toString()));
 
     private static final String[] REQUIRED_VERSIONS = {"1.17.2", "1.19.3", "2.0.0"};
 
@@ -518,8 +523,8 @@ class CrossVersionPojoProtocolValidation {
      * self-contained classpath, this method:
      *
      * <ol>
-     *   <li>Scans {@code ~/.m2/repository/org/apache/flink} for <em>all</em> jars of the target
-     *       version and adds them first (version-specific Flink jars).
+     *   <li>Scans the configured local Maven repository for <em>all</em> Flink jars of the target
+     *       version and adds them first.
      *   <li>Adds the test classpath's non-Flink jars (transitive deps like Kryo, Jackson, etc.).
      *   <li>Skips <em>all</em> Flink jars from the test classpath, regardless of version, to avoid
      *       cross-version contamination. The version-specific jars from step 1 take their place.
@@ -533,8 +538,8 @@ class CrossVersionPojoProtocolValidation {
     private static URL[] buildVersionClasspath(String flinkVersion) throws Exception {
         List<URL> urls = new ArrayList<>();
 
-        // 1. Add all version-specific Flink jars from ~/.m2/repository/org/apache/flink.
-        Path flinkM2Root = Paths.get(M2_HOME, "org", "apache", "flink");
+        // 1. Add all version-specific Flink jars from the local Maven repository.
+        Path flinkM2Root = MAVEN_REPOSITORY.resolve("org/apache/flink");
         if (Files.isDirectory(flinkM2Root)) {
             try (Stream<Path> modules = Files.list(flinkM2Root)) {
                 List<Path> moduleDirs = new ArrayList<>();
@@ -615,7 +620,12 @@ class CrossVersionPojoProtocolValidation {
         List<String> missing = new ArrayList<>();
         for (String version : REQUIRED_VERSIONS) {
             for (String[] module : requiredByVersion.get(version)) {
-                Path jar = Paths.get(M2_HOME, "org/apache/flink", module[0], version, module[1]);
+                Path jar =
+                        MAVEN_REPOSITORY
+                                .resolve("org/apache/flink")
+                                .resolve(module[0])
+                                .resolve(version)
+                                .resolve(module[1]);
                 if (!Files.exists(jar)) {
                     missing.add(jar.toString());
                 }
