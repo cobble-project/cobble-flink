@@ -60,10 +60,10 @@ For Flink checkpoints, both of these are valid:
 
 ```bash
 java -jar cobble-flink-monitor/target/cobble-flink-monitor-*.jar \
-  --checkpoint s3:///path/to/checkpoints
+  --checkpoint s3://bucket/path/to/checkpoints
 
 java -jar cobble-flink-monitor/target/cobble-flink-monitor-*.jar \
-  --checkpoint s3:///path/to/checkpoints/chk-42
+  --checkpoint s3://bucket/path/to/checkpoints/chk-42
 ```
 
 Useful options:
