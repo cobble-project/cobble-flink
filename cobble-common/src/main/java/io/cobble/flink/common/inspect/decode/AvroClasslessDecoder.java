@@ -42,8 +42,8 @@ import java.util.Map;
  *   <li>{@code FULLY_CLASSLESS}: decode failure is a row-level {@code decode_error}. No {@code
  *       restoreSerializer()} fallback is attempted because no live serializer was persisted.
  *   <li>{@code PARTIALLY_CLASSLESS}: decode failure falls through to the existing snapshot/live
- *       serializer fallback. Avro runtime exceptions (e.g. {@link AvroTypeException}, {@link
- *       org.apache.avro.AvroRuntimeException}) are normalized to {@link IOException} so they enter
+ *       serializer fallback. Avro runtime exceptions such as {@code AvroTypeException} and {@link
+ *       org.apache.avro.AvroRuntimeException} are normalized to {@link IOException} so they enter
  *       the intended fallback path.
  * </ul>
  */
