@@ -1,0 +1,4 @@
+interface:
+  display_name: "Cobble Inspect Probe"
+  short_description: "Open the Cobble Inspect SDK and probe checkpoints safely"
+  default_prompt: "Use the Cobble Inspect SDK to discover this path, open a read-only session, and report overview and bounded scan results."
