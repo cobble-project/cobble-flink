@@ -21,7 +21,7 @@ Cobble Flink currently provides:
 - a bundled **runtime jar** for Flink cluster deployment
 - a **web monitor** for inspecting checkpoint and sink snapshots
 
-For complete details, see the [documentation](https://cobble-project.github.io/cobble-flink/).
+For complete details, see the [documentation](https://cobble-project.github.io/cobble-flink/latest/).
 
 ## Why Cobble Flink
 
@@ -210,7 +210,7 @@ remote filesystem configured through Flink.
 ### Flink's State Backend
 
 For stateful jobs, Cobble can be used as the Flink state backend. Add the following to the
-[Flink cluster configuration file](docs/getting-started/#flink-cluster-configuration) for your
+[Flink cluster configuration file](https://cobble-project.github.io/cobble-flink/latest/getting-started/#flink-cluster-configuration) for your
 version:
 
 ```yaml
@@ -242,7 +242,7 @@ Cobble can also restore a job from a **RocksDB canonical savepoint**, which is
 the recommended way to migrate an existing RocksDB-backed job onto Cobble. Take
 the savepoint with `flink savepoint --type canonical`, then start the job with
 `-restoreMode CLAIM`. See the
-[state backend docs](https://cobble-project.github.io/cobble-flink/state-backend/#restore-from-a-rocksdb-canonical-savepoint)
+[state backend docs](https://cobble-project.github.io/cobble-flink/latest/state-backend/#restore-from-a-rocksdb-canonical-savepoint)
 for the full guide.
 
 ### Flink's Sink
@@ -338,7 +338,7 @@ When the Cobble data was produced by Flink SQL, Cobble records schema metadata
 so the source can expose semantic columns instead of raw key/value bytes. For
 example, a SQL join state can be read with columns such as `customer_id`,
 `order_id`, and `amount`, and a Cobble sink table can be read with its original
-primary-key and value columns. See [Source](docs/source/) for the full DDL
+primary-key and value columns. See [Source](https://cobble-project.github.io/cobble-flink/latest/source/) for the full DDL
 patterns.
 
 ```sql
