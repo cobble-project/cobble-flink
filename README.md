@@ -55,7 +55,7 @@ The diagram shows how Cobble connects Flink storage and consumption paths:
 - The web monitor reads the same snapshots so users can inspect keys, values,
   and semantic columns without modifying the running job.
 
-![Cobble Flink state, source, sink, lookup, and web monitor workflows](docs/assets/images/cobble-flink-showcase.jpg)
+<p align="center"><img src="docs/assets/images/cobble-flink-showcase.jpg" width="60%" alt="Cobble Flink state, source, sink, lookup, and web monitor workflows" /></p>
 
 ## Download and Versioning
 
