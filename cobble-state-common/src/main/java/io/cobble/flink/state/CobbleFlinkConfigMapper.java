@@ -35,6 +35,15 @@ final class CobbleFlinkConfigMapper {
         config.sstPartitionedIndex = flinkConfig.get(CobbleOptions.SST_PARTITIONED_INDEX_ENABLED);
         config.sstReadMetadataCacheMode =
                 flinkConfig.get(CobbleOptions.SST_READ_METADATA_CACHE_MODE);
+        int pinnedMetadataMaxLevel =
+                flinkConfig.get(CobbleOptions.SST_PINNED_METADATA_MAX_LEVEL);
+        if (pinnedMetadataMaxLevel < -1 || pinnedMetadataMaxLevel > 255) {
+            throw new IllegalConfigurationException(
+                    CobbleOptions.SST_PINNED_METADATA_MAX_LEVEL.key()
+                            + " must be between -1 and 255, but was "
+                            + pinnedMetadataMaxLevel);
+        }
+        config.sstPinnedMetadataMaxLevel = pinnedMetadataMaxLevel;
         config.jniDirectBufferSize =
                 toPositiveIntBytes(
                         CobbleOptions.DIRECT_IO_BUFFER_SIZE.key(),

@@ -170,6 +170,16 @@ public final class CobbleOptions {
                             "Caching policy for decoded SST footer and index-partition metadata. "
                                     + "Supported values: eager, lazy, off.");
 
+    /** Highest SST level whose immutable read metadata is pinned outside the block cache. */
+    public static final ConfigOption<Integer> SST_PINNED_METADATA_MAX_LEVEL =
+            ConfigOptions.key("state.backend.cobble.sst.pinned-metadata.max-level")
+                    .intType()
+                    .defaultValue(2)
+                    .withDescription(
+                            "Highest SST level whose index and bloom-filter metadata stays pinned "
+                                    + "for the file lifetime. -1 disables pinning; 0 pins L0 only; "
+                                    + "N pins L0 through LN.");
+
     /** Threshold above which values are separated into the value log. */
     public static final ConfigOption<MemorySize> VALUE_SEPARATION_THRESHOLD =
             ConfigOptions.key("state.backend.cobble.value-separation.threshold")

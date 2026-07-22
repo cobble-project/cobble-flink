@@ -53,6 +53,7 @@ import org.apache.flink.api.common.typeutils.base.TypeSerializerSingleton;
 import org.apache.flink.api.common.typeutils.base.array.BytePrimitiveArraySerializer;
 import org.apache.flink.configuration.CheckpointingOptions;
 import org.apache.flink.configuration.Configuration;
+import org.apache.flink.configuration.IllegalConfigurationException;
 import org.apache.flink.configuration.MemorySize;
 import org.apache.flink.contrib.streaming.state.RocksDBStateBackend;
 import org.apache.flink.core.execution.SavepointFormatType;
@@ -2437,6 +2438,7 @@ class CobbleStateBackendTest {
         assertTrue(config.sstBloomFilterEnabled);
         assertTrue(config.sstPartitionedIndex);
         assertEquals(Config.SstReadMetadataCacheMode.EAGER, config.sstReadMetadataCacheMode);
+        assertEquals(2, config.sstPinnedMetadataMaxLevel.intValue());
     }
 
     @Test
@@ -2453,6 +2455,46 @@ class CobbleStateBackendTest {
     }
 
     @Test
+    void flinkMapsPinnedMetadataLevel() {
+        Configuration flinkConfig = new Configuration();
+        flinkConfig.set(CobbleOptions.SST_PINNED_METADATA_MAX_LEVEL, 2);
+        Config config = new Config();
+
+        CobbleFlinkConfigMapper.applyExposedOptions(config, flinkConfig);
+
+        assertEquals(2, config.sstPinnedMetadataMaxLevel.intValue());
+    }
+
+    @Test
+    void flinkMapsDisabledPinnedMetadataLevel() {
+        Configuration flinkConfig = new Configuration();
+        flinkConfig.set(CobbleOptions.SST_PINNED_METADATA_MAX_LEVEL, -1);
+
+        Config config = new Config();
+        CobbleFlinkConfigMapper.applyExposedOptions(config, flinkConfig);
+
+        assertEquals(-1, config.sstPinnedMetadataMaxLevel.intValue());
+    }
+
+    @Test
+    void flinkRejectsInvalidPinnedMetadataLevel() {
+        for (int invalidLevel : new int[] {-2, 256}) {
+            Configuration flinkConfig = new Configuration();
+            flinkConfig.set(CobbleOptions.SST_PINNED_METADATA_MAX_LEVEL, invalidLevel);
+
+            IllegalConfigurationException error =
+                    assertThrows(
+                            IllegalConfigurationException.class,
+                            () ->
+                                    CobbleFlinkConfigMapper.applyExposedOptions(
+                                            new Config(), flinkConfig));
+
+            assertTrue(
+                    error.getMessage().contains(CobbleOptions.SST_PINNED_METADATA_MAX_LEVEL.key()));
+        }
+    }
+
+    @Test
     void createKeyedStateBackendAppliesSelectedCobbleOptionsFromFlinkConfig(@TempDir Path tempDir)
             throws Exception {
         Configuration overrides = new Configuration();
@@ -2464,6 +2506,7 @@ class CobbleStateBackendTest {
         overrides.set(CobbleOptions.SST_PARTITIONED_INDEX_ENABLED, true);
         overrides.set(
                 CobbleOptions.SST_READ_METADATA_CACHE_MODE, Config.SstReadMetadataCacheMode.LAZY);
+        overrides.set(CobbleOptions.SST_PINNED_METADATA_MAX_LEVEL, 1);
         overrides.set(CobbleOptions.DIRECT_IO_BUFFER_SIZE, MemorySize.parse("8kb"));
         overrides.set(CobbleOptions.DIRECT_IO_BUFFER_POOL_MAX_SIZE, 128);
         overrides.set(CobbleOptions.LOG_LEVEL, "debug");
@@ -2491,6 +2534,7 @@ class CobbleStateBackendTest {
             assertEquals(15, config.sstBloomBitsPerKey.intValue());
             assertTrue(config.sstPartitionedIndex);
             assertEquals(Config.SstReadMetadataCacheMode.LAZY, config.sstReadMetadataCacheMode);
+            assertEquals(1, config.sstPinnedMetadataMaxLevel.intValue());
             assertEquals(8 * 1024, config.jniDirectBufferSize.intValue());
             assertEquals(128, config.jniDirectBufferPoolSize.intValue());
             assertEquals("DEBUG", config.logLevel);

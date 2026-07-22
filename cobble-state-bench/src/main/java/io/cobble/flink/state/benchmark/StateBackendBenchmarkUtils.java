@@ -326,6 +326,13 @@ public final class StateBackendBenchmarkUtils {
                 CobbleOptions.LOCAL_DIRECTORIES,
                 new File(benchmarkRoot, "cobble-local").getAbsolutePath());
         configuration.set(CobbleOptions.MEMTABLE_TYPE, "skiplist");
+        String pinnedMetadataMaxLevel =
+                System.getProperty("cobble.state.bench.sst.pinned-metadata.max-level");
+        if (pinnedMetadataMaxLevel != null && !pinnedMetadataMaxLevel.isEmpty()) {
+            configuration.set(
+                    CobbleOptions.SST_PINNED_METADATA_MAX_LEVEL,
+                    Integer.parseInt(pinnedMetadataMaxLevel));
+        }
         String configuredLogLevel = System.getProperty("state.backend.cobble.log.level");
         if (configuredLogLevel != null && !configuredLogLevel.isEmpty()) {
             configuration.set(CobbleOptions.LOG_LEVEL, configuredLogLevel);
