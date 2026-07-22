@@ -2,6 +2,7 @@ package io.cobble.flink.state;
 
 import io.cobble.structured.Db;
 import io.cobble.structured.DirectEncodedRow;
+import io.cobble.structured.DirectScanBatch;
 import io.cobble.structured.DirectScanCursor;
 import io.cobble.structured.DirectScanRow;
 import io.cobble.structured.DirectWriteBatch;
@@ -14,11 +15,13 @@ import org.apache.flink.api.common.state.StateTtlConfig;
 import org.apache.flink.api.common.typeutils.TypeSerializer;
 import org.apache.flink.api.common.typeutils.base.MapSerializer;
 import org.apache.flink.api.java.tuple.Tuple2;
+import org.apache.flink.core.memory.DataInputViewStreamWrapper;
 import org.apache.flink.queryablestate.client.state.serialization.KvStateSerializer;
 import org.apache.flink.runtime.state.internal.InternalMapState;
 import org.apache.flink.util.Preconditions;
 
 import java.io.IOException;
+import java.io.InputStream;
 import java.nio.ByteBuffer;
 import java.util.AbstractMap;
 import java.util.ArrayList;
@@ -34,6 +37,7 @@ final class CobbleMapState<K, N, UK, UV> extends AbstractCobbleState<K, N, Map<U
         implements InternalMapState<K, N, UK, UV> {
 
     private static final int MAP_ITERATION_READ_AHEAD_BYTES = 64 * 1024;
+    private static final int MAP_ITERATION_BATCH_ROWS = 64;
 
     private final TypeSerializer<UK> userKeySerializer;
     private final TypeSerializer<UV> userValueSerializer;
@@ -42,6 +46,8 @@ final class CobbleMapState<K, N, UK, UV> extends AbstractCobbleState<K, N, Map<U
      * byte. Reused on every encode/decode so the put/get hot path stays allocation-free.
      */
     private final TypeSerializer<UV> userValueRowCodec;
+    private final ReusableDataInputView directUserValueInput;
+    private final DirectEncodedRow.ColumnDecoder<UV> directUserValueDecoder;
     private final DirectWriteBatch directWriteBatch;
 
     private final ScanOptions emptyCheckScanOptions;
@@ -76,6 +82,8 @@ final class CobbleMapState<K, N, UK, UV> extends AbstractCobbleState<K, N, Map<U
         this.userKeySerializer = mapSerializer.getKeySerializer();
         this.userValueSerializer = mapSerializer.getValueSerializer();
         this.userValueRowCodec = MapValueCodec.adapterFor(this.userValueSerializer);
+        this.directUserValueInput = new ReusableDataInputView();
+        this.directUserValueDecoder = this::decodeDirectUserValue;
         this.directWriteBatch = new DirectWriteBatch(1024);
         this.emptyCheckScanOptions = ScanOptions.defaults().columnFamily(this.columnFamily);
         this.emptyCheckFastScanOptions =
@@ -531,9 +539,13 @@ final class CobbleMapState<K, N, UK, UV> extends AbstractCobbleState<K, N, Map<U
             }
             // A present-null entry decodes to null too — get(...) cannot distinguish the two; use
             // contains(...) for physical row presence.
-            return encodedRow.decodeBytesColumn(
-                    STATE_COLUMN_INDEX, input -> MapValueCodec.decode(userValueRowCodec, input));
+            return encodedRow.decodeBytesColumn(STATE_COLUMN_INDEX, directUserValueDecoder);
         }
+    }
+
+    private UV decodeDirectUserValue(InputStream input) throws IOException {
+        directUserValueInput.setInput(input);
+        return userValueRowCodec.deserialize(directUserValueInput);
     }
 
     private <DUK> DUK deserializeUserKey(
@@ -558,6 +570,25 @@ final class CobbleMapState<K, N, UK, UV> extends AbstractCobbleState<K, N, Map<U
         userKeyView.position(keyNamespacePrefixLength + 1);
         userKeyView.limit(userKeyEnd);
         return deserializeValue(deserializedUserKeySerializer, userKeyView.slice());
+    }
+
+    /** Reuses DataInputStream's UTF scratch arrays on the task-thread-only point-read path. */
+    private static final class ReusableDataInputView extends DataInputViewStreamWrapper {
+        private static final InputStream EMPTY_INPUT =
+                new InputStream() {
+                    @Override
+                    public int read() {
+                        return -1;
+                    }
+                };
+
+        private ReusableDataInputView() {
+            super(EMPTY_INPUT);
+        }
+
+        private void setInput(InputStream input) {
+            this.in = Preconditions.checkNotNull(input, "input");
+        }
     }
 
     /** Checks map-entry row shape by separator + encoded key/namespace lengths. */
@@ -747,6 +778,8 @@ final class CobbleMapState<K, N, UK, UV> extends AbstractCobbleState<K, N, Map<U
          */
         private final TypeSerializer<DUV> userValueRowCodec;
 
+        private DirectScanBatch currentBatch;
+        private int currentBatchIndex;
         private Map.Entry<DUK, DUV> nextEntry;
         private boolean finished;
         private boolean cursorClosed;
@@ -788,11 +821,15 @@ final class CobbleMapState<K, N, UK, UV> extends AbstractCobbleState<K, N, Map<U
         private void fetchNextEntry() {
             while (!finished) {
                 try {
-                    DirectScanRow row = cursor.nextRow();
-                    if (row == null) {
+                    if (currentBatch == null || currentBatchIndex >= currentBatch.size()) {
+                        currentBatch = cursor.nextBatch(MAP_ITERATION_BATCH_ROWS);
+                        currentBatchIndex = 0;
+                    }
+                    if (currentBatch.isEmpty()) {
                         finish();
                         continue;
                     }
+                    DirectScanRow row = currentBatch.get(currentBatchIndex++);
                     ByteBuffer rowKey = row.getKey();
                     if (!startsWithMapKeyNamespacePrefix(rowKey, keyNamespacePrefix)) {
                         finish();
@@ -826,6 +863,8 @@ final class CobbleMapState<K, N, UK, UV> extends AbstractCobbleState<K, N, Map<U
                 return;
             }
             finished = true;
+            currentBatch = null;
+            currentBatchIndex = 0;
             nextEntry = null;
             if (!cursorClosed) {
                 cursorClosed = true;
