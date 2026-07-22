@@ -333,6 +333,13 @@ public final class StateBackendBenchmarkUtils {
                     CobbleOptions.SST_PINNED_METADATA_MAX_LEVEL,
                     Integer.parseInt(pinnedMetadataMaxLevel));
         }
+        String pinnedMetadataPartitionsEnabled =
+                System.getProperty("cobble.state.bench.sst.pinned-metadata.partitions.enabled");
+        if (pinnedMetadataPartitionsEnabled != null && !pinnedMetadataPartitionsEnabled.isEmpty()) {
+            configuration.set(
+                    CobbleOptions.SST_PINNED_METADATA_PARTITIONS_ENABLED,
+                    Boolean.parseBoolean(pinnedMetadataPartitionsEnabled));
+        }
         String configuredLogLevel = System.getProperty("state.backend.cobble.log.level");
         if (configuredLogLevel != null && !configuredLogLevel.isEmpty()) {
             configuration.set(CobbleOptions.LOG_LEVEL, configuredLogLevel);

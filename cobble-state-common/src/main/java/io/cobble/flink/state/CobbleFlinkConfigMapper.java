@@ -44,6 +44,8 @@ final class CobbleFlinkConfigMapper {
                             + pinnedMetadataMaxLevel);
         }
         config.sstPinnedMetadataMaxLevel = pinnedMetadataMaxLevel;
+        config.sstPinnedMetadataPartitionsEnabled =
+                flinkConfig.get(CobbleOptions.SST_PINNED_METADATA_PARTITIONS_ENABLED);
         config.jniDirectBufferSize =
                 toPositiveIntBytes(
                         CobbleOptions.DIRECT_IO_BUFFER_SIZE.key(),

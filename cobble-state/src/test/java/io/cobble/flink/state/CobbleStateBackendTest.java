@@ -2439,6 +2439,7 @@ class CobbleStateBackendTest {
         assertTrue(config.sstPartitionedIndex);
         assertEquals(Config.SstReadMetadataCacheMode.EAGER, config.sstReadMetadataCacheMode);
         assertEquals(2, config.sstPinnedMetadataMaxLevel.intValue());
+        assertFalse(config.sstPinnedMetadataPartitionsEnabled);
     }
 
     @Test
@@ -2507,6 +2508,7 @@ class CobbleStateBackendTest {
         overrides.set(
                 CobbleOptions.SST_READ_METADATA_CACHE_MODE, Config.SstReadMetadataCacheMode.LAZY);
         overrides.set(CobbleOptions.SST_PINNED_METADATA_MAX_LEVEL, 1);
+        overrides.set(CobbleOptions.SST_PINNED_METADATA_PARTITIONS_ENABLED, true);
         overrides.set(CobbleOptions.DIRECT_IO_BUFFER_SIZE, MemorySize.parse("8kb"));
         overrides.set(CobbleOptions.DIRECT_IO_BUFFER_POOL_MAX_SIZE, 128);
         overrides.set(CobbleOptions.LOG_LEVEL, "debug");
@@ -2535,6 +2537,7 @@ class CobbleStateBackendTest {
             assertTrue(config.sstPartitionedIndex);
             assertEquals(Config.SstReadMetadataCacheMode.LAZY, config.sstReadMetadataCacheMode);
             assertEquals(1, config.sstPinnedMetadataMaxLevel.intValue());
+            assertTrue(config.sstPinnedMetadataPartitionsEnabled);
             assertEquals(8 * 1024, config.jniDirectBufferSize.intValue());
             assertEquals(128, config.jniDirectBufferPoolSize.intValue());
             assertEquals("DEBUG", config.logLevel);

@@ -180,6 +180,15 @@ public final class CobbleOptions {
                                     + "for the file lifetime. -1 disables pinning; 0 pins L0 only; "
                                     + "N pins L0 through LN.");
 
+    /** Whether second-level index and filter partitions are pinned with top-level metadata. */
+    public static final ConfigOption<Boolean> SST_PINNED_METADATA_PARTITIONS_ENABLED =
+            ConfigOptions.key("state.backend.cobble.sst.pinned-metadata.partitions.enabled")
+                    .booleanType()
+                    .defaultValue(false)
+                    .withDescription(
+                            "Whether pinned metadata also includes second-level index and filter "
+                                    + "partitions for partitioned SST files.");
+
     /** Threshold above which values are separated into the value log. */
     public static final ConfigOption<MemorySize> VALUE_SEPARATION_THRESHOLD =
             ConfigOptions.key("state.backend.cobble.value-separation.threshold")
