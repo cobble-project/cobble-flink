@@ -4,6 +4,7 @@ import io.cobble.structured.Db;
 import io.cobble.structured.DirectEncodedRow;
 import io.cobble.structured.DirectScanCursor;
 import io.cobble.structured.DirectScanRow;
+import io.cobble.structured.DirectWriteBatch;
 import io.cobble.structured.Row;
 import io.cobble.structured.ScanCursor;
 import io.cobble.structured.ScanOptions;
@@ -41,6 +42,7 @@ final class CobbleMapState<K, N, UK, UV> extends AbstractCobbleState<K, N, Map<U
      * byte. Reused on every encode/decode so the put/get hot path stays allocation-free.
      */
     private final TypeSerializer<UV> userValueRowCodec;
+    private final DirectWriteBatch directWriteBatch;
 
     private final ScanOptions emptyCheckScanOptions;
     private final ScanOptions emptyCheckFastScanOptions;
@@ -74,6 +76,7 @@ final class CobbleMapState<K, N, UK, UV> extends AbstractCobbleState<K, N, Map<U
         this.userKeySerializer = mapSerializer.getKeySerializer();
         this.userValueSerializer = mapSerializer.getValueSerializer();
         this.userValueRowCodec = MapValueCodec.adapterFor(this.userValueSerializer);
+        this.directWriteBatch = new DirectWriteBatch(1024);
         this.emptyCheckScanOptions = ScanOptions.defaults().columnFamily(this.columnFamily);
         this.emptyCheckFastScanOptions =
                 ScanOptions.defaults().columnFamily(this.columnFamily).maxRows(1);
@@ -126,10 +129,29 @@ final class CobbleMapState<K, N, UK, UV> extends AbstractCobbleState<K, N, Map<U
     @Override
     public void putAll(Map<UK, UV> value) throws IOException {
         Preconditions.checkNotNull(value, "MapState putAll value must not be null.");
-        for (Map.Entry<UK, UV> entry : value.entrySet()) {
-            // entry.getValue() may be null; put(...) handles it (present-null row).
-            put(entry.getKey(), entry.getValue());
+        if (value.isEmpty()) {
+            return;
         }
+        K key = currentKey();
+        N namespace = currentNamespace();
+        directWriteBatch.clear();
+        for (Map.Entry<UK, UV> entry : value.entrySet()) {
+            UK userKey =
+                    Preconditions.checkNotNull(
+                            entry.getKey(), "MapState user key must not be null.");
+            CobbleStateKeySerializer.DirectBufferSlice directKey =
+                    directMapEntryRowKey(key, namespace, userKeySerializer, userKey);
+            CobbleStateKeySerializer.DirectBufferSlice directValue =
+                    MapValueCodec.encode(
+                            directValueSerializer, userValueRowCodec, entry.getValue());
+            directWriteBatch.put(
+                    directKey.buffer(),
+                    directKey.length(),
+                    directValue.buffer(),
+                    directValue.length());
+        }
+        db.putDirectBatchWithOptions(
+                currentBucket(), STATE_COLUMN_INDEX, directWriteBatch, writeOptions);
     }
 
     @Override
