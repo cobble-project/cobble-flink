@@ -1,10 +1,13 @@
 package io.cobble.flink.state;
 
 import org.apache.flink.api.common.typeutils.TypeSerializer;
+import org.apache.flink.core.memory.DataInputView;
 import org.apache.flink.core.memory.DataInputViewStreamWrapper;
-import org.apache.flink.core.memory.DataOutputViewStreamWrapper;
+import org.apache.flink.core.memory.DataOutputView;
+import org.apache.flink.util.Preconditions;
 
 import java.io.ByteArrayOutputStream;
+import java.io.DataOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
@@ -18,38 +21,37 @@ import java.util.List;
 final class DirectDelimitedListSerializer {
     static final byte DELIMITER = ',';
 
-    private final GrowingDirectBufferOutputStream outputStream;
-    private final DataOutputViewStreamWrapper outputView;
+    private final GrowingDirectBufferDataOutputView outputView;
     private final byte[] copyBuffer;
 
     DirectDelimitedListSerializer(int initialCapacityBytes) {
-        this.outputStream = new GrowingDirectBufferOutputStream(initialCapacityBytes);
-        this.outputView = new DataOutputViewStreamWrapper(outputStream);
+        this.outputView = new GrowingDirectBufferDataOutputView(initialCapacityBytes);
         this.copyBuffer = new byte[4096];
     }
 
     <T> CobbleStateKeySerializer.DirectBufferSlice encodeSingle(
             TypeSerializer<T> serializer, T value) throws IOException {
-        outputStream.clear();
+        outputView.clear();
         serializer.serialize(value, outputView);
-        outputStream.write(DELIMITER);
-        return outputStream.currentSlice();
+        outputView.write(DELIMITER);
+        return outputView.currentSlice();
     }
 
     <T> CobbleStateKeySerializer.DirectBufferSlice encodeAll(
             TypeSerializer<T> serializer, List<T> values) throws IOException {
-        outputStream.clear();
+        outputView.clear();
         for (T value : values) {
+            Preconditions.checkNotNull(value, "You cannot add null to a ListState.");
             serializer.serialize(value, outputView);
-            outputStream.write(DELIMITER);
+            outputView.write(DELIMITER);
         }
-        return outputStream.currentSlice();
+        return outputView.currentSlice();
     }
 
     CobbleStateKeySerializer.DirectBufferSlice copyRaw(InputStream input) throws IOException {
-        outputStream.clear();
+        outputView.clear();
         copyIntoOutput(input);
-        return outputStream.currentSlice();
+        return outputView.currentSlice();
     }
 
     byte[] copyRawWithoutTrailingDelimiter(InputStream input) throws IOException {
@@ -99,15 +101,18 @@ final class DirectDelimitedListSerializer {
             if (read < 0) {
                 return;
             }
-            outputStream.write(copyBuffer, 0, read);
+            outputView.write(copyBuffer, 0, read);
         }
     }
 
-    private static final class GrowingDirectBufferOutputStream extends OutputStream {
+    private static final class GrowingDirectBufferDataOutputView extends OutputStream
+            implements DataOutputView {
         private ByteBuffer buffer;
+        private final DataOutputStream utfOutput;
 
-        private GrowingDirectBufferOutputStream(int initialSize) {
+        private GrowingDirectBufferDataOutputView(int initialSize) {
             this.buffer = ByteBuffer.allocateDirect(Math.max(1, initialSize));
+            this.utfOutput = new DataOutputStream(this);
         }
 
         @Override
@@ -117,15 +122,101 @@ final class DirectDelimitedListSerializer {
         }
 
         @Override
+        public void write(byte[] bytes) {
+            write(bytes, 0, bytes.length);
+        }
+
+        @Override
         public void write(byte[] bytes, int offset, int length) {
-            if (bytes == null) {
-                throw new NullPointerException("bytes");
-            }
-            if (offset < 0 || length < 0 || offset + length > bytes.length) {
-                throw new IndexOutOfBoundsException("invalid offset/length");
-            }
+            checkRange(bytes, offset, length);
             ensureCapacity(length);
             buffer.put(bytes, offset, length);
+        }
+
+        @Override
+        public void writeBoolean(boolean value) {
+            write(value ? 1 : 0);
+        }
+
+        @Override
+        public void writeByte(int value) {
+            write(value);
+        }
+
+        @Override
+        public void writeShort(int value) {
+            ensureCapacity(Short.BYTES);
+            buffer.putShort((short) value);
+        }
+
+        @Override
+        public void writeChar(int value) {
+            writeShort(value);
+        }
+
+        @Override
+        public void writeInt(int value) {
+            ensureCapacity(Integer.BYTES);
+            buffer.putInt(value);
+        }
+
+        @Override
+        public void writeLong(long value) {
+            ensureCapacity(Long.BYTES);
+            buffer.putLong(value);
+        }
+
+        @Override
+        public void writeFloat(float value) {
+            writeInt(Float.floatToIntBits(value));
+        }
+
+        @Override
+        public void writeDouble(double value) {
+            writeLong(Double.doubleToLongBits(value));
+        }
+
+        @Override
+        public void writeBytes(String value) {
+            for (int i = 0; i < value.length(); i++) {
+                writeByte((byte) value.charAt(i));
+            }
+        }
+
+        @Override
+        public void writeChars(String value) {
+            for (int i = 0; i < value.length(); i++) {
+                writeChar(value.charAt(i));
+            }
+        }
+
+        @Override
+        public void writeUTF(String value) throws IOException {
+            utfOutput.writeUTF(value);
+        }
+
+        @Override
+        public void skipBytesToWrite(int numBytes) throws IOException {
+            if (numBytes < 0) {
+                throw new IOException("numBytes must be non-negative: " + numBytes);
+            }
+            ensureCapacity(numBytes);
+            buffer.position(buffer.position() + numBytes);
+        }
+
+        @Override
+        public void write(DataInputView source, int length) throws IOException {
+            if (length < 0) {
+                throw new IOException("length must be non-negative: " + length);
+            }
+            byte[] copy = new byte[Math.min(4096, Math.max(1, length))];
+            int remaining = length;
+            while (remaining > 0) {
+                int count = Math.min(copy.length, remaining);
+                source.readFully(copy, 0, count);
+                write(copy, 0, count);
+                remaining -= count;
+            }
         }
 
         private void ensureCapacity(int additionalBytes) {
@@ -151,6 +242,15 @@ final class DirectDelimitedListSerializer {
 
         private CobbleStateKeySerializer.DirectBufferSlice currentSlice() {
             return new CobbleStateKeySerializer.DirectBufferSlice(buffer, buffer.position());
+        }
+
+        private static void checkRange(byte[] bytes, int offset, int length) {
+            if (bytes == null) {
+                throw new NullPointerException("bytes");
+            }
+            if (offset < 0 || length < 0 || offset > bytes.length - length) {
+                throw new IndexOutOfBoundsException("invalid offset/length");
+            }
         }
     }
 }

@@ -172,6 +172,37 @@ class CobbleStateBackendTest {
     }
 
     @Test
+    void listAddAllNullElementDoesNotPartiallyWrite(@TempDir Path tempDir) throws Exception {
+        try (TestBackendContext context =
+                createBackendContext(
+                        tempDir,
+                        false,
+                        null,
+                        null,
+                        TtlTimeProvider.DEFAULT,
+                        false,
+                        Collections.emptyList(),
+                        KeyGroupRange.of(0, 15),
+                        new Configuration())) {
+            CobbleKeyedStateBackend<Integer> backend = context.cobbleBackend;
+            backend.setCurrentKey(1);
+            ListState<String> listState =
+                    backend.getPartitionedState(
+                            org.apache.flink.runtime.state.VoidNamespace.INSTANCE,
+                            VoidNamespaceSerializer.INSTANCE,
+                            new ListStateDescriptor<>(
+                                    "list-null-atomic", StringSerializer.INSTANCE));
+            listState.add("existing");
+
+            assertThrows(
+                    NullPointerException.class,
+                    () -> listState.addAll(Arrays.asList("left", null, "right")));
+
+            assertEquals(Arrays.asList("existing"), toList(listState.get()));
+        }
+    }
+
+    @Test
     void restoresCanonicalSavepointValueListAndMapState(@TempDir Path tempDir) throws Exception {
         int key = 42;
         int keyGroup = KeyGroupRangeAssignment.assignToKeyGroup(key, 16);

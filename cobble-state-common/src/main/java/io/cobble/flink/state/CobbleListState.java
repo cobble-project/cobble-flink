@@ -92,9 +92,6 @@ final class CobbleListState<K, N, V> extends AbstractCobbleState<K, N, List<V>>
         if (values.isEmpty()) {
             return;
         }
-        for (V value : values) {
-            Preconditions.checkNotNull(value, "You cannot add null to a ListState.");
-        }
         mergeCurrentEncodedListPayload(directListSerializer.encodeAll(elementSerializer, values));
     }
 
