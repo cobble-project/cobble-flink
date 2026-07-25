@@ -7,11 +7,12 @@
     <parent>
         <groupId>io.github.cobble-project</groupId>
         <artifactId>cobble-flink</artifactId>
-        <version>${cobble.java.version}-${patch.version}-flink-1.17-SNAPSHOT</version>
+        <version>${cobble.java.version}-${patch.version}-SNAPSHOT</version>
         <relativePath>../pom.xml</relativePath>
     </parent>
 
     <artifactId>cobble-flink-monitor</artifactId>
+    <version>${cobble.flink.version.1.17}</version>
     <name>cobble-flink-monitor</name>
     <description>Read-only web monitor for inspecting Cobble snapshots produced by Flink state backend.</description>
 
@@ -19,7 +20,7 @@
         <dependency>
             <groupId>io.github.cobble-project</groupId>
             <artifactId>cobble-flink-inspect</artifactId>
-            <version>${project.version}</version>
+            <version>${cobble.flink.version.1.17}</version>
         </dependency>
         <dependency>
             <groupId>io.github.cobble-project</groupId>
@@ -29,7 +30,7 @@
         <dependency>
             <groupId>io.github.cobble-project</groupId>
             <artifactId>cobble-flink-common</artifactId>
-            <version>${project.version}</version>
+            <version>${cobble.flink.version.1.17}</version>
         </dependency>
         <dependency>
             <groupId>org.apache.flink</groupId>

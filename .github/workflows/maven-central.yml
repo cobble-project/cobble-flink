@@ -46,7 +46,7 @@ jobs:
           fi
           echo "RELEASE_BASE=${release_base}" >> "${GITHUB_ENV}"
 
-      - name: Set Flink compatibility versions
+      - name: Set release versions
         shell: bash
         run: |
           set -euo pipefail
@@ -56,18 +56,36 @@ jobs:
           from pathlib import Path
 
           base = os.environ["RELEASE_BASE"]
-          root_version = f"{base}-flink-1.17"
 
           root_pom = Path("pom.xml")
           root_text = root_pom.read_text()
           root_text, count = re.subn(
               r"(<artifactId>cobble-flink</artifactId>\s*<version>)[^<]+(</version>)",
-              rf"\g<1>{root_version}\g<2>",
+              rf"\g<1>{base}\g<2>",
               root_text,
               count=1,
           )
           if count != 1:
               raise SystemExit("Could not update the root project version.")
+
+          artifact_versions = {
+              "cobble.flink.version.1.17": f"{base}-flink-1.17",
+              "cobble.flink.version.1.19": f"{base}-flink-1.19",
+              "cobble.flink.version.2.0": f"{base}-flink-2.0",
+              "cobble.flink.version.2.1": f"{base}-flink-2.1",
+          }
+          for property_name, version in artifact_versions.items():
+              pattern = rf"(<{re.escape(property_name)}>)[^<]+(</{re.escape(property_name)}>)"
+              root_text, count = re.subn(
+                  pattern,
+                  rf"\g<1>{version}\g<2>",
+                  root_text,
+                  count=1,
+              )
+              if count != 1:
+                  raise SystemExit(
+                      f"Could not update artifact version property {property_name}."
+                  )
           root_pom.write_text(root_text)
 
           module_poms = [path for path in Path(".").glob("*/pom.xml")]
@@ -78,55 +96,32 @@ jobs:
                   raise SystemExit(f"Missing parent block in {pom}.")
               parent, count = re.subn(
                   r"(<version>)[^<]+(</version>)",
-                  rf"\g<1>{root_version}\g<2>",
+                  rf"\g<1>{base}\g<2>",
                   parent,
                   count=1,
               )
               if count != 1:
                   raise SystemExit(f"Could not update the parent version in {pom}.")
-              pom.write_text(parent + marker + remainder)
-
-          explicit_versions = {
-              "cobble-state-flink-1.19/pom.xml": f"{base}-flink-1.19",
-              "cobble-state-flink-2.0/pom.xml": f"{base}-flink-2.0",
-              "cobble-state-flink-2.1/pom.xml": f"{base}-flink-2.1",
-              "cobble-sink-flink-2.0/pom.xml": f"{base}-flink-2.0",
-              "cobble-dist-flink-1.19/pom.xml": f"{base}-flink-1.19",
-              "cobble-dist-flink-2.0/pom.xml": f"{base}-flink-2.0",
-              "cobble-dist-flink-2.1/pom.xml": f"{base}-flink-2.1",
-          }
-          for filename, version in explicit_versions.items():
-              pom = Path(filename)
-              text = pom.read_text()
-              parent, marker, remainder = text.partition("</parent>")
-              remainder, count = re.subn(
-                  r"(<version>)[^<]+(</version>)",
-                  rf"\g<1>{version}\g<2>",
-                  remainder,
-                  count=1,
-              )
-              if count != 1:
-                  raise SystemExit(f"Could not update the project version in {pom}.")
-              pom.write_text(parent + marker + remainder)
-
-          dist_21 = Path("cobble-dist-flink-2.1/pom.xml")
-          text = dist_21.read_text()
-          text, count = re.subn(
-              r"\$\{cobble\.java\.version\}-\$\{patch\.version\}-flink-2\.0-SNAPSHOT",
-              f"{base}-flink-2.0",
-              text,
-              count=1,
-          )
-          if count != 1:
-              raise SystemExit("Could not update the Flink 2.0 sink dependency in cobble-dist-flink-2.1.")
-          dist_21.write_text(text)
+              text = parent + marker + remainder
+              for property_name, version in artifact_versions.items():
+                  text = text.replace(f"${{{property_name}}}", version)
+              pom.write_text(text)
 
           snapshots = []
+          unresolved_artifact_versions = []
           for pom in [root_pom, *module_poms]:
-              if "SNAPSHOT" in pom.read_text():
+              text = pom.read_text()
+              if "SNAPSHOT" in text:
                   snapshots.append(str(pom))
+              if "${cobble.flink.version." in text:
+                  unresolved_artifact_versions.append(str(pom))
           if snapshots:
               raise SystemExit("SNAPSHOT versions remain in: " + ", ".join(snapshots))
+          if unresolved_artifact_versions:
+              raise SystemExit(
+                  "Unresolved Cobble Flink artifact versions remain in: "
+                  + ", ".join(unresolved_artifact_versions)
+              )
           PY
 
           ./mvnw --batch-mode --no-transfer-progress \

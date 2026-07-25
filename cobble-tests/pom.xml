@@ -7,7 +7,7 @@
     <parent>
         <groupId>io.github.cobble-project</groupId>
         <artifactId>cobble-flink</artifactId>
-        <version>${cobble.java.version}-${patch.version}-flink-1.17-SNAPSHOT</version>
+        <version>${cobble.java.version}-${patch.version}-SNAPSHOT</version>
         <relativePath>../pom.xml</relativePath>
     </parent>
 
@@ -18,13 +18,13 @@
         <dependency>
             <groupId>io.github.cobble-project</groupId>
             <artifactId>cobble-flink-sink</artifactId>
-            <version>${project.version}</version>
+            <version>${cobble.flink.version.1.17}</version>
             <scope>test</scope>
         </dependency>
         <dependency>
             <groupId>io.github.cobble-project</groupId>
             <artifactId>cobble-flink-source</artifactId>
-            <version>${project.version}</version>
+            <version>${cobble.flink.version.1.17}</version>
             <scope>test</scope>
         </dependency>
         <dependency>

@@ -7,11 +7,12 @@
     <parent>
         <groupId>io.github.cobble-project</groupId>
         <artifactId>cobble-flink</artifactId>
-        <version>${cobble.java.version}-${patch.version}-flink-1.17-SNAPSHOT</version>
+        <version>${cobble.java.version}-${patch.version}-SNAPSHOT</version>
         <relativePath>../pom.xml</relativePath>
     </parent>
 
     <artifactId>cobble-flink-common</artifactId>
+    <version>${cobble.flink.version.1.17}</version>
     <name>cobble-flink-common</name>
 
     <dependencies>
