@@ -4,7 +4,7 @@
   <a href="https://github.com/cobble-project/cobble-flink/blob/main/LICENSE"><img alt="GitHub License" src="https://img.shields.io/github/license/cobble-project/cobble-flink" /></a>
   <a href="https://cobble-project.github.io/cobble-flink/latest/"><img alt="Documentation" src="https://img.shields.io/badge/docs-GitHub%20Pages-222222?logo=githubpages" /></a>
   <a href="https://github.com/cobble-project/cobble-flink/actions/workflows/ci.yml"><img alt="GitHub CI" src="https://img.shields.io/github/actions/workflow/status/cobble-project/cobble-flink/ci.yml?label=CI&logo=githubactions" /></a>
-  <a href="https://cobble-project.github.io/cobble-flink/latest/getting-started/"><img alt="Flink compatibility" src="https://img.shields.io/badge/Flink-1.17%20to%202.0%2B-E6526F?logo=apacheflink" /></a>
+  <a href="https://cobble-project.github.io/cobble-flink/latest/getting-started/"><img alt="Flink compatibility" src="https://img.shields.io/badge/Flink-1.17%20to%202.x-E6526F?logo=apacheflink" /></a>
 </p>
 
 Cobble-flink integrates [Cobble](https://github.com/cobble-project/cobble) with
@@ -85,7 +85,8 @@ runtime jar you copy into Flink `lib/`:
 | --- | --- | --- | --- | --- |
 | 1.17, 1.18 | `0.2.3-1-flink-1.17` | `0.2.3-1-flink-1.17` | `0.2.3-1-flink-1.17` | `0.2.3-1-flink-1.17` |
 | 1.19, 1.20 | `0.2.3-1-flink-1.19` | `0.2.3-1-flink-1.19` | `0.2.3-1-flink-1.17` | `0.2.3-1-flink-1.17` |
-| 2.0 and above | `0.2.3-1-flink-2.0` | `0.2.3-1-flink-2.0` | `0.2.3-1-flink-2.0` | `0.2.3-1-flink-1.17` |
+| 2.0 | `0.2.3-1-flink-2.0` | `0.2.3-1-flink-2.0` | `0.2.3-1-flink-2.0` | `0.2.3-1-flink-1.17` |
+| 2.1 and above | `0.2.3-1-flink-2.1` | `0.2.3-1-flink-2.1` | `0.2.3-1-flink-2.0` | `0.2.3-1-flink-1.17` |
 
 ArtifactIds stay the same across Flink versions. Choose the artifactId from
 the section you are using, then choose the `<version>` from the table.
@@ -123,12 +124,20 @@ For Flink 1.19 or 1.20, build `cobble-dist-flink-1.19`:
 cp cobble-dist-flink-1.19/target/cobble-flink-dist-*.jar "$FLINK_HOME/lib/"
 ```
 
-For Flink 2.0 and above, build `cobble-dist-flink-2.0`:
+For Flink 2.0, build `cobble-dist-flink-2.0`:
 
 ```bash
 ./mvnw -pl cobble-common,cobble-state-flink-2.0,cobble-sink-flink-2.0,cobble-source,cobble-dist-flink-2.0 \
   package -DskipTests
 cp cobble-dist-flink-2.0/target/cobble-flink-dist-*.jar "$FLINK_HOME/lib/"
+```
+
+For Flink 2.1 and above, build `cobble-dist-flink-2.1`:
+
+```bash
+./mvnw -pl cobble-common,cobble-state-flink-2.1,cobble-sink-flink-2.0,cobble-source,cobble-dist-flink-2.1 \
+  package -DskipTests
+cp cobble-dist-flink-2.1/target/cobble-flink-dist-*.jar "$FLINK_HOME/lib/"
 ```
 
 These artifacts can be built in the same reactor; no Maven profile switch is

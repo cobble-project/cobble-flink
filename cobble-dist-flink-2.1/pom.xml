@@ -1,0 +1,100 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <parent>
+        <groupId>io.github.cobble-project</groupId>
+        <artifactId>cobble-flink</artifactId>
+        <version>${cobble.java.version}-${patch.version}-flink-1.17-SNAPSHOT</version>
+        <relativePath>../pom.xml</relativePath>
+    </parent>
+
+    <artifactId>cobble-flink-dist</artifactId>
+    <version>${cobble.java.version}-${patch.version}-flink-2.1-SNAPSHOT</version>
+    <name>cobble-flink-dist (Flink 2.1)</name>
+
+    <dependencies>
+        <dependency>
+            <groupId>io.github.cobble-project</groupId>
+            <artifactId>cobble-flink-state</artifactId>
+            <version>${project.version}</version>
+        </dependency>
+        <dependency>
+            <groupId>io.github.cobble-project</groupId>
+            <artifactId>cobble-flink-sink</artifactId>
+            <version>${cobble.java.version}-${patch.version}-flink-2.0-SNAPSHOT</version>
+        </dependency>
+        <dependency>
+            <groupId>io.github.cobble-project</groupId>
+            <artifactId>cobble-flink-source</artifactId>
+            <version>${project.parent.version}</version>
+        </dependency>
+    </dependencies>
+
+    <build>
+        <plugins>
+            <!-- The distribution has no source tree, but Maven Central still requires a
+                 javadoc attachment for its shaded jar. -->
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-jar-plugin</artifactId>
+                <version>3.4.2</version>
+                <executions>
+                    <execution>
+                        <id>attach-empty-javadocs</id>
+                        <phase>package</phase>
+                        <goals>
+                            <goal>jar</goal>
+                        </goals>
+                        <configuration>
+                            <classifier>javadoc</classifier>
+                        </configuration>
+                    </execution>
+                </executions>
+            </plugin>
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-shade-plugin</artifactId>
+                <version>3.5.1</version>
+                <executions>
+                    <execution>
+                        <phase>package</phase>
+                        <goals>
+                            <goal>shade</goal>
+                        </goals>
+                        <configuration>
+                            <createDependencyReducedPom>false</createDependencyReducedPom>
+                            <!--
+                                Relocate gson away from its original package so the dist jar does not
+                                leak com.google.gson onto the Flink lib/ classpath (Flink ships its own
+                                gson inside flink-dist). The cobble-java artifact already relocates
+                                gson to io.cobble.shaded.gson; this matches that target so the bundled
+                                cobble-java classes continue to resolve.
+                            -->
+                            <relocations>
+                                <relocation>
+                                    <pattern>com.google.gson</pattern>
+                                    <shadedPattern>io.cobble.shaded.gson</shadedPattern>
+                                </relocation>
+                            </relocations>
+                            <transformers>
+                                <transformer implementation="org.apache.maven.plugins.shade.resource.ServicesResourceTransformer"/>
+                                <!--
+                                    Make the dist bundle executable with `java -jar`.
+                                    The entrypoint is provided by the bundled cobble-java artifact and
+                                    forwards arguments to cobble-cli, so the same Flink runtime jar can
+                                    also start tools such as `remote-compactor`.
+                                -->
+                                <transformer implementation="org.apache.maven.plugins.shade.resource.ManifestResourceTransformer">
+                                    <mainClass>io.cobble.Main</mainClass>
+                                </transformer>
+                            </transformers>
+                        </configuration>
+                    </execution>
+                </executions>
+            </plugin>
+        </plugins>
+    </build>
+</project>

@@ -41,12 +41,14 @@
         <module>cobble-state</module>
         <module>cobble-state-flink-1.19</module>
         <module>cobble-state-flink-2.0</module>
+        <module>cobble-state-flink-2.1</module>
         <module>cobble-sink</module>
         <module>cobble-sink-flink-2.0</module>
         <module>cobble-source</module>
         <module>cobble-dist</module>
         <module>cobble-dist-flink-1.19</module>
         <module>cobble-dist-flink-2.0</module>
+        <module>cobble-dist-flink-2.1</module>
         <module>cobble-flink-inspect</module>
         <module>cobble-flink-monitor</module>
         <module>cobble-state-bench</module>

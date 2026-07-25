@@ -28,7 +28,8 @@ your `pom.xml` or for the runtime jar you copy into Flink `lib/`:
 | --- | --- | --- | --- | --- |
 | 1.17, 1.18 | `0.2.3-1-flink-1.17` | `0.2.3-1-flink-1.17` | `0.2.3-1-flink-1.17` | `0.2.3-1-flink-1.17` |
 | 1.19, 1.20 | `0.2.3-1-flink-1.19` | `0.2.3-1-flink-1.19` | `0.2.3-1-flink-1.17` | `0.2.3-1-flink-1.17` |
-| 2.0 and above | `0.2.3-1-flink-2.0` | `0.2.3-1-flink-2.0` | `0.2.3-1-flink-2.0` | `0.2.3-1-flink-1.17` |
+| 2.0 | `0.2.3-1-flink-2.0` | `0.2.3-1-flink-2.0` | `0.2.3-1-flink-2.0` | `0.2.3-1-flink-1.17` |
+| 2.1 and above | `0.2.3-1-flink-2.1` | `0.2.3-1-flink-2.1` | `0.2.3-1-flink-2.0` | `0.2.3-1-flink-1.17` |
 
 The dist bundle jar is a single artifact that contains all three parts, it is the recommended way to use Cobble Flink.
 The other three parts are separate artifacts that can be used as job-side Maven dependencies.
@@ -94,7 +95,7 @@ For Flink 1.19 or 1.20, build `cobble-dist-flink-1.19`:
 cp cobble-dist-flink-1.19/target/cobble-flink-dist-*.jar "$FLINK_HOME/lib/"
 ```
 
-For Flink 2.0 and above, build `cobble-dist-flink-2.0`:
+For Flink 2.0, build `cobble-dist-flink-2.0`:
 
 ```bash
 ./mvnw --batch-mode --no-transfer-progress \
@@ -102,6 +103,16 @@ For Flink 2.0 and above, build `cobble-dist-flink-2.0`:
   package -DskipTests
 
 cp cobble-dist-flink-2.0/target/cobble-flink-dist-*.jar "$FLINK_HOME/lib/"
+```
+
+For Flink 2.1 and above, build `cobble-dist-flink-2.1`:
+
+```bash
+./mvnw --batch-mode --no-transfer-progress \
+  -pl cobble-common,cobble-state-flink-2.1,cobble-sink-flink-2.0,cobble-source,cobble-dist-flink-2.1 \
+  package -DskipTests
+
+cp cobble-dist-flink-2.1/target/cobble-flink-dist-*.jar "$FLINK_HOME/lib/"
 ```
 
 These runtime jar artifacts can be built in the same reactor; no Maven profile

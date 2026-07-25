@@ -17,7 +17,7 @@ jobs:
       MAVEN_CENTRAL_PASSWORD: ${{ secrets.MAVEN_CENTRAL_PASSWORD }}
       MAVEN_GPG_PRIVATE_KEY: ${{ secrets.MAVEN_GPG_PRIVATE_KEY }}
       MAVEN_GPG_PASSPHRASE: ${{ secrets.MAVEN_GPG_PASSPHRASE }}
-      RELEASE_MODULES: .,cobble-common,cobble-state,cobble-state-flink-1.19,cobble-state-flink-2.0,cobble-sink,cobble-sink-flink-2.0,cobble-source,cobble-dist,cobble-dist-flink-1.19,cobble-dist-flink-2.0,cobble-flink-inspect,cobble-flink-monitor
+      RELEASE_MODULES: .,cobble-common,cobble-state,cobble-state-flink-1.19,cobble-state-flink-2.0,cobble-state-flink-2.1,cobble-sink,cobble-sink-flink-2.0,cobble-source,cobble-dist,cobble-dist-flink-1.19,cobble-dist-flink-2.0,cobble-dist-flink-2.1,cobble-flink-inspect,cobble-flink-monitor
 
     steps:
       - name: Checkout
@@ -89,9 +89,11 @@ jobs:
           explicit_versions = {
               "cobble-state-flink-1.19/pom.xml": f"{base}-flink-1.19",
               "cobble-state-flink-2.0/pom.xml": f"{base}-flink-2.0",
+              "cobble-state-flink-2.1/pom.xml": f"{base}-flink-2.1",
               "cobble-sink-flink-2.0/pom.xml": f"{base}-flink-2.0",
               "cobble-dist-flink-1.19/pom.xml": f"{base}-flink-1.19",
               "cobble-dist-flink-2.0/pom.xml": f"{base}-flink-2.0",
+              "cobble-dist-flink-2.1/pom.xml": f"{base}-flink-2.1",
           }
           for filename, version in explicit_versions.items():
               pom = Path(filename)
@@ -106,6 +108,18 @@ jobs:
               if count != 1:
                   raise SystemExit(f"Could not update the project version in {pom}.")
               pom.write_text(parent + marker + remainder)
+
+          dist_21 = Path("cobble-dist-flink-2.1/pom.xml")
+          text = dist_21.read_text()
+          text, count = re.subn(
+              r"\$\{cobble\.java\.version\}-\$\{patch\.version\}-flink-2\.0-SNAPSHOT",
+              f"{base}-flink-2.0",
+              text,
+              count=1,
+          )
+          if count != 1:
+              raise SystemExit("Could not update the Flink 2.0 sink dependency in cobble-dist-flink-2.1.")
+          dist_21.write_text(text)
 
           snapshots = []
           for pom in [root_pom, *module_poms]:
