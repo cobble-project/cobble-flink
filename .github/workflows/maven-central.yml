@@ -104,7 +104,8 @@ jobs:
                   raise SystemExit(f"Could not update the parent version in {pom}.")
               text = parent + marker + remainder
               for property_name, version in artifact_versions.items():
-                  text = text.replace(f"${{{property_name}}}", version)
+                  placeholder = "$" + "{" + property_name + "}"
+                  text = text.replace(placeholder, version)
               pom.write_text(text)
 
           snapshots = []
