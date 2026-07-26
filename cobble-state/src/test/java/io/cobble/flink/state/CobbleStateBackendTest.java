@@ -2472,7 +2472,7 @@ class CobbleStateBackendTest {
         assertTrue(config.sstPartitionedIndex);
         assertEquals(Config.SstReadMetadataCacheMode.EAGER, config.sstReadMetadataCacheMode);
         assertEquals(2, config.sstPinnedMetadataMaxLevel.intValue());
-        assertFalse(config.sstPinnedMetadataPartitionsEnabled);
+        assertTrue(config.sstPinnedMetadataPartitionsEnabled);
     }
 
     @Test

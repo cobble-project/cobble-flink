@@ -194,7 +194,7 @@ public final class CobbleOptions {
     public static final ConfigOption<Boolean> SST_PINNED_METADATA_PARTITIONS_ENABLED =
             ConfigOptions.key("state.backend.cobble.sst.pinned-metadata.partitions.enabled")
                     .booleanType()
-                    .defaultValue(false)
+                    .defaultValue(true)
                     .withDescription(
                             "Whether pinned metadata also includes second-level index and filter "
                                     + "partitions for partitioned SST files.");
