@@ -124,9 +124,9 @@ public class MapStateBenchmark extends StateBenchmarkBase {
     @OperationsPerInvocation(MAP_KEY_COUNT)
     public void mapEntries(KeyValue keyValue, Blackhole bh) throws Exception {
         keyedStateBackend.setCurrentKey(keyValue.setUpKey);
-        Iterable<Map.Entry<Long, Double>> iterable = mapState.entries();
-        if (iterable != null) {
-            for (Map.Entry<Long, Double> entry : mapState.entries()) {
+        Iterable<Map.Entry<Long, Double>> entries = mapState.entries();
+        if (entries != null) {
+            for (Map.Entry<Long, Double> entry : entries) {
                 bh.consume(entry.getKey());
                 bh.consume(entry.getValue());
             }

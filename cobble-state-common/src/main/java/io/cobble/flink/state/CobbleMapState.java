@@ -199,12 +199,7 @@ final class CobbleMapState<K, N, UK, UV> extends AbstractCobbleState<K, N, Map<U
 
     @Override
     public Iterator<Map.Entry<UK, UV>> iterator() throws IOException {
-        return streamEntries(
-                currentKey(),
-                currentBucket(),
-                currentNamespace(),
-                userKeySerializer,
-                userValueSerializer);
+        return streamEntries(currentKey(), currentBucket(), currentNamespace());
     }
 
     @Override
@@ -254,13 +249,40 @@ final class CobbleMapState<K, N, UK, UV> extends AbstractCobbleState<K, N, Map<U
         return currentNamespace;
     }
 
-    private <DUK, DUV> Iterator<Map.Entry<DUK, DUV>> streamEntries(
-            K key,
-            int bucket,
-            N namespace,
-            TypeSerializer<DUK> deserializedUserKeySerializer,
-            TypeSerializer<DUV> deserializedUserValueSerializer)
+    private Iterator<Map.Entry<UK, UV>> streamEntries(K key, int bucket, N namespace)
             throws IOException {
+        MapValueDecoder<UV> valueDecoder = new MapValueDecoder<>(userValueSerializer);
+        return streamRows(
+                key,
+                bucket,
+                namespace,
+                (row, rowKey, keyNamespacePrefixLength) ->
+                        new AbstractMap.SimpleImmutableEntry<>(
+                                deserializeUserKey(
+                                        userKeySerializer, rowKey, keyNamespacePrefixLength),
+                                valueDecoder.decode(row)));
+    }
+
+    private Iterator<UK> streamKeys(K key, int bucket, N namespace) throws IOException {
+        return streamRows(
+                key,
+                bucket,
+                namespace,
+                (ignored, rowKey, keyNamespacePrefixLength) ->
+                        deserializeUserKey(userKeySerializer, rowKey, keyNamespacePrefixLength));
+    }
+
+    private Iterator<UV> streamValues(K key, int bucket, N namespace) throws IOException {
+        MapValueDecoder<UV> valueDecoder = new MapValueDecoder<>(userValueSerializer);
+        return streamRows(
+                key,
+                bucket,
+                namespace,
+                (row, ignoredKey, ignoredPrefixLength) -> valueDecoder.decode(row));
+    }
+
+    private <T> Iterator<T> streamRows(
+            K key, int bucket, N namespace, MapRowDecoder<T> rowDecoder) throws IOException {
         byte[] keyNamespacePrefix = mapKeyNamespacePrefix(key, namespace);
         DirectScanBounds directScanBounds = prepareDirectScanBounds(keyNamespacePrefix);
         DirectScanCursor cursor =
@@ -271,18 +293,13 @@ final class CobbleMapState<K, N, UK, UV> extends AbstractCobbleState<K, N, Map<U
                         directScanBounds.endKeyBuffer,
                         directScanBounds.endKeyLength,
                         mapIterationScanOptions);
-        return new StreamingMapEntryIterator<>(
-                cursor,
-                keyNamespacePrefix,
-                deserializedUserKeySerializer,
-                deserializedUserValueSerializer);
+        return new StreamingMapIterator<>(cursor, keyNamespacePrefix, rowDecoder);
     }
 
     private Iterable<Map.Entry<UK, UV>> streamingEntriesIterable(K key, int bucket, N namespace) {
         return () -> {
             try {
-                return streamEntries(
-                        key, bucket, namespace, userKeySerializer, userValueSerializer);
+                return streamEntries(key, bucket, namespace);
             } catch (IOException e) {
                 throw new IllegalStateException(
                         "Failed to open Cobble map entry iterator for state '"
@@ -296,9 +313,7 @@ final class CobbleMapState<K, N, UK, UV> extends AbstractCobbleState<K, N, Map<U
     private Iterable<UK> streamingKeysIterable(K key, int bucket, N namespace) {
         return () -> {
             try {
-                return keyIterator(
-                        streamEntries(
-                                key, bucket, namespace, userKeySerializer, userValueSerializer));
+                return streamKeys(key, bucket, namespace);
             } catch (IOException e) {
                 throw new IllegalStateException(
                         "Failed to open Cobble map key iterator for state '" + columnFamily + "'.",
@@ -310,43 +325,13 @@ final class CobbleMapState<K, N, UK, UV> extends AbstractCobbleState<K, N, Map<U
     private Iterable<UV> streamingValuesIterable(K key, int bucket, N namespace) {
         return () -> {
             try {
-                return valueIterator(
-                        streamEntries(
-                                key, bucket, namespace, userKeySerializer, userValueSerializer));
+                return streamValues(key, bucket, namespace);
             } catch (IOException e) {
                 throw new IllegalStateException(
                         "Failed to open Cobble map value iterator for state '"
                                 + columnFamily
                                 + "'.",
                         e);
-            }
-        };
-    }
-
-    private static <DUK, DUV> Iterator<DUK> keyIterator(Iterator<Map.Entry<DUK, DUV>> entries) {
-        return new Iterator<DUK>() {
-            @Override
-            public boolean hasNext() {
-                return entries.hasNext();
-            }
-
-            @Override
-            public DUK next() {
-                return entries.next().getKey();
-            }
-        };
-    }
-
-    private static <DUK, DUV> Iterator<DUV> valueIterator(Iterator<Map.Entry<DUK, DUV>> entries) {
-        return new Iterator<DUV>() {
-            @Override
-            public boolean hasNext() {
-                return entries.hasNext();
-            }
-
-            @Override
-            public DUV next() {
-                return entries.next().getValue();
             }
         };
     }
@@ -465,10 +450,10 @@ final class CobbleMapState<K, N, UK, UV> extends AbstractCobbleState<K, N, Map<U
             throws IOException {
         byte[] keyNamespacePrefix = mapKeyNamespacePrefix(key, namespace);
         LinkedHashMap<DUK, DUV> entries = new LinkedHashMap<>();
-        // readEntries is called from queryable-state with a freshly-duplicated user-value
-        // serializer per invocation, so the adapter is built once here and reused inside the
-        // scan loop rather than being allocated per row.
-        TypeSerializer<DUV> rowCodec = MapValueCodec.adapterFor(deserializedUserValueSerializer);
+        // Queryable state provides a freshly duplicated serializer per invocation. Keep both its
+        // null-prefix adapter and input view local to this scan and reuse them across rows.
+        MapValueDecoder<DUV> valueDecoder =
+                new MapValueDecoder<>(deserializedUserValueSerializer);
 
         DirectScanBounds directScanBounds = prepareDirectScanBounds(keyNamespacePrefix);
         try (DirectScanCursor cursor =
@@ -493,9 +478,7 @@ final class CobbleMapState<K, N, UK, UV> extends AbstractCobbleState<K, N, Map<U
                 DUK userKey =
                         deserializeUserKey(
                                 deserializedUserKeySerializer, rowKey, keyNamespacePrefix.length);
-                DUV userValue =
-                        row.decodeBytesColumn(
-                                STATE_COLUMN_INDEX, input -> MapValueCodec.decode(rowCodec, input));
+                DUV userValue = valueDecoder.decode(row);
                 entries.put(userKey, userValue);
             }
         }
@@ -765,60 +748,78 @@ final class CobbleMapState<K, N, UK, UV> extends AbstractCobbleState<K, N, Map<U
         }
     }
 
-    private final class StreamingMapEntryIterator<DUK, DUV>
-            implements Iterator<Map.Entry<DUK, DUV>> {
+    @FunctionalInterface
+    private interface MapRowDecoder<T> {
+        T decode(DirectScanRow row, ByteBuffer rowKey, int keyNamespacePrefixLength)
+                throws IOException;
+    }
+
+    /** Decodes a map row value with input state isolated to one streaming iterator. */
+    private final class MapValueDecoder<DUV> {
+        private final TypeSerializer<DUV> userValueRowCodec;
+        private final ReusableDataInputView input = new ReusableDataInputView();
+        private final DirectEncodedRow.ColumnDecoder<DUV> columnDecoder = this::decodeInput;
+
+        private MapValueDecoder(TypeSerializer<DUV> deserializedUserValueSerializer) {
+            this.userValueRowCodec = MapValueCodec.adapterFor(deserializedUserValueSerializer);
+        }
+
+        private DUV decode(DirectScanRow row) throws IOException {
+            return row.decodeBytesColumn(STATE_COLUMN_INDEX, columnDecoder);
+        }
+
+        private DUV decodeInput(InputStream stream) throws IOException {
+            input.setInput(stream);
+            return userValueRowCodec.deserialize(input);
+        }
+    }
+
+    /** Shared cursor lifecycle and batch traversal for all MapState streaming projections. */
+    private final class StreamingMapIterator<T> implements Iterator<T> {
         private final DirectScanCursor cursor;
         private final byte[] keyNamespacePrefix;
-        private final TypeSerializer<DUK> deserializedUserKeySerializer;
-        private final TypeSerializer<DUV> deserializedUserValueSerializer;
-        /**
-         * Cached {@link MapValueCodec#adapterFor} adapter over {@link
-         * #deserializedUserValueSerializer}. Built once per iterator so each row decode reuses the
-         * same adapter instead of allocating a new one.
-         */
-        private final TypeSerializer<DUV> userValueRowCodec;
+        private final MapRowDecoder<T> rowDecoder;
 
         private DirectScanBatch currentBatch;
         private int currentBatchIndex;
-        private Map.Entry<DUK, DUV> nextEntry;
+        private T nextItem;
+        private boolean hasNextItem;
         private boolean finished;
         private boolean cursorClosed;
 
-        private StreamingMapEntryIterator(
+        private StreamingMapIterator(
                 DirectScanCursor cursor,
                 byte[] keyNamespacePrefix,
-                TypeSerializer<DUK> deserializedUserKeySerializer,
-                TypeSerializer<DUV> deserializedUserValueSerializer) {
+                MapRowDecoder<T> rowDecoder) {
             this.cursor = cursor;
             this.keyNamespacePrefix = keyNamespacePrefix;
-            this.deserializedUserKeySerializer = deserializedUserKeySerializer;
-            this.deserializedUserValueSerializer = deserializedUserValueSerializer;
-            this.userValueRowCodec = MapValueCodec.adapterFor(deserializedUserValueSerializer);
+            this.rowDecoder = rowDecoder;
         }
 
         @Override
         public boolean hasNext() {
-            if (nextEntry != null) {
+            if (hasNextItem) {
                 return true;
             }
             if (finished) {
                 return false;
             }
-            fetchNextEntry();
-            return nextEntry != null;
+            fetchNextItem();
+            return hasNextItem;
         }
 
         @Override
-        public Map.Entry<DUK, DUV> next() {
+        public T next() {
             if (!hasNext()) {
                 throw new NoSuchElementException("No more map entries.");
             }
-            Map.Entry<DUK, DUV> result = nextEntry;
-            nextEntry = null;
+            T result = nextItem;
+            nextItem = null;
+            hasNextItem = false;
             return result;
         }
 
-        private void fetchNextEntry() {
+        private void fetchNextItem() {
             while (!finished) {
                 try {
                     if (currentBatch == null || currentBatchIndex >= currentBatch.size()) {
@@ -835,21 +836,13 @@ final class CobbleMapState<K, N, UK, UV> extends AbstractCobbleState<K, N, Map<U
                         finish();
                         return;
                     }
-                    DUK userKey =
-                            deserializeUserKey(
-                                    deserializedUserKeySerializer,
-                                    rowKey,
-                                    keyNamespacePrefix.length);
-                    DUV userValue =
-                            row.decodeBytesColumn(
-                                    STATE_COLUMN_INDEX,
-                                    input -> MapValueCodec.decode(userValueRowCodec, input));
-                    nextEntry = new AbstractMap.SimpleImmutableEntry<>(userKey, userValue);
+                    nextItem = rowDecoder.decode(row, rowKey, keyNamespacePrefix.length);
+                    hasNextItem = true;
                     return;
                 } catch (IOException e) {
                     finish();
                     throw new IllegalStateException(
-                            "Failed to stream Cobble map entries for state '" + columnFamily + "'.",
+                            "Failed to stream Cobble map rows for state '" + columnFamily + "'.",
                             e);
                 } catch (RuntimeException e) {
                     finish();
@@ -865,7 +858,8 @@ final class CobbleMapState<K, N, UK, UV> extends AbstractCobbleState<K, N, Map<U
             finished = true;
             currentBatch = null;
             currentBatchIndex = 0;
-            nextEntry = null;
+            nextItem = null;
+            hasNextItem = false;
             if (!cursorClosed) {
                 cursorClosed = true;
                 cursor.close();

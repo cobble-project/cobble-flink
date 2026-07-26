@@ -3,11 +3,9 @@ package io.cobble.flink.state;
 import org.apache.flink.api.common.typeutils.TypeSerializer;
 import org.apache.flink.core.memory.DataInputDeserializer;
 import org.apache.flink.core.memory.DataInputView;
-import org.apache.flink.core.memory.DataInputViewStreamWrapper;
 import org.apache.flink.core.memory.DataOutputView;
 
 import java.io.IOException;
-import java.io.InputStream;
 import java.nio.ByteBuffer;
 
 /**
@@ -75,15 +73,6 @@ final class MapValueCodec {
             ByteBuffer view)
             throws IOException {
         return reusable.deserialize(adapter, view);
-    }
-
-    /**
-     * Decodes a Cobble MapState row value from an InputStream via the cached {@link #adapterFor
-     * adapter}. Returns {@code null} for a present-null entry. Used by call sites that go through
-     * {@code DirectEncodedRow.decodeBytesColumn(input -> ...)}.
-     */
-    static <V> V decode(TypeSerializer<V> adapter, InputStream input) throws IOException {
-        return adapter.deserialize(new DataInputViewStreamWrapper(input));
     }
 
     /**

@@ -125,10 +125,12 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collection;
 import java.util.Collections;
+import java.util.HashSet;
 import java.util.Iterator;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.NoSuchElementException;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.RunnableFuture;
@@ -3529,15 +3531,63 @@ class CobbleStateBackendTest {
             assertEquals(expected, observed);
 
             // keys() and values() must also see both entries; values() carries the null verbatim.
-            Set<String> keys = new java.util.HashSet<>();
-            state.keys().forEach(keys::add);
-            assertEquals(new java.util.HashSet<>(Arrays.asList("a", "b")), keys);
+            Set<String> keys = new HashSet<>();
+            Iterator<String> keyIterator = state.keys().iterator();
+            while (keyIterator.hasNext()) {
+                keys.add(keyIterator.next());
+            }
+            assertEquals(new HashSet<>(Arrays.asList("a", "b")), keys);
+            assertFalse(keyIterator.hasNext());
+            assertThrows(NoSuchElementException.class, keyIterator::next);
 
             List<String> values = new ArrayList<>();
-            state.values().forEach(values::add);
+            Iterator<String> valueIterator = state.values().iterator();
+            while (valueIterator.hasNext()) {
+                values.add(valueIterator.next());
+            }
             assertEquals(2, values.size());
             assertTrue(values.contains(null));
             assertTrue(values.contains("vb"));
+            assertFalse(valueIterator.hasNext());
+            assertThrows(NoSuchElementException.class, valueIterator::next);
+        }
+    }
+
+    @Test
+    void mapStateKeysAndValuesDecodeOnlyTheirRequestedProjection(@TempDir Path tempDir)
+            throws Exception {
+        try (TestBackendContext context =
+                createBackendContext(tempDir, false, null, MemorySize.ofMebiBytes(1))) {
+            CobbleKeyedStateBackend<Integer> backend = context.cobbleBackend;
+            backend.setCurrentKey(8);
+
+            MapState<String, String> valuesState =
+                    backend.getPartitionedState(
+                            "values-only-ns",
+                            StringSerializer.INSTANCE,
+                            new MapStateDescriptor<>(
+                                    "values-only-map",
+                                    new FailOnDeserializeStringSerializer(),
+                                    StringSerializer.INSTANCE));
+            valuesState.put("key", "value");
+            Iterator<String> values = valuesState.values().iterator();
+            assertTrue(values.hasNext());
+            assertEquals("value", values.next());
+            assertFalse(values.hasNext());
+
+            MapState<String, String> keysState =
+                    backend.getPartitionedState(
+                            "keys-only-ns",
+                            StringSerializer.INSTANCE,
+                            new MapStateDescriptor<>(
+                                    "keys-only-map",
+                                    StringSerializer.INSTANCE,
+                                    new FailOnDeserializeStringSerializer()));
+            keysState.put("key", "value");
+            Iterator<String> keys = keysState.keys().iterator();
+            assertTrue(keys.hasNext());
+            assertEquals("key", keys.next());
+            assertFalse(keys.hasNext());
         }
     }
 
@@ -7508,6 +7558,75 @@ class CobbleStateBackendTest {
             extends SimpleTypeSerializerSnapshot<int[]> {
         public IntArraySerializerSnapshot() {
             super(() -> IntArraySerializer.INSTANCE);
+        }
+    }
+
+    /** Serializes normally but fails loudly when a test accidentally asks it to deserialize. */
+    private static final class FailOnDeserializeStringSerializer extends TypeSerializer<String> {
+
+        @Override
+        public boolean isImmutableType() {
+            return true;
+        }
+
+        @Override
+        public TypeSerializer<String> duplicate() {
+            return this;
+        }
+
+        @Override
+        public String createInstance() {
+            return StringSerializer.INSTANCE.createInstance();
+        }
+
+        @Override
+        public String copy(String from) {
+            return StringSerializer.INSTANCE.copy(from);
+        }
+
+        @Override
+        public String copy(String from, String reuse) {
+            return StringSerializer.INSTANCE.copy(from, reuse);
+        }
+
+        @Override
+        public int getLength() {
+            return StringSerializer.INSTANCE.getLength();
+        }
+
+        @Override
+        public void serialize(String record, DataOutputView target) throws IOException {
+            StringSerializer.INSTANCE.serialize(record, target);
+        }
+
+        @Override
+        public String deserialize(DataInputView source) throws IOException {
+            throw new IOException("Test serializer must not deserialize this projection.");
+        }
+
+        @Override
+        public String deserialize(String reuse, DataInputView source) throws IOException {
+            return deserialize(source);
+        }
+
+        @Override
+        public void copy(DataInputView source, DataOutputView target) throws IOException {
+            StringSerializer.INSTANCE.copy(source, target);
+        }
+
+        @Override
+        public boolean equals(Object obj) {
+            return obj instanceof FailOnDeserializeStringSerializer;
+        }
+
+        @Override
+        public int hashCode() {
+            return FailOnDeserializeStringSerializer.class.hashCode();
+        }
+
+        @Override
+        public TypeSerializerSnapshot<String> snapshotConfiguration() {
+            return StringSerializer.INSTANCE.snapshotConfiguration();
         }
     }
 
