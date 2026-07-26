@@ -34,6 +34,7 @@ import org.apache.flink.api.common.typeutils.base.LongSerializer;
 import org.apache.flink.configuration.Configuration;
 import org.apache.flink.configuration.MemorySize;
 import org.apache.flink.contrib.streaming.state.EmbeddedRocksDBStateBackend;
+import org.apache.flink.contrib.streaming.state.RocksDBOptions;
 import org.apache.flink.contrib.streaming.state.RocksDBOptionsFactory;
 import org.apache.flink.core.fs.CloseableRegistry;
 import org.apache.flink.metrics.MetricGroup;
@@ -71,6 +72,8 @@ public final class StateBackendBenchmarkUtils {
             org.apache.flink.runtime.state.KeyGroupRange.of(0, 1);
     private static final int NUMBER_OF_KEY_GROUPS = 2;
     private static final String OPERATOR_IDENTIFIER = "state-benchmark";
+    // Each JMH fork creates one backend, which receives this entire managed-memory budget.
+    private static final MemorySize MANAGED_MEMORY_SIZE = MemorySize.ofMebiBytes(256);
     private static volatile Statistics lastRocksDbStatistics;
 
     public enum StateBackendType {
@@ -251,7 +254,7 @@ public final class StateBackendBenchmarkUtils {
         return new MockEnvironmentBuilder()
                 .setTaskName("state-benchmark-task")
                 .setJobVertexID(BENCHMARK_JOB_VERTEX_ID)
-                .setManagedMemorySize(MemorySize.ofMebiBytes(256).getBytes())
+                .setManagedMemorySize(MANAGED_MEMORY_SIZE.getBytes())
                 .setTaskManagerRuntimeInfo(
                         new TestingTaskManagerRuntimeInfo(new Configuration(), workingDir))
                 .setTaskStateManager(new TestTaskStateManagerBuilder().build())
@@ -279,7 +282,12 @@ public final class StateBackendBenchmarkUtils {
     private static AbstractKeyedStateBackend<Long> createRocksDbBackend(
             MockEnvironment environment, CloseableRegistry cancelStreamRegistry, File benchmarkRoot)
             throws Exception {
-        EmbeddedRocksDBStateBackend backend = new EmbeddedRocksDBStateBackend();
+        Configuration configuration = new Configuration();
+        configuration.set(RocksDBOptions.USE_MANAGED_MEMORY, true);
+        EmbeddedRocksDBStateBackend backend =
+                new EmbeddedRocksDBStateBackend()
+                        .configure(
+                                configuration, StateBackendBenchmarkUtils.class.getClassLoader());
         backend.setDbStoragePath(new File(benchmarkRoot, "rocksdb").getAbsolutePath());
         if (Boolean.getBoolean("cobble.state.bench.enable-rocksdb-statistics")) {
             backend.setRocksDBOptions(
@@ -322,6 +330,7 @@ public final class StateBackendBenchmarkUtils {
             MockEnvironment environment, CloseableRegistry cancelStreamRegistry, File benchmarkRoot)
             throws Exception {
         Configuration configuration = new Configuration();
+        configuration.set(CobbleOptions.USE_MANAGED_MEMORY, true);
         configuration.set(
                 CobbleOptions.LOCAL_DIRECTORIES,
                 new File(benchmarkRoot, "cobble-local").getAbsolutePath());
