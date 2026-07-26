@@ -2533,6 +2533,7 @@ class CobbleStateBackendTest {
         overrides.set(CobbleOptions.MEMTABLE_TYPE, "skiplist");
         overrides.set(CobbleOptions.COMPACTION_POLICY, "min_overlap");
         overrides.set(CobbleOptions.L0_FILE_LIMIT, 3);
+        overrides.set(CobbleOptions.WRITE_STALL_LIMIT, 5);
         overrides.set(CobbleOptions.SST_BLOOM_FILTER_ENABLED, true);
         overrides.set(CobbleOptions.SST_BLOOM_FILTER_BITS_PER_KEY, 15);
         overrides.set(CobbleOptions.SST_PARTITIONED_INDEX_ENABLED, true);
@@ -2563,6 +2564,7 @@ class CobbleStateBackendTest {
             assertEquals(Config.MemtableType.SKIPLIST, config.memtableType);
             assertEquals(Config.CompactionPolicyKind.MIN_OVERLAP, config.compactionPolicy);
             assertEquals(3, config.l0FileLimit.intValue());
+            assertEquals(5, config.writeStallLimit.intValue());
             assertTrue(config.sstBloomFilterEnabled);
             assertEquals(15, config.sstBloomBitsPerKey.intValue());
             assertTrue(config.sstPartitionedIndex);
@@ -2667,6 +2669,37 @@ class CobbleStateBackendTest {
                                         KeyGroupRange.of(0, 15),
                                         overrides)
                                 .close());
+    }
+
+    @Test
+    void writeStallLimitIsOptionalAndPreservesCobbleDefault() {
+        Config config = new Config();
+        config.writeStallLimit = 17;
+
+        CobbleFlinkConfigMapper.applyExposedOptions(config, new Configuration());
+
+        assertNull(CobbleOptions.WRITE_STALL_LIMIT.defaultValue());
+        assertEquals(17, config.writeStallLimit.intValue());
+    }
+
+    @Test
+    void writeStallLimitMustExceedL0FileLimitPlusOne() {
+        for (int invalidLimit : new int[] {3, 2, 1, 0}) {
+            Configuration overrides = new Configuration();
+            overrides.set(CobbleOptions.L0_FILE_LIMIT, 2);
+            overrides.set(CobbleOptions.WRITE_STALL_LIMIT, invalidLimit);
+
+            IllegalConfigurationException error =
+                    assertThrows(
+                            IllegalConfigurationException.class,
+                            () ->
+                                    CobbleFlinkConfigMapper.applyExposedOptions(
+                                            new Config(), overrides));
+
+            assertTrue(error.getMessage().contains(CobbleOptions.WRITE_STALL_LIMIT.key()));
+            assertTrue(error.getMessage().contains(CobbleOptions.L0_FILE_LIMIT.key()));
+            assertTrue(error.getMessage().contains("at least 4"));
+        }
     }
 
     @Test

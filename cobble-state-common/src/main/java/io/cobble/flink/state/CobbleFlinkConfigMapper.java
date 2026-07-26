@@ -27,6 +27,23 @@ final class CobbleFlinkConfigMapper {
                 requirePositive(
                         CobbleOptions.L0_FILE_LIMIT.key(),
                         flinkConfig.get(CobbleOptions.L0_FILE_LIMIT));
+        if (flinkConfig.contains(CobbleOptions.WRITE_STALL_LIMIT)) {
+            int writeStallLimit = flinkConfig.get(CobbleOptions.WRITE_STALL_LIMIT);
+            long minimumWriteStallLimit = (long) config.l0FileLimit + 2L;
+            if (writeStallLimit < minimumWriteStallLimit) {
+                throw new IllegalConfigurationException(
+                        CobbleOptions.WRITE_STALL_LIMIT.key()
+                                + " must be at least "
+                                + minimumWriteStallLimit
+                                + " when "
+                                + CobbleOptions.L0_FILE_LIMIT.key()
+                                + " is "
+                                + config.l0FileLimit
+                                + ", but was "
+                                + writeStallLimit);
+            }
+            config.writeStallLimit = writeStallLimit;
+        }
         config.sstBloomFilterEnabled = flinkConfig.get(CobbleOptions.SST_BLOOM_FILTER_ENABLED);
         config.sstBloomBitsPerKey =
                 requirePositive(

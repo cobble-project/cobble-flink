@@ -87,6 +87,16 @@ public final class CobbleOptions {
                     .withDescription(
                             "The number of L0 files that triggers Cobble compaction. Defaults to 2.");
 
+    /** Maximum combined immutable-memtable and L0-file pressure before writes stall. */
+    public static final ConfigOption<Integer> WRITE_STALL_LIMIT =
+            ConfigOptions.key("state.backend.cobble.compaction.write-stall-limit")
+                    .intType()
+                    .noDefaultValue()
+                    .withDescription(
+                            "The maximum combined number of immutable memtables and L0 files "
+                                    + "allowed before writes stall. Must be at least 2 greater than "
+                                    + "the L0 file limit. When unset, Cobble uses its default.");
+
     /**
      * Whether Cobble compaction read-ahead is enabled. Mirrors Cobble's
      * {@code compaction_read_ahead_enabled}.

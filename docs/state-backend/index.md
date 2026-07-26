@@ -191,6 +191,7 @@ backend.
 | `state.backend.cobble.memtable.type` | `skiplist` | Memtable implementation. `skiplist` supports both point lookups and the range scans used by `MapState`; `hash` is available for point-lookup-only workloads. |
 | `state.backend.cobble.compaction.policy` | `score_priority` | Compaction policy. Supported values are `round_robin`, `min_overlap`, and `score_priority`. |
 | `state.backend.cobble.compaction.l0-file-limit` | `2` | Number of L0 files that triggers compaction. Higher values reduce compaction work but can increase state lookup and iteration cost. |
+| `state.backend.cobble.compaction.write-stall-limit` | Derived by Cobble | Maximum combined immutable-memtable and L0-file pressure before Cobble blocks writes. The value must be at least `state.backend.cobble.compaction.l0-file-limit + 2`. When unset, Cobble derives `max(l0-file-limit + 2, 32)`. |
 | `state.backend.cobble.compaction.read-ahead.enabled` | `true` | Whether Cobble compaction read-ahead is enabled. |
 | `state.backend.cobble.compaction.remote.addr` | none | Address (`host:port`) of a Cobble remote compactor. When unset, compaction runs locally in the TaskManager. |
 | `state.backend.cobble.compaction.remote.timeout` | `300s` | Timeout for a single remote compaction request. |
