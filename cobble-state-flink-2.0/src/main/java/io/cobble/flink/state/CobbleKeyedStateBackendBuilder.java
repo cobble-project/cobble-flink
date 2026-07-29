@@ -635,6 +635,10 @@ final class CobbleKeyedStateBackendBuilder<K> {
                         intersectionStarts,
                         intersectionEnds);
             }
+            // Rescale imports source shards as READONLY references. Queue the final, filtered set
+            // for asynchronous promotion into this backend's writable primary volume. Same-range
+            // resume and canonical restore take different paths and intentionally do not do this.
+            db.loadReadonlyFilesToPrimary();
             success = true;
             return db;
         } finally {

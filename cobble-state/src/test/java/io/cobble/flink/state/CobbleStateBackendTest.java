@@ -134,7 +134,9 @@ import java.util.NoSuchElementException;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.RunnableFuture;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.stream.Stream;
 
 /** Tests for {@link CobbleStateBackend}. */
 class CobbleStateBackendTest {
@@ -892,11 +894,11 @@ class CobbleStateBackendTest {
      * itself is owned by Flink configuration and may exist either way.
      */
     private static Path[] listLeakedInstanceDirs(Path localDirRoot) throws IOException {
-        if (!java.nio.file.Files.isDirectory(localDirRoot)) {
+        if (!Files.isDirectory(localDirRoot)) {
             return new Path[0];
         }
-        try (java.util.stream.Stream<Path> entries = java.nio.file.Files.list(localDirRoot)) {
-            return entries.filter(java.nio.file.Files::isDirectory)
+        try (Stream<Path> entries = Files.list(localDirRoot)) {
+            return entries.filter(Files::isDirectory)
                     .filter(p -> p.getFileName().toString().startsWith("job_"))
                     .sorted()
                     .toArray(Path[]::new);
@@ -3141,6 +3143,65 @@ class CobbleStateBackendTest {
             assertEquals(3, backend.getCobbleConfig().volumes.size());
             assertVolumeKinds(
                     backend.getCobbleConfig().volumes.get(2), Config.VolumeUsageKind.READONLY);
+        }
+    }
+
+    @Test
+    void rescaledRestoreLoadsReadonlyFilesIntoLocalPrimaryVolume(@TempDir Path tempDir)
+            throws Exception {
+        String checkpointDirectory = tempDir.resolve("checkpoints").toString();
+        String restoredCheckpointDirectory = tempDir.resolve("restored-checkpoints").toString();
+        int retainedKey = findKeyForGroup(2);
+        String retainedValue = payload("rescale-primary-load", retainedKey, 64 * 1024);
+        KeyedStateHandle snapshotHandle;
+        ValueStateDescriptor<String> descriptor =
+                new ValueStateDescriptor<>("rescale-primary-load-state", StringSerializer.INSTANCE);
+
+        try (TestBackendContext source =
+                createBackendContext(
+                        tempDir.resolve("rescale-load-source"),
+                        false,
+                        checkpointDirectory,
+                        MemorySize.ofMebiBytes(1),
+                        TtlTimeProvider.DEFAULT,
+                        false,
+                        Collections.<KeyedStateHandle>emptyList(),
+                        KeyGroupRange.of(0, 15))) {
+            CobbleKeyedStateBackend<Integer> backend = source.cobbleBackend;
+            backend.setCurrentKey(retainedKey);
+            backend.getPartitionedState("rescale-load-ns", StringSerializer.INSTANCE, descriptor)
+                    .update(retainedValue);
+            snapshotHandle = runCheckpointSnapshot(backend, 63L);
+        }
+
+        try (TestBackendContext restored =
+                createBackendContext(
+                        tempDir.resolve("rescale-load-target"),
+                        true,
+                        restoredCheckpointDirectory,
+                        null,
+                        TtlTimeProvider.DEFAULT,
+                        false,
+                        Collections.singletonList(snapshotHandle),
+                        KeyGroupRange.of(0, 7))) {
+            CobbleKeyedStateBackend<Integer> backend = restored.cobbleBackend;
+            ValueState<String> valueState =
+                    backend.getPartitionedState(
+                            "rescale-load-ns", StringSerializer.INSTANCE, descriptor);
+
+            backend.setCurrentKey(retainedKey);
+            assertEquals(retainedValue, valueState.value());
+            assertVolumeKinds(
+                    backend.getCobbleConfig().volumes.get(0),
+                    Config.VolumeUsageKind.PRIMARY_DATA_PRIORITY_LOW,
+                    Config.VolumeUsageKind.META,
+                    Config.VolumeUsageKind.SNAPSHOT);
+            assertVolumeKinds(
+                    backend.getCobbleConfig().volumes.get(1),
+                    Config.VolumeUsageKind.PRIMARY_DATA_PRIORITY_HIGH);
+            assertVolumeKinds(
+                    backend.getCobbleConfig().volumes.get(2), Config.VolumeUsageKind.READONLY);
+            waitForLocalPrimaryDataFile(backend.getVolumePath().toPath());
         }
     }
 
@@ -8635,6 +8696,36 @@ class CobbleStateBackendTest {
         assertEquals(expectedKinds.length, actualKinds.size());
         for (Config.VolumeUsageKind expectedKind : expectedKinds) {
             assertTrue(actualKinds.contains(expectedKind));
+        }
+    }
+
+    private static void waitForLocalPrimaryDataFile(Path localVolumePath) throws Exception {
+        long deadlineNanos = System.nanoTime() + TimeUnit.SECONDS.toNanos(10);
+        while (System.nanoTime() < deadlineNanos) {
+            if (hasDataFile(localVolumePath)) {
+                return;
+            }
+            Thread.sleep(25L);
+        }
+        assertTrue(
+                hasDataFile(localVolumePath),
+                "rescaled READONLY files were not loaded into the local primary volume");
+    }
+
+    private static boolean hasDataFile(Path volumePath) throws IOException {
+        if (!Files.isDirectory(volumePath)) {
+            return false;
+        }
+        try (Stream<Path> paths = Files.walk(volumePath)) {
+            return paths.filter(Files::isRegularFile)
+                    .anyMatch(
+                            path ->
+                                    path.getParent() != null
+                                            && "data"
+                                                    .equals(
+                                                            path.getParent()
+                                                                    .getFileName()
+                                                                    .toString()));
         }
     }
 
