@@ -1,6 +1,7 @@
 package io.cobble.flink.state;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import org.apache.flink.api.common.functions.RichMapFunction;
 import org.apache.flink.api.common.restartstrategy.RestartStrategies;
@@ -11,6 +12,7 @@ import org.apache.flink.api.java.functions.KeySelector;
 import org.apache.flink.api.java.tuple.Tuple2;
 import org.apache.flink.configuration.CheckpointingOptions;
 import org.apache.flink.configuration.Configuration;
+import org.apache.flink.runtime.jobgraph.JobGraph;
 import org.apache.flink.streaming.api.checkpoint.ListCheckpointed;
 import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
 import org.apache.flink.streaming.api.functions.sink.RichSinkFunction;
@@ -20,18 +22,28 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
 import java.io.IOException;
+import java.nio.file.Files;
 import java.nio.file.Path;
+import java.time.Duration;
+import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.stream.Stream;
 
 class CobbleKeyedStateCheckpointingITTest {
     private static final int NUM_STRINGS = 10_000;
     private static final int NUM_KEYS = 40;
     private static final int FAILURE_POSITION = 1_800;
+    private static final int SEQUENTIAL_FAILURES = 3;
+    private static final Duration JOB_TIMEOUT = Duration.ofSeconds(180);
+    private static final Duration LOCAL_STATE_CLEANUP_TIMEOUT = Duration.ofSeconds(30);
+    private static final Map<Integer, Long> FINAL_SUMS = new ConcurrentHashMap<>();
 
     @Test
     void recoversKeyedStateExactlyOnceAfterFailure(@TempDir Path tempDir) throws Exception {
@@ -43,37 +55,12 @@ class CobbleKeyedStateCheckpointingITTest {
         try {
             StreamExecutionEnvironment env =
                     CobbleCheckpointingITSupport.createEnvironment(tempDir.resolve("local-state"));
-            env.enableCheckpointing(500L);
+            configureCheckpointing(env, tempDir);
             env.setRestartStrategy(RestartStrategies.fixedDelayRestart(Integer.MAX_VALUE, 0L));
-            Configuration checkpointConfiguration = new Configuration();
-            checkpointConfiguration.set(CheckpointingOptions.CHECKPOINT_STORAGE, "filesystem");
-            checkpointConfiguration.set(
-                    CheckpointingOptions.CHECKPOINTS_DIRECTORY,
-                    tempDir.resolve("checkpoints").toUri().toString());
-            env.configure(checkpointConfiguration);
 
-            env.addSource(new IntGeneratingSourceFunction(NUM_STRINGS / 2, NUM_STRINGS / 4))
-                    .name("source-one")
-                    .uid("source-one")
-                    .union(
-                            env.addSource(
-                                    new IntGeneratingSourceFunction(
-                                            NUM_STRINGS / 2, NUM_STRINGS / 4)))
-                    .keyBy(new IdentityKeySelector<>())
-                    .map(new OnceFailingPartitionedSum(FAILURE_POSITION))
-                    .name("sum")
-                    .uid("sum")
-                    .keyBy(value -> value.f0)
-                    .addSink(new CounterSink())
-                    .name("counter-sink")
-                    .uid("counter-sink");
-
-            org.apache.flink.runtime.jobgraph.JobGraph jobGraph =
-                    env.getStreamGraph().getJobGraph();
-            cluster.getClusterClient().submitJob(jobGraph).get(30, TimeUnit.SECONDS);
-            cluster.getClusterClient()
-                    .requestJobResult(jobGraph.getJobID())
-                    .get(180, TimeUnit.SECONDS);
+            submitAndAwait(
+                    cluster,
+                    createJobGraph(env, false, new OnceFailingPartitionedSum(FAILURE_POSITION)));
         } finally {
             cluster.after();
         }
@@ -81,10 +68,90 @@ class CobbleKeyedStateCheckpointingITTest {
         assertEquals(
                 CobbleCheckpointingITSupport.PARALLELISM,
                 OnceFailingPartitionedSum.RECOVERY_COUNTER.get());
-        assertEquals(NUM_KEYS, OnceFailingPartitionedSum.ALL_SUMS.size());
+        assertFinalSumsAndCounts();
+    }
+
+    @Test
+    void recoversAllStatefulSubtasksAcrossThreeSequentialFailures(@TempDir Path tempDir)
+            throws Exception {
+        resetSharedState();
+
+        Path localStateRoot = tempDir.resolve("local-state");
+        MiniClusterWithClientResource cluster =
+                CobbleCheckpointingITSupport.createCluster(new Configuration());
+        cluster.before();
+        try {
+            StreamExecutionEnvironment env =
+                    CobbleCheckpointingITSupport.createEnvironment(localStateRoot);
+            configureCheckpointing(env, tempDir);
+            env.setRestartStrategy(RestartStrategies.fixedDelayRestart(SEQUENTIAL_FAILURES, 0L));
+
+            submitAndAwait(
+                    cluster, createJobGraph(env, true, new ThreeTimesFailingPartitionedSum()));
+        } finally {
+            cluster.after();
+        }
+
+        assertEquals(SEQUENTIAL_FAILURES, ThreeTimesFailingPartitionedSum.FAILURES.get());
+        assertEquals(
+                Collections.nCopies(SEQUENTIAL_FAILURES, 0),
+                new ArrayList<>(ThreeTimesFailingPartitionedSum.FAILING_SUBTASKS));
+        assertRestoredOnEverySubtask(
+                ThreeTimesFailingPartitionedSum.RECOVERIES_BY_SUBTASK, SEQUENTIAL_FAILURES);
+        assertRestoredOnEverySubtask(CounterSink.RECOVERIES_BY_SUBTASK, SEQUENTIAL_FAILURES);
+        assertFinalSumsAndCounts();
+        assertLocalStateRootIsEmpty(localStateRoot);
+    }
+
+    private static void configureCheckpointing(StreamExecutionEnvironment env, Path tempDir) {
+        env.enableCheckpointing(500L);
+        Configuration checkpointConfiguration = new Configuration();
+        checkpointConfiguration.set(CheckpointingOptions.CHECKPOINT_STORAGE, "filesystem");
+        checkpointConfiguration.set(
+                CheckpointingOptions.CHECKPOINTS_DIRECTORY,
+                tempDir.resolve("checkpoints").toUri().toString());
+        env.configure(checkpointConfiguration);
+    }
+
+    private static JobGraph createJobGraph(
+            StreamExecutionEnvironment env,
+            boolean waitForCheckpointAfterRestore,
+            RichMapFunction<Integer, Tuple2<Integer, Long>> sumFunction) {
+        env.addSource(
+                        new IntGeneratingSourceFunction(
+                                NUM_STRINGS / 2, NUM_STRINGS / 4, waitForCheckpointAfterRestore))
+                .name("source-one")
+                .uid("source-one")
+                .union(
+                        env.addSource(
+                                new IntGeneratingSourceFunction(
+                                        NUM_STRINGS / 2,
+                                        NUM_STRINGS / 4,
+                                        waitForCheckpointAfterRestore)))
+                .keyBy(new IdentityKeySelector<>())
+                .map(sumFunction)
+                .name("sum")
+                .uid("sum")
+                .keyBy(value -> value.f0)
+                .addSink(new CounterSink())
+                .name("counter-sink")
+                .uid("counter-sink");
+        return env.getStreamGraph().getJobGraph();
+    }
+
+    private static void submitAndAwait(MiniClusterWithClientResource cluster, JobGraph jobGraph)
+            throws Exception {
+        cluster.getClusterClient().submitJob(jobGraph).get(30, TimeUnit.SECONDS);
+        cluster.getClusterClient()
+                .requestJobResult(jobGraph.getJobID())
+                .get(JOB_TIMEOUT.toSeconds(), TimeUnit.SECONDS);
+    }
+
+    private static void assertFinalSumsAndCounts() {
+        assertEquals(NUM_KEYS, FINAL_SUMS.size());
         assertEquals(NUM_KEYS, CounterSink.ALL_COUNTS.size());
 
-        for (Map.Entry<Integer, Long> sum : OnceFailingPartitionedSum.ALL_SUMS.entrySet()) {
+        for (Map.Entry<Integer, Long> sum : FINAL_SUMS.entrySet()) {
             assertEquals(
                     sum.getKey().longValue() * NUM_STRINGS / NUM_KEYS, sum.getValue().longValue());
         }
@@ -93,10 +160,24 @@ class CobbleKeyedStateCheckpointingITTest {
         }
     }
 
+    private static void assertRestoredOnEverySubtask(
+            Map<Integer, AtomicInteger> recoveriesBySubtask, int expectedRestarts) {
+        assertEquals(CobbleCheckpointingITSupport.PARALLELISM, recoveriesBySubtask.size());
+        for (int subtask = 0; subtask < CobbleCheckpointingITSupport.PARALLELISM; subtask++) {
+            AtomicInteger recoveries = recoveriesBySubtask.get(subtask);
+            assertTrue(recoveries != null, "subtask " + subtask + " was not restored");
+            assertEquals(expectedRestarts, recoveries.get(), "subtask " + subtask);
+        }
+    }
+
     private static void resetSharedState() {
-        OnceFailingPartitionedSum.ALL_SUMS.clear();
+        FINAL_SUMS.clear();
         OnceFailingPartitionedSum.RECOVERY_COUNTER.set(0L);
+        ThreeTimesFailingPartitionedSum.FAILURES.set(0);
+        ThreeTimesFailingPartitionedSum.FAILING_SUBTASKS.clear();
+        ThreeTimesFailingPartitionedSum.RECOVERIES_BY_SUBTASK.clear();
         CounterSink.ALL_COUNTS.clear();
+        CounterSink.RECOVERIES_BY_SUBTASK.clear();
     }
 
     private static final class IntGeneratingSourceFunction
@@ -104,13 +185,16 @@ class CobbleKeyedStateCheckpointingITTest {
             implements ListCheckpointed<Integer>, CheckpointListener {
         private final int numElements;
         private final int checkpointLatestAt;
+        private final boolean waitForCheckpointAfterRestore;
         private volatile boolean running = true;
         private int lastEmitted = -1;
         private boolean checkpointHappened;
 
-        private IntGeneratingSourceFunction(int numElements, int checkpointLatestAt) {
+        private IntGeneratingSourceFunction(
+                int numElements, int checkpointLatestAt, boolean waitForCheckpointAfterRestore) {
             this.numElements = numElements;
             this.checkpointLatestAt = checkpointLatestAt;
+            this.waitForCheckpointAfterRestore = waitForCheckpointAfterRestore;
         }
 
         @Override
@@ -157,7 +241,7 @@ class CobbleKeyedStateCheckpointingITTest {
         public void restoreState(List<Integer> state) {
             assertEquals(1, state.size());
             lastEmitted = state.get(0);
-            checkpointHappened = true;
+            checkpointHappened = !waitForCheckpointAfterRestore;
         }
 
         @Override
@@ -175,7 +259,6 @@ class CobbleKeyedStateCheckpointingITTest {
     private static final class OnceFailingPartitionedSum
             extends RichMapFunction<Integer, Tuple2<Integer, Long>>
             implements ListCheckpointed<Integer> {
-        private static final Map<Integer, Long> ALL_SUMS = new ConcurrentHashMap<>();
         private static final AtomicLong RECOVERY_COUNTER = new AtomicLong();
 
         private final int failurePosition;
@@ -202,7 +285,7 @@ class CobbleKeyedStateCheckpointingITTest {
             Long oldSum = sum.value();
             long currentSum = (oldSum == null ? 0L : oldSum) + value;
             sum.update(currentSum);
-            ALL_SUMS.put(value, currentSum);
+            FINAL_SUMS.put(value, currentSum);
             return Tuple2.of(value, currentSum);
         }
 
@@ -220,8 +303,76 @@ class CobbleKeyedStateCheckpointingITTest {
         }
     }
 
-    private static final class CounterSink extends RichSinkFunction<Tuple2<Integer, Long>> {
+    private static final class ThreeTimesFailingPartitionedSum
+            extends RichMapFunction<Integer, Tuple2<Integer, Long>>
+            implements ListCheckpointed<Integer>, CheckpointListener {
+        private static final AtomicInteger FAILURES = new AtomicInteger();
+        private static final ConcurrentLinkedQueue<Integer> FAILING_SUBTASKS =
+                new ConcurrentLinkedQueue<>();
+        private static final Map<Integer, AtomicInteger> RECOVERIES_BY_SUBTASK =
+                new ConcurrentHashMap<>();
+
+        private transient ValueState<Long> sum;
+        private boolean checkpointCompleted;
+        private boolean failedThisAttempt;
+
+        @Override
+        public void open(Configuration parameters) throws IOException {
+            sum = getRuntimeContext().getState(new ValueStateDescriptor<>("sum", Long.class));
+        }
+
+        @Override
+        public Tuple2<Integer, Long> map(Integer value) throws Exception {
+            if (getRuntimeContext().getIndexOfThisSubtask() == 0
+                    && checkpointCompleted
+                    && !failedThisAttempt
+                    && FAILURES.get() < SEQUENTIAL_FAILURES) {
+                failedThisAttempt = true;
+                int failure = FAILURES.incrementAndGet();
+                if (failure <= SEQUENTIAL_FAILURES) {
+                    FAILING_SUBTASKS.add(0);
+                    throw new Exception("intentional sequential test failure " + failure);
+                }
+            }
+
+            Long oldSum = sum.value();
+            long currentSum = (oldSum == null ? 0L : oldSum) + value;
+            sum.update(currentSum);
+            FINAL_SUMS.put(value, currentSum);
+            return Tuple2.of(value, currentSum);
+        }
+
+        @Override
+        public List<Integer> snapshotState(long checkpointId, long timestamp) {
+            return Collections.emptyList();
+        }
+
+        @Override
+        public void restoreState(List<Integer> state) {
+            assertTrue(state.isEmpty());
+            RECOVERIES_BY_SUBTASK
+                    .computeIfAbsent(
+                            getRuntimeContext().getIndexOfThisSubtask(),
+                            ignored -> new AtomicInteger())
+                    .incrementAndGet();
+            checkpointCompleted = false;
+            failedThisAttempt = false;
+        }
+
+        @Override
+        public void notifyCheckpointComplete(long checkpointId) {
+            checkpointCompleted = true;
+        }
+
+        @Override
+        public void notifyCheckpointAborted(long checkpointId) {}
+    }
+
+    private static final class CounterSink extends RichSinkFunction<Tuple2<Integer, Long>>
+            implements ListCheckpointed<Integer> {
         private static final Map<Integer, Long> ALL_COUNTS = new ConcurrentHashMap<>();
+        private static final Map<Integer, AtomicInteger> RECOVERIES_BY_SUBTASK =
+                new ConcurrentHashMap<>();
 
         private transient ValueState<NonSerializableLong> countStateA;
         private transient ValueState<Long> countStateB;
@@ -247,6 +398,46 @@ class CobbleKeyedStateCheckpointingITTest {
             countStateA.update(NonSerializableLong.of(updated));
             countStateB.update(updated);
             ALL_COUNTS.put(value.f0, updated);
+        }
+
+        @Override
+        public List<Integer> snapshotState(long checkpointId, long timestamp) {
+            return Collections.emptyList();
+        }
+
+        @Override
+        public void restoreState(List<Integer> state) {
+            assertTrue(state.isEmpty());
+            RECOVERIES_BY_SUBTASK
+                    .computeIfAbsent(
+                            getRuntimeContext().getIndexOfThisSubtask(),
+                            ignored -> new AtomicInteger())
+                    .incrementAndGet();
+        }
+    }
+
+    private static void assertLocalStateRootIsEmpty(Path localStateRoot) throws Exception {
+        long deadline = System.nanoTime() + LOCAL_STATE_CLEANUP_TIMEOUT.toNanos();
+        List<Path> leftovers;
+        do {
+            leftovers = localStateChildren(localStateRoot);
+            if (leftovers.isEmpty()) {
+                return;
+            }
+            Thread.sleep(100L);
+        } while (System.nanoTime() < deadline);
+
+        assertEquals(Collections.emptyList(), leftovers, "attempt-local Cobble DB files remain");
+    }
+
+    private static List<Path> localStateChildren(Path localStateRoot) throws IOException {
+        if (!Files.exists(localStateRoot)) {
+            return Collections.emptyList();
+        }
+        try (Stream<Path> paths = Files.walk(localStateRoot)) {
+            List<Path> children = new ArrayList<>();
+            paths.filter(path -> !path.equals(localStateRoot)).forEach(children::add);
+            return children;
         }
     }
 

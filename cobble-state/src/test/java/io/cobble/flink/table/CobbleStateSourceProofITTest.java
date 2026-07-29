@@ -233,8 +233,8 @@ class CobbleStateSourceProofITTest {
         clusterConfiguration.setString("cobble.ha.delegate.type", "NONE");
         clusterConfiguration.setString(
                 org.apache.flink.configuration.JobManagerOptions.ADDRESS, "localhost");
-        clusterConfiguration.setInteger(
-                org.apache.flink.configuration.JobManagerOptions.PORT, 6123);
+        // Keep this MiniCluster isolated from the other table ITs in the same Surefire JVM.
+        clusterConfiguration.setInteger(org.apache.flink.configuration.JobManagerOptions.PORT, 0);
         clusterConfiguration.setString(
                 org.apache.flink.configuration.RestOptions.ADDRESS, "localhost");
         clusterConfiguration.setInteger(org.apache.flink.configuration.RestOptions.PORT, 0);

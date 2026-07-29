@@ -26,6 +26,7 @@ import org.apache.flink.util.Preconditions;
 import java.io.File;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.DirectoryNotEmptyException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
@@ -295,24 +296,24 @@ final class CobbleKeyedStateBackendBuilder<K> {
     }
 
     /**
-     * Deletes the per-subtask instance directory and, only when the parent {@code
-     * job_<id>/op_<name>} wrapper has been observed as empty, deletes that wrapper too. We do not
-     * remove the wrapper when {@code listFiles()} returns {@code null} (I/O failure or wrapper
-     * already gone) — leaving the directory in place is preferable to deleting a tree we cannot
-     * safely characterize, especially when another concurrent subtask may still own a sibling. The
-     * configured {@code LOCAL_DIRECTORIES} root is shared across backends and is never removed
-     * here.
+     * Deletes the per-subtask instance directory, then attempts a non-recursive deletion of its
+     * {@code job_<id>/op_<name>} wrapper. The filesystem removes the wrapper only when it is still
+     * empty; a concurrently-created sibling makes the deletion fail with {@link
+     * DirectoryNotEmptyException} and is preserved. The configured {@code LOCAL_DIRECTORIES} root
+     * is shared across backends and is never removed here.
      */
     @org.apache.flink.annotation.VisibleForTesting
     static void deleteInstanceDirectories(File instanceBasePath) throws IOException {
         org.apache.flink.util.FileUtils.deleteDirectory(instanceBasePath);
         File jobOperatorDir = instanceBasePath.getParentFile();
-        if (jobOperatorDir == null || !jobOperatorDir.isDirectory()) {
+        if (jobOperatorDir == null) {
             return;
         }
-        File[] siblings = jobOperatorDir.listFiles();
-        if (siblings != null && siblings.length == 0) {
-            org.apache.flink.util.FileUtils.deleteDirectory(jobOperatorDir);
+
+        try {
+            Files.deleteIfExists(jobOperatorDir.toPath());
+        } catch (DirectoryNotEmptyException ignored) {
+            // A concurrent subtask owns a sibling instance directory.
         }
     }
 
@@ -770,7 +771,7 @@ final class CobbleKeyedStateBackendBuilder<K> {
         public void close() throws IOException {
             nativeMetricsMonitor.close();
             db.close();
-            org.apache.flink.util.FileUtils.deleteDirectory(instanceBasePath);
+            deleteInstanceDirectories(instanceBasePath);
         }
     }
 

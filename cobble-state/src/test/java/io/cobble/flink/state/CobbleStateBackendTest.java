@@ -709,11 +709,14 @@ class CobbleStateBackendTest {
         File peerSubtask = new File(wrapper, "subtask-1");
         assertTrue(mySubtask.mkdirs(), "setup: create my subtask dir");
         assertTrue(peerSubtask.mkdirs(), "setup: create peer subtask dir");
+        Path peerFile = peerSubtask.toPath().resolve("active-state");
+        Files.write(peerFile, new byte[] {1});
 
         CobbleKeyedStateBackendBuilder.deleteInstanceDirectories(mySubtask);
 
         assertFalse(mySubtask.exists(), "my subtask dir must be deleted");
         assertTrue(peerSubtask.exists(), "peer subtask dir must survive");
+        assertTrue(Files.exists(peerFile), "peer subtask contents must not be deleted recursively");
         assertTrue(wrapper.exists(), "wrapper must survive while a sibling exists");
     }
 
@@ -730,6 +733,68 @@ class CobbleStateBackendTest {
         assertTrue(
                 wrapper.getParentFile().exists(),
                 "LOCAL_DIRECTORIES root (wrapper's parent) is shared and must never be removed");
+    }
+
+    @Test
+    void postPrepareBuildFailureRemovesEmptyWrapper(@TempDir Path tempDir) throws Exception {
+        Path configuredLocalDir = tempDir.resolve("configured-local-dir");
+        MockEnvironment environment =
+                new MockEnvironmentBuilder()
+                        .setTaskName("cobble-test-task")
+                        .setJobVertexID(TEST_JOB_VERTEX_ID)
+                        .setManagedMemorySize(MemorySize.ofMebiBytes(128).getBytes())
+                        .setTaskManagerRuntimeInfo(
+                                new TestingTaskManagerRuntimeInfo(
+                                        new Configuration(),
+                                        tempDir.resolve("tm-working-dir").toFile()))
+                        .setTaskStateManager(new TestTaskStateManagerBuilder().build())
+                        .build();
+        try {
+            File instanceBasePath =
+                    configuredLocalDir
+                            .resolve("job_" + environment.getJobID() + "_op_test-operator")
+                            .resolve("subtask_0_attempt_0")
+                            .toFile();
+            Configuration configuration = new Configuration();
+            configuration.set(CobbleOptions.LOCAL_DIRECTORIES, configuredLocalDir.toString());
+            configuration.set(CobbleOptions.MEMTABLE_BUFFER_RATIO, 0.25d);
+            configuration.set(CobbleOptions.MEMTABLE_BUFFER_COUNT, 4);
+            configuration.set(CobbleOptions.DIRECT_IO_BUFFER_SIZE, MemorySize.parse("8kb"));
+            configuration.set(CobbleOptions.DIRECT_IO_BUFFER_POOL_MAX_SIZE, 128);
+
+            CobbleKeyedStateBackendBuilder<Integer> builder =
+                    new CobbleKeyedStateBackendBuilder<>(
+                            environment,
+                            environment.getMetricGroup(),
+                            environment.getTaskKvStateRegistry(),
+                            IntSerializer.INSTANCE,
+                            16,
+                            KeyGroupRange.of(0, 15),
+                            TtlTimeProvider.DEFAULT,
+                            org.apache.flink.runtime.state.metrics.LatencyTrackingStateConfig
+                                    .disabled(),
+                            new CloseableRegistry(),
+                            Collections.emptyList(),
+                            instanceBasePath,
+                            CHECKPOINT_SCOPE,
+                            new CobbleMemoryConfiguration(),
+                            null,
+                            false,
+                            0.5d,
+                            false,
+                            configuration,
+                            null);
+
+            // A null timer type fails backend construction only after resources are prepared.
+            // This covers build()'s resource-close path rather than the helper directly.
+            assertThrows(NullPointerException.class, builder::build);
+            assertEquals(
+                    0,
+                    listLeakedInstanceDirs(configuredLocalDir).length,
+                    "A post-prepare builder failure must remove the empty job/operator wrapper.");
+        } finally {
+            environment.close();
+        }
     }
 
     @Test

@@ -49,7 +49,6 @@ import org.apache.flink.runtime.state.heap.InternalKeyContext;
 import org.apache.flink.runtime.state.metrics.LatencyTrackingStateConfig;
 import org.apache.flink.runtime.state.ttl.TtlTimeProvider;
 import org.apache.flink.streaming.api.operators.TimerSerializer;
-import org.apache.flink.util.FileUtils;
 import org.apache.flink.util.StateMigrationException;
 
 import javax.annotation.Nonnull;
@@ -864,7 +863,7 @@ final class CobbleKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
         }
 
         try {
-            FileUtils.deleteDirectory(instanceBasePath);
+            CobbleKeyedStateBackendBuilder.deleteInstanceDirectories(instanceBasePath);
         } catch (Exception e) {
             IOException deleteError =
                     new IOException(
