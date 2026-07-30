@@ -189,7 +189,7 @@ jobs:
               -Dspotless.check.skip=true \
               -DdeploymentName="cobble-flink-${RELEASE_BASE}-${batch_name}" \
               -DignorePublishedComponents=true \
-              -DwaitUntil=published \
+              -DwaitUntil=validated \
               -Dgpg.passphrase="${MAVEN_GPG_PASSPHRASE}" \
               deploy
           }
