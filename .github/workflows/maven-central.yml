@@ -41,7 +41,7 @@ jobs:
           set -euo pipefail
           release_base="${GITHUB_REF_NAME#v}"
           if [[ ! "${release_base}" =~ ^[0-9]+\.[0-9]+\.[0-9]+-[0-9]+$ ]]; then
-            echo "Release tag must look like v0.2.0-1; got ${GITHUB_REF_NAME}." >&2
+            echo "Release tag must look like v0.3.0-1; got ${GITHUB_REF_NAME}." >&2
             exit 1
           fi
           echo "RELEASE_BASE=${release_base}" >> "${GITHUB_ENV}"

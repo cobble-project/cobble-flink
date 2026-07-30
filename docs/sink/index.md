@@ -39,7 +39,7 @@ Flink's `lib/` directory. Use the version matrix in
 Flink version. For example, on Flink 2.0 and above:
 
 ```bash
-cp cobble-flink-dist-0.2.3-1-flink-2.0.jar "$FLINK_HOME/lib/"
+cp cobble-flink-dist-0.3.0-1-flink-2.0.jar "$FLINK_HOME/lib/"
 ```
 
 ### Option B: use a job-side dependency

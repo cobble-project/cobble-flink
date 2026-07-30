@@ -8,7 +8,7 @@ Use the current repository version when working in this checkout. For released c
 <dependency>
   <groupId>io.github.cobble-project</groupId>
   <artifactId>cobble-flink-inspect</artifactId>
-  <version>0.2.3-1-flink-1.17</version>
+  <version>0.3.0-1-flink-1.17</version>
 </dependency>
 ```
 

@@ -51,7 +51,7 @@ Flink's `lib/` directory. Use the version matrix in
 Flink version. For example, on Flink 1.19 or 1.20:
 
 ```bash
-cp cobble-flink-dist-0.2.3-1-flink-1.19.jar "$FLINK_HOME/lib/"
+cp cobble-flink-dist-0.3.0-1-flink-1.19.jar "$FLINK_HOME/lib/"
 ```
 
 ### Option B: use a job-side dependency
@@ -255,11 +255,11 @@ fn main() -> cobble::Result<()> {
 }
 ```
 
-You can also start it from the [cobble-java](https://repo1.maven.org/maven2/io/github/cobble-project/cobble/0.2.3/) artifact, which bundles
+You can also start it from the [cobble-java](https://repo1.maven.org/maven2/io/github/cobble-project/cobble/0.3.0/) artifact, which bundles
 `cobble-cli`:
 
 ```bash
-java -jar cobble-0.2.3.jar remote-compactor \
+java -jar cobble-0.3.0.jar remote-compactor \
   --config ./cobble-compactor.yaml \
   --bind 0.0.0.0:18888
 ```
@@ -268,7 +268,7 @@ If you already use a Cobble Flink dist bundle, the same bundled CLI entrypoint
 is available there too. Pick the dist jar that matches your Flink version:
 
 ```bash
-java -jar cobble-flink-dist-0.2.3-1-flink-1.17.jar remote-compactor \
+java -jar cobble-flink-dist-0.3.0-1-flink-1.17.jar remote-compactor \
   --config ./cobble-compactor.yaml \
   --bind 0.0.0.0:18888
 ```

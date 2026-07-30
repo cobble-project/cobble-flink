@@ -68,13 +68,13 @@ Flink minor version.
 The current release prefix is:
 
 ```text
-0.2.3-1
+0.3.0-1
 ```
 
 Append the Flink compatibility suffix shown in the table below, for example:
 
 ```text
-0.2.3-1-flink-1.17
+0.3.0-1-flink-1.17
 ```
 
 Artifact versions vary when Flink breaks binary APIs. Use the matrix below to
@@ -83,10 +83,10 @@ runtime jar you copy into Flink `lib/`:
 
 | Flink cluster version | Dist bundle jar version | State dependency version | Sink dependency version | Source dependency version |
 | --- | --- | --- | --- | --- |
-| 1.17, 1.18 | `0.2.3-1-flink-1.17` | `0.2.3-1-flink-1.17` | `0.2.3-1-flink-1.17` | `0.2.3-1-flink-1.17` |
-| 1.19, 1.20 | `0.2.3-1-flink-1.19` | `0.2.3-1-flink-1.19` | `0.2.3-1-flink-1.17` | `0.2.3-1-flink-1.17` |
-| 2.0 | `0.2.3-1-flink-2.0` | `0.2.3-1-flink-2.0` | `0.2.3-1-flink-2.0` | `0.2.3-1-flink-1.17` |
-| 2.1 and above | `0.2.3-1-flink-2.1` | `0.2.3-1-flink-2.1` | `0.2.3-1-flink-2.0` | `0.2.3-1-flink-1.17` |
+| 1.17, 1.18 | `0.3.0-1-flink-1.17` | `0.3.0-1-flink-1.17` | `0.3.0-1-flink-1.17` | `0.3.0-1-flink-1.17` |
+| 1.19, 1.20 | `0.3.0-1-flink-1.19` | `0.3.0-1-flink-1.19` | `0.3.0-1-flink-1.17` | `0.3.0-1-flink-1.17` |
+| 2.0 | `0.3.0-1-flink-2.0` | `0.3.0-1-flink-2.0` | `0.3.0-1-flink-2.0` | `0.3.0-1-flink-1.17` |
+| 2.1 and above | `0.3.0-1-flink-2.1` | `0.3.0-1-flink-2.1` | `0.3.0-1-flink-2.0` | `0.3.0-1-flink-1.17` |
 
 ArtifactIds stay the same across Flink versions. Choose the artifactId from
 the section you are using, then choose the `<version>` from the table.
@@ -105,7 +105,7 @@ Download the runtime jar artifact that matches your Flink version and copy it
 into Flink `lib/`. For example, on Flink 1.17 or 1.18:
 
 ```bash
-cp cobble-flink-dist-0.2.3-1-flink-1.17.jar "$FLINK_HOME/lib/"
+cp cobble-flink-dist-0.3.0-1-flink-1.17.jar "$FLINK_HOME/lib/"
 ```
 
 If you are developing from source instead of downloading from Maven, you can
@@ -156,19 +156,19 @@ and source can use the 1.17-compatible artifact version:
   <dependency>
     <groupId>io.github.cobble-project</groupId>
     <artifactId>cobble-flink-state</artifactId>
-    <version>0.2.3-1-flink-1.19</version>
+    <version>0.3.0-1-flink-1.19</version>
   </dependency>
 
   <dependency>
     <groupId>io.github.cobble-project</groupId>
     <artifactId>cobble-flink-source</artifactId>
-    <version>0.2.3-1-flink-1.17</version>
+    <version>0.3.0-1-flink-1.17</version>
   </dependency>
 
   <dependency>
     <groupId>io.github.cobble-project</groupId>
     <artifactId>cobble-flink-sink</artifactId>
-    <version>0.2.3-1-flink-1.17</version>
+    <version>0.3.0-1-flink-1.17</version>
   </dependency>
 </dependencies>
 ```
