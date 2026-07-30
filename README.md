@@ -108,111 +108,20 @@ into Flink `lib/`. For example, on Flink 1.17 or 1.18:
 cp cobble-flink-dist-0.3.0-1-flink-1.17.jar "$FLINK_HOME/lib/"
 ```
 
-If you are developing from source instead of downloading from Maven, you can
-build the distribution jar locally:
-
-```bash
-./mvnw -pl :cobble-flink-dist -am package -DskipTests
-cp cobble-dist/target/cobble-flink-dist-*.jar "$FLINK_HOME/lib/"
-```
-
-For Flink 1.19 or 1.20, build `cobble-dist-flink-1.19`:
-
-```bash
-./mvnw -pl cobble-common,cobble-state-flink-1.19,cobble-sink,cobble-source,cobble-dist-flink-1.19 \
-  package -DskipTests
-cp cobble-dist-flink-1.19/target/cobble-flink-dist-*.jar "$FLINK_HOME/lib/"
-```
-
-For Flink 2.0, build `cobble-dist-flink-2.0`:
-
-```bash
-./mvnw -pl cobble-common,cobble-state-flink-2.0,cobble-sink-flink-2.0,cobble-source,cobble-dist-flink-2.0 \
-  package -DskipTests
-cp cobble-dist-flink-2.0/target/cobble-flink-dist-*.jar "$FLINK_HOME/lib/"
-```
-
-For Flink 2.1 and above, build `cobble-dist-flink-2.1`:
-
-```bash
-./mvnw -pl cobble-common,cobble-state-flink-2.1,cobble-sink-flink-2.0,cobble-source,cobble-dist-flink-2.1 \
-  package -DskipTests
-cp cobble-dist-flink-2.1/target/cobble-flink-dist-*.jar "$FLINK_HOME/lib/"
-```
-
-These artifacts can be built in the same reactor; no Maven profile switch is
-required.
-
 ### Option B: use job-side Maven dependencies
 
-When writing a Flink job, add the dependencies you actually use.
-
-The following example is for a Flink 1.19 or 1.20 job that uses all three
-parts. The state backend uses the 1.19-compatible artifact version, while sink
-and source can use the 1.17-compatible artifact version:
+To package Cobble with your Flink job, add the dist bundle that matches the
+Flink cluster version. For Flink 1.19 or 1.20:
 
 ```xml
-<dependencies>
-  <dependency>
-    <groupId>io.github.cobble-project</groupId>
-    <artifactId>cobble-flink-state</artifactId>
-    <version>0.3.0-1-flink-1.19</version>
-  </dependency>
-
-  <dependency>
-    <groupId>io.github.cobble-project</groupId>
-    <artifactId>cobble-flink-source</artifactId>
-    <version>0.3.0-1-flink-1.17</version>
-  </dependency>
-
-  <dependency>
-    <groupId>io.github.cobble-project</groupId>
-    <artifactId>cobble-flink-sink</artifactId>
-    <version>0.3.0-1-flink-1.17</version>
-  </dependency>
-</dependencies>
+<dependency>
+  <groupId>io.github.cobble-project</groupId>
+  <artifactId>cobble-flink-dist</artifactId>
+  <version>0.3.0-1-flink-1.19</version>
+</dependency>
 ```
 
-Typical choices:
-
-- stateful DataStream job: `cobble-flink-state`
-- SQL read job: `cobble-flink-source`
-- SQL write job: `cobble-flink-sink`
-
-### Configure Flink and run your job
-
-Make sure to configure Flink as described in the next section, then you can run your job as usual.
-Cobble will automatically be used for state management and SQL source/sink based on your configuration.
-
-## Web Monitor
-
-`cobble-flink-monitor` starts a read-only web UI for inspecting Cobble data in
-Flink checkpoints or normal Cobble sink/table snapshots. It can list available
-checkpoints/snapshots, select `latest` or a concrete snapshot, choose operators
-for checkpoint sources, scan key/value rows, and track selected rows. For
-Cobble state backend checkpoints, it can display schema-aware state and timer
-parts such as state key, map key, list elements, timer timestamp, timer key, and
-decoded values when metadata is available.
-
-Build it with:
-
-```bash
-./mvnw -pl cobble-flink-monitor -am package -DskipTests
-```
-
-Start it with an optional initial source:
-
-```bash
-java -jar cobble-flink-monitor/target/cobble-flink-monitor-*.jar \
-  --checkpoint s3://bucket/path/to/checkpoints \
-  --flink-conf "$FLINK_HOME/conf" \
-  --port 18088
-```
-
-If `--checkpoint` is omitted, open the UI first and use the `Datasource` page to
-enter a checkpoint root, a concrete `chk-*` directory, or a Cobble sink/table
-path. `--flink-conf` is optional and is useful when checkpoint data lives on a
-remote filesystem configured through Flink.
+The dist bundle includes the state backend, SQL source, and SQL sink.
 
 ## Get Started
 
