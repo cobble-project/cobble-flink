@@ -18,7 +18,9 @@ import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Comparator;
 import java.util.List;
+import java.util.Map;
 import java.util.NavigableSet;
+import java.util.TreeMap;
 import java.util.TreeSet;
 
 /**
@@ -27,11 +29,14 @@ import java.util.TreeSet;
  * <p>The constructor binds {@code keyGroup} to {@code bucket} once. Every native operation uses
  * that immutable bucket, preserving the one-to-one key-group/bucket contract required by rescale.
  *
- * <p>The queue follows a two-tier model:
+ * <p>The queue follows a three-tier model:
  *
  * <p>1. Native Cobble storage keeps the future tail for this key group.
  *
- * <p>2. {@code overlay} keeps one ordered hot prefix read with {@link
+ * <p>2. A timer-state-wide {@link CobbleTimerWriteBuffer} batches new tail writes across key
+ * groups.
+ *
+ * <p>3. {@code overlay} keeps one ordered hot prefix read with {@link
  * PriorityQueue#peekBatchDirect(int, int)}. Native storage remains the durable owner until the
  * overlay is drained or exported for a snapshot.
  *
@@ -42,12 +47,12 @@ import java.util.TreeSet;
 final class CobbleCachingPriorityQueueSet<T>
         implements InternalPriorityQueue<T>, HeapPriorityQueueElement {
 
-    private static final ByteBuffer EMPTY_DIRECT_VALUE = ByteBuffer.allocateDirect(0);
     private static final int PREFETCH_BATCH_SIZE = 1_024;
 
     private final Db db;
     private final PriorityQueue priorityQueue;
     private final CobbleTimerSerializationContext<T> serializationContext;
+    private final CobbleTimerWriteBuffer<T> writeBuffer;
     private final int bucket;
     private final NavigableSet<OverlayTimer<T>> overlay;
 
@@ -59,11 +64,28 @@ final class CobbleCachingPriorityQueueSet<T>
     private boolean cursorInitialized;
     private byte[] cursor;
     private byte[] pendingAdvanceKey;
+    private long observedNativeMutationVersion;
 
     CobbleCachingPriorityQueueSet(
             Db db,
             PriorityQueue priorityQueue,
             CobbleTimerSerializationContext<T> serializationContext,
+            int keyGroup,
+            boolean restoredNativeQueueMayContainEntries) {
+        this(
+                db,
+                priorityQueue,
+                serializationContext,
+                new CobbleTimerWriteBuffer<>(priorityQueue),
+                keyGroup,
+                restoredNativeQueueMayContainEntries);
+    }
+
+    CobbleCachingPriorityQueueSet(
+            Db db,
+            PriorityQueue priorityQueue,
+            CobbleTimerSerializationContext<T> serializationContext,
+            CobbleTimerWriteBuffer<T> writeBuffer,
             int keyGroup,
             boolean restoredNativeQueueMayContainEntries) {
         this.db = Preconditions.checkNotNull(db, "db must not be null");
@@ -72,6 +94,7 @@ final class CobbleCachingPriorityQueueSet<T>
         this.serializationContext =
                 Preconditions.checkNotNull(
                         serializationContext, "serializationContext must not be null");
+        this.writeBuffer = Preconditions.checkNotNull(writeBuffer, "writeBuffer must not be null");
         this.bucket = keyGroup;
         this.overlay =
                 new TreeSet<>(
@@ -81,22 +104,22 @@ final class CobbleCachingPriorityQueueSet<T>
         this.internalIndex = NOT_CONTAINED;
         this.cachedSize = restoredNativeQueueMayContainEntries ? -1 : 0;
         this.nativeExhausted = false;
+        this.observedNativeMutationVersion = writeBuffer.nativeMutationVersion();
     }
 
     int bucket() {
         return bucket;
     }
 
-    List<T> overlayElements() {
-        List<T> elements = new ArrayList<>(overlay.size());
-        for (OverlayTimer<T> timer : overlay) {
-            elements.add(materializeElement(timer));
-        }
-        return elements;
-    }
-
     List<T> overlaySnapshotElements() {
-        return overlayElements();
+        Map<byte[], T> elements = newSerializedKeyMap();
+        for (OverlayTimer<T> timer : overlay) {
+            elements.put(timer.serializedKey, materializeElement(timer));
+        }
+        for (CobbleTimerWriteBuffer.PendingTimer<T> timer : writeBuffer.entries(bucket)) {
+            elements.putIfAbsent(timer.serializedKey, materializeElement(timer));
+        }
+        return new ArrayList<>(elements.values());
     }
 
     void close() {
@@ -106,10 +129,34 @@ final class CobbleCachingPriorityQueueSet<T>
     @Override
     public T poll() {
         ensureLoaded();
-        OverlayTimer<T> head = overlay.pollFirst();
-        if (head == null) {
+        OverlayTimer<T> overlayHead = overlay.isEmpty() ? null : overlay.first();
+        CobbleTimerWriteBuffer.PendingTimer<T> pendingHead = writeBuffer.first(bucket);
+        if (overlayHead == null && pendingHead == null) {
             return null;
         }
+        if (pendingHead != null
+                && (overlayHead == null
+                        || compareSerializedKeys(
+                                        pendingHead.serializedKey, overlayHead.serializedKey)
+                                <= 0)) {
+            byte[] serializedKey = pendingHead.serializedKey;
+            T element = materializeElement(pendingHead);
+            priorityQueue.delete(bucket, serializedKey);
+            writeBuffer.remove(bucket, serializedKey);
+            if (overlayHead != null
+                    && compareSerializedKeys(serializedKey, overlayHead.serializedKey) == 0) {
+                overlay.pollFirst();
+                if (overlay.isEmpty()) {
+                    advancePrefetchedBatch();
+                }
+            }
+            if (cachedSize >= 0) {
+                cachedSize--;
+            }
+            return element;
+        }
+
+        OverlayTimer<T> head = overlay.pollFirst();
         T element = materializeElement(head);
         if (cachedSize >= 0) {
             cachedSize--;
@@ -123,18 +170,31 @@ final class CobbleCachingPriorityQueueSet<T>
     @Override
     public T peek() {
         ensureLoaded();
-        return overlay.isEmpty() ? null : materializeElement(overlay.first());
+        OverlayTimer<T> overlayHead = overlay.isEmpty() ? null : overlay.first();
+        CobbleTimerWriteBuffer.PendingTimer<T> pendingHead = writeBuffer.first(bucket);
+        if (pendingHead == null) {
+            return overlayHead == null ? null : materializeElement(overlayHead);
+        }
+        if (overlayHead == null
+                || compareSerializedKeys(pendingHead.serializedKey, overlayHead.serializedKey) <= 0) {
+            return materializeElement(pendingHead);
+        }
+        return materializeElement(overlayHead);
     }
 
     @Override
     public boolean add(T element) {
         Preconditions.checkNotNull(element, "Timer element must not be null.");
+        observeNativeMutations();
         initializeCursor();
 
         CobbleTimerSerializationContext.SerializedKey serializedKey =
                 serializationContext.serializeElementKey(element);
 
         if (isOwnedByOverlay(serializedKey.heapBytes)) {
+            if (writeBuffer.get(bucket, serializedKey.heapBytes) != null) {
+                return false;
+            }
             // The native queue is monotonic behind its truncation cursor. A prefetched batch is
             // likewise owned by the overlay until its pending cursor advance, so re-registering a
             // timer at or behind either boundary must remain in memory.
@@ -147,19 +207,17 @@ final class CobbleCachingPriorityQueueSet<T>
             return added && overlay.first() == candidate;
         }
 
+        byte[] knownHead = knownHeadKey();
         // InternalPriorityQueue reports whether the head changed or remains unknown.
-        boolean headMayHaveChanged = overlay.isEmpty();
-        priorityQueue.offerDirect(
-                bucket,
-                serializedKey.directBuffer,
-                serializedKey.directLength,
-                EMPTY_DIRECT_VALUE.duplicate(),
-                0);
-        nativeExhausted = false;
-        // offerDirect is an upsert. Avoid a read-before-write existence check on the hot add path;
-        // size() can cold-scan later if an exact answer is needed.
-        cachedSize = -1;
-        return headMayHaveChanged;
+        boolean headMayHaveChanged =
+                knownHead == null
+                        || compareSerializedKeys(serializedKey.heapBytes, knownHead) < 0;
+        boolean added = writeBuffer.add(bucket, serializedKey.heapBytes);
+        if (added) {
+            cachedSize = -1;
+        }
+        observeNativeMutations();
+        return added && headMayHaveChanged;
     }
 
     @Override
@@ -171,9 +229,27 @@ final class CobbleCachingPriorityQueueSet<T>
         ensureLoaded();
         initializeCursor();
 
-        OverlayTimer<T> headBeforeRemove = overlay.isEmpty() ? null : overlay.first();
+        byte[] headBeforeRemove = knownHeadKey();
         CobbleTimerSerializationContext.SerializedKey serializedKey =
                 serializationContext.serializeElementKey(element);
+        CobbleTimerWriteBuffer.PendingTimer<T> pending =
+                writeBuffer.get(bucket, serializedKey.heapBytes);
+        if (pending != null) {
+            // Delete conservatively before removing the buffered owner so an older native copy
+            // cannot reappear after this remove.
+            priorityQueue.delete(bucket, serializedKey.heapBytes);
+            writeBuffer.remove(bucket, serializedKey.heapBytes);
+            overlay.remove(new OverlayTimer<>(serializedKey.heapBytes));
+            if (cachedSize >= 0) {
+                cachedSize--;
+            }
+            if (overlay.isEmpty()) {
+                advancePrefetchedBatch();
+            }
+            return headBeforeRemove != null
+                    && compareSerializedKeys(serializedKey.heapBytes, headBeforeRemove) == 0;
+        }
+
         if (overlay.remove(new OverlayTimer<>(serializedKey.heapBytes))) {
             if (cachedSize >= 0) {
                 cachedSize--;
@@ -182,9 +258,7 @@ final class CobbleCachingPriorityQueueSet<T>
                 advancePrefetchedBatch();
             }
             return headBeforeRemove != null
-                    && CobbleTimerSerializationContext.compareSerializedKeys(
-                                    serializedKey.heapBytes, headBeforeRemove.serializedKey)
-                            == 0;
+                    && compareSerializedKeys(serializedKey.heapBytes, headBeforeRemove) == 0;
         }
 
         if (isOwnedByOverlay(serializedKey.heapBytes) || !existsInDb(serializedKey.heapBytes)) {
@@ -207,12 +281,19 @@ final class CobbleCachingPriorityQueueSet<T>
     public int size() {
         if (cachedSize < 0) {
             advancePrefetchedBatch();
-            cachedSize = overlay.size();
+            NavigableSet<byte[]> serializedKeys = newSerializedKeySet();
+            for (OverlayTimer<T> timer : overlay) {
+                serializedKeys.add(timer.serializedKey);
+            }
+            for (CobbleTimerWriteBuffer.PendingTimer<T> timer : writeBuffer.entries(bucket)) {
+                serializedKeys.add(timer.serializedKey);
+            }
             try (ScanCursor scan = db.scan(bucket, null, null, priorityQueue.columnFamily())) {
-                for (Row ignored : scan) {
-                    cachedSize++;
+                for (Row row : scan) {
+                    serializedKeys.add(row.getKey());
                 }
             }
+            cachedSize = serializedKeys.size();
         }
         return cachedSize;
     }
@@ -230,13 +311,21 @@ final class CobbleCachingPriorityQueueSet<T>
     @Override
     public CloseableIterator<T> iterator() {
         advancePrefetchedBatch();
-        List<T> elements = overlayElements();
+        Map<byte[], T> elements = newSerializedKeyMap();
+        for (OverlayTimer<T> timer : overlay) {
+            elements.put(timer.serializedKey, materializeElement(timer));
+        }
+        for (CobbleTimerWriteBuffer.PendingTimer<T> timer : writeBuffer.entries(bucket)) {
+            elements.putIfAbsent(timer.serializedKey, materializeElement(timer));
+        }
         try (ScanCursor scan = db.scan(bucket, null, null, priorityQueue.columnFamily())) {
             for (Row row : scan) {
-                elements.add(serializationContext.deserializeElement(row.getKey()));
+                byte[] serializedKey = row.getKey();
+                elements.putIfAbsent(
+                        serializedKey, serializationContext.deserializeElement(serializedKey));
             }
         }
-        return CloseableIterator.adapterForIterator(elements.iterator());
+        return CloseableIterator.adapterForIterator(elements.values().iterator());
     }
 
     @Override
@@ -250,6 +339,7 @@ final class CobbleCachingPriorityQueueSet<T>
     }
 
     private void ensureLoaded() {
+        observeNativeMutations();
         if (overlay.isEmpty() && !nativeExhausted) {
             reload();
         }
@@ -322,10 +412,50 @@ final class CobbleCachingPriorityQueueSet<T>
         return db.get(bucket, serializedKey, priorityQueue.columnFamily()) != null;
     }
 
+    private void observeNativeMutations() {
+        long currentVersion = writeBuffer.nativeMutationVersion();
+        if (currentVersion != observedNativeMutationVersion) {
+            observedNativeMutationVersion = currentVersion;
+            nativeExhausted = false;
+            cachedSize = -1;
+        }
+    }
+
+    private byte[] knownHeadKey() {
+        OverlayTimer<T> overlayHead = overlay.isEmpty() ? null : overlay.first();
+        CobbleTimerWriteBuffer.PendingTimer<T> pendingHead = writeBuffer.first(bucket);
+        if (pendingHead == null) {
+            return overlayHead == null ? null : overlayHead.serializedKey;
+        }
+        if (overlayHead == null
+                || compareSerializedKeys(pendingHead.serializedKey, overlayHead.serializedKey) <= 0) {
+            return pendingHead.serializedKey;
+        }
+        return overlayHead.serializedKey;
+    }
+
+    private Map<byte[], T> newSerializedKeyMap() {
+        return new TreeMap<>(CobbleCachingPriorityQueueSet::compareSerializedKeys);
+    }
+
+    private NavigableSet<byte[]> newSerializedKeySet() {
+        return new TreeSet<>(CobbleCachingPriorityQueueSet::compareSerializedKeys);
+    }
+
+    private static int compareSerializedKeys(byte[] left, byte[] right) {
+        return CobbleTimerSerializationContext.compareSerializedKeys(left, right);
+    }
+
     private T materializeElement(OverlayTimer<T> timer) {
         if (timer.cachedElement == null) {
-            timer.cachedElement =
-                    serializationContext.deserializeElement(timer.serializedKey);
+            timer.cachedElement = serializationContext.deserializeElement(timer.serializedKey);
+        }
+        return timer.cachedElement;
+    }
+
+    private T materializeElement(CobbleTimerWriteBuffer.PendingTimer<T> timer) {
+        if (timer.cachedElement == null) {
+            timer.cachedElement = serializationContext.deserializeElement(timer.serializedKey);
         }
         return timer.cachedElement;
     }

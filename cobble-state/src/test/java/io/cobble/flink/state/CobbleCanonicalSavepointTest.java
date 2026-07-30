@@ -333,7 +333,7 @@ class CobbleCanonicalSavepointTest {
     }
 
     // =====================================================================================
-    //  Round-trip: timer state (native + overlay)
+    //  Round-trip: timer state (pending writes + native snapshot)
     // =====================================================================================
 
     @Test
@@ -362,7 +362,7 @@ class CobbleCanonicalSavepointTest {
             KeyGroupedInternalPriorityQueue<TimerHeapInternalTimer<Integer, VoidNamespace>> queue =
                     backend.create("timer", timerSerializer);
 
-            // Add two timers. Both go to native storage initially.
+            // Add two timers. Both remain in the bounded timer-state write buffer initially.
             TimerHeapInternalTimer<Integer, VoidNamespace> timer1 =
                     new TimerHeapInternalTimer<>(100L, key, VoidNamespace.INSTANCE);
             TimerHeapInternalTimer<Integer, VoidNamespace> timer2 =
@@ -370,9 +370,8 @@ class CobbleCanonicalSavepointTest {
             queue.add(timer1);
             queue.add(timer2);
 
-            // Peek triggers ensureLoaded → reload → pollBatchDirect, which moves timers from
-            // native storage into the in-memory overlay. The savepoint must capture the overlay
-            // snapshot in the sync phase and not re-read the live queue in the async phase.
+            // The buffered head is immediately visible. savepoint() must flush both timers before
+            // starting the native snapshot and must not include the later post-savepoint write.
             backend.setCurrentKey(key);
             assertEquals(timer1, queue.peek());
 

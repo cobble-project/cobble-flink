@@ -29,10 +29,10 @@ import java.util.Set;
  * storage.
  *
  * <p>The inherited implementation would export each child queue's complete iterator from {@link
- * #getSubsetForKeyGroup(int)}. Cobble instead exports only each child queue's overlay. The native
- * shard snapshot retains timers that have not yet been prefetched. Exporting a key group advances
- * its prefetched batch into the overlay first, so Flink's legacy timer snapshot owns that prefix
- * before the Cobble shard snapshot captures the native tail.
+ * #getSubsetForKeyGroup(int)}. Cobble instead exports each child queue's prefetched overlay and
+ * pending write-buffer entries. The native shard snapshot retains the remaining timers. Exporting
+ * a key group advances its prefetched batch first, so Flink's legacy timer snapshot owns that
+ * prefix before the Cobble shard snapshot captures the native tail.
  */
 final class CobbleTimerPriorityQueue<
                 T extends HeapPriorityQueueElement & PriorityComparable<? super T> & Keyed<?>>
@@ -41,6 +41,7 @@ final class CobbleTimerPriorityQueue<
     private final KeyGroupRange keyGroupRange;
     private final Map<Integer, CobbleCachingPriorityQueueSet<T>> queuesByKeyGroup;
     private final CobbleTimerSerializationContext<T> serializationContext;
+    private final CobbleTimerWriteBuffer<T> writeBuffer;
     private final PriorityQueue priorityQueue;
 
     CobbleTimerPriorityQueue(
@@ -57,7 +58,8 @@ final class CobbleTimerPriorityQueue<
                 totalKeyGroups,
                 restoredNativeQueuesMayContainEntries,
                 new HashMap<>(),
-                new CobbleTimerSerializationContext<>(serializer));
+                new CobbleTimerSerializationContext<>(serializer),
+                new CobbleTimerWriteBuffer<>(priorityQueue));
     }
 
     private CobbleTimerPriorityQueue(
@@ -67,7 +69,8 @@ final class CobbleTimerPriorityQueue<
             int totalKeyGroups,
             boolean restoredNativeQueuesMayContainEntries,
             Map<Integer, CobbleCachingPriorityQueueSet<T>> queuesByKeyGroup,
-            CobbleTimerSerializationContext<T> serializationContext) {
+            CobbleTimerSerializationContext<T> serializationContext,
+            CobbleTimerWriteBuffer<T> writeBuffer) {
         super(
                 KeyExtractorFunction.forKeyedObjects(),
                 PriorityComparator.forPriorityComparableObjects(),
@@ -77,6 +80,7 @@ final class CobbleTimerPriorityQueue<
                                     db,
                                     priorityQueue,
                                     serializationContext,
+                                    writeBuffer,
                                     keyGroup,
                                     restoredNativeQueuesMayContainEntries);
                     queuesByKeyGroup.put(keyGroup, queue);
@@ -88,6 +92,7 @@ final class CobbleTimerPriorityQueue<
                 Preconditions.checkNotNull(keyGroupRange, "keyGroupRange must not be null");
         this.queuesByKeyGroup = queuesByKeyGroup;
         this.serializationContext = serializationContext;
+        this.writeBuffer = writeBuffer;
         this.priorityQueue =
                 Preconditions.checkNotNull(priorityQueue, "priorityQueue must not be null");
     }
@@ -102,9 +107,18 @@ final class CobbleTimerPriorityQueue<
         }
     }
 
+    void flushPendingWrites() {
+        writeBuffer.flushPendingWrites();
+    }
+
     /** Releases child queues and closes the native priority-queue handle. */
     void close() {
         RuntimeException error = null;
+        try {
+            flushPendingWrites();
+        } catch (RuntimeException e) {
+            error = e;
+        }
         for (CobbleCachingPriorityQueueSet<T> queue : queuesByKeyGroup.values()) {
             try {
                 queue.close();

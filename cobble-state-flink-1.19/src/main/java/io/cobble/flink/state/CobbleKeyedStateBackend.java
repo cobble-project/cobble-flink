@@ -214,6 +214,7 @@ final class CobbleKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
                     SnapshotExecutionType.ASYNCHRONOUS);
         }
 
+        flushPendingTimerWrites();
         advancePrefetchedTimerBatches();
         io.cobble.PendingSnapshot<io.cobble.ShardSnapshot> pending = cobbleDb.startAsyncSnapshot();
         long snapshotId = pending.snapshotId();
@@ -554,6 +555,7 @@ final class CobbleKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
             @Nonnull CheckpointStreamFactory streamFactory,
             @Nonnull CheckpointOptions checkpointOptions) {
         try {
+            flushPendingTimerWrites();
             return new SnapshotStrategyRunner<>(
                             "Cobble shard snapshot",
                             snapshotStrategy,
@@ -906,6 +908,12 @@ final class CobbleKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
     private void advancePrefetchedTimerBatches() {
         if (priorityQueueFactory instanceof CobblePriorityQueueSetFactory) {
             ((CobblePriorityQueueSetFactory) priorityQueueFactory).advancePrefetchedBatches();
+        }
+    }
+
+    private void flushPendingTimerWrites() {
+        if (priorityQueueFactory instanceof CobblePriorityQueueSetFactory) {
+            ((CobblePriorityQueueSetFactory) priorityQueueFactory).flushPendingWrites();
         }
     }
 
