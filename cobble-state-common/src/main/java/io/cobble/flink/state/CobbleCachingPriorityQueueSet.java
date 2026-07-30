@@ -90,7 +90,7 @@ final class CobbleCachingPriorityQueueSet<T>
     List<T> overlayElements() {
         List<T> elements = new ArrayList<>(overlay.size());
         for (OverlayTimer<T> timer : overlay) {
-            elements.add(timer.element);
+            elements.add(materializeElement(timer));
         }
         return elements;
     }
@@ -110,19 +110,20 @@ final class CobbleCachingPriorityQueueSet<T>
         if (head == null) {
             return null;
         }
+        T element = materializeElement(head);
         if (cachedSize >= 0) {
             cachedSize--;
         }
         if (overlay.isEmpty()) {
             advancePrefetchedBatch();
         }
-        return head.element;
+        return element;
     }
 
     @Override
     public T peek() {
         ensureLoaded();
-        return overlay.isEmpty() ? null : overlay.first().element;
+        return overlay.isEmpty() ? null : materializeElement(overlay.first());
     }
 
     @Override
@@ -137,15 +138,17 @@ final class CobbleCachingPriorityQueueSet<T>
             // The native queue is monotonic behind its truncation cursor. A prefetched batch is
             // likewise owned by the overlay until its pending cursor advance, so re-registering a
             // timer at or behind either boundary must remain in memory.
-            // Detach from caller-owned keys that Flink operators may reuse after add() returns.
-            T stableElement = serializationContext.deserializeElement(serializedKey.heapBytes);
-            boolean added = overlay.add(new OverlayTimer<>(serializedKey.heapBytes, stableElement));
+            // Serialized bytes are already detached from caller-owned timer objects.
+            OverlayTimer<T> candidate = new OverlayTimer<>(serializedKey.heapBytes);
+            boolean added = overlay.add(candidate);
             if (added && cachedSize >= 0) {
                 cachedSize++;
             }
-            return added;
+            return added && overlay.first() == candidate;
         }
 
+        // InternalPriorityQueue reports whether the head changed or remains unknown.
+        boolean headMayHaveChanged = overlay.isEmpty();
         priorityQueue.offerDirect(
                 bucket,
                 serializedKey.directBuffer,
@@ -156,7 +159,7 @@ final class CobbleCachingPriorityQueueSet<T>
         // offerDirect is an upsert. Avoid a read-before-write existence check on the hot add path;
         // size() can cold-scan later if an exact answer is needed.
         cachedSize = -1;
-        return true;
+        return headMayHaveChanged;
     }
 
     @Override
@@ -168,16 +171,20 @@ final class CobbleCachingPriorityQueueSet<T>
         ensureLoaded();
         initializeCursor();
 
+        OverlayTimer<T> headBeforeRemove = overlay.isEmpty() ? null : overlay.first();
         CobbleTimerSerializationContext.SerializedKey serializedKey =
                 serializationContext.serializeElementKey(element);
-        if (overlay.remove(new OverlayTimer<>(serializedKey.heapBytes, null))) {
+        if (overlay.remove(new OverlayTimer<>(serializedKey.heapBytes))) {
             if (cachedSize >= 0) {
                 cachedSize--;
             }
             if (overlay.isEmpty()) {
                 advancePrefetchedBatch();
             }
-            return true;
+            return headBeforeRemove != null
+                    && CobbleTimerSerializationContext.compareSerializedKeys(
+                                    serializedKey.heapBytes, headBeforeRemove.serializedKey)
+                            == 0;
         }
 
         if (isOwnedByOverlay(serializedKey.heapBytes) || !existsInDb(serializedKey.heapBytes)) {
@@ -187,7 +194,8 @@ final class CobbleCachingPriorityQueueSet<T>
         if (cachedSize >= 0) {
             cachedSize--;
         }
-        return true;
+        // A native tail deletion cannot change the known overlay head.
+        return false;
     }
 
     @Override
@@ -251,8 +259,8 @@ final class CobbleCachingPriorityQueueSet<T>
      * Prefetches one ordered fixed-size batch and hands logical ownership to the overlay.
      *
      * <p>The direct entry key views are valid only while the batch is open, so the serialized key
-     * bytes are copied before closing the batch. The timer element itself is kept exactly as the
-     * Flink serializer returns it.
+     * bytes are copied before closing the batch. Timer elements are decoded lazily from those
+     * immutable bytes.
      */
     private void reload() {
         try (DirectPriorityQueueBatch prefetched =
@@ -269,9 +277,7 @@ final class CobbleCachingPriorityQueueSet<T>
                 byte[] heapKey =
                         CobbleTimerSerializationContext.copyBytes(
                                 serializedKey, ((Buffer) serializedKey).limit());
-                overlay.add(
-                        new OverlayTimer<>(
-                                heapKey, serializationContext.deserializeElement(serializedKey)));
+                overlay.add(new OverlayTimer<>(heapKey));
                 lastKey = heapKey;
             }
 
@@ -316,14 +322,22 @@ final class CobbleCachingPriorityQueueSet<T>
         return db.get(bucket, serializedKey, priorityQueue.columnFamily()) != null;
     }
 
+    private T materializeElement(OverlayTimer<T> timer) {
+        if (timer.cachedElement == null) {
+            timer.cachedElement =
+                    serializationContext.deserializeElement(timer.serializedKey);
+        }
+        return timer.cachedElement;
+    }
+
     /** One logical timer currently owned by the overlay. */
     private static final class OverlayTimer<T> {
+        // serializedKey is the ownership and ordering truth; cachedElement is only a lazy cache.
         private final byte[] serializedKey;
-        private final T element;
+        private T cachedElement;
 
-        private OverlayTimer(byte[] serializedKey, T element) {
+        private OverlayTimer(byte[] serializedKey) {
             this.serializedKey = serializedKey;
-            this.element = element;
         }
     }
 }

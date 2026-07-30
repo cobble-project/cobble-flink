@@ -18,7 +18,6 @@ final class CobbleTimerSerializationContext<T> {
 
     private final DataInputDeserializer inputDeserializer;
     private final CobbleStateKeySerializer.ReusableDirectValueSerializer directKeySerializer;
-    private final CobbleStateKeySerializer.ReusableDirectValueDeserializer directKeyDeserializer;
 
     private TypeSerializer<T> serializer;
 
@@ -26,7 +25,6 @@ final class CobbleTimerSerializationContext<T> {
         this.serializer = Preconditions.checkNotNull(serializer, "serializer must not be null");
         this.inputDeserializer = new DataInputDeserializer();
         this.directKeySerializer = new CobbleStateKeySerializer.ReusableDirectValueSerializer(128);
-        this.directKeyDeserializer = new CobbleStateKeySerializer.ReusableDirectValueDeserializer();
     }
 
     void updateSerializer(TypeSerializer<T> serializer) {
@@ -50,14 +48,6 @@ final class CobbleTimerSerializationContext<T> {
         try {
             inputDeserializer.setBuffer(serializedKey);
             return serializer.deserialize(inputDeserializer);
-        } catch (IOException e) {
-            throw new IllegalStateException("Failed to deserialize Cobble timer element.", e);
-        }
-    }
-
-    T deserializeElement(ByteBuffer serializedKey) {
-        try {
-            return directKeyDeserializer.deserialize(serializer, serializedKey.duplicate());
         } catch (IOException e) {
             throw new IllegalStateException("Failed to deserialize Cobble timer element.", e);
         }

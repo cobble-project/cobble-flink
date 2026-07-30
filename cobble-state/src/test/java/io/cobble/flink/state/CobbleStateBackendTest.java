@@ -1990,6 +1990,114 @@ class CobbleStateBackendTest {
     }
 
     @Test
+    void timerChildQueueReportsOnlyPossibleHeadChanges(@TempDir Path tempDir) throws Exception {
+        int key = findKeyForGroup(0);
+        try (TestBackendContext context = createBackendContext(tempDir, false, null);
+                PriorityQueue nativeQueue =
+                        context.cobbleBackend
+                                .getCobbleDb()
+                                .getOrNewPriorityQueue("timer-head-change")) {
+            CobbleCachingPriorityQueueSet<TestTimerElement> queue =
+                    new CobbleCachingPriorityQueueSet<>(
+                            context.cobbleBackend.getCobbleDb(),
+                            nativeQueue,
+                            new CobbleTimerSerializationContext<>(new TestTimerElementSerializer()),
+                            0,
+                            false);
+            TestTimerElement first = new TestTimerElement(20L, key);
+            TestTimerElement later = new TestTimerElement(30L, key);
+            TestTimerElement earlier = new TestTimerElement(10L, key);
+
+            assertTrue(queue.add(first), "the first timer establishes the head");
+            assertEquals(first, queue.peek());
+            assertFalse(queue.add(later), "a native-tail timer cannot change the overlay head");
+            assertTrue(queue.add(earlier), "an earlier overlay timer changes the head");
+            assertFalse(queue.add(earlier), "a duplicate timer cannot change the head");
+
+            assertFalse(queue.remove(later), "removing a native-tail timer keeps the head");
+            assertTrue(queue.remove(earlier), "removing the overlay head changes the head");
+        }
+    }
+
+    @Test
+    void restoredTimerChildQueueConservativelyReportsUnknownHead(@TempDir Path tempDir)
+            throws Exception {
+        int key = findKeyForGroup(0);
+        try (TestBackendContext context = createBackendContext(tempDir, false, null);
+                PriorityQueue nativeQueue =
+                        context.cobbleBackend
+                                .getCobbleDb()
+                                .getOrNewPriorityQueue("restored-timer-head-change")) {
+            CobbleTimerSerializationContext<TestTimerElement> serializationContext =
+                    new CobbleTimerSerializationContext<>(new TestTimerElementSerializer());
+            CobbleCachingPriorityQueueSet<TestTimerElement> sourceQueue =
+                    new CobbleCachingPriorityQueueSet<>(
+                            context.cobbleBackend.getCobbleDb(),
+                            nativeQueue,
+                            serializationContext,
+                            0,
+                            false);
+            assertTrue(sourceQueue.add(new TestTimerElement(10L, key)));
+
+            CobbleCachingPriorityQueueSet<TestTimerElement> restoredQueue =
+                    new CobbleCachingPriorityQueueSet<>(
+                            context.cobbleBackend.getCobbleDb(),
+                            nativeQueue,
+                            serializationContext,
+                            0,
+                            true);
+            assertTrue(
+                    restoredQueue.add(new TestTimerElement(20L, key)),
+                    "an unloaded restored head must be treated as unknown");
+        }
+    }
+
+    @Test
+    void timerOverlayDecodesElementsLazily(@TempDir Path tempDir) throws Exception {
+        int key = findKeyForGroup(0);
+        AtomicInteger deserializations = new AtomicInteger();
+        try (TestBackendContext context = createBackendContext(tempDir, false, null);
+                PriorityQueue nativeQueue =
+                        context.cobbleBackend
+                                .getCobbleDb()
+                                .getOrNewPriorityQueue("lazy-timer-overlay")) {
+            CobbleCachingPriorityQueueSet<TestTimerElement> queue =
+                    new CobbleCachingPriorityQueueSet<>(
+                            context.cobbleBackend.getCobbleDb(),
+                            nativeQueue,
+                            new CobbleTimerSerializationContext<>(
+                                    new TestTimerElementSerializer(deserializations)),
+                            0,
+                            false);
+            TestTimerElement first = new TestTimerElement(20L, key);
+            TestTimerElement later = new TestTimerElement(30L, key);
+            TestTimerElement earlier = new TestTimerElement(10L, key);
+
+            assertTrue(queue.add(first));
+            assertTrue(queue.add(later));
+            assertEquals(0, deserializations.get(), "native adds must not decode timer objects");
+
+            assertFalse(queue.remove(new TestTimerElement(40L, key)));
+            assertEquals(0, deserializations.get(), "batch reload must remain bytes-first");
+
+            assertEquals(first, queue.peek());
+            assertEquals(first, queue.peek());
+            assertEquals(1, deserializations.get(), "repeated peek must reuse the cached head");
+            assertEquals(first, queue.poll());
+            assertEquals(1, deserializations.get(), "poll must reuse the cached head");
+
+            assertTrue(queue.add(earlier));
+            assertEquals(1, deserializations.get(), "overlay add must not decode the timer");
+
+            assertEquals(Arrays.asList(earlier, later), queue.overlaySnapshotElements());
+            assertEquals(
+                    3,
+                    deserializations.get(),
+                    "snapshot export must decode every remaining overlay timer");
+        }
+    }
+
+    @Test
     void overlayTimerDetachesFromMutatedCallerElement(@TempDir Path tempDir) throws Exception {
         try (TestBackendContext context = createBackendContext(tempDir, false, null)) {
             KeyGroupedInternalPriorityQueue<TestTimerElement> queue =
@@ -8916,6 +9024,15 @@ class CobbleStateBackendTest {
     private static final class TestTimerElementSerializer
             extends TypeSerializerSingleton<TestTimerElement> {
         private static final long serialVersionUID = 1L;
+        private final AtomicInteger deserializations;
+
+        private TestTimerElementSerializer() {
+            this(null);
+        }
+
+        private TestTimerElementSerializer(AtomicInteger deserializations) {
+            this.deserializations = deserializations;
+        }
 
         @Override
         public boolean isImmutableType() {
@@ -8950,6 +9067,9 @@ class CobbleStateBackendTest {
 
         @Override
         public TestTimerElement deserialize(DataInputView source) throws IOException {
+            if (deserializations != null) {
+                deserializations.incrementAndGet();
+            }
             return new TestTimerElement(source.readLong(), source.readInt());
         }
 
