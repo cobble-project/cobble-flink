@@ -37,8 +37,8 @@ immutable versioned directory.
 ### How to operate
 
 1. Merge documentation changes into `main` to update `latest/`.
-2. Create and push a release tag such as `v0.2.3-1`.
-3. The workflow publishes the tagged sources to `0.2.3-1/` on `gh-pages`.
+2. Create and push a release tag such as `v0.3.0-1`.
+3. The workflow publishes the tagged sources to `0.3.0-1/` on `gh-pages`.
 
 ### Versioned roots
 
@@ -50,4 +50,4 @@ immutable versioned directory.
 Example URLs:
 
 - `https://cobble-project.github.io/cobble-flink/latest/`
-- `https://cobble-project.github.io/cobble-flink/0.2.3-1/`
+- `https://cobble-project.github.io/cobble-flink/0.3.0-1/`
