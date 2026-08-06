@@ -6,7 +6,7 @@
 
     <groupId>io.github.cobble-project</groupId>
     <artifactId>cobble-flink</artifactId>
-    <version>${cobble.java.version}-${patch.version}-SNAPSHOT</version>
+    <version>${cobble.flink.base.version}-${patch.version}-SNAPSHOT</version>
     <name>cobble-flink</name>
     <description>Apache Flink integration for Cobble, providing state backend, source, sink, inspect, and monitoring
         capabilities for storing and querying Flink data.</description>
@@ -60,12 +60,13 @@
         <maven.compiler.target>8</maven.compiler.target>
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
         <flink.version>1.17.2</flink.version>
-        <cobble.java.version>0.3.0</cobble.java.version>
+        <cobble.java.version>0.4.0-SNAPSHOT</cobble.java.version>
+        <cobble.flink.base.version>0.4.0</cobble.flink.base.version>
         <patch.version>1</patch.version>
-        <cobble.flink.version.1.17>${cobble.java.version}-${patch.version}-flink-1.17-SNAPSHOT</cobble.flink.version.1.17>
-        <cobble.flink.version.1.19>${cobble.java.version}-${patch.version}-flink-1.19-SNAPSHOT</cobble.flink.version.1.19>
-        <cobble.flink.version.2.0>${cobble.java.version}-${patch.version}-flink-2.0-SNAPSHOT</cobble.flink.version.2.0>
-        <cobble.flink.version.2.1>${cobble.java.version}-${patch.version}-flink-2.1-SNAPSHOT</cobble.flink.version.2.1>
+        <cobble.flink.version.1.17>${cobble.flink.base.version}-${patch.version}-flink-1.17-SNAPSHOT</cobble.flink.version.1.17>
+        <cobble.flink.version.1.19>${cobble.flink.base.version}-${patch.version}-flink-1.19-SNAPSHOT</cobble.flink.version.1.19>
+        <cobble.flink.version.2.0>${cobble.flink.base.version}-${patch.version}-flink-2.0-SNAPSHOT</cobble.flink.version.2.0>
+        <cobble.flink.version.2.1>${cobble.flink.base.version}-${patch.version}-flink-2.1-SNAPSHOT</cobble.flink.version.2.1>
         <junit.version>5.10.2</junit.version>
         <surefire.test.jvm.args></surefire.test.jvm.args>
     </properties>

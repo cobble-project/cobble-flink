@@ -2812,7 +2812,7 @@ class CobbleStateBackendTest {
         CobbleFlinkConfigMapper.applyExposedOptions(config, new Configuration());
 
         assertEquals(2, new CobbleMemoryConfiguration().getMemtableBufferCount());
-        assertEquals(Config.MemtableType.SKIPLIST, config.memtableType);
+        assertEquals(Config.MemtableType.ADAPTIVE, config.memtableType);
         assertEquals(Config.CompactionPolicyKind.SCORE_PRIORITY, config.compactionPolicy);
         assertEquals(2, config.l0FileLimit.intValue());
         assertTrue(config.sstBloomFilterEnabled);
@@ -2820,6 +2820,19 @@ class CobbleStateBackendTest {
         assertEquals(Config.SstReadMetadataCacheMode.EAGER, config.sstReadMetadataCacheMode);
         assertEquals(2, config.sstPinnedMetadataMaxLevel.intValue());
         assertTrue(config.sstPinnedMetadataPartitionsEnabled);
+    }
+
+    @Test
+    void flinkMapsEveryMemtableType() {
+        for (Config.MemtableType type : Config.MemtableType.values()) {
+            Configuration flinkConfig = new Configuration();
+            flinkConfig.set(CobbleOptions.MEMTABLE_TYPE, type.name());
+            Config config = new Config();
+
+            CobbleFlinkConfigMapper.applyExposedOptions(config, flinkConfig);
+
+            assertEquals(type, config.memtableType);
+        }
     }
 
     @Test

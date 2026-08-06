@@ -188,7 +188,7 @@ backend.
 | `state.backend.cobble.memory.fixed-per-slot` | none | Fixed memory budget per slot. Use this when you want to override managed-memory-based sizing. |
 | `state.backend.cobble.memory.memtable-buffer-ratio` | `0.5` | Fraction of the Cobble memory budget reserved for memtable buffers. |
 | `state.backend.cobble.memory.memtable-buffer-count` | `2` | Number of in-memory memtable buffers. |
-| `state.backend.cobble.memtable.type` | `skiplist` | Memtable implementation. `skiplist` supports both point lookups and the range scans used by `MapState`; `hash` is available for point-lookup-only workloads. |
+| `state.backend.cobble.memtable.type` | `adaptive` | Memtable implementation. `adaptive` (default) monitors access patterns and switches automatically: `vec` for write-heavy, `hash` for point-read-heavy, `skiplist` for mixed workloads. `skiplist` supports both point lookups and range scans; `hash` is available for point-lookup-only workloads. |
 | `state.backend.cobble.compaction.policy` | `score_priority` | Compaction policy. Supported values are `round_robin`, `min_overlap`, and `score_priority`. |
 | `state.backend.cobble.compaction.l0-file-limit` | `2` | Number of L0 files that triggers compaction. Higher values reduce compaction work but can increase state lookup and iteration cost. |
 | `state.backend.cobble.compaction.write-stall-limit` | Derived by Cobble | Maximum combined immutable-memtable and L0-file pressure before Cobble blocks writes. The value must be at least `state.backend.cobble.compaction.l0-file-limit + 2`. When unset, Cobble derives `max(l0-file-limit + 2, 32)`. |

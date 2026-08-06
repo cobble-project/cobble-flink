@@ -291,7 +291,7 @@ final class CobbleFlinkConfigMapper {
 
     private static Config.MemtableType parseMemtableType(String memtableType) {
         if (memtableType == null) {
-            return Config.MemtableType.SKIPLIST;
+            return Config.MemtableType.ADAPTIVE;
         }
         switch (memtableType.trim().toLowerCase(Locale.ROOT)) {
             case "hash":
@@ -300,9 +300,11 @@ final class CobbleFlinkConfigMapper {
                 return Config.MemtableType.SKIPLIST;
             case "vec":
                 return Config.MemtableType.VEC;
+            case "adaptive":
+                return Config.MemtableType.ADAPTIVE;
             default:
                 throw new IllegalConfigurationException(
-                        "state.backend.cobble.memtable.type must be one of [hash, skiplist, vec], but was: "
+                        "state.backend.cobble.memtable.type must be one of [hash, skiplist, vec, adaptive], but was: "
                                 + memtableType);
         }
     }

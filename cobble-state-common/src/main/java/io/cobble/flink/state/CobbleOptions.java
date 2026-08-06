@@ -63,13 +63,21 @@ public final class CobbleOptions {
                     .defaultValue(2)
                     .withDescription("The number of memtable buffers kept in memory.");
 
-    /** Memtable implementation type used by Cobble (hash, skiplist, vec). */
+    /**
+     * Memtable implementation type used by Cobble (hash, skiplist, vec, adaptive).
+     *
+     * <p>When set to {@code adaptive} (the default), the native Cobble engine monitors access
+     * patterns and switches the memtable type automatically: {@code vec} for write-heavy workloads,
+     * {@code hash} for point-read-heavy workloads, and {@code skiplist} for mixed workloads.
+     */
     public static final ConfigOption<String> MEMTABLE_TYPE =
             ConfigOptions.key("state.backend.cobble.memtable.type")
                     .stringType()
-                    .defaultValue("skiplist")
+                    .defaultValue("adaptive")
                     .withDescription(
-                            "The memtable implementation used by Cobble. Supported values: hash, skiplist, vec.");
+                            "The memtable implementation used by Cobble. Supported values: hash, "
+                                    + "skiplist, vec, adaptive. adaptive (default) monitors access "
+                                    + "patterns and switches automatically.");
 
     /** Compaction policy used by Cobble (round_robin, min_overlap, score_priority). */
     public static final ConfigOption<String> COMPACTION_POLICY =

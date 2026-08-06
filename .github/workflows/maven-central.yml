@@ -66,6 +66,9 @@ jobs:
           from pathlib import Path
 
           base = os.environ["RELEASE_BASE"]
+          core_version, separator, patch_version = base.rpartition("-")
+          if not separator or not core_version or not patch_version.isdigit():
+              raise SystemExit(f"Could not derive Cobble core version from {base}.")
 
           root_pom = Path("pom.xml")
           root_text = root_pom.read_text()
@@ -77,6 +80,15 @@ jobs:
           )
           if count != 1:
               raise SystemExit("Could not update the root project version.")
+
+          root_text, count = re.subn(
+              r"(<cobble\.java\.version>)[^<]+(</cobble\.java\.version>)",
+              rf"\g<1>{core_version}\g<2>",
+              root_text,
+              count=1,
+          )
+          if count != 1:
+              raise SystemExit("Could not update the Cobble Java dependency version.")
 
           artifact_versions = {
               "cobble.flink.version.1.17": f"{base}-flink-1.17",
