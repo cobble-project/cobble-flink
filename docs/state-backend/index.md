@@ -25,7 +25,9 @@ checkpoint recovery.
   When restoring to the same key-group range, Cobble can resume from the
   existing snapshot source directly. During rescale, it can rebuild only the
   key-group ranges needed by the new tasks from one or more checkpoint
-  manifests. This makes restart and rescale more efficient when state is large.
+  manifests. This makes restart and rescale more efficient when state is large. Rescale uses
+  Cobble's default asynchronous adoption mode, so exported checkpoint files remain retained until
+  Cobble has taken ownership.
 - **Easier to consume and inspect state data**
   Once state data is in Cobble, it is easier to reuse Cobble's source
   capabilities for batch consumption or point lookup. In some scenarios, you

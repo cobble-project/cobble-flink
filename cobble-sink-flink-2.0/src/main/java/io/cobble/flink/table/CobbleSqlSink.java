@@ -310,7 +310,8 @@ final class CobbleSqlSink
                             source.shardSnapshot.dbId,
                             source.shardSnapshot.snapshotId,
                             starts,
-                            ends);
+                            ends,
+                            io.cobble.structured.ExpandStorageMode.ADOPT_ASYNC);
                 }
                 success = true;
                 return db;
