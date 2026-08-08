@@ -271,7 +271,7 @@ public final class CobbleOptions {
     public static final ConfigOption<Boolean> LOCAL_DIR_PRIMARY_HIGH_PRIORITY =
             ConfigOptions.key("state.backend.cobble.localdir.primary-high-priority")
                     .booleanType()
-                    .defaultValue(false)
+                    .defaultValue(true)
                     .withDescription(
                             "If enabled and a Flink checkpoint directory is configured, the local Cobble working "
                                     + "directory is registered as the high-priority primary volume. Checkpoint storage "

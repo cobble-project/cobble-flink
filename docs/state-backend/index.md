@@ -211,7 +211,7 @@ backend.
 | `state.backend.cobble.log.keep-files` | `3` | Number of Cobble log files to retain. |
 | `state.backend.cobble.log.level` | `info` | Cobble native log level. Supported values are `trace`, `debug`, `info`, `warn`, `error`, and `off`. |
 | `state.backend.cobble.snapshot.retention` | none | Automatically expire older snapshots after this many newer snapshots have completed. |
-| `state.backend.cobble.localdir.primary-high-priority` | `false` | Use the local Cobble directory as the high-priority active-state volume. Checkpoint storage remains a low-priority fallback and stores metadata and snapshots. |
+| `state.backend.cobble.localdir.primary-high-priority` | `true` | Use the local Cobble directory as the high-priority active-state volume. Checkpoint storage remains a low-priority fallback and stores metadata and snapshots. |
 
 `EAGER` attaches decoded SST metadata when Cobble writes a new file and is the recommended default.
 `LAZY` caches the metadata on the first read, while `OFF` rebuilds it for each reader.

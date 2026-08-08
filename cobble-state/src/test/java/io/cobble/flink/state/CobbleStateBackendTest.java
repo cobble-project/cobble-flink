@@ -3320,7 +3320,7 @@ class CobbleStateBackendTest {
         try (TestBackendContext context =
                 createBackendContext(
                         tempDir.resolve("restored"),
-                        false,
+                        true,
                         restoredCheckpointDirectory,
                         null,
                         TtlTimeProvider.DEFAULT,
@@ -3335,14 +3335,18 @@ class CobbleStateBackendTest {
             assertEquals(3, backend.getCobbleConfig().volumes.size());
             assertVolumeKinds(
                     backend.getCobbleConfig().volumes.get(0),
-                    Config.VolumeUsageKind.PRIMARY_DATA_PRIORITY_HIGH,
+                    Config.VolumeUsageKind.PRIMARY_DATA_PRIORITY_LOW,
                     Config.VolumeUsageKind.META,
                     Config.VolumeUsageKind.SNAPSHOT);
             assertVolumeKinds(
                     backend.getCobbleConfig().volumes.get(1),
-                    Config.VolumeUsageKind.PRIMARY_DATA_PRIORITY_HIGH,
+                    Config.VolumeUsageKind.PRIMARY_DATA_PRIORITY_LOW,
                     Config.VolumeUsageKind.META,
                     Config.VolumeUsageKind.SNAPSHOT);
+            assertVolumeKinds(
+                    backend.getCobbleConfig().volumes.get(2),
+                    Config.VolumeUsageKind.PRIMARY_DATA_PRIORITY_HIGH);
+            waitForLocalPrimaryDataFile(backend.getVolumePath().toPath());
 
             ValueStateDescriptor<String> valueStateDescriptor =
                     new ValueStateDescriptor<>("restore-value-state", StringSerializer.INSTANCE);

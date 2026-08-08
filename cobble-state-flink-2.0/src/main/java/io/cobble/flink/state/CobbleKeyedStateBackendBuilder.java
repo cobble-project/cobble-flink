@@ -371,7 +371,9 @@ final class CobbleKeyedStateBackendBuilder<K> {
             sourceVolume.kinds =
                     resumeSingleSource
                             ? Arrays.asList(
-                                    Config.VolumeUsageKind.PRIMARY_DATA_PRIORITY_HIGH,
+                                    localDirPrimaryHighPriority
+                                            ? Config.VolumeUsageKind.PRIMARY_DATA_PRIORITY_LOW
+                                            : Config.VolumeUsageKind.PRIMARY_DATA_PRIORITY_HIGH,
                                     Config.VolumeUsageKind.META,
                                     Config.VolumeUsageKind.SNAPSHOT)
                             : Collections.singletonList(Config.VolumeUsageKind.READONLY);
