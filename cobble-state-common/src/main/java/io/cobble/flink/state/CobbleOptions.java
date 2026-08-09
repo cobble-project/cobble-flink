@@ -216,6 +216,17 @@ public final class CobbleOptions {
                             "Values larger than this threshold are separated into Cobble's value log. "
                                     + "Default: 1kb.");
 
+    /** Whether value-log files newly created or copied into primary use the lowest tier. */
+    public static final ConfigOption<Boolean> VLOG_LOW_PRIORITY_PRIMARY_ENABLED =
+            ConfigOptions.key("state.backend.cobble.vlog.low-priority-primary.enabled")
+                    .booleanType()
+                    .defaultValue(false)
+                    .withDescription(
+                            "Whether Cobble value-log files newly created or copied into primary use the "
+                                    + "lowest-priority volume tier instead of the normal high-priority tier. "
+                                    + "Existing primary replicas are not rebalanced, and these files are not "
+                                    + "promoted by low-to-high primary backfill.");
+
     /** Byte size of each pooled direct ByteBuffer used by Cobble direct reads. */
     public static final ConfigOption<MemorySize> DIRECT_IO_BUFFER_SIZE =
             ConfigOptions.key("state.backend.cobble.direct-io.buffer-size")

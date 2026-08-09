@@ -205,6 +205,7 @@ backend.
 | `state.backend.cobble.sst.pinned-metadata.max-level` | `2` | Pin immutable top-level SST index and bloom-filter metadata outside the block cache for point reads, scans, and compactions. `-1` disables it; `0` pins L0; `N` pins L0 through LN. |
 | `state.backend.cobble.sst.pinned-metadata.partitions.enabled` | `true` | Also pin second-level index and filter partitions for partitioned SST files. Set to `false` to reduce pinned memory at the cost of point-read performance. |
 | `state.backend.cobble.value-separation.threshold` | `1kb` | Values larger than this threshold are separated into Cobble's value log. |
+| `state.backend.cobble.vlog.low-priority-primary.enabled` | `false` | Place value-log files newly created or copied into primary on the lowest-priority tier. Existing primary replicas are not rebalanced or promoted by low-to-high primary backfill; if that tier is unavailable, writes fail rather than falling back to a higher tier. |
 | `state.backend.cobble.direct-io.buffer-size` | `2kb` | Size of each pooled direct I/O buffer used by Cobble reads. |
 | `state.backend.cobble.direct-io.pool-max-size` | `64` | Maximum number of pooled direct I/O buffers. |
 | `state.backend.cobble.log.max-file-size` | `10mb` | Maximum size of one Cobble log file before rolling. |

@@ -2909,6 +2909,7 @@ class CobbleStateBackendTest {
         overrides.set(CobbleOptions.LOG_MAX_FILE_SIZE, MemorySize.parse("16mb"));
         overrides.set(CobbleOptions.LOG_KEEP_FILES, 5);
         overrides.set(CobbleOptions.VALUE_SEPARATION_THRESHOLD, MemorySize.parse("4kb"));
+        overrides.set(CobbleOptions.VLOG_LOW_PRIORITY_PRIMARY_ENABLED, true);
         overrides.set(CobbleOptions.SNAPSHOT_RETENTION, 3);
 
         try (TestBackendContext context =
@@ -2939,6 +2940,7 @@ class CobbleStateBackendTest {
             assertEquals(16 * 1024 * 1024, config.logMaxFileSize.intValue());
             assertEquals(5, config.logKeepFiles.intValue());
             assertEquals(4 * 1024, config.valueSeparationThreshold.intValue());
+            assertTrue(config.vlogLowPriorityPrimaryEnabled);
             assertEquals(3, config.snapshotRetention.intValue());
             assertEquals(Config.GovernanceMode.NOOP, config.governanceMode);
             assertEquals(1, config.numColumns.intValue());

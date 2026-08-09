@@ -85,6 +85,8 @@ final class CobbleFlinkConfigMapper {
                 toPositiveIntBytes(
                         CobbleOptions.VALUE_SEPARATION_THRESHOLD.key(),
                         flinkConfig.get(CobbleOptions.VALUE_SEPARATION_THRESHOLD));
+        config.vlogLowPriorityPrimaryEnabled =
+                flinkConfig.get(CobbleOptions.VLOG_LOW_PRIORITY_PRIMARY_ENABLED);
         // Remote compaction options. The remote address is optional: a blank value leaves
         // compaction running locally in the TaskManager.
         config.compactionReadAheadEnabled =
