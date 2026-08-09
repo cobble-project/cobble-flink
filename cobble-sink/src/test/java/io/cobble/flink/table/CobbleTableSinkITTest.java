@@ -284,6 +284,7 @@ class CobbleTableSinkITTest {
                                         "name", "VARCHAR(2147483647)", 1, 0)));
 
         Config writerConfig = CobbleSinkPaths.createWriterConfig(sinkConfig, 0);
+        assertFalse(writerConfig.walEnabled);
         assertEquals(0, writerConfig.blockCacheSize.intValue());
         assertEquals(false, writerConfig.blockCacheHybridEnabled.booleanValue());
         assertEquals(0, writerConfig.blockCacheHybridDiskSize.intValue());

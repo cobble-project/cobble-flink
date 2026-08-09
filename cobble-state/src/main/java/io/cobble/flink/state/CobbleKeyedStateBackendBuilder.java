@@ -1,6 +1,7 @@
 package io.cobble.flink.state;
 
 import io.cobble.Config;
+import io.cobble.RecoveryMode;
 import io.cobble.flink.common.CobbleNativeMetrics;
 import io.cobble.flink.common.CobbleStateDescriptor;
 import io.cobble.structured.Db;
@@ -490,7 +491,9 @@ final class CobbleKeyedStateBackendBuilder<K> {
         }
         if (canResumeSingleSource(restoreSources)) {
             return Db.resume(
-                    configPath.toString(), restoreSources.get(0).metadata.shardSnapshot().dbId);
+                    configPath.toString(),
+                    restoreSources.get(0).metadata.shardSnapshot().dbId,
+                    RecoveryMode.SNAPSHOT_ONLY);
         }
         return restoreRescaledDb(configPath, restoreSources);
     }

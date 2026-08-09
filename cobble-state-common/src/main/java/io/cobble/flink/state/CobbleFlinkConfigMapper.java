@@ -20,6 +20,9 @@ final class CobbleFlinkConfigMapper {
     private CobbleFlinkConfigMapper() {}
 
     static void applyExposedOptions(Config config, Configuration flinkConfig) {
+        // Flink checkpoints define the recovery boundary; replaying a newer Cobble WAL tail would
+        // violate that boundary.
+        config.walEnabled = false;
         config.memtableType = parseMemtableType(flinkConfig.get(CobbleOptions.MEMTABLE_TYPE));
         config.compactionPolicy =
                 parseCompactionPolicy(flinkConfig.get(CobbleOptions.COMPACTION_POLICY));

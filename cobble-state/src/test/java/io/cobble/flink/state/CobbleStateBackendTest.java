@@ -2811,6 +2811,7 @@ class CobbleStateBackendTest {
 
         CobbleFlinkConfigMapper.applyExposedOptions(config, new Configuration());
 
+        assertFalse(config.walEnabled);
         assertEquals(2, new CobbleMemoryConfiguration().getMemtableBufferCount());
         assertEquals(Config.MemtableType.ADAPTIVE, config.memtableType);
         assertEquals(Config.CompactionPolicyKind.SCORE_PRIORITY, config.compactionPolicy);

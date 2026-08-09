@@ -3,6 +3,7 @@ package io.cobble.flink.table;
 import io.cobble.DbCoordinator;
 import io.cobble.GlobalSnapshot;
 import io.cobble.PendingSnapshot;
+import io.cobble.RecoveryMode;
 import io.cobble.ShardSnapshot;
 import io.cobble.SnapshotTools;
 import io.cobble.flink.common.CobbleConnectorMetrics;
@@ -641,7 +642,8 @@ final class CobbleSqlSink
                             Db.resume(
                                     CobbleSinkPaths.createWriterConfigForWriterPath(
                                             config, writerPath),
-                                    dbId)) {
+                                    dbId,
+                                    RecoveryMode.SNAPSHOT_ONLY)) {
                         ShardSnapshot latestShard = loadLatestShardSnapshot(db, writerPath);
                         if (latestShard != null) {
                             writerPathByDbId.put(dbId, writerPath);
