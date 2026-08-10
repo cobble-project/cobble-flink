@@ -19,7 +19,7 @@ workload.
 
 | Item | Value |
 |---|---|
-| Cobble version | 0.3.0-1-flink-1.17 |
+| Cobble version | 0.4.0-1-flink-1.17 |
 | Flink | 1.17.2 |
 | Java | OpenJDK 11.0.29 |
 
@@ -69,33 +69,34 @@ a positive value means Cobble finished faster.
 
 | Query | RocksDB duration | Cobble duration | Cobble throughput |
 |---|---:|---:|---:|
-| q3 | 31.7s | 28.3s | +12.0% |
-| q4 | 123.5s | 94.3s | +30.9% |
-| q5 | 97.8s | 69.1s | +41.5% |
-| q7 | 182.9s | 89.7s | +103.9% |
-| q8 | 28.1s | 28.1s | +0.1% |
-| q9 | 222.2s | 183.1s | +21.3% |
-| q11 | 106.4s | 99.9s | +6.6% |
-| q12 | 33.3s | 33.2s | +0.3% |
-| q15 | 77.1s | 79.6s | -3.1% |
-| q16 | 299.2s | 270.8s | +10.5% |
-| q17 | 39.5s | 41.5s | -4.9% |
-| q18 | 76.2s | 51.6s | +47.6% |
-| q19 | 57.1s | 46.4s | +23.0% |
-| q20 | 156.4s | 115.0s | +36.1% |
-| q23 | 280.0s | 232.3s | +20.5% |
-| **Total** | **1811.3s** | **1462.9s** | **+23.8%** |
+| q3 | 28.0s | 27.9s | +0.6% |
+| q4 | 123.1s | 100.0s | +23.1% |
+| q5 | 95.8s | 69.6s | +37.7% |
+| q7 | 176.9s | 99.2s | +78.4% |
+| q8 | 28.6s | 27.9s | +2.6% |
+| q9 | 225.9s | 195.2s | +15.8% |
+| q11 | 104.2s | 84.8s | +22.9% |
+| q12 | 30.7s | 30.6s | +0.5% |
+| q15 | 91.2s | 84.1s | +8.5% |
+| q16 | 307.8s | 285.6s | +7.8% |
+| q17 | 48.7s | 46.8s | +4.0% |
+| q18 | 72.8s | 51.9s | +40.2% |
+| q19 | 63.7s | 52.5s | +21.2% |
+| q20 | 159.2s | 122.7s | +29.7% |
+| q23 | 290.4s | 247.9s | +17.1% |
+| **Total** | **1847.1s** | **1526.7s** | **+21.0%** |
+
+![Nexmark normalized throughput by query](../assets/images/nexmark-normalized-throughput.png)
 
 ### Summary
 
-- Cobble is faster in **11 of 15** queries (above 5%) and within 5% in 4
-  queries (q8, q12, q15, q17).
-- The total Cobble duration is **19.2% lower** than RocksDB
-  (1462.9s vs 1811.3s), a **+23.8%** throughput advantage.
-- The largest Cobble lead is on **q7** (+103.9%), a stateful join with heavy
+- Cobble is faster by more than 5% in **11 of 15** queries and within 5% in
+  the other 4.
+- The total Cobble duration is **17.3% lower** than RocksDB
+  (1526.7s vs 1847.1s), a **+21.0%** throughput advantage.
+- The largest Cobble lead is on **q7** (+78.4%), a stateful join with heavy
   state access.
-- With the 24 h TTL and reproducible data, q8, q12, q15, and q17 are within
-  ±5%.
+- q15 is 8.5% faster with Cobble; q3, q8, q12, and q17 are within 5%.
 
 ## Flink state micro-benchmark
 
@@ -131,34 +132,37 @@ a positive value means Cobble has higher throughput.
 
 | Benchmark | RocksDB | Cobble | Cobble throughput |
 |---|---:|---:|---:|
-| valueAdd | 588.898 ± 41.138 | 854.506 ± 26.699 | +45.1% |
-| valueGet | 836.686 ± 15.678 | 878.697 ± 15.122 | +5.0% |
-| valueUpdate | 592.690 ± 43.405 | 870.665 ± 47.619 | +46.9% |
-| listAdd | 738.088 ± 48.829 | 1016.921 ± 54.038 | +37.8% |
-| listAddAll | 475.551 ± 6.452 | 674.456 ± 16.305 | +41.8% |
-| listAppend | 664.232 ± 22.524 | 857.058 ± 22.624 | +29.0% |
-| listGet | 687.114 ± 18.834 | 799.233 ± 51.123 | +16.3% |
-| listGetAndIterate | 669.452 ± 13.341 | 786.904 ± 13.498 | +17.5% |
-| listUpdate | 651.474 ± 16.273 | 892.762 ± 37.243 | +37.0% |
-| mapAdd | 586.160 ± 44.811 | 925.876 ± 61.661 | +58.0% |
-| mapContains | 364.432 ± 4.686 | 538.012 ± 9.149 | +47.6% |
-| mapEntries | 949.889 ± 26.460 | 928.594 ± 22.631 | -2.2% |
-| mapGet | 374.723 ± 12.112 | 380.316 ± 7.709 | +1.5% |
-| mapIsEmpty | 244.190 ± 14.766 | 230.685 ± 3.465 | -5.5% |
-| mapIterator | 941.331 ± 23.333 | 939.407 ± 8.328 | -0.2% |
-| mapKeys | 943.048 ± 28.935 | 976.894 ± 31.140 | +3.6% |
-| mapPutAll | 114.450 ± 4.032 | 256.203 ± 5.456 | +123.9% |
-| mapRemove | 609.061 ± 54.656 | 893.226 ± 36.671 | +46.7% |
-| mapUpdate | 560.540 ± 46.639 | 945.696 ± 48.038 | +68.7% |
-| mapValues | 942.460 ± 25.564 | 999.262 ± 7.742 | +6.0% |
+| valueAdd | 628.324 ± 39.355 | 1186.824 ± 15.843 | +88.9% |
+| valueGet | 983.301 ± 10.914 | 1003.100 ± 12.059 | +2.0% |
+| valueUpdate | 640.803 ± 38.806 | 1129.497 ± 24.800 | +76.3% |
+| listAdd | 782.201 ± 18.100 | 860.401 ± 9.411 | +10.0% |
+| listAddAll | 499.097 ± 5.215 | 660.119 ± 10.134 | +32.3% |
+| listAppend | 757.518 ± 19.712 | 1019.736 ± 28.377 | +34.6% |
+| listGet | 750.388 ± 7.174 | 905.950 ± 9.075 | +20.7% |
+| listGetAndIterate | 741.915 ± 9.018 | 900.436 ± 12.795 | +21.4% |
+| listUpdate | 785.069 ± 16.797 | 1158.398 ± 21.968 | +47.6% |
+| mapAdd | 604.981 ± 45.372 | 1179.077 ± 10.891 | +94.9% |
+| mapContains | 384.808 ± 5.395 | 555.001 ± 6.454 | +44.2% |
+| mapEntries | 994.319 ± 30.562 | 989.964 ± 7.669 | -0.4% |
+| mapGet | 439.575 ± 5.572 | 416.688 ± 5.020 | -5.2% |
+| mapIsEmpty | 266.524 ± 19.989 | 248.163 ± 6.060 | -6.9% |
+| mapIterator | 994.958 ± 31.906 | 998.529 ± 5.513 | +0.4% |
+| mapKeys | 1011.880 ± 34.143 | 1029.464 ± 7.259 | +1.7% |
+| mapPutAll | 118.335 ± 4.841 | 164.087 ± 5.014 | +38.7% |
+| mapRemove | 702.122 ± 58.241 | 1308.669 ± 22.999 | +86.4% |
+| mapUpdate | 611.308 ± 44.671 | 1170.361 ± 13.765 | +91.5% |
+| mapValues | 997.387 ± 33.343 | 1051.495 ± 7.126 | +5.4% |
+
+![Flink state normalized throughput by operation](../assets/images/flink-state-normalized-throughput.png)
 
 ### Summary
 
 - Cobble has higher throughput in **14 of 20** benchmarks (above 5%), is within
-  5% in 5 benchmarks, and is slower in **1** benchmark (mapIsEmpty).
-- The largest Cobble lead is on **mapPutAll** (+123.9%).
+  5% in 4 benchmarks, and is slower in **2** benchmarks (mapGet, mapIsEmpty).
+- The largest Cobble leads are on **mapAdd** (+94.9%), **mapUpdate** (+91.5%),
+  and **mapRemove** (+86.4%).
 - **5 of 20** benchmarks have overlapping 99.9% confidence intervals; in all
-  of these the difference is within ±6%.
+  of these the difference is within ±7%.
 
 ## Remote rescale benchmark
 
@@ -171,7 +175,7 @@ rate limit. The keyspace is unchanged by parallelism.
 
 | Item | Value |
 |---|---|
-| Cobble version | 0.3.0-1-flink-1.17 |
+| Cobble version | 0.3.0-1-flink-1.17 (validated at 0.4.0-1) |
 | Flink | 1.17.2 |
 | State | 524,288 keys, 8 KiB payload per key (4 GiB configured) |
 | Object store | RustFS through Toxiproxy |
@@ -228,16 +232,17 @@ The Nexmark and state micro-benchmark results show Cobble delivering higher
 throughput than RocksDB under the same managed-memory budget:
 
 - **Write-heavy operations** (valueAdd, valueUpdate, mapAdd, mapUpdate,
-  mapPutAll, mapRemove) show the largest Cobble advantages in the
-  micro-benchmark, and the stateful Nexmark queries (q4, q5, q7, q18, q20)
-  show the largest end-to-end gains.
+  mapRemove) show the largest Cobble advantages in the micro-benchmark, and
+  the stateful Nexmark queries (q4, q5, q7, q18, q20) show the largest
+  end-to-end gains.
 - **Read-only or full-scan operations** (valueGet, mapGet, mapEntries,
   mapIterator, mapKeys, mapValues) are roughly equal, with Cobble slightly
   ahead and overlapping confidence intervals.
-- All 15 Nexmark queries show a Cobble gain
-  or are within 5%; q12 uses its normal four-boundary processing-time result
-  because an additional wall-clock window adds about 10 s of scheduling tail
-  latency unrelated to backend throughput.
+- Cobble's default memtable type is now `adaptive`: the native engine monitors
+  read/write/scan patterns and switches the memtable type at runtime (Vec for
+  write-heavy, Hash for point-read-heavy, Skiplist for mixed workloads). This
+  is why write-oriented state operations see larger gains than in 0.3.0.
+- All Nexmark queries show a Cobble gain; q3, q8, q12, and q17 are within 5%.
 - The remote rescale benchmark shows a separate tradeoff: restoring shared
   files by reference substantially reduces time to `RUNNING`, while a cold
   random-read workload can remain limited by remote-storage latency until its
