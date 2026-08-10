@@ -44,6 +44,10 @@ class CobbleKeyedStateCheckpointingITTest {
     private static final Duration JOB_TIMEOUT = Duration.ofSeconds(180);
     private static final Duration LOCAL_STATE_CLEANUP_TIMEOUT = Duration.ofSeconds(30);
     private static final Map<Integer, Long> FINAL_SUMS = new ConcurrentHashMap<>();
+    // Checkpoint completion reaches source and map tasks independently. Do not let the finite
+    // source finish an attempt before the failing map subtask has armed the next failure.
+    private static final Object SEQUENTIAL_FAILURE_COORDINATION_LOCK = new Object();
+    private static final AtomicInteger CHECKPOINTED_FAILURE_ATTEMPT = new AtomicInteger();
 
     @Test
     void recoversKeyedStateExactlyOnceAfterFailure(@TempDir Path tempDir) throws Exception {
@@ -174,6 +178,7 @@ class CobbleKeyedStateCheckpointingITTest {
         FINAL_SUMS.clear();
         OnceFailingPartitionedSum.RECOVERY_COUNTER.set(0L);
         ThreeTimesFailingPartitionedSum.FAILURES.set(0);
+        CHECKPOINTED_FAILURE_ATTEMPT.set(0);
         ThreeTimesFailingPartitionedSum.FAILING_SUBTASKS.clear();
         ThreeTimesFailingPartitionedSum.RECOVERIES_BY_SUBTASK.clear();
         CounterSink.ALL_COUNTS.clear();
@@ -188,7 +193,7 @@ class CobbleKeyedStateCheckpointingITTest {
         private final boolean waitForCheckpointAfterRestore;
         private volatile boolean running = true;
         private int lastEmitted = -1;
-        private boolean checkpointHappened;
+        private volatile boolean checkpointHappened;
 
         private IntGeneratingSourceFunction(
                 int numElements, int checkpointLatestAt, boolean waitForCheckpointAfterRestore) {
@@ -207,13 +212,13 @@ class CobbleKeyedStateCheckpointingITTest {
                             : getRuntimeContext().getIndexOfThisSubtask();
 
             while (running && nextElement < numElements) {
-                if (!checkpointHappened) {
-                    if (nextElement < checkpointLatestAt) {
+                if (!checkpointGateOpen()) {
+                    if (!checkpointHappened && nextElement < checkpointLatestAt) {
                         Thread.sleep(1L);
                     } else {
-                        synchronized (this) {
-                            while (!checkpointHappened) {
-                                wait();
+                        synchronized (SEQUENTIAL_FAILURE_COORDINATION_LOCK) {
+                            while (running && !checkpointGateOpen()) {
+                                SEQUENTIAL_FAILURE_COORDINATION_LOCK.wait();
                             }
                         }
                     }
@@ -230,6 +235,9 @@ class CobbleKeyedStateCheckpointingITTest {
         @Override
         public void cancel() {
             running = false;
+            synchronized (SEQUENTIAL_FAILURE_COORDINATION_LOCK) {
+                SEQUENTIAL_FAILURE_COORDINATION_LOCK.notifyAll();
+            }
         }
 
         @Override
@@ -246,14 +254,22 @@ class CobbleKeyedStateCheckpointingITTest {
 
         @Override
         public void notifyCheckpointComplete(long checkpointId) {
-            synchronized (this) {
+            synchronized (SEQUENTIAL_FAILURE_COORDINATION_LOCK) {
                 checkpointHappened = true;
-                notifyAll();
+                SEQUENTIAL_FAILURE_COORDINATION_LOCK.notifyAll();
             }
         }
 
         @Override
         public void notifyCheckpointAborted(long checkpointId) {}
+
+        private boolean checkpointGateOpen() {
+            return checkpointHappened
+                    && (!waitForCheckpointAfterRestore
+                            || ThreeTimesFailingPartitionedSum.FAILURES.get() >= SEQUENTIAL_FAILURES
+                            || CHECKPOINTED_FAILURE_ATTEMPT.get()
+                                    > ThreeTimesFailingPartitionedSum.FAILURES.get());
+        }
     }
 
     private static final class OnceFailingPartitionedSum
@@ -362,6 +378,13 @@ class CobbleKeyedStateCheckpointingITTest {
         @Override
         public void notifyCheckpointComplete(long checkpointId) {
             checkpointCompleted = true;
+            if (getRuntimeContext().getIndexOfThisSubtask() == 0
+                    && FAILURES.get() < SEQUENTIAL_FAILURES) {
+                CHECKPOINTED_FAILURE_ATTEMPT.accumulateAndGet(FAILURES.get() + 1, Math::max);
+                synchronized (SEQUENTIAL_FAILURE_COORDINATION_LOCK) {
+                    SEQUENTIAL_FAILURE_COORDINATION_LOCK.notifyAll();
+                }
+            }
         }
 
         @Override
