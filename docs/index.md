@@ -26,23 +26,34 @@ Cobble Flink supports Flink `1.17` and later. See
 ## Why Cobble Flink
 
 Flink state is essential to a stateful job, but it is often visible only to the
-running job and restore tooling. Cobble Flink makes persisted state easier to
-understand and reuse:
+running job and restore tooling. Cobble Flink provides a state backend built for
+performance, elastic storage, and a more open state experience:
 
-- **See what Flink stored.** The web monitor can browse checkpoints and sink
-  snapshots by operator and state, then decode keys and values into semantic
-  fields when schema information is available.
+- **High performance for stateful workloads.** Cobble combines adaptive
+  in-memory structures, efficient state operations, and an LSM engine designed
+  for streaming workloads. On Flink 2.0, it also supports the asynchronous state
+  API introduced by Flink. See the current
+  [state backend benchmarks](https://cobble-project.github.io/cobble-flink/latest/state-backend/benchmark)
+  for Nexmark and Flink state-operation results.
+- **Storage-compute separation with a local fast path.** Durable state can live
+  on shared or object storage for recovery and rescale, while the local volume
+  remains the high-priority active tier by default. Normal processing therefore
+  uses local storage first without giving up shared-state elasticity.
+- **Key-value separation for large state values.** Values above a configurable
+  threshold are stored in Cobble's value log instead of being repeatedly
+  rewritten with SST keys and indexes. Value-log files can also be assigned to
+  a lower-priority primary tier when required by the deployment.
+- **Observe persisted state.** The web monitor can browse checkpoint and sink
+  snapshots by operator and state, decode keys and values into semantic fields,
+  and surface generated SQL examples.
 - **Consume state as data.** The SQL source can scan or look up Cobble sink
   tables and supported keyed state directly, including structured semantic
   columns. Persisted state is no longer useful only for job recovery.
-- **Use one storage layer across workflows.** State backend, source, sink,
-  metrics, and remote storage support work together, making it easier to debug
-  a job, validate its state, and build new Flink pipelines from existing data.
 
-This brings a different experience to stateful Flink: managed state remains
-part of the runtime while becoming observable and consumable. The same applies
-to tables written by the Cobble sink: users can inspect their snapshots and
-read the data back through the Cobble source.
+State backend, source, sink, metrics, and remote storage support work together
+as one storage layer. Managed state remains part of the Flink runtime while
+becoming observable and consumable; tables written by the Cobble sink gain the
+same inspection and source capabilities.
 
 ## Showcase
 

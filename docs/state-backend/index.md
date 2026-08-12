@@ -198,6 +198,8 @@ backend.
 | `state.backend.cobble.compaction.remote.addr` | none | Address (`host:port`) of a Cobble remote compactor. When unset, compaction runs locally in the TaskManager. |
 | `state.backend.cobble.compaction.remote.timeout` | `300s` | Timeout for a single remote compaction request. |
 | `state.backend.cobble.compaction.threads` | `4` | Number of Cobble compaction worker threads on the writer (TaskManager) side. When compaction runs locally this is the local compaction thread pool; when remote compaction is enabled this sizes the writer's remote-compaction submission runtime. The remote compactor process has its own worker pool, configured by `compaction_threads` in its Cobble config (see [Remote Compaction](#remote-compaction)). |
+| `state.backend.cobble.async.read-threads` | `4` | Flink 2.0 only: worker threads used for asynchronous state reads. |
+| `state.backend.cobble.async.write-threads` | `1` | Flink 2.0 only: worker threads used for asynchronous state writes. |
 | `state.backend.cobble.sst.bloom-filter.enabled` | `true` | Whether SST bloom filters are enabled. |
 | `state.backend.cobble.sst.bloom-filter.bits-per-key` | `10` | Bloom-filter density used when bloom filters are enabled. |
 | `state.backend.cobble.sst.partitioned-index.enabled` | `true` | Whether partitioned SST index/filter blocks are enabled. |
@@ -318,9 +320,8 @@ This section explains how to migrate a stateful Flink job from the RocksDB state
 backend to the Cobble state backend by restoring from a RocksDB **canonical
 savepoint**.
 
-Cobble can **restore from** canonical savepoints, but it does **not create**
-canonical savepoints. After the restore, the job continues with regular Cobble
-checkpoints.
+Cobble can both create and restore canonical savepoints on the synchronous
+state path. Flink 2.0 async-state operators use native checkpoints instead.
 
 ### When to use this
 
