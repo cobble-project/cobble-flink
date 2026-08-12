@@ -56,6 +56,16 @@ final class StateInspectSemanticSchemaExtractor {
                         describeDescriptorType(descriptor)));
     }
 
+    static StateInspectSemanticSchema forValue(
+            SerializerInspectSchema stateKeySerializer,
+            SerializerInspectSchema namespaceSerializer,
+            SerializerInspectSchema valueSerializer) {
+        return StateInspectSemanticSchema.forValue(
+                inspectTypeOrUnknown(stateKeySerializer),
+                inspectTypeOrUnknown(namespaceSerializer),
+                inspectTypeOrUnknown(valueSerializer));
+    }
+
     static StateInspectSemanticSchema forReducing(
             SerializerInspectSchema stateKeySerializer,
             SerializerInspectSchema namespaceSerializer,
@@ -69,6 +79,16 @@ final class StateInspectSemanticSchemaExtractor {
                                 inspectTypeOrUnknown(valueSerializer),
                                 describeDescriptorType(descriptor)),
                         describeDescriptorType(descriptor)));
+    }
+
+    static StateInspectSemanticSchema forReducing(
+            SerializerInspectSchema stateKeySerializer,
+            SerializerInspectSchema namespaceSerializer,
+            SerializerInspectSchema valueSerializer) {
+        return StateInspectSemanticSchema.forReducing(
+                inspectTypeOrUnknown(stateKeySerializer),
+                inspectTypeOrUnknown(namespaceSerializer),
+                inspectTypeOrUnknown(valueSerializer));
     }
 
     /**
@@ -86,6 +106,16 @@ final class StateInspectSemanticSchemaExtractor {
                 inspectTypeOrUnknown(stateKeySerializer),
                 inspectTypeOrUnknown(namespaceSerializer),
                 firstKnown(inspectTypeOrUnknown(valueSerializer), StateInspectType.unknown()));
+    }
+
+    static StateInspectSemanticSchema forAggregating(
+            SerializerInspectSchema stateKeySerializer,
+            SerializerInspectSchema namespaceSerializer,
+            SerializerInspectSchema valueSerializer) {
+        return StateInspectSemanticSchema.forAggregating(
+                inspectTypeOrUnknown(stateKeySerializer),
+                inspectTypeOrUnknown(namespaceSerializer),
+                inspectTypeOrUnknown(valueSerializer));
     }
 
     static StateInspectSemanticSchema forList(
@@ -106,6 +136,16 @@ final class StateInspectSemanticSchemaExtractor {
                 inspectTypeOrUnknown(stateKeySerializer),
                 inspectTypeOrUnknown(namespaceSerializer),
                 elementType);
+    }
+
+    static StateInspectSemanticSchema forList(
+            SerializerInspectSchema stateKeySerializer,
+            SerializerInspectSchema namespaceSerializer,
+            SerializerInspectSchema elementSerializer) {
+        return StateInspectSemanticSchema.forList(
+                inspectTypeOrUnknown(stateKeySerializer),
+                inspectTypeOrUnknown(namespaceSerializer),
+                inspectTypeOrUnknown(elementSerializer));
     }
 
     static StateInspectSemanticSchema forMap(
@@ -132,6 +172,18 @@ final class StateInspectSemanticSchemaExtractor {
                 inspectTypeOrUnknown(namespaceSerializer),
                 mapKeyType,
                 mapValueType);
+    }
+
+    static StateInspectSemanticSchema forMap(
+            SerializerInspectSchema stateKeySerializer,
+            SerializerInspectSchema namespaceSerializer,
+            SerializerInspectSchema mapUserKeySerializer,
+            SerializerInspectSchema mapUserValueSerializer) {
+        return StateInspectSemanticSchema.forMap(
+                inspectTypeOrUnknown(stateKeySerializer),
+                inspectTypeOrUnknown(namespaceSerializer),
+                inspectTypeOrUnknown(mapUserKeySerializer),
+                inspectTypeOrUnknown(mapUserValueSerializer));
     }
 
     static StateInspectSemanticSchema forTimer(

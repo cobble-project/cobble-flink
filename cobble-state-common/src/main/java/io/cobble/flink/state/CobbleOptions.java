@@ -155,6 +155,24 @@ public final class CobbleOptions {
                                     + "(TaskManager) side. Defaults to 4. The remote compactor "
                                     + "process uses its own compaction_threads setting.");
 
+    /** Number of worker threads used for Flink 2.0 asynchronous state reads. */
+    public static final ConfigOption<Integer> ASYNC_READ_THREADS =
+            ConfigOptions.key("state.backend.cobble.async.read-threads")
+                    .intType()
+                    .defaultValue(4)
+                    .withDescription(
+                            "Number of worker threads used for Flink 2.0 asynchronous state reads. "
+                                    + "Defaults to 4.");
+
+    /** Number of worker threads used for Flink 2.0 asynchronous state writes. */
+    public static final ConfigOption<Integer> ASYNC_WRITE_THREADS =
+            ConfigOptions.key("state.backend.cobble.async.write-threads")
+                    .intType()
+                    .defaultValue(1)
+                    .withDescription(
+                            "Number of worker threads used for Flink 2.0 asynchronous state writes. "
+                                    + "Defaults to 1.");
+
     /** Whether Cobble should enable SST bloom filters. */
     public static final ConfigOption<Boolean> SST_BLOOM_FILTER_ENABLED =
             ConfigOptions.key("state.backend.cobble.sst.bloom-filter.enabled")

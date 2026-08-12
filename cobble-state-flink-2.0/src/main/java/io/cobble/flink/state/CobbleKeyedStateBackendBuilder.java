@@ -7,6 +7,7 @@ import io.cobble.flink.common.CobbleStateDescriptor;
 import io.cobble.structured.Db;
 
 import org.apache.flink.api.common.typeutils.TypeSerializer;
+import org.apache.flink.configuration.ConfigOption;
 import org.apache.flink.configuration.Configuration;
 import org.apache.flink.core.fs.CloseableRegistry;
 import org.apache.flink.core.memory.DataInputViewStreamWrapper;
@@ -152,6 +153,53 @@ final class CobbleKeyedStateBackendBuilder<K> {
                             priorityQueueStateType,
                             restoredCanonicalMetadata,
                             restoredStateDescriptors);
+            success = true;
+            return backend;
+        } finally {
+            if (!success) {
+                IOUtils.closeQuietly(cancelStreamRegistryForBackend);
+                resources.close();
+            }
+        }
+    }
+
+    private int positiveAsyncThreadCount(ConfigOption<Integer> option) {
+        int value = flinkConfig.get(option);
+        Preconditions.checkArgument(value > 0, "%s must be greater than zero.", option.key());
+        return value;
+    }
+
+    /** Builds Flink 2.0's asynchronous keyed-state backend over the same Cobble resources. */
+    CobbleAsyncKeyedStateBackend<K> buildAsync() throws IOException {
+        CloseableRegistry cancelStreamRegistryForBackend = new CloseableRegistry();
+        validateTimerBackendRestoreCompatibility();
+        StateSerializerProvider<K> keySerializerProvider =
+                StateSerializerProvider.fromNewRegisteredSerializer(keySerializer);
+        CobbleBackendResources resources =
+                prepareCobbleResources(keySerializerProvider, cancelStreamRegistryForBackend);
+        boolean success = false;
+        try {
+            boolean restoredNativeQueuesMayContainEntries =
+                    restoreStateHandles != null && !restoreStateHandles.isEmpty();
+            CobbleAsyncKeyedStateBackend<K> backend =
+                    new CobbleAsyncKeyedStateBackend<>(
+                            env.getExecutionConfig(),
+                            ttlTimeProvider,
+                            keySerializerProvider.currentSchemaSerializer(),
+                            new InternalKeyContextImpl<>(keyGroupRange, numberOfKeyGroups),
+                            cancelStreamRegistryForBackend,
+                            resources.instanceBasePath,
+                            resources.volumePath,
+                            resources.configPath,
+                            resources.config,
+                            resources.db,
+                            resources.nativeMetricsMonitor,
+                            positiveAsyncThreadCount(CobbleOptions.ASYNC_READ_THREADS),
+                            positiveAsyncThreadCount(CobbleOptions.ASYNC_WRITE_THREADS),
+                            restoredNativeQueuesMayContainEntries,
+                            priorityQueueStateType,
+                            restoredCanonicalMetadata,
+                            readRestoredStateDescriptors());
             success = true;
             return backend;
         } finally {

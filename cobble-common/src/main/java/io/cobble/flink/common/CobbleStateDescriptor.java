@@ -80,45 +80,41 @@ public final class CobbleStateDescriptor {
     /** Creates the current physical descriptor for a Flink keyed state. */
     public static CobbleStateDescriptor forKeyValue(
             String stateName, String columnFamily, StateDescriptor.Type stateType) {
-        switch (stateType) {
+        return forKeyValue(stateName, columnFamily, StateKind.valueOf(stateType.name()));
+    }
+
+    /** Creates the current physical descriptor without depending on a Flink API generation. */
+    public static CobbleStateDescriptor forKeyValue(
+            String stateName, String columnFamily, StateKind stateKind) {
+        switch (stateKind) {
             case VALUE:
+            case REDUCING:
+            case AGGREGATING:
                 return current(
                         stateName,
                         columnFamily,
-                        StateKind.VALUE,
+                        stateKind,
                         RowKeyEncoding.KEY_NAMESPACE,
                         RowValueEncoding.SERIALIZED_VALUE);
             case LIST:
                 return current(
                         stateName,
                         columnFamily,
-                        StateKind.LIST,
+                        stateKind,
                         RowKeyEncoding.KEY_NAMESPACE,
                         RowValueEncoding.DELIMITED_LIST);
             case MAP:
                 return current(
                         stateName,
                         columnFamily,
-                        StateKind.MAP,
+                        stateKind,
                         RowKeyEncoding.KEY_NAMESPACE_MAP_KEY,
                         RowValueEncoding.NULLABLE_MAP_VALUE);
-            case REDUCING:
-                return current(
-                        stateName,
-                        columnFamily,
-                        StateKind.REDUCING,
-                        RowKeyEncoding.KEY_NAMESPACE,
-                        RowValueEncoding.SERIALIZED_VALUE);
-            case AGGREGATING:
-                return current(
-                        stateName,
-                        columnFamily,
-                        StateKind.AGGREGATING,
-                        RowKeyEncoding.KEY_NAMESPACE,
-                        RowValueEncoding.SERIALIZED_VALUE);
+            case TIMER:
+                throw new IllegalArgumentException("Use forTimer() for timer state.");
             default:
                 throw new IllegalArgumentException(
-                        "Unsupported Cobble keyed state kind: " + stateType);
+                        "Unsupported Cobble keyed state kind: " + stateKind);
         }
     }
 
