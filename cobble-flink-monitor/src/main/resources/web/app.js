@@ -492,10 +492,18 @@ async function switchSource(
   }
 }
 
+// The sessions API accepts the literal 'latest' or a JSON number. Checkpoint ids reach here as
+// strings -- from a data attribute on the Open button, or from String() in the operator handler --
+// so coerce numeric ones back to numbers. Anything else is passed through for the server to reject.
+function checkpointParam(checkpointId) {
+  if (typeof checkpointId === 'string' && /^\d+$/.test(checkpointId)) return Number(checkpointId)
+  return checkpointId
+}
+
 async function replaceSession(checkpointId, operatorId, source, discovered = null, options = {}) {
   if (!source) throw new Error('Enter a checkpoint root or Cobble data source path.')
   const catalog = discovered || await post('/api/v1/discovery', { source })
-  const body = { source, checkpoint: checkpointId }
+  const body = { source, checkpoint: checkpointParam(checkpointId) }
   if (operatorId) body.operator_id = operatorId
   const replacement = await post('/api/v1/sessions', body)
   let replacementOverview
