@@ -104,6 +104,30 @@ row-kind, and database mutation failures count one send error.
 Sink writers also expose the [storage metrics](#storage-and-state-backend) for
 their Cobble database.
 
+## Dedicated Compaction
+
+The dedicated-compaction job registers metrics under its monitor and executor
+operator groups. Monitor metrics describe planning and the small source-side
+queue; executor metrics describe actual compaction attempts.
+
+| Metric | Type | Meaning |
+| --- | --- | --- |
+| `cobble.monitorPollsTotal` | Counter | Monitor polling attempts. |
+| `cobble.monitorPollFailuresTotal` | Counter | Polls that failed before returning plans. |
+| `cobble.monitorPollDurationMillisTotal` | Counter | Cumulative monitor polling time. |
+| `cobble.lastMonitorPollDurationMillis` | Gauge | Duration of the latest poll. |
+| `cobble.plansDiscoveredTotal` | Counter | Plans returned by the Cobble monitor. |
+| `cobble.plansEmittedTotal` | Counter | Plans emitted to downstream executors. |
+| `cobble.pendingPlans` | Gauge | Plans waiting in the monitor operator's local output queue. |
+| `cobble.planExecutionsTotal` | Counter | Executor attempts, including failures and non-publishing outcomes. |
+| `cobble.resultsPublishedTotal` | Counter | Attempts that published a compaction result. |
+| `cobble.stalePlansTotal` | Counter | Plans discarded after their source observation changed. |
+| `cobble.waitingForResultTotal` | Counter | Attempts deferred because another result was already pending. |
+| `cobble.executionFailuresTotal` | Counter | Executor attempts that failed. |
+| `cobble.executionDurationMillisTotal` | Counter | Cumulative executor time across all attempts. |
+| `cobble.lastExecutionDurationMillis` | Gauge | Duration of the latest executor attempt. |
+| `cobble.executionInProgress` | Gauge | `1` while the subtask is executing a plan, otherwise `0`. |
+
 ## Reporter Example
 
 Configure a Flink metric reporter normally. Add it to the

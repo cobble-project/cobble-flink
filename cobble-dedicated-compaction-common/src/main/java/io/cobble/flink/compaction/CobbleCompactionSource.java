@@ -175,6 +175,7 @@ public final class CobbleCompactionSource
         private final Deque<CobbleCompactionPlan> pending =
                 new ArrayDeque<CobbleCompactionPlan>();
         private final ScheduledExecutorService availabilityExecutor;
+        private final CobbleCompactionMetrics.MonitorMetrics metrics;
 
         private DedicatedCompactionMonitor monitor;
         private CompletableFuture<Void> availability;
@@ -194,6 +195,8 @@ public final class CobbleCompactionSource
             this.availabilityExecutor =
                     Executors.newSingleThreadScheduledExecutor(
                             new DaemonThreadFactory("cobble-compaction-source-availability"));
+            this.metrics =
+                    new CobbleCompactionMetrics.MonitorMetrics(context.metricGroup());
             this.availability = new CompletableFuture<Void>();
         }
 
@@ -219,6 +222,7 @@ public final class CobbleCompactionSource
                 return InputStatus.NOTHING_AVAILABLE;
             }
             output.collect(plan);
+            metrics.planEmitted();
             return pending.isEmpty() ? InputStatus.NOTHING_AVAILABLE : InputStatus.MORE_AVAILABLE;
         }
 
@@ -270,6 +274,7 @@ public final class CobbleCompactionSource
             closed = true;
             availability.complete(null);
             availabilityExecutor.shutdownNow();
+            metrics.close();
             if (monitor != null) {
                 monitor.close();
                 monitor = null;
@@ -280,12 +285,21 @@ public final class CobbleCompactionSource
             if (closed) {
                 return;
             }
-            if (monitor == null) {
-                CobbleLoader.ensureCobbleLoaded();
-                monitor = DedicatedCompactionMonitor.scan(Paths.get(configPath), path);
-            }
-            for (DedicatedCompactionPlan plan : monitor.poll()) {
-                pending.addLast(new CobbleCompactionPlan(plan.encode()));
+            long startedNanos = System.nanoTime();
+            try {
+                if (monitor == null) {
+                    CobbleLoader.ensureCobbleLoaded();
+                    monitor = DedicatedCompactionMonitor.scan(Paths.get(configPath), path);
+                }
+                List<DedicatedCompactionPlan> plans = monitor.poll();
+                for (DedicatedCompactionPlan plan : plans) {
+                    pending.addLast(new CobbleCompactionPlan(plan.encode()));
+                }
+                metrics.pollSucceeded(
+                        plans.size(), CobbleCompactionMetrics.elapsedMillis(startedNanos));
+            } catch (RuntimeException | LinkageError error) {
+                metrics.pollFailed(CobbleCompactionMetrics.elapsedMillis(startedNanos));
+                throw error;
             }
         }
     }

@@ -15,6 +15,7 @@ public final class CobbleCompactionExecutorFunction
 
     private final String configPath;
     private transient DedicatedCompactionExecutor executor;
+    private transient CobbleCompactionMetrics.ExecutorMetrics metrics;
 
     public CobbleCompactionExecutorFunction(String configPath) {
         if (configPath == null || configPath.trim().isEmpty()) {
@@ -27,12 +28,24 @@ public final class CobbleCompactionExecutorFunction
     public void open(Configuration parameters) {
         CobbleLoader.ensureCobbleLoaded();
         executor = DedicatedCompactionExecutor.open(Paths.get(configPath));
+        metrics = new CobbleCompactionMetrics.ExecutorMetrics(getRuntimeContext().getMetricGroup());
     }
 
     @Override
     public String map(CobbleCompactionPlan plan) {
-        DedicatedCompactionExecutor.Outcome outcome = executor.execute(plan.toNativePlan());
-        return outcome.name();
+        long startedNanos = System.nanoTime();
+        metrics.executionStarted();
+        try {
+            DedicatedCompactionExecutor.Outcome outcome = executor.execute(plan.toNativePlan());
+            metrics.executionSucceeded(
+                    outcome, CobbleCompactionMetrics.elapsedMillis(startedNanos));
+            return outcome.name();
+        } catch (RuntimeException | LinkageError error) {
+            metrics.executionFailed(CobbleCompactionMetrics.elapsedMillis(startedNanos));
+            throw error;
+        } finally {
+            metrics.executionFinished();
+        }
     }
 
     @Override
