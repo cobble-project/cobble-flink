@@ -15,6 +15,7 @@ import org.apache.flink.core.execution.SavepointFormatType;
 import org.apache.flink.runtime.execution.Environment;
 import org.apache.flink.runtime.state.AbstractKeyedStateBackend;
 import org.apache.flink.runtime.state.AbstractManagedMemoryStateBackend;
+import org.apache.flink.runtime.state.AsyncKeyedStateBackend;
 import org.apache.flink.runtime.state.ConfigurableStateBackend;
 import org.apache.flink.runtime.state.DefaultOperatorStateBackendBuilder;
 import org.apache.flink.runtime.state.OperatorStateBackend;
@@ -152,12 +153,36 @@ public class CobbleStateBackend extends AbstractManagedMemoryStateBackend
         return true;
     }
 
+    /** Enables Flink 2.1's asynchronous keyed-state execution path. */
+    @Override
+    public boolean supportsAsyncKeyedStateBackend() {
+        return true;
+    }
+
     /** Creates the Cobble-backed keyed backend shell and wires in resolved runtime settings. */
     @Override
     public <K> AbstractKeyedStateBackend<K> createKeyedStateBackend(
             StateBackend.KeyedStateBackendParameters<K> parameters) throws IOException {
         ensureCobbleLoaded();
+        try {
+            return createKeyedStateBackendBuilder(parameters).build();
+        } catch (IOException e) {
+            throw e;
+        } catch (Exception e) {
+            throw new IOException("Failed to create Cobble keyed state backend.", e);
+        }
+    }
 
+    /** Creates the native Cobble implementation used when async state execution is enabled. */
+    @Override
+    public <K> AsyncKeyedStateBackend<K> createAsyncKeyedStateBackend(
+            StateBackend.KeyedStateBackendParameters<K> parameters) throws Exception {
+        ensureCobbleLoaded();
+        return createKeyedStateBackendBuilder(parameters).buildAsync();
+    }
+
+    private <K> CobbleKeyedStateBackendBuilder<K> createKeyedStateBackendBuilder(
+            StateBackend.KeyedStateBackendParameters<K> parameters) throws IOException {
         Environment env = parameters.getEnv();
         String operatorIdentifier = parameters.getOperatorIdentifier();
         String fileCompatibleIdentifier = CobblePathUtils.toFileCompatibleName(operatorIdentifier);
@@ -181,34 +206,27 @@ public class CobbleStateBackend extends AbstractManagedMemoryStateBackend
         SizeTrackingStateConfig sizeTrackingStateConfig =
                 sizeTrackingConfigBuilder.setMetricGroup(parameters.getMetricGroup()).build();
 
-        try {
-            return new CobbleKeyedStateBackendBuilder<>(
-                            env,
-                            parameters.getMetricGroup(),
-                            parameters.getKvStateRegistry(),
-                            parameters.getKeySerializer(),
-                            parameters.getNumberOfKeyGroups(),
-                            parameters.getKeyGroupRange(),
-                            parameters.getTtlTimeProvider(),
-                            latencyTrackingStateConfig,
-                            sizeTrackingStateConfig,
-                            parameters.getCancelStreamRegistry(),
-                            parameters.getStateHandles(),
-                            instanceBasePath,
-                            checkpointScopeDirectoryName,
-                            memoryConfiguration,
-                            checkpointDirectory,
-                            localDirPrimaryHighPriority,
-                            parameters.getManagedMemoryFraction(),
-                            manualTtlTimeProviderForTests,
-                            flinkConfig,
-                            getPriorityQueueStateType())
-                    .build();
-        } catch (IOException e) {
-            throw e;
-        } catch (Exception e) {
-            throw new IOException("Failed to create Cobble keyed state backend.", e);
-        }
+        return new CobbleKeyedStateBackendBuilder<>(
+                env,
+                parameters.getMetricGroup(),
+                parameters.getKvStateRegistry(),
+                parameters.getKeySerializer(),
+                parameters.getNumberOfKeyGroups(),
+                parameters.getKeyGroupRange(),
+                parameters.getTtlTimeProvider(),
+                latencyTrackingStateConfig,
+                sizeTrackingStateConfig,
+                parameters.getCancelStreamRegistry(),
+                parameters.getStateHandles(),
+                instanceBasePath,
+                checkpointScopeDirectoryName,
+                memoryConfiguration,
+                checkpointDirectory,
+                localDirPrimaryHighPriority,
+                parameters.getManagedMemoryFraction(),
+                manualTtlTimeProviderForTests,
+                flinkConfig,
+                getPriorityQueueStateType());
     }
 
     private static Configuration mergedConfiguration(

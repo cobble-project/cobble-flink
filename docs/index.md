@@ -31,8 +31,8 @@ performance, elastic storage, and a more open state experience:
 
 - **High performance for stateful workloads.** Cobble combines adaptive
   in-memory structures, efficient state operations, and an LSM engine designed
-  for streaming workloads. On Flink 2.0, it also supports the asynchronous state
-  API introduced by Flink. See the current
+  for streaming workloads. On Flink 2.0 and later, it also supports the
+  asynchronous state API introduced by Flink. See the current
   [state backend benchmarks](https://cobble-project.github.io/cobble-flink/latest/state-backend/benchmark)
   for Nexmark and Flink state-operation results.
 - **Storage-compute separation with a local fast path.** Durable state can live

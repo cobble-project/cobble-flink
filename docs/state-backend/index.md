@@ -201,8 +201,8 @@ backend.
 | `state.backend.cobble.compaction.threads` | `4` | Number of Cobble compaction worker threads on the writer (TaskManager) side. When compaction runs locally this is the local compaction thread pool; when remote compaction is enabled this sizes the writer's remote-compaction submission runtime. The remote compactor process has its own worker pool, configured by `compaction_threads` in its Cobble config (see [Remote Compaction](#remote-compaction)). |
 | `state.backend.cobble.compaction.dedicated.poll-interval` | `1s` | How often the TaskManager checks shared storage for dedicated-compaction results. |
 | `state.backend.cobble.compaction.dedicated.orphan-min-age` | `5m` | Minimum age before abandoned dedicated-compaction output is eligible for cleanup. |
-| `state.backend.cobble.async.read-threads` | `4` | Flink 2.0 only: worker threads used for asynchronous state reads. |
-| `state.backend.cobble.async.write-threads` | `1` | Flink 2.0 only: worker threads used for asynchronous state writes. |
+| `state.backend.cobble.async.read-threads` | `4` | Flink 2.x worker threads used for asynchronous state reads. |
+| `state.backend.cobble.async.write-threads` | `1` | Flink 2.x worker threads used for asynchronous state writes. |
 | `state.backend.cobble.sst.bloom-filter.enabled` | `true` | Whether SST bloom filters are enabled. |
 | `state.backend.cobble.sst.bloom-filter.bits-per-key` | `10` | Bloom-filter density used when bloom filters are enabled. |
 | `state.backend.cobble.sst.partitioned-index.enabled` | `true` | Whether partitioned SST index/filter blocks are enabled. |
@@ -374,7 +374,7 @@ backend to the Cobble state backend by restoring from a RocksDB **canonical
 savepoint**.
 
 Cobble can both create and restore canonical savepoints on the synchronous
-state path. Flink 2.0 async-state operators use native checkpoints instead.
+state path. Flink 2.x async-state operators use native checkpoints instead.
 
 ### When to use this
 
