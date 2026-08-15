@@ -1,6 +1,7 @@
 name: Deploy Docs
 
 on:
+  workflow_dispatch:
   push:
     branches: [main, master]
     tags:
@@ -30,6 +31,12 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+
+          if [[ "${GITHUB_EVENT_NAME}" == "workflow_dispatch" ]]; then
+            echo "force_publish=true" >> "${GITHUB_OUTPUT}"
+          else
+            echo "force_publish=false" >> "${GITHUB_OUTPUT}"
+          fi
 
           if [[ "${GITHUB_REF_TYPE}" == "branch" ]]; then
             echo "publish_kind=latest" >> "${GITHUB_OUTPUT}"
@@ -93,6 +100,7 @@ jobs:
         run: |
           set -euo pipefail
           publish_kind="${{ steps.resolve.outputs.publish_kind }}"
+          force_publish="${{ steps.resolve.outputs.force_publish }}"
           root="${{ steps.resolve.outputs.docs_root }}"
           cobble_version="${{ steps.resolve.outputs.cobble_version }}"
           docs_label="${{ steps.resolve.outputs.docs_label }}"
@@ -147,12 +155,12 @@ jobs:
           EOF
 
           git -C "${tmp_dir}" add -A
-          if git -C "${tmp_dir}" diff --cached --quiet; then
+          if [[ "${force_publish}" != "true" ]] && git -C "${tmp_dir}" diff --cached --quiet; then
             echo "No docs changes to publish for '${docs_label}'."
             exit 0
           fi
 
           git -C "${tmp_dir}" config user.name "github-actions[bot]"
           git -C "${tmp_dir}" config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git -C "${tmp_dir}" commit -m "docs: publish ${docs_label}" >/dev/null
+          git -C "${tmp_dir}" commit --allow-empty -m "docs: publish ${docs_label}" >/dev/null
           git -C "${tmp_dir}" push origin "HEAD:${publish_branch}" >/dev/null
