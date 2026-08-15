@@ -320,6 +320,13 @@ final class CobbleKeyedStateBackendBuilder<K> {
 
     /** Computes the local volume root and the full Cobble volume list for this backend instance. */
     private VolumeLayout createVolumeLayout() throws IOException {
+        boolean dedicatedCompaction = CobbleFlinkConfigMapper.usesDedicatedCompaction(flinkConfig);
+        if (dedicatedCompaction && normalizeCheckpointDirectory(checkpointDirectory) == null) {
+            throw new IOException(
+                    CobbleOptions.COMPACTION_MODE.key()
+                            + "=dedicated requires shared checkpoint storage");
+        }
+        boolean useLocalPrimary = localDirPrimaryHighPriority && !dedicatedCompaction;
         File localVolumePath = new File(instanceBasePath, COBBLE_DB_DIR_NAME);
         List<Config.VolumeDescriptor> volumes =
                 new ArrayList<>(
@@ -327,7 +334,7 @@ final class CobbleKeyedStateBackendBuilder<K> {
                                 instanceBasePath,
                                 checkpointScopeDirectoryName,
                                 checkpointDirectory,
-                                localDirPrimaryHighPriority,
+                                useLocalPrimary,
                                 flinkConfig));
         addRestoreSourceVolumes(volumes);
         return new VolumeLayout(localVolumePath, volumes);
@@ -353,6 +360,9 @@ final class CobbleKeyedStateBackendBuilder<K> {
         rejectMixedRestoreHandles();
 
         List<RestoreSource> restoreSources = readRestoreSources();
+        boolean useLocalPrimary =
+                localDirPrimaryHighPriority
+                        && !CobbleFlinkConfigMapper.usesDedicatedCompaction(flinkConfig);
         boolean resumeSingleSource = canResumeSingleSource(restoreSources);
         List<Config.VolumeDescriptor> claimedSourceVolumes = new ArrayList<>();
         Set<String> configuredBaseDirectories = new LinkedHashSet<>();
@@ -373,7 +383,7 @@ final class CobbleKeyedStateBackendBuilder<K> {
             sourceVolume.kinds =
                     resumeSingleSource
                             ? Arrays.asList(
-                                    localDirPrimaryHighPriority
+                                    useLocalPrimary
                                             ? Config.VolumeUsageKind.PRIMARY_DATA_PRIORITY_LOW
                                             : Config.VolumeUsageKind.PRIMARY_DATA_PRIORITY_HIGH,
                                     Config.VolumeUsageKind.META,

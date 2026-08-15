@@ -90,22 +90,71 @@ final class CobbleFlinkConfigMapper {
                         flinkConfig.get(CobbleOptions.VALUE_SEPARATION_THRESHOLD));
         config.vlogLowPriorityPrimaryEnabled =
                 flinkConfig.get(CobbleOptions.VLOG_LOW_PRIORITY_PRIMARY_ENABLED);
-        // Remote compaction options. The remote address is optional: a blank value leaves
-        // compaction running locally in the TaskManager.
+        // Compaction execution is local by default. Keep the legacy remote-address-only form
+        // below so existing deployments continue to select remote mode.
         config.compactionReadAheadEnabled =
                 flinkConfig.get(CobbleOptions.COMPACTION_READ_AHEAD_ENABLED);
         config.compactionThreads =
                 requirePositive(
                         CobbleOptions.COMPACTION_THREADS.key(),
                         flinkConfig.get(CobbleOptions.COMPACTION_THREADS));
+        config.compactionDedicatedPollIntervalMs =
+                requirePositiveMillis(
+                        CobbleOptions.COMPACTION_DEDICATED_POLL_INTERVAL.key(),
+                        flinkConfig.get(CobbleOptions.COMPACTION_DEDICATED_POLL_INTERVAL));
+        config.compactionOrphanMinAgeMs =
+                requirePositiveMillis(
+                        CobbleOptions.COMPACTION_DEDICATED_ORPHAN_MIN_AGE.key(),
+                        flinkConfig.get(CobbleOptions.COMPACTION_DEDICATED_ORPHAN_MIN_AGE));
         config.compactionRemoteTimeoutMs =
                 requirePositiveMillis(
                         CobbleOptions.COMPACTION_REMOTE_TIMEOUT.key(),
                         flinkConfig.get(CobbleOptions.COMPACTION_REMOTE_TIMEOUT));
         String remoteAddr =
                 normalizeOptionalString(flinkConfig.get(CobbleOptions.COMPACTION_REMOTE_ADDR));
-        if (remoteAddr != null) {
-            config.compactionRemoteAddr = remoteAddr;
+        CobbleOptions.CompactionExecutionMode compactionMode =
+                flinkConfig.get(CobbleOptions.COMPACTION_MODE);
+        if (!flinkConfig.contains(CobbleOptions.COMPACTION_MODE) && remoteAddr != null) {
+            // Preserve the established configuration contract: remote.addr by itself enables
+            // remote compaction.
+            compactionMode = CobbleOptions.CompactionExecutionMode.REMOTE;
+        }
+        switch (compactionMode) {
+            case LOCAL:
+                if (remoteAddr != null) {
+                    throw new IllegalConfigurationException(
+                            CobbleOptions.COMPACTION_REMOTE_ADDR.key()
+                                    + " cannot be set when "
+                                    + CobbleOptions.COMPACTION_MODE.key()
+                                    + " is local");
+                }
+                config.compactionMode = Config.CompactionMode.EMBEDDED;
+                break;
+            case REMOTE:
+                if (remoteAddr == null) {
+                    throw new IllegalConfigurationException(
+                            CobbleOptions.COMPACTION_REMOTE_ADDR.key()
+                                    + " is required when "
+                                    + CobbleOptions.COMPACTION_MODE.key()
+                                    + " is remote");
+                }
+                config.compactionMode = Config.CompactionMode.EMBEDDED;
+                config.compactionRemoteAddr = remoteAddr;
+                break;
+            case DEDICATED:
+                if (remoteAddr != null) {
+                    throw new IllegalConfigurationException(
+                            CobbleOptions.COMPACTION_REMOTE_ADDR.key()
+                                    + " cannot be set when "
+                                    + CobbleOptions.COMPACTION_MODE.key()
+                                    + " is dedicated");
+                }
+                config.compactionMode = Config.CompactionMode.DEDICATED;
+                config.runtimeManifestMode = Config.RuntimeManifestMode.AUTO;
+                break;
+            default:
+                throw new IllegalConfigurationException(
+                        "Unsupported Cobble compaction mode: " + compactionMode);
         }
         // Flink already owns keyed-state shard assignment, restore, and rescale routing, so the
         // TaskManager-side Cobble DB should not also publish filesystem governance manifests.
@@ -116,6 +165,11 @@ final class CobbleFlinkConfigMapper {
                             CobbleOptions.SNAPSHOT_RETENTION.key(),
                             flinkConfig.get(CobbleOptions.SNAPSHOT_RETENTION));
         }
+    }
+
+    static boolean usesDedicatedCompaction(Configuration flinkConfig) {
+        return flinkConfig.get(CobbleOptions.COMPACTION_MODE)
+                == CobbleOptions.CompactionExecutionMode.DEDICATED;
     }
 
     static void applyCheckpointVolumeOptions(

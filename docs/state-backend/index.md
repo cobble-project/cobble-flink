@@ -195,9 +195,12 @@ backend.
 | `state.backend.cobble.compaction.l0-file-limit` | `2` | Number of L0 files that triggers compaction. Higher values reduce compaction work but can increase state lookup and iteration cost. |
 | `state.backend.cobble.compaction.write-stall-limit` | Derived by Cobble | Maximum combined immutable-memtable and L0-file pressure before Cobble blocks writes. The value must be at least `state.backend.cobble.compaction.l0-file-limit + 2`. When unset, Cobble derives `max(l0-file-limit + 2, 32)`. |
 | `state.backend.cobble.compaction.read-ahead.enabled` | `true` | Whether Cobble compaction read-ahead is enabled. |
-| `state.backend.cobble.compaction.remote.addr` | none | Address (`host:port`) of a Cobble remote compactor. When unset, compaction runs locally in the TaskManager. |
+| `state.backend.cobble.compaction.mode` | `LOCAL` | Where compaction runs: `LOCAL` in the TaskManager, `REMOTE` over the compaction service protocol, or `DEDICATED` through shared storage. |
+| `state.backend.cobble.compaction.remote.addr` | none | Address (`host:port`) of a Cobble remote compactor. Required in `REMOTE` mode. For compatibility, setting only this option also selects remote mode. |
 | `state.backend.cobble.compaction.remote.timeout` | `300s` | Timeout for a single remote compaction request. |
 | `state.backend.cobble.compaction.threads` | `4` | Number of Cobble compaction worker threads on the writer (TaskManager) side. When compaction runs locally this is the local compaction thread pool; when remote compaction is enabled this sizes the writer's remote-compaction submission runtime. The remote compactor process has its own worker pool, configured by `compaction_threads` in its Cobble config (see [Remote Compaction](#remote-compaction)). |
+| `state.backend.cobble.compaction.dedicated.poll-interval` | `1s` | How often the TaskManager checks shared storage for dedicated-compaction results. |
+| `state.backend.cobble.compaction.dedicated.orphan-min-age` | `5m` | Minimum age before abandoned dedicated-compaction output is eligible for cleanup. |
 | `state.backend.cobble.async.read-threads` | `4` | Flink 2.0 only: worker threads used for asynchronous state reads. |
 | `state.backend.cobble.async.write-threads` | `1` | Flink 2.0 only: worker threads used for asynchronous state writes. |
 | `state.backend.cobble.sst.bloom-filter.enabled` | `true` | Whether SST bloom filters are enabled. |
@@ -237,9 +240,8 @@ have a specific operational need.
 
 ## Remote Compaction
 
-By default, Cobble runs compaction in the TaskManager process. You can offload
-compaction CPU and I/O to a separate remote compactor by setting
-`state.backend.cobble.compaction.remote.addr`.
+By default, Cobble runs compaction in the TaskManager process. Remote mode sends
+each compaction request to a long-running compactor service.
 
 ### Start a compactor
 
@@ -296,14 +298,15 @@ try (CobbleCliProcess process =
 Point the Flink state backend to the compactor address:
 
 ```yaml
+state.backend.cobble.compaction.mode: REMOTE
 state.backend.cobble.compaction.remote.addr: 127.0.0.1:18888
 state.backend.cobble.compaction.remote.timeout: 30s
 state.backend.cobble.compaction.threads: 2
 state.backend.cobble.compaction.read-ahead.enabled: true
 ```
 
-Leave `state.backend.cobble.compaction.remote.addr` unset to keep compaction
-local in each TaskManager. A blank value is treated the same as unset.
+Use `state.backend.cobble.compaction.mode: LOCAL` to keep compaction local in
+each TaskManager.
 
 `state.backend.cobble.compaction.threads` is a TaskManager-side setting. When
 remote compaction is disabled, it sizes the local compaction pool. When remote
@@ -313,6 +316,56 @@ the compactor's Cobble config.
 
 Use the same Cobble version for the compactor and the TaskManagers. Upgrade them
 together when changing Cobble versions.
+
+## Dedicated Compaction
+
+Dedicated mode coordinates through checkpoint storage instead of a network
+request. A dedicated Flink job discovers Cobble databases, queues portable
+compaction plans, and executes those plans in parallel. Results are published
+through shared storage for the TaskManagers to apply.
+
+Configure the state backend:
+
+```yaml
+state.backend.cobble.compaction.mode: DEDICATED
+state.backend.cobble.compaction.dedicated.poll-interval: 1s
+state.backend.cobble.compaction.dedicated.orphan-min-age: 5m
+```
+
+Dedicated mode requires shared checkpoint storage. Cobble writes active SSTs to
+that shared volume so the external process can read them; the TaskManager local
+directory remains a cache.
+
+Create a Cobble config whose metadata/data volumes cover the shared checkpoint
+prefix and contain the required storage credentials. The config file must be
+available at the same path on the compaction job's TaskManagers.
+
+Run the job with the matching dist jar. `--path` accepts a Cobble DB directory
+or any parent directory/storage prefix. It discovers ordinary Cobble stores and
+Flink state below that path using Cobble's own DB metadata. `--parallelism`
+controls the number of concurrent compaction executors:
+
+```bash
+bin/flink run \
+  -c io.cobble.flink.compaction.CobbleDedicatedCompactionJob \
+  cobble-flink-dist-0.4.0-1-flink-1.17.jar \
+  --config ./cobble-dedicated-compactor.yaml \
+  --path s3://state-bucket/flink-checkpoints \
+  --parallelism 4
+```
+
+The path must be absolute and must not contain credentials or storage options;
+those come from `--config`. Monitoring always runs at parallelism one; plans
+are shuffled to the configured executor parallelism. Planning and
+execution are independent, and every executor revalidates the durable DB
+observation before writing output, so queued stale plans are discarded safely.
+Queued plans use absolute volume locations without credentials; each executor
+loads credentials and storage options from `--config`.
+
+The same dist jar can still run the standalone Cobble `compact` command when a
+Flink-managed compaction service is not needed.
+
+When state TTL is enabled, keep TaskManager and compactor host clocks synchronized.
 
 ## Restore From A RocksDB Canonical Savepoint
 

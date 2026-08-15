@@ -116,9 +116,19 @@ public final class CobbleOptions {
                     .withDescription(
                             "Whether Cobble should enable compaction read-ahead. Defaults to true.");
 
+    /** Where Cobble executes compaction work. */
+    public static final ConfigOption<CompactionExecutionMode> COMPACTION_MODE =
+            ConfigOptions.key("state.backend.cobble.compaction.mode")
+                    .enumType(CompactionExecutionMode.class)
+                    .defaultValue(CompactionExecutionMode.LOCAL)
+                    .withDescription(
+                            "Compaction execution mode: local in the TaskManager, remote over the "
+                                    + "Cobble compaction protocol, or dedicated through shared storage.");
+
     /**
-     * Address (host:port) of a Cobble remote compactor. When blank, compaction runs locally in the
-     * TaskManager. Mirrors Cobble's {@code compaction_remote_addr}.
+     * Address (host:port) of a Cobble remote compactor. Setting this option without an explicit
+     * mode selects remote mode for compatibility. A blank value is treated as unset. Mirrors
+     * Cobble's {@code compaction_remote_addr}.
      */
     public static final ConfigOption<String> COMPACTION_REMOTE_ADDR =
             ConfigOptions.key("state.backend.cobble.compaction.remote.addr")
@@ -154,6 +164,22 @@ public final class CobbleOptions {
                             "Number of Cobble compaction worker threads on the writer "
                                     + "(TaskManager) side. Defaults to 4. The remote compactor "
                                     + "process uses its own compaction_threads setting.");
+
+    /** Poll interval for results produced by a shared-storage dedicated compactor. */
+    public static final ConfigOption<Duration> COMPACTION_DEDICATED_POLL_INTERVAL =
+            ConfigOptions.key("state.backend.cobble.compaction.dedicated.poll-interval")
+                    .durationType()
+                    .defaultValue(Duration.ofSeconds(1))
+                    .withDescription(
+                            "How often a TaskManager checks shared storage for dedicated compaction results.");
+
+    /** Minimum age before abandoned dedicated compaction output may be removed. */
+    public static final ConfigOption<Duration> COMPACTION_DEDICATED_ORPHAN_MIN_AGE =
+            ConfigOptions.key("state.backend.cobble.compaction.dedicated.orphan-min-age")
+                    .durationType()
+                    .defaultValue(Duration.ofMinutes(5))
+                    .withDescription(
+                            "Minimum age of an abandoned dedicated compaction job before cleanup.");
 
     /** Number of worker threads used for Flink 2.0 asynchronous state reads. */
     public static final ConfigOption<Integer> ASYNC_READ_THREADS =
@@ -305,6 +331,12 @@ public final class CobbleOptions {
                             "If enabled and a Flink checkpoint directory is configured, the local Cobble working "
                                     + "directory is registered as the high-priority primary volume. Checkpoint storage "
                                     + "remains a low-priority primary fallback and stores metadata and snapshots.");
+
+    public enum CompactionExecutionMode {
+        LOCAL,
+        REMOTE,
+        DEDICATED
+    }
 
     private CobbleOptions() {}
 }

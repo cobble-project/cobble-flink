@@ -13,6 +13,8 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import io.cobble.CancelledError;
+import io.cobble.CobbleCli;
+import io.cobble.CobbleCliProcess;
 import io.cobble.Config;
 import io.cobble.ShardSnapshot;
 import io.cobble.flink.common.CobbleStateDescriptor;
@@ -121,6 +123,7 @@ import java.io.UncheckedIOException;
 import java.lang.reflect.Proxy;
 import java.nio.ByteBuffer;
 import java.nio.file.Files;
+import java.nio.file.NoSuchFileException;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -2966,9 +2969,159 @@ class CobbleStateBackendTest {
         CobbleFlinkConfigMapper.applyExposedOptions(config, overrides);
 
         assertFalse(config.compactionReadAheadEnabled);
+        assertEquals(Config.CompactionMode.EMBEDDED, config.compactionMode);
         assertEquals("127.0.0.1:18888", config.compactionRemoteAddr);
         assertEquals(45_000L, config.compactionRemoteTimeoutMs.longValue());
         assertEquals(2, config.compactionThreads.intValue());
+    }
+
+    @Test
+    void dedicatedCompactionUsesSharedStorageForAllPrimaryData(@TempDir Path tempDir)
+            throws Exception {
+        Configuration overrides = new Configuration();
+        overrides.set(
+                CobbleOptions.COMPACTION_MODE, CobbleOptions.CompactionExecutionMode.DEDICATED);
+        overrides.set(
+                CobbleOptions.COMPACTION_DEDICATED_POLL_INTERVAL, java.time.Duration.ofSeconds(2));
+        overrides.set(
+                CobbleOptions.COMPACTION_DEDICATED_ORPHAN_MIN_AGE,
+                java.time.Duration.ofSeconds(30));
+        String checkpointDirectory = tempDir.resolve("checkpoints").toUri().toString();
+
+        try (TestBackendContext context =
+                createBackendContext(
+                        tempDir,
+                        true,
+                        checkpointDirectory,
+                        null,
+                        TtlTimeProvider.DEFAULT,
+                        false,
+                        Collections.emptyList(),
+                        KeyGroupRange.of(0, 15),
+                        overrides)) {
+            Config config = context.cobbleBackend.getCobbleConfig();
+            assertEquals(Config.CompactionMode.DEDICATED, config.compactionMode);
+            assertEquals(Config.RuntimeManifestMode.AUTO, config.runtimeManifestMode);
+            assertEquals(2_000L, config.compactionDedicatedPollIntervalMs.longValue());
+            assertEquals(30_000L, config.compactionOrphanMinAgeMs.longValue());
+            assertNull(config.compactionRemoteAddr);
+            assertTrue(config.ttlEnabled);
+            assertVolumeKinds(
+                    config.volumes.get(0),
+                    Config.VolumeUsageKind.PRIMARY_DATA_PRIORITY_HIGH,
+                    Config.VolumeUsageKind.META,
+                    Config.VolumeUsageKind.SNAPSHOT);
+            assertVolumeKinds(config.volumes.get(1), Config.VolumeUsageKind.CACHE);
+        }
+    }
+
+    @Test
+    void dedicatedCompactorProcessCompactsFlinkState(@TempDir Path tempDir) throws Exception {
+        Configuration overrides = new Configuration();
+        overrides.set(
+                CobbleOptions.COMPACTION_MODE, CobbleOptions.CompactionExecutionMode.DEDICATED);
+        overrides.set(CobbleOptions.L0_FILE_LIMIT, 2);
+        overrides.set(
+                CobbleOptions.COMPACTION_DEDICATED_POLL_INTERVAL, java.time.Duration.ofMillis(100));
+        overrides.set(
+                CobbleOptions.COMPACTION_DEDICATED_ORPHAN_MIN_AGE,
+                java.time.Duration.ofSeconds(30));
+        String checkpointDirectory = tempDir.resolve("checkpoints").toUri().toString();
+
+        try (TestBackendContext context =
+                        createBackendContext(
+                                tempDir,
+                                true,
+                                checkpointDirectory,
+                                MemorySize.ofMebiBytes(1),
+                                TtlTimeProvider.DEFAULT,
+                                false,
+                                Collections.emptyList(),
+                                KeyGroupRange.of(0, 15),
+                                overrides);
+                CobbleCliProcess compactor =
+                        CobbleCli.startDedicatedCompactor(
+                                context.cobbleBackend.getConfigPath(),
+                                Collections.singletonList(
+                                        context.cobbleBackend
+                                                .getCobbleConfig()
+                                                .volumes
+                                                .get(0)
+                                                .baseDir),
+                                1,
+                                100L)) {
+            assertTrue(compactor.isAlive());
+            CobbleKeyedStateBackend<Integer> backend = context.cobbleBackend;
+            ValueState<String> state =
+                    backend.getPartitionedState(
+                            "dedicated-ns",
+                            StringSerializer.INSTANCE,
+                            new ValueStateDescriptor<>(
+                                    "dedicated-value-state", StringSerializer.INSTANCE));
+            String value = payload("dedicated", 0, 2048);
+
+            for (int round = 0; round < 3; round++) {
+                for (int key = 0; key < 48; key++) {
+                    backend.setCurrentKey(key);
+                    state.update(value + round);
+                }
+                backend.getCobbleDb().snapshot();
+            }
+
+            waitForDedicatedCompactionOutput(tempDir.resolve("checkpoints"));
+            for (int key = 0; key < 48; key++) {
+                backend.setCurrentKey(key);
+                assertEquals(value + 2, state.value());
+            }
+        }
+    }
+
+    @Test
+    void dedicatedCompactionRequiresSharedCheckpointStorage(@TempDir Path tempDir) {
+        Configuration overrides = new Configuration();
+        overrides.set(
+                CobbleOptions.COMPACTION_MODE, CobbleOptions.CompactionExecutionMode.DEDICATED);
+
+        Exception error =
+                assertThrows(
+                        Exception.class,
+                        () ->
+                                createBackendContext(
+                                                tempDir,
+                                                true,
+                                                null,
+                                                null,
+                                                TtlTimeProvider.DEFAULT,
+                                                false,
+                                                Collections.emptyList(),
+                                                KeyGroupRange.of(0, 15),
+                                                overrides)
+                                        .close());
+        assertTrue(error.toString().contains("dedicated requires shared checkpoint storage"));
+    }
+
+    @Test
+    void explicitCompactionModeRejectsRemoteAddressConflicts() {
+        Configuration local = new Configuration();
+        local.set(CobbleOptions.COMPACTION_MODE, CobbleOptions.CompactionExecutionMode.LOCAL);
+        local.set(CobbleOptions.COMPACTION_REMOTE_ADDR, "127.0.0.1:18888");
+        assertThrows(
+                IllegalConfigurationException.class,
+                () -> CobbleFlinkConfigMapper.applyExposedOptions(new Config(), local));
+
+        Configuration remote = new Configuration();
+        remote.set(CobbleOptions.COMPACTION_MODE, CobbleOptions.CompactionExecutionMode.REMOTE);
+        assertThrows(
+                IllegalConfigurationException.class,
+                () -> CobbleFlinkConfigMapper.applyExposedOptions(new Config(), remote));
+
+        Configuration dedicated = new Configuration();
+        dedicated.set(
+                CobbleOptions.COMPACTION_MODE, CobbleOptions.CompactionExecutionMode.DEDICATED);
+        dedicated.set(CobbleOptions.COMPACTION_REMOTE_ADDR, "127.0.0.1:18888");
+        assertThrows(
+                IllegalConfigurationException.class,
+                () -> CobbleFlinkConfigMapper.applyExposedOptions(new Config(), dedicated));
     }
 
     @Test
@@ -9075,6 +9228,39 @@ class CobbleStateBackendTest {
         assertTrue(
                 hasDataFile(localVolumePath),
                 "rescaled READONLY files were not loaded into the local primary volume");
+    }
+
+    private static void waitForDedicatedCompactionOutput(Path checkpointRoot) throws Exception {
+        long deadlineNanos = System.nanoTime() + TimeUnit.SECONDS.toNanos(30);
+        while (System.nanoTime() < deadlineNanos) {
+            if (hasDedicatedCompactionOutput(checkpointRoot)) {
+                return;
+            }
+            Thread.sleep(50L);
+        }
+        assertTrue(
+                hasDedicatedCompactionOutput(checkpointRoot),
+                "dedicated compactor did not publish an applied output within 30 seconds");
+    }
+
+    private static boolean hasDedicatedCompactionOutput(Path checkpointRoot) throws IOException {
+        if (!Files.isDirectory(checkpointRoot)) {
+            return false;
+        }
+        try (Stream<Path> paths = Files.walk(checkpointRoot)) {
+            return paths.filter(Files::isRegularFile)
+                    .anyMatch(
+                            path ->
+                                    path.toString().contains("compaction/jobs")
+                                            && path.getFileName().toString().endsWith(".sst"));
+        } catch (UncheckedIOException error) {
+            // Runtime manifests are published with an atomic temp-file rename. A concurrent walk
+            // may observe the temp name immediately before it disappears; simply retry the probe.
+            if (error.getCause() instanceof NoSuchFileException) {
+                return false;
+            }
+            throw error;
+        }
     }
 
     private static boolean hasDataFile(Path volumePath) throws IOException {
