@@ -41,6 +41,7 @@ class CobbleKeyedStateCheckpointingITTest {
     private static final int NUM_KEYS = 40;
     private static final int FAILURE_POSITION = 1_800;
     private static final int SEQUENTIAL_FAILURES = 3;
+    private static final int MAX_RECORDS_PER_FAILURE_ATTEMPT = NUM_KEYS;
     private static final Duration JOB_TIMEOUT = Duration.ofSeconds(180);
     private static final Duration LOCAL_STATE_CLEANUP_TIMEOUT = Duration.ofSeconds(30);
     private static final Map<Integer, Long> FINAL_SUMS = new ConcurrentHashMap<>();
@@ -194,6 +195,8 @@ class CobbleKeyedStateCheckpointingITTest {
         private volatile boolean running = true;
         private int lastEmitted = -1;
         private volatile boolean checkpointHappened;
+        private int releasedFailureAttempt = -1;
+        private int recordsReleasedForFailure;
 
         private IntGeneratingSourceFunction(
                 int numElements, int checkpointLatestAt, boolean waitForCheckpointAfterRestore) {
@@ -212,21 +215,26 @@ class CobbleKeyedStateCheckpointingITTest {
                             : getRuntimeContext().getIndexOfThisSubtask();
 
             while (running && nextElement < numElements) {
-                if (!checkpointGateOpen()) {
-                    if (!checkpointHappened && nextElement < checkpointLatestAt) {
-                        Thread.sleep(1L);
-                    } else {
-                        synchronized (SEQUENTIAL_FAILURE_COORDINATION_LOCK) {
-                            while (running && !checkpointGateOpen()) {
-                                SEQUENTIAL_FAILURE_COORDINATION_LOCK.wait();
-                            }
-                        }
+                awaitCheckpointGate(nextElement);
+
+                int armedFailureAttempt = armedFailureAttempt();
+                if (armedFailureAttempt > ThreeTimesFailingPartitionedSum.FAILURES.get()) {
+                    if (releasedFailureAttempt != armedFailureAttempt) {
+                        releasedFailureAttempt = armedFailureAttempt;
+                        recordsReleasedForFailure = 0;
+                    }
+                    if (recordsReleasedForFailure >= MAX_RECORDS_PER_FAILURE_ATTEMPT) {
+                        awaitFailure(armedFailureAttempt);
+                        continue;
                     }
                 }
 
                 synchronized (checkpointLock) {
                     ctx.collect(nextElement % NUM_KEYS);
                     lastEmitted = nextElement;
+                }
+                if (armedFailureAttempt > ThreeTimesFailingPartitionedSum.FAILURES.get()) {
+                    recordsReleasedForFailure++;
                 }
                 nextElement += step;
             }
@@ -269,6 +277,34 @@ class CobbleKeyedStateCheckpointingITTest {
                             || ThreeTimesFailingPartitionedSum.FAILURES.get() >= SEQUENTIAL_FAILURES
                             || CHECKPOINTED_FAILURE_ATTEMPT.get()
                                     > ThreeTimesFailingPartitionedSum.FAILURES.get());
+        }
+
+        private int armedFailureAttempt() {
+            return waitForCheckpointAfterRestore ? CHECKPOINTED_FAILURE_ATTEMPT.get() : -1;
+        }
+
+        private void awaitCheckpointGate(int nextElement) throws InterruptedException {
+            if (checkpointGateOpen()) {
+                return;
+            }
+            if (!checkpointHappened && nextElement < checkpointLatestAt) {
+                Thread.sleep(1L);
+                return;
+            }
+            synchronized (SEQUENTIAL_FAILURE_COORDINATION_LOCK) {
+                while (running && !checkpointGateOpen()) {
+                    SEQUENTIAL_FAILURE_COORDINATION_LOCK.wait();
+                }
+            }
+        }
+
+        private void awaitFailure(int armedFailureAttempt) throws InterruptedException {
+            synchronized (SEQUENTIAL_FAILURE_COORDINATION_LOCK) {
+                while (running
+                        && ThreeTimesFailingPartitionedSum.FAILURES.get() < armedFailureAttempt) {
+                    SEQUENTIAL_FAILURE_COORDINATION_LOCK.wait();
+                }
+            }
         }
     }
 
@@ -347,6 +383,9 @@ class CobbleKeyedStateCheckpointingITTest {
                 int failure = FAILURES.incrementAndGet();
                 if (failure <= SEQUENTIAL_FAILURES) {
                     FAILING_SUBTASKS.add(0);
+                    synchronized (SEQUENTIAL_FAILURE_COORDINATION_LOCK) {
+                        SEQUENTIAL_FAILURE_COORDINATION_LOCK.notifyAll();
+                    }
                     throw new Exception("intentional sequential test failure " + failure);
                 }
             }
