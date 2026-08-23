@@ -3537,6 +3537,56 @@ class CobbleStateBackendTest {
     }
 
     @Test
+    void restoreFromOlderCheckpointUsesItsExactShardSnapshot(@TempDir Path tempDir)
+            throws Exception {
+        String checkpointDirectory = tempDir.resolve("checkpoints").toString();
+        String restoredCheckpointDirectory = tempDir.resolve("restored-checkpoints").toString();
+        ValueStateDescriptor<String> descriptor =
+                new ValueStateDescriptor<>("historical-restore-state", StringSerializer.INSTANCE);
+        KeyedStateHandle olderCheckpoint;
+        long olderSnapshotId;
+        long newerSnapshotId;
+
+        try (TestBackendContext context =
+                createBackendContext(tempDir.resolve("source"), false, checkpointDirectory)) {
+            CobbleKeyedStateBackend<Integer> backend = context.cobbleBackend;
+            ValueState<String> state =
+                    backend.getPartitionedState(
+                            "historical-restore-ns", StringSerializer.INSTANCE, descriptor);
+
+            backend.setCurrentKey(1);
+            state.update("checkpoint-1");
+            olderCheckpoint = runCheckpointSnapshot(backend, 53L);
+            olderSnapshotId = readSnapshotMetadata(olderCheckpoint).shardSnapshot().snapshotId;
+
+            state.update("checkpoint-2");
+            newerSnapshotId =
+                    readSnapshotMetadata(runCheckpointSnapshot(backend, 54L))
+                            .shardSnapshot()
+                            .snapshotId;
+            assertTrue(newerSnapshotId > olderSnapshotId);
+        }
+
+        try (TestBackendContext context =
+                createBackendContext(
+                        tempDir.resolve("restored"),
+                        false,
+                        restoredCheckpointDirectory,
+                        null,
+                        TtlTimeProvider.DEFAULT,
+                        false,
+                        Collections.singletonList(olderCheckpoint))) {
+            CobbleKeyedStateBackend<Integer> backend = context.cobbleBackend;
+            ValueState<String> restoredState =
+                    backend.getPartitionedState(
+                            "historical-restore-ns", StringSerializer.INSTANCE, descriptor);
+
+            backend.setCurrentKey(1);
+            assertEquals("checkpoint-1", restoredState.value());
+        }
+    }
+
+    @Test
     void restoreFromShardSnapshotKeepsTtlWiringActive(@TempDir Path tempDir) throws Exception {
         String checkpointDirectory = tempDir.resolve("checkpoints").toString();
         MockTtlTimeProvider ttlTimeProvider = new MockTtlTimeProvider();

@@ -2,6 +2,7 @@ package io.cobble.flink.state;
 
 import io.cobble.Config;
 import io.cobble.RecoveryMode;
+import io.cobble.ShardSnapshot;
 import io.cobble.flink.common.CobbleNativeMetrics;
 import io.cobble.flink.common.CobbleStateDescriptor;
 import io.cobble.structured.Db;
@@ -449,9 +450,9 @@ final class CobbleKeyedStateBackendBuilder<K> {
                 volumes.add(sourceVolume);
             }
         }
-        // Db.resume() loads manifests from the first snapshot-persistable volume. Put the claimed
-        // source first so resume opens the old DB before it starts writing snapshots for the new
-        // job.
+        // Exact snapshot resume loads the selected manifest from the first snapshot-persistable
+        // volume. Put the claimed source first before the restored DB starts writing snapshots for
+        // the new job.
         volumes.addAll(0, claimedSourceVolumes);
     }
 
@@ -552,9 +553,11 @@ final class CobbleKeyedStateBackendBuilder<K> {
                     "Cobble restore did not receive any readable checkpoint handles.");
         }
         if (canResumeSingleSource(restoreSources)) {
-            return Db.resume(
+            ShardSnapshot snapshot = restoreSources.get(0).metadata.shardSnapshot();
+            return Db.resumeFromSnapshot(
                     configPath.toString(),
-                    restoreSources.get(0).metadata.shardSnapshot().dbId,
+                    snapshot.snapshotId,
+                    snapshot.dbId,
                     RecoveryMode.SNAPSHOT_ONLY);
         }
         return restoreRescaledDb(configPath, restoreSources);
