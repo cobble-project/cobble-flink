@@ -50,6 +50,7 @@ final class GlobalCommitOperator extends AbstractStreamOperator<Void>
     public void open() throws Exception {
         super.open();
         this.global = new CobbleSqlSink.Global(config);
+        replayRestoredCommittables();
     }
 
     @Override
@@ -135,6 +136,12 @@ final class GlobalCommitOperator extends AbstractStreamOperator<Void>
         global.commitCommittables(
                 checkpointId, new ArrayList<>(latestBySubtask.values()), abandoned);
         head.clear();
+    }
+
+    private void replayRestoredCommittables() throws Exception {
+        if (!pendingByCheckpoint.isEmpty()) {
+            commitUpTo(pendingByCheckpoint.lastKey().longValue());
+        }
     }
 
     @Override
