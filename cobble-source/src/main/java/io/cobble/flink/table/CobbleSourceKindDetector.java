@@ -24,8 +24,7 @@ import java.io.IOException;
  * <ol>
  *   <li>A Flink checkpoint, savepoint, metadata file, or checkpoint root containing readable Cobble
  *       embedded {@code _metadata} → STATE.
- *   <li>A checkpoint root with {@code chk-N/_metadata} and a Cobble manifest copy → STATE through
- *       the existing global-sidecar path.
+ *   <li>A checkpoint root with {@code chk-N/_metadata} and a Cobble manifest copy → STATE.
  *   <li>{@code <path>/inspect-schema/blobs/*.csch} whose blob begins with {@link
  *       StateInspectSchemaStore#MAGIC} (CSCH) → STATE operator root.
  *   <li>{@code <path>/snapshot/CURRENT} or {@code <path>/writer-paths.properties} present but no
@@ -36,12 +35,10 @@ import java.io.IOException;
  * {@code sink} request over a state path and a {@code state} request over a sink path both fail
  * loudly rather than silently falling back.
  *
- * <p>To preserve existing sink behavior, {@code auto} over an ambiguous path (a weak sink signal,
- * no strong schema/checkpoint signal) falls back to {@link CobbleSourceKind#SINK} when the DDL is
- * <em>sink-shaped</em> (declares a primary key and at least one non-key column). This keeps sink
- * tables written without an inspect-schema sidecar working without forcing {@code source.kind}.
- * Strong state signals are never overridden by a sink-shaped DDL, and truly unknown or missing
- * paths still fail.
+ * <p>{@code auto} over an ambiguous table path falls back to {@link CobbleSourceKind#SINK} when the
+ * DDL is <em>sink-shaped</em> (declares a primary key and at least one non-key column). Strong
+ * state signals are never overridden by a sink-shaped DDL, and truly unknown or missing paths still
+ * fail.
  */
 final class CobbleSourceKindDetector {
 
@@ -289,9 +286,8 @@ final class CobbleSourceKindDetector {
                 return resolveState(pathUri, StateSourceConfig.Layout.OPERATOR_ROOT);
             case AMBIGUOUS:
                 if (sinkShapedSchema) {
-                    // A weak sink signal plus a sink-shaped DDL: keep existing sink behavior for
-                    // tables (including externally written ones) that lack an inspect-schema
-                    // sidecar. Strong state signals are handled above and are never reached here.
+                    // A native table root plus a sink-shaped DDL. Strong state signals are handled
+                    // above and are never reached here.
                     return CobbleResolvedSource.sink(sinkFallbackDiagnostics(pathUri));
                 }
                 throw ambiguousFailure(pathUri);
@@ -331,7 +327,7 @@ final class CobbleSourceKindDetector {
     private static String sinkFallbackDiagnostics(String pathUri) {
         return "Resolved Cobble sink source for "
                 + pathUri
-                + " from the sink-shaped table schema; no inspect-schema sidecar was found.";
+                + " from the native Table layout and sink-shaped DDL.";
     }
 
     private static String stateDiagnostics(String pathUri, StateSourceConfig.Layout layout) {

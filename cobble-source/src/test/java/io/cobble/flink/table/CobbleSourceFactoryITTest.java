@@ -122,23 +122,23 @@ class CobbleSourceFactoryITTest {
 
     @Test
     void autoSinkShapedDdlCreatesNativeTableSource() throws Exception {
-        Path root = ambiguousRoot("sink-no-sidecar");
+        Path root = nativeTableRoot("sink-table-auto");
         StreamTableEnvironment tableEnv = newTableEnv();
-        tableEnv.executeSql(sinkDdl("t_sink_no_sidecar", root, null));
+        tableEnv.executeSql(sinkDdl("t_sink_table_auto", root, null));
 
-        assertDoesNotThrow(() -> tableEnv.explainSql("SELECT * FROM t_sink_no_sidecar"));
+        assertDoesNotThrow(() -> tableEnv.explainSql("SELECT * FROM t_sink_table_auto"));
     }
 
     @Test
-    void legacySinkSidecarIsRejectedDuringPlanning() throws Exception {
-        Path root = legacySinkRoot("sink-sidecar-valid");
+    void legacySinkFormatIsRejectedDuringPlanning() throws Exception {
+        Path root = legacySinkRoot("sink-legacy-format");
         StreamTableEnvironment tableEnv = newTableEnv();
-        tableEnv.executeSql(sinkDdl("t_sink_sidecar_valid", root, "sink"));
+        tableEnv.executeSql(sinkDdl("t_sink_legacy_format", root, "sink"));
 
         Exception error =
                 assertThrows(
                         Exception.class,
-                        () -> tableEnv.explainSql("SELECT * FROM t_sink_sidecar_valid"));
+                        () -> tableEnv.explainSql("SELECT * FROM t_sink_legacy_format"));
         assertTrue(messageChain(error).contains("pre-Table Cobble sink format"));
     }
 
@@ -147,7 +147,7 @@ class CobbleSourceFactoryITTest {
         Path root = nativeTableRootWithNonLeadingPrimaryKey("sink-table-non-leading-pk");
         StreamTableEnvironment tableEnv = newTableEnv();
         tableEnv.executeSql(
-                "CREATE TABLE t_sink_sidecar_non_leading_pk ("
+                "CREATE TABLE t_sink_table_non_leading_pk ("
                         + " name STRING,"
                         + " id BIGINT,"
                         + " PRIMARY KEY (id) NOT ENFORCED"
@@ -159,8 +159,7 @@ class CobbleSourceFactoryITTest {
                         + "'"
                         + ")");
 
-        assertDoesNotThrow(
-                () -> tableEnv.explainSql("SELECT * FROM t_sink_sidecar_non_leading_pk"));
+        assertDoesNotThrow(() -> tableEnv.explainSql("SELECT * FROM t_sink_table_non_leading_pk"));
     }
 
     @Test
@@ -168,7 +167,7 @@ class CobbleSourceFactoryITTest {
         Path root = sinkRoot("sink-table-reorder");
         StreamTableEnvironment tableEnv = newTableEnv();
         tableEnv.executeSql(
-                "CREATE TABLE t_sink_sidecar_reorder ("
+                "CREATE TABLE t_sink_table_reorder ("
                         + " name STRING,"
                         + " id BIGINT,"
                         + " PRIMARY KEY (id) NOT ENFORCED"
@@ -183,7 +182,7 @@ class CobbleSourceFactoryITTest {
         Exception error =
                 assertThrows(
                         Exception.class,
-                        () -> tableEnv.explainSql("SELECT * FROM t_sink_sidecar_reorder"));
+                        () -> tableEnv.explainSql("SELECT * FROM t_sink_table_reorder"));
         assertTrue(
                 messageChain(error).contains("does not match the persisted Cobble Table schema"));
     }
@@ -193,7 +192,7 @@ class CobbleSourceFactoryITTest {
         Path root = sinkRoot("sink-table-wrong-pk");
         StreamTableEnvironment tableEnv = newTableEnv();
         tableEnv.executeSql(
-                "CREATE TABLE t_sink_sidecar_wrong_pk ("
+                "CREATE TABLE t_sink_table_wrong_pk ("
                         + " id BIGINT,"
                         + " name STRING,"
                         + " PRIMARY KEY (name) NOT ENFORCED"
@@ -208,18 +207,29 @@ class CobbleSourceFactoryITTest {
         Exception error =
                 assertThrows(
                         Exception.class,
-                        () -> tableEnv.explainSql("SELECT * FROM t_sink_sidecar_wrong_pk"));
+                        () -> tableEnv.explainSql("SELECT * FROM t_sink_table_wrong_pk"));
         assertTrue(
                 messageChain(error).contains("does not match the persisted Cobble Table schema"));
     }
 
     @Test
     void nativeTableDdlPlansWithPersistedSchema() throws Exception {
-        Path root = ambiguousRoot("sink-no-sidecar-explicit");
+        Path root = nativeTableRoot("sink-table-explicit");
         StreamTableEnvironment tableEnv = newTableEnv();
-        tableEnv.executeSql(sinkDdl("t_sink_no_sidecar_explicit", root, "sink"));
+        tableEnv.executeSql(sinkDdl("t_sink_table_explicit", root, "sink"));
 
-        assertDoesNotThrow(() -> tableEnv.explainSql("SELECT * FROM t_sink_no_sidecar_explicit"));
+        assertDoesNotThrow(() -> tableEnv.explainSql("SELECT * FROM t_sink_table_explicit"));
+    }
+
+    @Test
+    void nativeTableSourceAcceptsInitialSnapshotId() throws Exception {
+        Path root = nativeTableRoot("sink-table-snapshot-zero");
+        StreamTableEnvironment tableEnv = newTableEnv();
+        tableEnv.executeSql(
+                sinkDdl("t_sink_table_snapshot_zero", root, "sink")
+                        .replace("'bucket' = '2',", "'bucket' = '2', 'scan.checkpoint-id' = '0',"));
+
+        assertDoesNotThrow(() -> tableEnv.explainSql("SELECT * FROM t_sink_table_snapshot_zero"));
     }
 
     @Test
@@ -1126,7 +1136,7 @@ class CobbleSourceFactoryITTest {
 
     @Test
     void rawSourcePlansOnTableRoot() throws Exception {
-        Path root = ambiguousRoot("raw-planning");
+        Path root = nativeTableRoot("raw-planning");
         StreamTableEnvironment tableEnv = newTableEnv();
         tableEnv.executeSql(rawDdl("t_raw_plan", root, "0,1"));
 
@@ -1135,7 +1145,7 @@ class CobbleSourceFactoryITTest {
 
     @Test
     void rawSourceMissingColumnsFailsDuringPlanning() throws Exception {
-        Path root = ambiguousRoot("raw-no-columns");
+        Path root = nativeTableRoot("raw-no-columns");
         StreamTableEnvironment tableEnv = newTableEnv();
         tableEnv.executeSql(rawDdl("t_raw_no_cols", root, null));
 
@@ -1203,7 +1213,7 @@ class CobbleSourceFactoryITTest {
 
     @Test
     void rawSourceRejectsPrimaryKey() throws Exception {
-        Path root = ambiguousRoot("raw-with-pk");
+        Path root = nativeTableRoot("raw-with-pk");
         StreamTableEnvironment tableEnv = newTableEnv();
         tableEnv.executeSql(
                 "CREATE TABLE t_raw_pk ("
@@ -1228,7 +1238,7 @@ class CobbleSourceFactoryITTest {
 
     @Test
     void rawSourceRejectsWrongColumnCount() throws Exception {
-        Path root = ambiguousRoot("raw-wrong-cols");
+        Path root = nativeTableRoot("raw-wrong-cols");
         StreamTableEnvironment tableEnv = newTableEnv();
         tableEnv.executeSql(
                 "CREATE TABLE t_raw_wrong_cols ("
@@ -1403,7 +1413,7 @@ class CobbleSourceFactoryITTest {
         return root;
     }
 
-    private Path ambiguousRoot(String name) throws Exception {
+    private Path nativeTableRoot(String name) throws Exception {
         return sinkRoot(name);
     }
 

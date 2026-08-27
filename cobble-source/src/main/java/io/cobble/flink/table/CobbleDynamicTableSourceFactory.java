@@ -319,8 +319,8 @@ public final class CobbleDynamicTableSourceFactory implements DynamicTableSource
 
     /**
      * Returns whether the table schema is sink-shaped: it declares a primary key and has at least
-     * one non-primary-key column. This lets {@code auto} keep treating an ambiguous path as a sink
-     * source for native Table roots without a separate schema sidecar.
+     * one non-primary-key column. This lets {@code auto} resolve a native Table root as a sink
+     * source before its persisted schema is validated.
      */
     private static boolean isSinkShaped(ResolvedSchema resolvedSchema) {
         if (!resolvedSchema.getPrimaryKey().isPresent()) {
@@ -364,16 +364,16 @@ public final class CobbleDynamicTableSourceFactory implements DynamicTableSource
         }
         try {
             long parsed = Long.parseLong(trimmed);
-            if (parsed <= 0L) {
+            if (parsed < 0L) {
                 throw new ValidationException(
                         CobbleSourceTableOptions.SCAN_CHECKPOINT_ID.key()
-                                + " must be a positive number or 'latest'.");
+                                + " must be a non-negative number or 'latest'.");
             }
             return Long.toString(parsed);
         } catch (NumberFormatException e) {
             throw new ValidationException(
                     CobbleSourceTableOptions.SCAN_CHECKPOINT_ID.key()
-                            + " must be a positive number or 'latest'.",
+                            + " must be a non-negative number or 'latest'.",
                     e);
         }
     }
