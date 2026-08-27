@@ -45,7 +45,9 @@ final class PublicInspectModels {
         }
         boolean lookupSupported = false;
         String lookupDiagnostic = null;
-        if (source.schema != null && source.semanticSchema != null) {
+        if (source.tableSchema != null) {
+            lookupSupported = !source.tableSchema.keyFields.isEmpty();
+        } else if (source.schema != null && source.semanticSchema != null) {
             StateInspectExactLookupSupport.Result result =
                     StateInspectExactLookupSupport.evaluate(source.schema, source.semanticSchema);
             lookupSupported = result.supported();

@@ -49,6 +49,7 @@ class InspectTypedSinkIT {
 
         try (CobbleInspectClient client = CobbleInspectClient.builder().totalBuckets(1).build();
                 InspectSession session = client.openDataSource(table.toString())) {
+            assertTrue(session.targets().get(0).exactLookupSupported());
             List<FieldValue> filter = Arrays.asList(field("region", "us"), field("id", "target"));
             InspectPage first =
                     session.scan(
@@ -80,7 +81,9 @@ class InspectTypedSinkIT {
                                                                     field("region", "us"),
                                                                     field("id", "target-1")))))));
             assertTrue(lookup.rows().get(0).found());
-            assertEquals("one", lookup.rows().get(0).decodedColumns().get(0).scalar());
+            assertEquals(
+                    "one",
+                    lookup.rows().get(0).decodedColumns().get(0).fields().get(0).value().scalar());
 
             InspectException partial =
                     assertThrows(
@@ -123,6 +126,7 @@ class InspectTypedSinkIT {
             String ddl = session.overview().items().get(0).sourceSql().ddl();
             assertTrue(ddl.contains("`region` STRING NOT NULL"));
             assertTrue(ddl.contains("PRIMARY KEY (`region`, `id`) NOT ENFORCED"));
+            String tableName = ddl.substring("CREATE TABLE ".length(), ddl.indexOf(" ("));
             StreamExecutionEnvironment environment =
                     StreamExecutionEnvironment.getExecutionEnvironment();
             environment.setParallelism(1);
@@ -130,7 +134,7 @@ class InspectTypedSinkIT {
             tables.executeSql(ddl);
             List<String> sqlRows = new ArrayList<String>();
             try (CloseableIterator<Row> results =
-                    tables.executeSql("SELECT region, id FROM sink").collect()) {
+                    tables.executeSql("SELECT region, id FROM " + tableName).collect()) {
                 while (results.hasNext()) {
                     Row row = results.next();
                     sqlRows.add(row.getFieldAs(0) + ":" + row.getFieldAs(1));
