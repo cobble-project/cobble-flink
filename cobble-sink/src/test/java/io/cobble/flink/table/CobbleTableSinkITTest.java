@@ -8,12 +8,16 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import io.cobble.Config;
+import io.cobble.Db;
 import io.cobble.DbCoordinator;
 import io.cobble.GlobalSnapshot;
 import io.cobble.ShardSnapshot;
 import io.cobble.flink.common.CobbleConnectorStorageOptions;
 import io.cobble.flink.common.CobbleMetadataFileIO;
-import io.cobble.structured.Db;
+import io.cobble.flink.common.table.CobbleTableRowConverter;
+import io.cobble.table.Table;
+import io.cobble.table.TableKey;
+import io.cobble.table.Value;
 
 import org.apache.flink.api.common.JobStatus;
 import org.apache.flink.api.common.restartstrategy.RestartStrategies;
@@ -226,42 +230,43 @@ class CobbleTableSinkITTest {
 
         CobbleRowDataCodecs.RuntimeKeyEncoder keyEncoder =
                 new CobbleRowDataCodecs.RuntimeKeyEncoder(sinkConfig.keyFields);
-        List<CobbleRowDataCodecs.RuntimeFieldEncoder> valueEncoders = new ArrayList<>();
-        for (CobbleDynamicTableSink.SerializableField field : sinkConfig.valueFields) {
-            valueEncoders.add(new CobbleRowDataCodecs.RuntimeFieldEncoder(field));
-        }
-
-        try (Db db = Db.open(CobbleSinkPaths.createWriterConfig(sinkConfig, 0), 0, 1)) {
+        CobbleTableRowConverter rowConverter = new CobbleTableRowConverter(sinkConfig.rowType());
+        try (Db db = Db.open(CobbleSinkPaths.createWriterConfig(sinkConfig, 0), 0, 1);
+                Table table =
+                        Table.create(
+                                db, CobbleTableRowConverter.TABLE_NAME, sinkConfig.tableSchema())) {
             GenericRowData insertRow = rowData(RowKind.INSERT, 2L, "name-2", 2);
             byte[] encodedKey = keyEncoder.encode(insertRow);
-            int bucket = CobbleSqlSink.hashFixedBucket(encodedKey, sinkConfig.bucketCount);
 
             CobbleSqlSink.MutationStats insertStats =
-                    CobbleSqlSink.applyRowChange(db, valueEncoders, bucket, encodedKey, insertRow);
+                    CobbleSqlSink.applyRowChange(
+                            table, rowConverter, sinkConfig, encodedKey, insertRow);
             assertEquals(true, insertStats.mutated);
-            assertEquals(true, insertStats.bytes > encodedKey.length);
-            verifyRow(bucket, encodedKey, db, "name-2", 2);
+            assertEquals((long) encodedKey.length, insertStats.bytes);
+            verifyTableRow(table, 2L, "name-2", 2);
 
             GenericRowData updateBeforeRow = rowData(RowKind.UPDATE_BEFORE, 2L, "name-2", 2);
             CobbleSqlSink.MutationStats updateBeforeStats =
                     CobbleSqlSink.applyRowChange(
-                            db, valueEncoders, bucket, encodedKey, updateBeforeRow);
+                            table, rowConverter, sinkConfig, encodedKey, updateBeforeRow);
             assertEquals(false, updateBeforeStats.mutated);
             assertEquals(0L, updateBeforeStats.bytes);
-            verifyRow(bucket, encodedKey, db, "name-2", 2);
+            verifyTableRow(table, 2L, "name-2", 2);
 
             GenericRowData updateRow = rowData(RowKind.UPDATE_AFTER, 2L, "updated-2", 20);
             CobbleSqlSink.MutationStats updateStats =
-                    CobbleSqlSink.applyRowChange(db, valueEncoders, bucket, encodedKey, updateRow);
+                    CobbleSqlSink.applyRowChange(
+                            table, rowConverter, sinkConfig, encodedKey, updateRow);
             assertEquals(true, updateStats.mutated);
-            verifyRow(bucket, encodedKey, db, "updated-2", 20);
+            verifyTableRow(table, 2L, "updated-2", 20);
 
             GenericRowData deleteRow = rowData(RowKind.DELETE, 2L, "updated-2", 20);
             CobbleSqlSink.MutationStats deleteStats =
-                    CobbleSqlSink.applyRowChange(db, valueEncoders, bucket, encodedKey, deleteRow);
+                    CobbleSqlSink.applyRowChange(
+                            table, rowConverter, sinkConfig, encodedKey, deleteRow);
             assertEquals(true, deleteStats.mutated);
             assertEquals((long) encodedKey.length, deleteStats.bytes);
-            assertNull(db.get(bucket, encodedKey));
+            assertNull(table.get(table.keyBuilder().push(Value.int64(2L)).build()));
         }
     }
 
@@ -551,14 +556,7 @@ class CobbleTableSinkITTest {
 
     private static long encodedUpsertBytes(
             CobbleDynamicTableSink.SerializableConfig config, RowData row) throws Exception {
-        long bytes = new CobbleRowDataCodecs.RuntimeKeyEncoder(config.keyFields).encode(row).length;
-        for (CobbleDynamicTableSink.SerializableField field : config.valueFields) {
-            byte[] encoded = new CobbleRowDataCodecs.RuntimeFieldEncoder(field).encodeNullable(row);
-            if (encoded != null) {
-                bytes += encoded.length;
-            }
-        }
-        return bytes;
+        return new CobbleRowDataCodecs.RuntimeKeyEncoder(config.keyFields).encode(row).length;
     }
 
     private static StreamTableEnvironment newTableEnv() {
@@ -681,26 +679,20 @@ class CobbleTableSinkITTest {
             String expectedName,
             int expectedScore)
             throws Exception {
-        CobbleRowDataCodecs.RuntimeKeyEncoder keyEncoder =
-                new CobbleRowDataCodecs.RuntimeKeyEncoder(sinkConfig.keyFields);
-        GenericRowData keyRow = new GenericRowData(1);
-        keyRow.setRowKind(RowKind.INSERT);
-        keyRow.setField(0, Long.valueOf(id));
-        byte[] encodedKey = keyEncoder.encode(keyRow);
-
         for (ShardSnapshot shardSnapshot : globalSnapshot.shardSnapshots) {
-            int bucket = shardSnapshot.ranges.get(0).start;
-            Path restoreDir = tempDir.resolve("restore-" + bucket + "-" + id);
+            Path restoreDir = tempDir.resolve("restore-" + shardSnapshot.dbId + "-" + id);
             Db restoredDb =
                     Db.restoreWithManifest(
                             createRestoreConfig(restoreDir, sinkConfig),
                             shardSnapshot.manifestPath);
             try {
-                io.cobble.structured.Row row = restoredDb.get(bucket, encodedKey);
-                if (row != null) {
-                    assertEquals(expectedName, decodeString(row.getBytes(0)));
-                    assertEquals(expectedScore, decodeInt(row.getBytes(1)));
-                    return;
+                try (Table table = Table.open(restoredDb, CobbleTableRowConverter.TABLE_NAME)) {
+                    List<Value> row = table.get(table.keyBuilder().push(Value.int64(id)).build());
+                    if (row != null) {
+                        assertEquals(expectedName, row.get(1).raw());
+                        assertEquals(Integer.valueOf(expectedScore), row.get(2).raw());
+                        return;
+                    }
                 }
             } finally {
                 restoredDb.close();
@@ -711,7 +703,7 @@ class CobbleTableSinkITTest {
 
     private Config createRestoreConfig(
             Path restoreDir, CobbleDynamicTableSink.SerializableConfig sinkConfig) {
-        Config config = new Config().numColumns(2).totalBuckets(2);
+        Config config = new Config().totalBuckets(2);
         Config.VolumeDescriptor volume = new Config.VolumeDescriptor();
         volume.baseDir = restoreDir.toAbsolutePath().toString();
         volume.kinds =
@@ -820,25 +812,20 @@ class CobbleTableSinkITTest {
             String expectedName,
             int expectedScore)
             throws Exception {
-        CobbleRowDataCodecs.RuntimeKeyEncoder keyEncoder =
-                new CobbleRowDataCodecs.RuntimeKeyEncoder(sinkConfig.keyFields);
-        GenericRowData keyRow = new GenericRowData(1);
-        keyRow.setRowKind(RowKind.INSERT);
-        keyRow.setField(0, Long.valueOf(id));
-        byte[] encodedKey = keyEncoder.encode(keyRow);
-
         for (ShardSnapshot shardSnapshot : globalSnapshot.shardSnapshots) {
-            int bucket = shardSnapshot.ranges.get(0).start;
-            Path restoreDir = tempDir.resolve("restore-" + bucket + "-" + id + "-probe");
+            Path restoreDir =
+                    tempDir.resolve("restore-" + shardSnapshot.dbId + "-" + id + "-probe");
             Db restoredDb =
                     Db.restoreWithManifest(
                             createRestoreConfig(restoreDir, sinkConfig),
                             shardSnapshot.manifestPath);
             try {
-                io.cobble.structured.Row row = restoredDb.get(bucket, encodedKey);
-                if (row != null) {
-                    return expectedName.equals(decodeString(row.getBytes(0)))
-                            && expectedScore == decodeInt(row.getBytes(1));
+                try (Table table = Table.open(restoredDb, CobbleTableRowConverter.TABLE_NAME)) {
+                    List<Value> row = table.get(table.keyBuilder().push(Value.int64(id)).build());
+                    if (row != null) {
+                        return expectedName.equals(row.get(1).raw())
+                                && Integer.valueOf(expectedScore).equals(row.get(2).raw());
+                    }
                 }
             } finally {
                 restoredDb.close();
@@ -856,13 +843,12 @@ class CobbleTableSinkITTest {
         return row;
     }
 
-    private void verifyRow(
-            int bucket, byte[] encodedKey, Db db, String expectedName, int expectedScore)
-            throws Exception {
-        io.cobble.structured.Row row = db.get(bucket, encodedKey);
+    private void verifyTableRow(Table table, long id, String expectedName, int expectedScore) {
+        TableKey key = table.keyBuilder().push(Value.int64(id)).build();
+        List<Value> row = table.get(key);
         assertNotNull(row);
-        assertEquals(expectedName, decodeString(row.getBytes(0)));
-        assertEquals(expectedScore, decodeInt(row.getBytes(1)));
+        assertEquals(expectedName, row.get(1).raw());
+        assertEquals(Integer.valueOf(expectedScore), row.get(2).raw());
     }
 
     private Throwable jobFailure(JobClient jobClient, Throwable fallback) {

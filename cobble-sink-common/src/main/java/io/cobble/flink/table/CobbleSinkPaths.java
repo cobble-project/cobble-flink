@@ -71,8 +71,7 @@ final class CobbleSinkPaths {
 
     private static Config createWriterConfigForLocalDir(
             CobbleDynamicTableSink.SerializableConfig config, File localDir) {
-        Config dbConfig =
-                new Config().numColumns(config.valueFields.size()).totalBuckets(config.bucketCount);
+        Config dbConfig = new Config().totalBuckets(config.bucketCount);
         // Sink commits are snapshot-based. Keep WAL disabled so recovery cannot cross the committed
         // snapshot boundary.
         dbConfig.walEnabled = false;

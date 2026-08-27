@@ -1,6 +1,8 @@
 package io.cobble.flink.table;
 
 import io.cobble.flink.common.CobbleConnectorStorageOptions;
+import io.cobble.flink.common.table.CobbleTableRowConverter;
+import io.cobble.table.TableSchema;
 
 import org.apache.flink.core.memory.ManagedMemoryUseCase;
 import org.apache.flink.table.connector.ChangelogMode;
@@ -13,6 +15,7 @@ import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
 import java.util.Optional;
+import java.util.Comparator;
 
 /** Cobble SQL sink with primary-key upsert semantics. */
 final class CobbleDynamicTableSink implements DynamicTableSink {
@@ -176,6 +179,39 @@ final class CobbleDynamicTableSink implements DynamicTableSink {
                     keyFields,
                     valueFields,
                     storageOptions);
+        }
+
+        List<SerializableField> physicalFields() {
+            List<SerializableField> fields = new ArrayList<SerializableField>();
+            fields.addAll(keyFields);
+            fields.addAll(valueFields);
+            Collections.sort(
+                    fields,
+                    new Comparator<SerializableField>() {
+                        @Override
+                        public int compare(SerializableField left, SerializableField right) {
+                            return Integer.compare(left.rowIndex, right.rowIndex);
+                        }
+                    });
+            return fields;
+        }
+
+        org.apache.flink.table.types.logical.RowType rowType() {
+            List<String> names = new ArrayList<String>();
+            List<String> types = new ArrayList<String>();
+            for (SerializableField field : physicalFields()) {
+                names.add(field.name);
+                types.add(field.logicalType);
+            }
+            return CobbleTableRowConverter.parseRowType(names, types);
+        }
+
+        TableSchema tableSchema() {
+            List<String> primaryKey = new ArrayList<String>(keyFields.size());
+            for (SerializableField field : keyFields) {
+                primaryKey.add(field.name);
+            }
+            return CobbleTableRowConverter.toTableSchema(rowType(), primaryKey);
         }
     }
 

@@ -104,14 +104,7 @@ class CobbleSqlSinkMetricsTest {
 
     private static long encodedUpsertBytes(
             CobbleDynamicTableSink.SerializableConfig config, RowData row) throws Exception {
-        long bytes = new CobbleRowDataCodecs.RuntimeKeyEncoder(config.keyFields).encode(row).length;
-        for (CobbleDynamicTableSink.SerializableField field : config.valueFields) {
-            byte[] encoded = new CobbleRowDataCodecs.RuntimeFieldEncoder(field).encodeNullable(row);
-            if (encoded != null) {
-                bytes += encoded.length;
-            }
-        }
-        return bytes;
+        return new CobbleRowDataCodecs.RuntimeKeyEncoder(config.keyFields).encode(row).length;
     }
 
     private static final class CapturingSinkMetrics {

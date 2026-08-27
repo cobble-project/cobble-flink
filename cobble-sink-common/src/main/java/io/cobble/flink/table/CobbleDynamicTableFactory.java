@@ -12,7 +12,6 @@ import org.apache.flink.table.catalog.UniqueConstraint;
 import org.apache.flink.table.connector.sink.DynamicTableSink;
 import org.apache.flink.table.factories.DynamicTableSinkFactory;
 import org.apache.flink.table.factories.FactoryUtil;
-import org.apache.flink.table.runtime.typeutils.InternalSerializers;
 import org.apache.flink.table.types.DataType;
 import org.apache.flink.table.types.logical.RowType;
 
@@ -158,13 +157,18 @@ public final class CobbleDynamicTableFactory implements DynamicTableSinkFactory 
                         keyFields,
                         valueFields,
                         storageOptions);
+        try {
+            config.tableSchema();
+        } catch (IllegalArgumentException e) {
+            throw new ValidationException("Unsupported Cobble table schema: " + e.getMessage(), e);
+        }
         return new CobbleDynamicTableSink(config, context.getObjectIdentifier().asSummaryString());
     }
 
     private static void validateTypeSupported(RowType.RowField field) {
         try {
-            InternalSerializers.create(field.getType());
-        } catch (UnsupportedOperationException e) {
+            io.cobble.flink.common.table.CobbleTableRowConverter.toCobbleType(field.getType());
+        } catch (IllegalArgumentException e) {
             throw new ValidationException(
                     "Cobble sink does not support field "
                             + field.getName()
