@@ -2,16 +2,18 @@ package io.cobble.flink.table;
 
 import io.cobble.Config;
 import io.cobble.GlobalSnapshot;
+import io.cobble.ReadOptions;
 import io.cobble.Reader;
 import io.cobble.flink.common.CobbleConnectorMetrics;
 import io.cobble.flink.common.CobbleLoader;
+import io.cobble.flink.common.table.CobbleTableRowConverter;
+import io.cobble.table.BucketHash;
+import io.cobble.table.KeyCodec;
+import io.cobble.table.Value;
 
-import org.apache.flink.api.common.typeutils.TypeSerializer;
-import org.apache.flink.core.memory.DataOutputSerializer;
 import org.apache.flink.table.data.RowData;
 import org.apache.flink.table.functions.FunctionContext;
 import org.apache.flink.table.functions.LookupFunction;
-import org.apache.flink.table.runtime.typeutils.InternalSerializers;
 import org.apache.flink.table.types.logical.LogicalType;
 import org.apache.flink.table.types.logical.utils.LogicalTypeParser;
 
@@ -30,6 +32,7 @@ public final class CobbleLookupFunction extends LookupFunction {
     private transient RuntimeLookupKeyEncoder keyEncoder;
     private transient CobbleRowDataDecoders.RuntimeRowDecoder rowDecoder;
     private transient Reader reader;
+    private transient ReadOptions readOptions;
     private transient int totalBuckets;
     private transient CobbleConnectorMetrics.LookupMetrics metrics;
 
@@ -60,7 +63,7 @@ public final class CobbleLookupFunction extends LookupFunction {
             }
             byte[] encodedKey = keyEncoder.encode(keyRow);
             int bucket = hashFixedBucket(encodedKey, totalBuckets);
-            byte[][] columns = reader.get(bucket, encodedKey);
+            byte[][] columns = reader.getWithOptions(bucket, encodedKey, readOptions);
             if (columns == null) {
                 metrics.miss();
                 return Collections.emptyList();
@@ -79,6 +82,10 @@ public final class CobbleLookupFunction extends LookupFunction {
 
     @Override
     public void close() {
+        if (readOptions != null) {
+            readOptions.close();
+            readOptions = null;
+        }
         if (reader != null) {
             reader.close();
             reader = null;
@@ -96,16 +103,24 @@ public final class CobbleLookupFunction extends LookupFunction {
         }
         this.totalBuckets = initialSnapshot.totalBuckets;
         Config readerConfig = CobbleSourceRuntime.createLookupReaderConfig(config, totalBuckets);
-        if (config.isStreamingLatest()) {
-            this.reader = Reader.openCurrent(readerConfig);
-        } else {
-            this.reader = Reader.open(readerConfig, initialSnapshot.id);
+        Reader openedReader =
+                config.isStreamingLatest()
+                        ? Reader.openCurrent(readerConfig)
+                        : Reader.open(readerConfig, initialSnapshot.id);
+        try {
+            int[] columns = config.projectedColumnIndexes();
+            this.readOptions =
+                    ReadOptions.forColumnsInFamily(CobbleTableRowConverter.TABLE_NAME, columns);
+            this.reader = openedReader;
+        } catch (RuntimeException | LinkageError e) {
+            openedReader.close();
+            throw e;
         }
         return true;
     }
 
     private static int hashFixedBucket(byte[] encodedKey, int totalBuckets) {
-        return Math.floorMod(Arrays.hashCode(encodedKey), totalBuckets);
+        return new BucketHash(totalBuckets).bucket(encodedKey);
     }
 
     private static CobbleConnectorMetrics.LookupMetrics lookupMetrics(FunctionContext context) {
@@ -114,56 +129,55 @@ public final class CobbleLookupFunction extends LookupFunction {
 
     private static final class RuntimeLookupKeyEncoder {
         private final List<RuntimeLookupFieldEncoder> encoders;
-        private final DataOutputSerializer keyOutput;
+        private final List<io.cobble.table.LogicalType> keyTypes;
 
         private RuntimeLookupKeyEncoder(
                 List<CobbleDynamicTableSource.SerializableField> keyFields,
                 int[] lookupKeyPositions) {
             this.encoders = new ArrayList<>(keyFields.size());
+            this.keyTypes = new ArrayList<io.cobble.table.LogicalType>(keyFields.size());
             for (int i = 0; i < keyFields.size(); i++) {
+                LogicalType type =
+                        LogicalTypeParser.parse(
+                                keyFields.get(i).logicalType,
+                                CobbleLookupFunction.class.getClassLoader());
                 this.encoders.add(
-                        new RuntimeLookupFieldEncoder(keyFields.get(i), lookupKeyPositions[i]));
+                        new RuntimeLookupFieldEncoder(
+                                keyFields.get(i), lookupKeyPositions[i], type));
+                this.keyTypes.add(CobbleTableRowConverter.toCobbleType(type.copy(false)));
             }
-            this.keyOutput = new DataOutputSerializer(128);
         }
 
-        private byte[] encode(RowData row) throws IOException {
-            keyOutput.clear();
+        private byte[] encode(RowData row) {
+            List<Value> values = new ArrayList<Value>(encoders.size());
             for (RuntimeLookupFieldEncoder encoder : encoders) {
-                byte[] encoded = encoder.encodeRequired(row);
-                keyOutput.writeInt(encoded.length);
-                keyOutput.write(encoded);
+                values.add(encoder.encodeRequired(row));
             }
-            return keyOutput.getCopyOfBuffer();
+            return KeyCodec.encode(keyTypes, values);
         }
     }
 
     private static final class RuntimeLookupFieldEncoder {
         private final String name;
-        private final TypeSerializer<Object> serializer;
+        private final LogicalType logicalType;
         private final RowData.FieldGetter fieldGetter;
-        private final DataOutputSerializer valueOutput;
 
         private RuntimeLookupFieldEncoder(
-                CobbleDynamicTableSource.SerializableField field, int lookupKeyPosition) {
+                CobbleDynamicTableSource.SerializableField field,
+                int lookupKeyPosition,
+                LogicalType logicalType) {
             this.name = field.name;
-            LogicalType logicalType =
-                    LogicalTypeParser.parse(
-                            field.logicalType, CobbleLookupFunction.class.getClassLoader());
-            this.serializer = InternalSerializers.create(logicalType);
+            this.logicalType = logicalType;
             this.fieldGetter = RowData.createFieldGetter(logicalType, lookupKeyPosition);
-            this.valueOutput = new DataOutputSerializer(64);
         }
 
-        private byte[] encodeRequired(RowData row) throws IOException {
+        private Value encodeRequired(RowData row) {
             Object value = fieldGetter.getFieldOrNull(row);
             if (value == null) {
                 throw new IllegalArgumentException(
                         "Lookup key column " + name + " must not be null.");
             }
-            valueOutput.clear();
-            serializer.serialize(value, valueOutput);
-            return valueOutput.getCopyOfBuffer();
+            return CobbleTableRowConverter.toValue(logicalType, value);
         }
     }
 }

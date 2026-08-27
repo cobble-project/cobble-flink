@@ -1,97 +1,90 @@
 package io.cobble.flink.table;
 
-import io.cobble.structured.Row;
+import io.cobble.flink.common.table.CobbleTableRowConverter;
+import io.cobble.table.DataField;
+import io.cobble.table.KeyCodec;
+import io.cobble.table.LogicalType;
+import io.cobble.table.TableSchema;
+import io.cobble.table.Value;
+import io.cobble.table.ValueCodec;
 
-import org.apache.flink.api.common.typeutils.TypeSerializer;
-import org.apache.flink.core.memory.DataInputDeserializer;
-import org.apache.flink.table.data.GenericRowData;
 import org.apache.flink.table.data.RowData;
-import org.apache.flink.table.runtime.typeutils.InternalSerializers;
-import org.apache.flink.table.types.logical.LogicalType;
-import org.apache.flink.table.types.logical.utils.LogicalTypeParser;
-import org.apache.flink.types.RowKind;
 
 import java.io.IOException;
+import java.nio.ByteBuffer;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 
-/** RowData decoders for turning Cobble structured rows back into Flink internal rows. */
+/** Decodes native Cobble Table records into Flink internal rows. */
 final class CobbleRowDataDecoders {
 
     private CobbleRowDataDecoders() {}
 
     static final class RuntimeRowDecoder implements ScannedRowDecoder {
-        private final List<RuntimeFieldDecoder> keyFields;
-        private final List<RuntimeFieldDecoder> valueFields;
+        private final CobbleTableRowConverter converter;
+        private final List<LogicalType> keyTypes;
+        private final List<Integer> keyPositions;
+        private final List<LogicalType> valueTypes;
+        private final List<Integer> valuePositions;
         private final int fieldCount;
 
         RuntimeRowDecoder(CobbleDynamicTableSource.SerializableConfig config) {
-            this.keyFields = new ArrayList<>(config.keyFields.size());
-            for (CobbleDynamicTableSource.SerializableField field : config.keyFields) {
-                this.keyFields.add(new RuntimeFieldDecoder(field));
+            TableSchema schema = config.tableSchema();
+            this.converter = new CobbleTableRowConverter(config.rowType());
+            this.fieldCount = schema.fields().size();
+            Map<Long, Integer> positionsById = new HashMap<Long, Integer>();
+            for (int i = 0; i < schema.fields().size(); i++) {
+                positionsById.put(Long.valueOf(schema.fields().get(i).id()), Integer.valueOf(i));
             }
-            this.valueFields = new ArrayList<>(config.valueFields.size());
-            for (CobbleDynamicTableSource.SerializableField field : config.valueFields) {
-                this.valueFields.add(new RuntimeFieldDecoder(field));
+            this.keyTypes = new ArrayList<LogicalType>(schema.primaryKey().size());
+            this.keyPositions = new ArrayList<Integer>(schema.primaryKey().size());
+            for (Long fieldId : schema.primaryKey()) {
+                int position = positionsById.get(fieldId).intValue();
+                keyPositions.add(Integer.valueOf(position));
+                keyTypes.add(schema.fields().get(position).logicalType());
             }
-            this.fieldCount = config.totalFieldCount();
-        }
-
-        RowData decode(Row row) throws IOException {
-            return decode(row.getKey(), extractColumns(row));
+            this.valueTypes = new ArrayList<LogicalType>();
+            this.valuePositions = new ArrayList<Integer>();
+            for (int i = 0; i < schema.fields().size(); i++) {
+                DataField field = schema.fields().get(i);
+                if (!schema.primaryKey().contains(Long.valueOf(field.id()))) {
+                    valuePositions.add(Integer.valueOf(i));
+                    valueTypes.add(field.logicalType());
+                }
+            }
         }
 
         @Override
         public RowData decode(byte[] key, byte[][] columns) throws IOException {
-            GenericRowData decoded = new GenericRowData(RowKind.INSERT, fieldCount);
-
-            DataInputDeserializer keyInput = new DataInputDeserializer(key);
-            for (RuntimeFieldDecoder field : keyFields) {
-                int length = keyInput.readInt();
-                byte[] bytes = new byte[length];
-                keyInput.readFully(bytes);
-                decoded.setField(field.rowIndex, field.deserialize(bytes));
-            }
-
-            for (RuntimeFieldDecoder field : valueFields) {
-                byte[] bytes =
-                        field.structuredColumnIndex < columns.length
-                                ? columns[field.structuredColumnIndex]
-                                : null;
-                decoded.setField(field.rowIndex, bytes == null ? null : field.deserialize(bytes));
-            }
-            return decoded;
-        }
-
-        private byte[][] extractColumns(Row row) {
-            byte[][] columns = new byte[valueFields.size()][];
-            for (RuntimeFieldDecoder field : valueFields) {
-                if (field.structuredColumnIndex >= 0
-                        && field.structuredColumnIndex < columns.length) {
-                    columns[field.structuredColumnIndex] =
-                            row.getBytes(field.structuredColumnIndex);
+            try {
+                List<Value> row = new ArrayList<Value>(fieldCount);
+                for (int i = 0; i < fieldCount; i++) {
+                    row.add(Value.nullValue());
                 }
+                List<Value> decodedKey = KeyCodec.decode(keyTypes, ByteBuffer.wrap(key));
+                for (int i = 0; i < decodedKey.size(); i++) {
+                    row.set(keyPositions.get(i).intValue(), decodedKey.get(i));
+                }
+                if (columns.length < valueTypes.size()) {
+                    throw new IllegalArgumentException(
+                            "Cobble table row is missing one or more value columns");
+                }
+                for (int i = 0; i < valueTypes.size(); i++) {
+                    byte[] column = columns[i];
+                    if (column == null) {
+                        throw new IllegalArgumentException(
+                                "Cobble table row is missing value column " + i);
+                    }
+                    row.set(
+                            valuePositions.get(i).intValue(),
+                            ValueCodec.decodeOwned(valueTypes.get(i), ByteBuffer.wrap(column)));
+                }
+                return converter.toRowData(row);
+            } catch (IllegalArgumentException e) {
+                throw new IOException("Failed to decode Cobble Table row: " + e.getMessage(), e);
             }
-            return columns;
-        }
-    }
-
-    static final class RuntimeFieldDecoder {
-        final int rowIndex;
-        final int structuredColumnIndex;
-        private final TypeSerializer<Object> serializer;
-
-        RuntimeFieldDecoder(CobbleDynamicTableSource.SerializableField field) {
-            this.rowIndex = field.rowIndex;
-            this.structuredColumnIndex = field.structuredColumnIndex;
-            LogicalType logicalType =
-                    LogicalTypeParser.parse(
-                            field.logicalType, CobbleRowDataDecoders.class.getClassLoader());
-            this.serializer = InternalSerializers.create(logicalType);
-        }
-
-        Object deserialize(byte[] bytes) throws IOException {
-            return serializer.deserialize(new DataInputDeserializer(bytes));
         }
     }
 }

@@ -5,6 +5,8 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import io.cobble.GlobalSnapshot;
+
 import org.apache.flink.api.common.functions.RuntimeContext;
 import org.apache.flink.api.common.restartstrategy.RestartStrategies;
 import org.apache.flink.core.execution.JobClient;
@@ -76,9 +78,11 @@ class CobbleLookupFunctionITTest {
     @Test
     void snapshotIdLookupStaysPinnedToConfiguredSnapshot() throws Exception {
         Path tablePath = tempDir.resolve("snapshot-id");
-        writeDimensionRows(tablePath, Arrays.asList("2,name-2,20", "7,name-7,70"));
+        long snapshotId =
+                writeDimensionRows(tablePath, Arrays.asList("2,name-2,20", "7,name-7,70"));
 
-        CobbleLookupFunction lookup = openLookupFunction(tablePath, "1", "batch");
+        CobbleLookupFunction lookup =
+                openLookupFunction(tablePath, Long.toString(snapshotId), "batch");
         try {
             assertEquals("name-2,20", lookupValue(lookup, 2L));
             assertEquals("name-7,70", lookupValue(lookup, 7L));
@@ -227,7 +231,7 @@ class CobbleLookupFunctionITTest {
                         new CobbleDynamicTableSource.SerializableField("score", "INT", 2, 1)));
     }
 
-    private void writeDimensionRows(Path tablePath, Collection<String> rows) throws Exception {
+    private long writeDimensionRows(Path tablePath, Collection<String> rows) throws Exception {
         StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment();
         env.setParallelism(1);
         env.setRestartStrategy(RestartStrategies.noRestart());
@@ -255,6 +259,13 @@ class CobbleLookupFunctionITTest {
                                 + "SELECT * FROM (VALUES "
                                 + String.join(", ", toSqlRows(rows))
                                 + ") AS src(id, name, score)"));
+        GlobalSnapshot snapshot =
+                CobbleSourceRuntime.loadConfiguredSnapshot(
+                        buildLookupConfig(tablePath, "latest", "batch"));
+        if (snapshot == null) {
+            throw new IllegalStateException("Sink did not publish a global snapshot.");
+        }
+        return snapshot.id;
     }
 
     private String[] toSqlRows(Collection<String> rows) {

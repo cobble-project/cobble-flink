@@ -55,6 +55,9 @@ final class CobbleSourceReader implements SourceReader<RowData, CobbleSourceSpli
     @Override
     public void start() {
         this.scanOptions = ScanOptions.forColumns(projectedColumnIndexes);
+        if (config.columnFamily() != null) {
+            this.scanOptions.columnFamily(config.columnFamily());
+        }
         context.sendSplitRequest();
     }
 

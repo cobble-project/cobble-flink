@@ -51,6 +51,10 @@ interface CobbleTableScanConfig extends Serializable {
     /** Per-scan column projection indexes; passed to {@code ScanOptions.forColumns(...)}. */
     int[] projectedColumnIndexes();
 
+    default String columnFamily() {
+        return null;
+    }
+
     /**
      * Creates the reader-side row decoder. Called on the TaskManager side in {@link
      * CobbleSource#createReader}, never on the JobManager side, so decoders that hold

@@ -3,6 +3,7 @@ package io.cobble.flink.table;
 import io.cobble.flink.common.CobbleConnectorStorageOptions;
 import io.cobble.flink.common.CobbleLoader;
 import io.cobble.flink.common.inspect.StateInspectExactLookupSupport;
+import io.cobble.flink.common.table.CobbleTableRowConverter;
 
 import org.apache.flink.configuration.ConfigOption;
 import org.apache.flink.configuration.MemorySize;
@@ -13,7 +14,6 @@ import org.apache.flink.table.catalog.UniqueConstraint;
 import org.apache.flink.table.connector.source.DynamicTableSource;
 import org.apache.flink.table.factories.DynamicTableSourceFactory;
 import org.apache.flink.table.factories.FactoryUtil;
-import org.apache.flink.table.runtime.typeutils.InternalSerializers;
 import org.apache.flink.table.types.DataType;
 import org.apache.flink.table.types.logical.RowType;
 
@@ -150,19 +150,7 @@ public final class CobbleDynamicTableSourceFactory implements DynamicTableSource
                                 new ValidationExceptionSupplier(
                                         "The initial Cobble source requires a PRIMARY KEY."));
 
-        SinkSourceResolvedSchema sinkSidecar =
-                SinkSourceSchemaResolver.resolve(
-                        pathUri, checkpointId, resolvedSchema, storageOptions);
-        List<CobbleDynamicTableSource.SerializableField> keyFields;
-        List<CobbleDynamicTableSource.SerializableField> valueFields;
-        if (sinkSidecar.present()) {
-            keyFields = sinkSidecar.keyFields();
-            valueFields = sinkSidecar.valueFields();
-        } else {
-            SinkDdlSchema ddlSchema = deriveSinkFieldsFromDdl(resolvedSchema, primaryKey);
-            keyFields = ddlSchema.keyFields;
-            valueFields = ddlSchema.valueFields;
-        }
+        SinkDdlSchema ddlSchema = deriveSinkFieldsFromDdl(resolvedSchema, primaryKey);
 
         CobbleDynamicTableSource.SerializableConfig config =
                 new CobbleDynamicTableSource.SerializableConfig(
@@ -172,9 +160,10 @@ public final class CobbleDynamicTableSourceFactory implements DynamicTableSource
                         scanMode,
                         pollIntervalMillis,
                         sourceBlockCacheMemory.getBytes(),
-                        keyFields,
-                        valueFields,
+                        ddlSchema.keyFields,
+                        ddlSchema.valueFields,
                         storageOptions);
+        CobbleTableSourceSchemaResolver.validate(config);
         return new CobbleDynamicTableSource(
                 config, context.getObjectIdentifier().asSummaryString());
     }
@@ -353,8 +342,8 @@ public final class CobbleDynamicTableSourceFactory implements DynamicTableSource
 
     private static void validateTypeSupported(RowType.RowField field) {
         try {
-            InternalSerializers.create(field.getType());
-        } catch (UnsupportedOperationException e) {
+            CobbleTableRowConverter.toCobbleType(field.getType());
+        } catch (IllegalArgumentException e) {
             throw new ValidationException(
                     "Cobble source does not support field "
                             + field.getName()

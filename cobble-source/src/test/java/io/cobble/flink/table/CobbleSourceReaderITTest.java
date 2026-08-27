@@ -40,12 +40,12 @@ class CobbleSourceReaderITTest {
     @Test
     void readerEmitsAllKeysAcrossLargeBucketRanges() throws Exception {
         Path tablePath = tempDir.resolve("large-bucket-source");
-        writeRows(tablePath, 32, rows("v1", 1000));
+        long snapshotId = writeRows(tablePath, 32, rows("v1", 1000));
 
         CobbleDynamicTableSource.SerializableConfig config =
-                sourceConfig(tablePath, 32, "1", "batch");
+                sourceConfig(tablePath, 32, Long.toString(snapshotId), "batch");
 
-        GlobalSnapshot snapshot = CobbleSourceRuntime.loadSnapshotById(config, 1L);
+        GlobalSnapshot snapshot = CobbleSourceRuntime.loadSnapshotById(config, snapshotId);
         List<CobbleSourceSplit> splits = CobbleSourceRuntime.createSourceSplits(config, snapshot);
         CapturingSourceMetrics metrics = new CapturingSourceMetrics();
         CobbleSourceReader reader =
@@ -88,11 +88,11 @@ class CobbleSourceReaderITTest {
     @Test
     void readerRestoresProgressFromCheckpointAcrossLargeBucketRanges() throws Exception {
         Path tablePath = tempDir.resolve("checkpoint-resume");
-        writeRows(tablePath, 32, rows("v1", 1000));
+        long snapshotId = writeRows(tablePath, 32, rows("v1", 1000));
 
         CobbleDynamicTableSource.SerializableConfig config =
-                sourceConfig(tablePath, 32, "1", "batch");
-        GlobalSnapshot snapshot = CobbleSourceRuntime.loadSnapshotById(config, 1L);
+                sourceConfig(tablePath, 32, Long.toString(snapshotId), "batch");
+        GlobalSnapshot snapshot = CobbleSourceRuntime.loadSnapshotById(config, snapshotId);
         List<CobbleSourceSplit> initialSplits =
                 CobbleSourceRuntime.createSourceSplits(config, snapshot);
 
@@ -126,11 +126,11 @@ class CobbleSourceReaderITTest {
     @Test
     void readerContinuesFromLastKeyWhenSnapshotIsReplaced() throws Exception {
         Path tablePath = tempDir.resolve("replacement-resume");
-        writeRows(tablePath, 1, rows("v1", 1000));
+        long snapshot1Id = writeRows(tablePath, 1, rows("v1", 1000));
 
         CobbleDynamicTableSource.SerializableConfig config =
                 sourceConfig(tablePath, 1, "latest", "streaming");
-        GlobalSnapshot snapshot1 = CobbleSourceRuntime.loadSnapshotById(config, 1L);
+        GlobalSnapshot snapshot1 = CobbleSourceRuntime.loadSnapshotById(config, snapshot1Id);
         List<CobbleSourceSplit> initialSplits =
                 CobbleSourceRuntime.createSourceSplits(config, snapshot1);
 
@@ -143,8 +143,8 @@ class CobbleSourceReaderITTest {
             pollUntilRowCount(reader, output, 20);
             idsSeenBeforeReplacement = extractIds(output.rows);
 
-            writeRows(tablePath, 1, rows("v2", 2000));
-            GlobalSnapshot snapshot2 = CobbleSourceRuntime.loadSnapshotById(config, 2L);
+            long snapshot2Id = writeRows(tablePath, 1, rows("v2", 2000));
+            GlobalSnapshot snapshot2 = CobbleSourceRuntime.loadSnapshotById(config, snapshot2Id);
             for (CobbleSourceSplit split :
                     CobbleSourceRuntime.createSourceSplits(config, snapshot2)) {
                 reader.handleSourceEvents(new CobbleSourceEvents.ReplaceSplitEvent(split));
@@ -170,11 +170,11 @@ class CobbleSourceReaderITTest {
     @Test
     void readerContinuesLargeBucketReplacementAfterCheckpointRestore() throws Exception {
         Path tablePath = tempDir.resolve("replacement-resume-large-buckets");
-        writeRows(tablePath, 32, 1, rows("v1", 1000, 640));
+        long snapshot1Id = writeRows(tablePath, 32, 1, rows("v1", 1000, 640));
 
         CobbleDynamicTableSource.SerializableConfig config =
                 sourceConfig(tablePath, 32, "latest", "streaming");
-        GlobalSnapshot snapshot1 = CobbleSourceRuntime.loadSnapshotById(config, 1L);
+        GlobalSnapshot snapshot1 = CobbleSourceRuntime.loadSnapshotById(config, snapshot1Id);
         List<CobbleSourceSplit> initialSplits =
                 CobbleSourceRuntime.createSourceSplits(config, snapshot1);
 
@@ -197,8 +197,8 @@ class CobbleSourceReaderITTest {
             resumedReader.addSplits(checkpointedSplits);
             pollUntilRowCount(resumedReader, resumedOutput, 40);
 
-            writeRows(tablePath, 32, 1, rows("v2", 2000, 640));
-            GlobalSnapshot snapshot2 = CobbleSourceRuntime.loadSnapshotById(config, 2L);
+            long snapshot2Id = writeRows(tablePath, 32, 1, rows("v2", 2000, 640));
+            GlobalSnapshot snapshot2 = CobbleSourceRuntime.loadSnapshotById(config, snapshot2Id);
             for (CobbleSourceSplit split :
                     CobbleSourceRuntime.createSourceSplits(config, snapshot2)) {
                 resumedReader.handleSourceEvents(new CobbleSourceEvents.ReplaceSplitEvent(split));
@@ -230,11 +230,11 @@ class CobbleSourceReaderITTest {
     @Test
     void readerWrapsReplacementAfterCheckpointRestoreToConsumeEarlierNewKeys() throws Exception {
         Path tablePath = tempDir.resolve("replacement-wrap-after-restore");
-        writeRows(tablePath, 1, rangedRows("v1", 1000, 101, 200));
+        long snapshot1Id = writeRows(tablePath, 1, rangedRows("v1", 1000, 101, 200));
 
         CobbleDynamicTableSource.SerializableConfig config =
                 sourceConfig(tablePath, 1, "latest", "streaming");
-        GlobalSnapshot snapshot1 = CobbleSourceRuntime.loadSnapshotById(config, 1L);
+        GlobalSnapshot snapshot1 = CobbleSourceRuntime.loadSnapshotById(config, snapshot1Id);
         List<CobbleSourceSplit> initialSplits =
                 CobbleSourceRuntime.createSourceSplits(config, snapshot1);
 
@@ -259,8 +259,8 @@ class CobbleSourceReaderITTest {
             pollUntilRowCount(resumedReader, resumedOutput, 10);
             idsSeenBeforeReplacement.addAll(extractIds(resumedOutput.rows));
 
-            writeRows(tablePath, 1, rangedRows("v2", 2000, 1, 200));
-            GlobalSnapshot snapshot2 = CobbleSourceRuntime.loadSnapshotById(config, 2L);
+            long snapshot2Id = writeRows(tablePath, 1, rangedRows("v2", 2000, 1, 200));
+            GlobalSnapshot snapshot2 = CobbleSourceRuntime.loadSnapshotById(config, snapshot2Id);
             for (CobbleSourceSplit split :
                     CobbleSourceRuntime.createSourceSplits(config, snapshot2)) {
                 resumedReader.handleSourceEvents(new CobbleSourceEvents.ReplaceSplitEvent(split));
@@ -287,11 +287,11 @@ class CobbleSourceReaderITTest {
         }
     }
 
-    private void writeRows(Path tablePath, int bucketCount, List<String> rows) throws Exception {
-        writeRows(tablePath, bucketCount, Math.min(bucketCount, 8), rows);
+    private long writeRows(Path tablePath, int bucketCount, List<String> rows) throws Exception {
+        return writeRows(tablePath, bucketCount, Math.min(bucketCount, 8), rows);
     }
 
-    private void writeRows(Path tablePath, int bucketCount, int sinkParallelism, List<String> rows)
+    private long writeRows(Path tablePath, int bucketCount, int sinkParallelism, List<String> rows)
             throws Exception {
         StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment();
         env.setParallelism(1);
@@ -320,6 +320,13 @@ class CobbleSourceReaderITTest {
                         "INSERT INTO cobble_sink SELECT * FROM (VALUES "
                                 + String.join(", ", rows)
                                 + ") AS src(id, name, score)"));
+        GlobalSnapshot snapshot =
+                CobbleSourceRuntime.loadConfiguredSnapshot(
+                        sourceConfig(tablePath, bucketCount, "latest", "batch"));
+        if (snapshot == null) {
+            throw new IllegalStateException("Sink did not publish a global snapshot.");
+        }
+        return snapshot.id;
     }
 
     private static List<String> rows(String suffix, int scoreBase) {

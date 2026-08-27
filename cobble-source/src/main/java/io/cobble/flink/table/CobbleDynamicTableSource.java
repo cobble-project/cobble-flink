@@ -1,6 +1,8 @@
 package io.cobble.flink.table;
 
 import io.cobble.flink.common.CobbleConnectorStorageOptions;
+import io.cobble.flink.common.table.CobbleTableRowConverter;
+import io.cobble.table.TableSchema;
 
 import org.apache.flink.api.connector.source.Boundedness;
 import org.apache.flink.table.api.ValidationException;
@@ -14,9 +16,10 @@ import org.apache.flink.table.connector.source.lookup.LookupFunctionProvider;
 import java.io.Serializable;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.Comparator;
 import java.util.List;
 
-/** Flink SQL source that reads rows from Cobble sink checkpoints. */
+/** Flink SQL source that reads rows from committed Cobble Tables. */
 final class CobbleDynamicTableSource implements ScanTableSource, LookupTableSource {
 
     private final SerializableConfig config;
@@ -199,7 +202,7 @@ final class CobbleDynamicTableSource implements ScanTableSource, LookupTableSour
 
         @Override
         public int scanColumnCount() {
-            return valueFields.size();
+            return Math.max(1, valueFields.size());
         }
 
         @Override
@@ -214,6 +217,44 @@ final class CobbleDynamicTableSource implements ScanTableSource, LookupTableSour
         @Override
         public ScannedRowDecoder createDecoder() {
             return new CobbleRowDataDecoders.RuntimeRowDecoder(this);
+        }
+
+        @Override
+        public String columnFamily() {
+            return CobbleTableRowConverter.TABLE_NAME;
+        }
+
+        List<SerializableField> physicalFields() {
+            List<SerializableField> fields = new ArrayList<SerializableField>();
+            fields.addAll(keyFields);
+            fields.addAll(valueFields);
+            Collections.sort(
+                    fields,
+                    new Comparator<SerializableField>() {
+                        @Override
+                        public int compare(SerializableField left, SerializableField right) {
+                            return Integer.compare(left.rowIndex, right.rowIndex);
+                        }
+                    });
+            return fields;
+        }
+
+        org.apache.flink.table.types.logical.RowType rowType() {
+            List<String> names = new ArrayList<String>();
+            List<String> types = new ArrayList<String>();
+            for (SerializableField field : physicalFields()) {
+                names.add(field.name);
+                types.add(field.logicalType);
+            }
+            return CobbleTableRowConverter.parseRowType(names, types);
+        }
+
+        TableSchema tableSchema() {
+            List<String> primaryKey = new ArrayList<String>(keyFields.size());
+            for (SerializableField field : keyFields) {
+                primaryKey.add(field.name);
+            }
+            return CobbleTableRowConverter.toTableSchema(rowType(), primaryKey);
         }
 
         int totalFieldCount() {

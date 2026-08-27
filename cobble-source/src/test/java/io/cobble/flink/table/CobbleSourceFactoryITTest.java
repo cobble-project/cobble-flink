@@ -124,9 +124,7 @@ class CobbleSourceFactoryITTest {
     }
 
     @Test
-    void autoSinkShapedDdlWithoutInspectSchemaStillCreatesSinkSource() throws Exception {
-        // A sink table written without an inspect-schema sidecar: only snapshot/CURRENT exists.
-        // The sink-shaped DDL (PK + non-PK column) must keep working under default 'auto'.
+    void autoSinkShapedDdlCreatesNativeTableSource() throws Exception {
         Path root = ambiguousRoot("sink-no-sidecar");
         StreamTableEnvironment tableEnv = newTableEnv();
         tableEnv.executeSql(sinkDdl("t_sink_no_sidecar", root, null));
@@ -135,25 +133,21 @@ class CobbleSourceFactoryITTest {
     }
 
     @Test
-    void sidecarBackedSinkDdlPlansWhenDdlMatchesPersistedSchema() throws Exception {
+    void legacySinkSidecarIsRejectedDuringPlanning() throws Exception {
         Path root = sinkRootWithSidecar("sink-sidecar-valid", "name", "VARCHAR(2147483647)");
         StreamTableEnvironment tableEnv = newTableEnv();
         tableEnv.executeSql(sinkDdl("t_sink_sidecar_valid", root, "sink"));
 
-        assertDoesNotThrow(() -> tableEnv.explainSql("SELECT * FROM t_sink_sidecar_valid"));
+        Exception error =
+                assertThrows(
+                        Exception.class,
+                        () -> tableEnv.explainSql("SELECT * FROM t_sink_sidecar_valid"));
+        assertTrue(messageChain(error).contains("pre-Table Cobble sink format"));
     }
 
     @Test
     void sidecarBackedSinkDdlPlansWhenPrimaryKeyIsNotFirstPhysicalColumn() throws Exception {
-        Path root =
-                sinkRootWithSidecar(
-                        "sink-sidecar-non-leading-pk",
-                        "id",
-                        1,
-                        "name",
-                        "VARCHAR(2147483647)",
-                        0,
-                        0);
+        Path root = nativeTableRootWithNonLeadingPrimaryKey("sink-table-non-leading-pk");
         StreamTableEnvironment tableEnv = newTableEnv();
         tableEnv.executeSql(
                 "CREATE TABLE t_sink_sidecar_non_leading_pk ("
@@ -173,8 +167,8 @@ class CobbleSourceFactoryITTest {
     }
 
     @Test
-    void sidecarBackedSinkDdlWithReorderedColumnsFailsDuringPlanning() throws Exception {
-        Path root = sinkRootWithSidecar("sink-sidecar-reorder", "name", "VARCHAR(2147483647)");
+    void nativeTableDdlWithReorderedColumnsFailsDuringPlanning() throws Exception {
+        Path root = sinkRoot("sink-table-reorder");
         StreamTableEnvironment tableEnv = newTableEnv();
         tableEnv.executeSql(
                 "CREATE TABLE t_sink_sidecar_reorder ("
@@ -194,13 +188,12 @@ class CobbleSourceFactoryITTest {
                         Exception.class,
                         () -> tableEnv.explainSql("SELECT * FROM t_sink_sidecar_reorder"));
         assertTrue(
-                messageChain(error).contains("inspect schema expects 'id'"),
-                "expected sidecar reorder message but got: " + messageChain(error));
+                messageChain(error).contains("does not match the persisted Cobble Table schema"));
     }
 
     @Test
-    void sidecarBackedSinkDdlWithWrongPrimaryKeyFailsDuringPlanning() throws Exception {
-        Path root = sinkRootWithSidecar("sink-sidecar-wrong-pk", "name", "VARCHAR(2147483647)");
+    void nativeTableDdlWithWrongPrimaryKeyFailsDuringPlanning() throws Exception {
+        Path root = sinkRoot("sink-table-wrong-pk");
         StreamTableEnvironment tableEnv = newTableEnv();
         tableEnv.executeSql(
                 "CREATE TABLE t_sink_sidecar_wrong_pk ("
@@ -220,12 +213,11 @@ class CobbleSourceFactoryITTest {
                         Exception.class,
                         () -> tableEnv.explainSql("SELECT * FROM t_sink_sidecar_wrong_pk"));
         assertTrue(
-                messageChain(error).contains("PRIMARY KEY column at position 0"),
-                "expected sidecar PK-order message but got: " + messageChain(error));
+                messageChain(error).contains("does not match the persisted Cobble Table schema"));
     }
 
     @Test
-    void sidecarLessSinkDdlStillPlansWithDdlDerivedSchema() throws Exception {
+    void nativeTableDdlPlansWithPersistedSchema() throws Exception {
         Path root = ambiguousRoot("sink-no-sidecar-explicit");
         StreamTableEnvironment tableEnv = newTableEnv();
         tableEnv.executeSql(sinkDdl("t_sink_no_sidecar_explicit", root, "sink"));
@@ -1371,14 +1363,38 @@ class CobbleSourceFactoryITTest {
 
     private Path sinkRoot(String name) throws Exception {
         Path root = tempDir.resolve(name);
-        byte[] blob = new SinkInspectSchemaStore(null).toBytes();
-        String hash = InspectSchemaRegistryLayout.sha256(blob);
-        write(
-                root.resolve("inspect-schema")
-                        .resolve("blobs")
-                        .resolve(InspectSchemaRegistryLayout.blobFileName(hash)),
-                blob);
-        write(root.resolve("snapshot").resolve("CURRENT"), new byte[] {1});
+        CobbleTableSourceTestData.write(
+                root,
+                2,
+                CobbleTableSourceTestData.idNameSchema(),
+                CobbleTableSourceTestData.idNameRows());
+        return root;
+    }
+
+    private Path nativeTableRootWithNonLeadingPrimaryKey(String name) throws Exception {
+        Path root = tempDir.resolve(name);
+        CobbleDynamicTableSource.SerializableConfig config =
+                new CobbleDynamicTableSource.SerializableConfig(
+                        root.toUri().toString(),
+                        2,
+                        "latest",
+                        "batch",
+                        50L,
+                        0L,
+                        Collections.singletonList(
+                                new CobbleDynamicTableSource.SerializableField(
+                                        "id", "BIGINT", 1, -1)),
+                        Collections.singletonList(
+                                new CobbleDynamicTableSource.SerializableField(
+                                        "name", "VARCHAR(2147483647)", 0, 0)));
+        CobbleTableSourceTestData.write(
+                root,
+                2,
+                config.tableSchema(),
+                Collections.singletonList(
+                        Arrays.asList(
+                                io.cobble.table.Value.string("one"),
+                                io.cobble.table.Value.int64(1L))));
         return root;
     }
 
@@ -1420,10 +1436,7 @@ class CobbleSourceFactoryITTest {
     }
 
     private Path ambiguousRoot(String name) throws Exception {
-        Path root = tempDir.resolve(name);
-        // Sink data without an inspect-schema sidecar: only the weak snapshot/CURRENT signal.
-        write(root.resolve("snapshot").resolve("CURRENT"), new byte[] {1});
-        return root;
+        return sinkRoot(name);
     }
 
     /**
