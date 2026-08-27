@@ -16,6 +16,41 @@ import java.nio.file.Paths;
 class MonitorAppJsTest {
 
     @Test
+    void nativeTableRowsRenderStructuredKeyAndColumns() throws Exception {
+        String appJs = readAppJs();
+        String harness =
+                "const document = {\n"
+                        + "  getElementById: () => ({ addEventListener() {}, classList: { toggle() {}, remove() {}, add() {} }, setAttribute() {} }),\n"
+                        + "  querySelectorAll: () => [], querySelector: () => ({ classList: { toggle() {} } }), addEventListener() {},\n"
+                        + "};\n"
+                        + "const window = { addEventListener() {} };\n"
+                        + "async function fetch() { return { ok: true, json: async () => ({}) }; }\n"
+                        + appJs
+                        + "\nconst scalar = (type, value) => ({ kind: 'SCALAR', logical_type: type, value, fields: [], elements: [], entries: [] });\n"
+                        + "const row = (fields) => ({ kind: 'ROW', fields, elements: [], entries: [] });\n"
+                        + "const key = row([{ name: 'id', value: scalar('BIGINT NOT NULL', 1001) }]);\n"
+                        + "const columns = [row([{ name: 'name', value: scalar('STRING', 'alice') }]), row([{ name: 'score', value: scalar('INT', 11) }])];\n"
+                        + "const keyHtml = renderSinkExpandedCells([{ name: 'id' }], key, 'key');\n"
+                        + "const valueHtml = renderSinkExpandedCells([{ name: 'name' }, { name: 'score' }], columns, 'column');\n"
+                        + "const projected = projectedSinkValueFields([{ name: 'name' }, { name: 'score' }], '1,0').map((field) => field.name);\n"
+                        + "console.log(JSON.stringify({ keyHtml, valueHtml, projected }));\n";
+
+        Process process = new ProcessBuilder("node", "--input-type=module", "-").start();
+        process.getOutputStream().write(harness.getBytes(StandardCharsets.UTF_8));
+        process.getOutputStream().close();
+        String stdout = new String(process.getInputStream().readAllBytes(), StandardCharsets.UTF_8);
+        String stderr = new String(process.getErrorStream().readAllBytes(), StandardCharsets.UTF_8);
+        int exit = process.waitFor();
+
+        assertEquals(0, exit, stderr);
+        assertTrue(stdout.contains("1001"));
+        assertTrue(stdout.contains("alice"));
+        assertTrue(stdout.contains("11"));
+        assertTrue(stdout.contains("\"projected\":[\"score\",\"name\"]"));
+        assertFalse(stdout.contains("muted-text\\\">null"));
+    }
+
+    @Test
     void semanticScalarTypedInputsUseStateLookupWireNames() throws Exception {
         String appJs = readAppJs();
         String harness =

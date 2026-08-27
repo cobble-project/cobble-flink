@@ -1163,7 +1163,7 @@ function renderScanResult(data, context = activeScanContext()) {
   const sinkExpanded = isSinkExpandedTable(target)
   const timerFieldTable = timer && isStateExpandedTable(target)
   const stateExpanded = !timer && !sinkExpanded && isStateExpandedTable(target)
-  const sinkTable = sinkExpanded ? sinkTableLayout(target, context, items) : null
+  const sinkTable = sinkExpanded ? sinkTableLayout(target, context) : null
   const stateTable = stateExpanded || timerFieldTable ? stateTableLayout(target) : null
   setResultTableExpanded(
     sinkExpanded || stateExpanded || timerFieldTable,
@@ -1228,7 +1228,7 @@ function renderLookupResult() {
   const timerFieldTable = timerOnly && isStateExpandedLookup(items)
   const sinkExpanded = !timerOnly && isSinkExpandedLookup(items)
   const stateExpanded = !timerOnly && !sinkExpanded && isStateExpandedLookup(items)
-  const sinkTable = sinkExpanded ? sinkTableLayout(trackedTarget(items[0]), items[0], items) : null
+  const sinkTable = sinkExpanded ? sinkTableLayout(trackedTarget(items[0]), items[0]) : null
   const stateTable = stateExpanded || timerFieldTable ? stateTableLayout(trackedTarget(items[0])) : null
   setResultTableExpanded(
     sinkExpanded || stateExpanded || timerFieldTable,
@@ -1738,12 +1738,11 @@ function setResultTableExpanded(expanded, kind = '') {
   table?.classList.toggle('state-expanded-table', expanded && kind === 'state')
 }
 
-function sinkTableLayout(target, context = {}, items = []) {
+function sinkTableLayout(target, context = {}) {
   const keyFields = target?.key_fields || context.keyFields || []
   const valueFields = projectedSinkValueFields(
     target?.value_fields || context.valueFields || [],
     context.columns,
-    items,
   )
   return {
     keyFields,
@@ -1755,34 +1754,27 @@ function sinkTableLayout(target, context = {}, items = []) {
   }
 }
 
-function projectedSinkValueFields(valueFields, columns, items) {
+function projectedSinkValueFields(valueFields, columns) {
   const projected = parseColumnProjection(columns)
-  if (projected.size === 0) return valueFields
-  const filtered = valueFields.filter((field) => projected.has(Number(field.structured_column_index)))
-  if (filtered.length > 0) return filtered
-  const decodedColumns = firstDecodedSinkColumns(items)
-  return decodedColumns.filter((field) => projected.has(Number(field.index)))
+  if (projected.length === 0) return valueFields
+  return projected.map((index) => valueFields[index]).filter(Boolean)
 }
 
 function parseColumnProjection(columns) {
-  const projected = new Set()
+  const projected = []
+  const seen = new Set()
   String(columns || '')
     .split(',')
     .map((part) => part.trim())
     .filter(Boolean)
     .forEach((part) => {
       const value = Number(part)
-      if (Number.isInteger(value) && value >= 0) projected.add(value)
+      if (Number.isInteger(value) && value >= 0 && !seen.has(value)) {
+        projected.push(value)
+        seen.add(value)
+      }
     })
   return projected
-}
-
-function firstDecodedSinkColumns(items = []) {
-  for (const item of items) {
-    const columns = item.decoded_columns || item.decodedColumns
-    if (Array.isArray(columns) && columns.length > 0) return columns
-  }
-  return []
 }
 
 function renderSinkScanHeader(layout) {
@@ -1867,17 +1859,19 @@ function sinkGroupBoundaryClass(index, total) {
 }
 
 function sinkDecodedField(decodedFields = [], field, index) {
-  if (!Array.isArray(decodedFields)) return null
-  if (field && Object.prototype.hasOwnProperty.call(field, 'structured_column_index')) {
-    const columnIndex = Number(field.structured_column_index)
-    const byIndex = decodedFields.find((decoded) => Number(decoded?.index) === columnIndex)
-    if (byIndex) return byIndex
-  }
+  const fields = decodedTableFields(decodedFields)
   if (field?.name) {
-    const byName = decodedFields.find((decoded) => decoded?.name === field.name)
+    const byName = fields.find((decoded) => decoded?.name === field.name)
     if (byName) return byName
   }
-  return decodedFields[index] || null
+  return fields[index] || null
+}
+
+function decodedTableFields(decoded) {
+  if (Array.isArray(decoded)) return decoded.flatMap((value) => decodedTableFields(value))
+  if (!decoded || typeof decoded !== 'object') return []
+  if (decoded.kind === 'ROW' && Array.isArray(decoded.fields)) return decoded.fields
+  return Object.prototype.hasOwnProperty.call(decoded, 'value') ? [decoded] : []
 }
 
 function renderSinkExpandedValue(decodedField) {
