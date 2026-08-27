@@ -79,13 +79,16 @@ final class InspectSessionImpl implements InspectSession {
                         ? snapshot.totalBuckets
                         : configuredTotalBuckets;
         SchemaResolveResult stateSchema = resolveStateSchema(sourceKind, checkpoint, operator);
-        SinkSchemaResolveResult sinkSchema =
-                resolveSinkSchema(sourceKind, sourceRoot, checkpoint, storageOptions);
+        List<InspectTarget> resolvedTargets;
+        if ("data_source".equals(sourceKind)) {
+            TableInspectSchema tableSchema =
+                    CobbleTableInspectSchemaResolver.resolve(sourceRoot, snapshot, storageOptions);
+            resolvedTargets = Collections.singletonList(InspectTarget.table("table", tableSchema));
+        } else {
+            resolvedTargets = StateInspectTargetBuilder.build(snapshot, stateSchema);
+        }
         this.internalTargets =
-                Collections.unmodifiableList(
-                        new ArrayList<>(
-                                StateInspectTargetBuilder.build(
-                                        snapshot, stateSchema, sinkSchema)));
+                Collections.unmodifiableList(new ArrayList<InspectTarget>(resolvedTargets));
         List<io.cobble.flink.inspect.InspectTarget> publicTargets = new ArrayList<>();
         for (InspectTarget target : internalTargets) {
             publicTargets.add(PublicInspectModels.target(target));
@@ -250,11 +253,11 @@ final class InspectSessionImpl implements InspectSession {
         List<DecodedValue> decodedColumns = Collections.emptyList();
         Map<String, DecodedValue> decodedParts = Collections.emptyMap();
         List<DecodeIssue> issues = Collections.emptyList();
-        if (found && target.sinkSchema != null) {
-            SinkInspectDecoder.DecodedRow decoded =
+        if (found && target.tableSchema != null) {
+            TableInspectDecoder.DecodedRow decoded =
                     UserClassLoaderScope.call(
                             userClassLoader,
-                            () -> SinkInspectDecoder.decode(target, key, columns, projection));
+                            () -> TableInspectDecoder.decode(target, key, columns, projection));
             decodedKey =
                     decoded.decodedKey == null
                             ? null
@@ -332,11 +335,11 @@ final class InspectSessionImpl implements InspectSession {
         }
         validateFilterShape(filter);
         if (!filter.sinkKeyFields().isEmpty()) {
-            if (target.sinkSchema == null || filter.stateKey() != null) {
+            if (target.tableSchema == null || filter.stateKey() != null) {
                 throw invalid("Sink key filters require a sink target");
             }
             List<String> values =
-                    TypedInputs.sink(filter.sinkKeyFields(), target.sinkSchema.keyFields(), false);
+                    TypedInputs.table(filter.sinkKeyFields(), target.tableSchema.keyFields, false);
             try {
                 List<String> encodedPrefixValues =
                         values.subList(0, Math.max(0, values.size() - 1));
@@ -344,11 +347,11 @@ final class InspectSessionImpl implements InspectSession {
                         filter.sinkKeyFields().get(filter.sinkKeyFields().size() - 1).name();
                 String lastPrefix = values.get(values.size() - 1);
                 return new ScanPlan(
-                        SinkInspectDecoder.encodeKeyPrefix(target, encodedPrefixValues),
+                        TableInspectDecoder.encodeKeyPrefix(target, encodedPrefixValues),
                         request.bucket(),
                         (key, columns) ->
                                 sinkKeyStartsWith(
-                                        SinkInspectDecoder.decode(target, key, columns, null),
+                                        TableInspectDecoder.decode(target, key, columns, null),
                                         lastField,
                                         lastPrefix));
             } catch (java.io.IOException error) {
@@ -496,15 +499,16 @@ final class InspectSessionImpl implements InspectSession {
             return new ResolvedLookup(lookup.bucket(), lookup.key().value());
         }
         TypedLookupKey typed = lookup.typedKey();
-        if (target.sinkSchema != null) {
+        if (target.tableSchema != null) {
             if (typed.kind() != TypedLookupKey.Kind.SINK) {
                 throw invalid("A sink target requires a typed sink key");
             }
             List<String> values =
-                    TypedInputs.sink(typed.sinkKeyFields(), target.sinkSchema.keyFields(), true);
+                    TypedInputs.table(typed.sinkKeyFields(), target.tableSchema.keyFields, true);
             try {
-                byte[] key = SinkInspectDecoder.encodeKeyPrefix(target, values);
-                return new ResolvedLookup(Math.floorMod(Arrays.hashCode(key), totalBuckets), key);
+                byte[] key = TableInspectDecoder.encodeKeyPrefix(target, values);
+                return new ResolvedLookup(
+                        TableInspectDecoder.bucket(target, key, totalBuckets), key);
             } catch (java.io.IOException error) {
                 throw invalid("Failed to encode sink lookup key: " + message(error));
             }
@@ -585,7 +589,7 @@ final class InspectSessionImpl implements InspectSession {
     }
 
     private static boolean sinkKeyStartsWith(
-            SinkInspectDecoder.DecodedRow decoded, String fieldName, String prefix) {
+            TableInspectDecoder.DecodedRow decoded, String fieldName, String prefix) {
         if (decoded.decodedKey == null) {
             return false;
         }
@@ -676,6 +680,12 @@ final class InspectSessionImpl implements InspectSession {
             if (!seen.add(column)) {
                 throw invalid("Column indexes must not contain duplicates");
             }
+            if (target.tableSchema != null && column >= target.tableSchema.valueFields.size()) {
+                throw invalid(
+                        "Column index "
+                                + column
+                                + " is outside the Cobble Table value column range");
+            }
         }
     }
 
@@ -696,23 +706,6 @@ final class InspectSessionImpl implements InspectSession {
         } catch (Exception error) {
             return SchemaResolveResult.unavailable(
                     "Failed to resolve state schema: " + message(error));
-        }
-    }
-
-    private static SinkSchemaResolveResult resolveSinkSchema(
-            String sourceKind,
-            String sourceRoot,
-            CheckpointEntry checkpoint,
-            CobbleConnectorStorageOptions storageOptions) {
-        if (!"data_source".equals(sourceKind)) {
-            return SinkSchemaResolveResult.unsupported(
-                    "Sink schemas are only used for Cobble data sources");
-        }
-        try {
-            return SinkInspectSchemaResolver.resolve(sourceRoot, checkpoint.id, storageOptions);
-        } catch (Exception error) {
-            return SinkSchemaResolveResult.unavailable(
-                    "Failed to resolve sink schema: " + message(error));
         }
     }
 

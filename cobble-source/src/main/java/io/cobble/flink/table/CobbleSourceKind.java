@@ -9,14 +9,14 @@ import java.util.Locale;
  *
  * <p>{@link #RAW} selects the schema-less raw source: it reads a standard Cobble table root and
  * emits raw key bytes plus selected value columns as {@code ARRAY<BYTES>}, without depending on
- * sink sidecar schema, state inspect schema, or Flink serializers.
+ * persisted Table schema, state inspect schema, or Flink serializers.
  */
 enum CobbleSourceKind {
 
     /** Detect the concrete kind from the on-disk layout of the configured path. */
     AUTO,
 
-    /** A Cobble SQL sink table root, read through the existing sink source runtime. */
+    /** A native Cobble Table root produced by the SQL sink or another Table writer. */
     SINK,
 
     /** A Flink state checkpoint root or state operator root. */

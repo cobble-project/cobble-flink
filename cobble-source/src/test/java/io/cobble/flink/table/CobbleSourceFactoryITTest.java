@@ -7,9 +7,6 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import io.cobble.flink.common.inspect.InspectSchemaRegistryLayout;
-import io.cobble.flink.common.inspect.SinkInspectField;
-import io.cobble.flink.common.inspect.SinkInspectSchema;
-import io.cobble.flink.common.inspect.SinkInspectSchemaStore;
 import io.cobble.flink.common.inspect.StateInspectField;
 import io.cobble.flink.common.inspect.StateInspectSchema;
 import io.cobble.flink.common.inspect.StateInspectSchemaStore;
@@ -134,7 +131,7 @@ class CobbleSourceFactoryITTest {
 
     @Test
     void legacySinkSidecarIsRejectedDuringPlanning() throws Exception {
-        Path root = sinkRootWithSidecar("sink-sidecar-valid", "name", "VARCHAR(2147483647)");
+        Path root = legacySinkRoot("sink-sidecar-valid");
         StreamTableEnvironment tableEnv = newTableEnv();
         tableEnv.executeSql(sinkDdl("t_sink_sidecar_valid", root, "sink"));
 
@@ -146,7 +143,7 @@ class CobbleSourceFactoryITTest {
     }
 
     @Test
-    void sidecarBackedSinkDdlPlansWhenPrimaryKeyIsNotFirstPhysicalColumn() throws Exception {
+    void nativeTableDdlPlansWhenPrimaryKeyIsNotFirstPhysicalColumn() throws Exception {
         Path root = nativeTableRootWithNonLeadingPrimaryKey("sink-table-non-leading-pk");
         StreamTableEnvironment tableEnv = newTableEnv();
         tableEnv.executeSql(
@@ -1398,39 +1395,10 @@ class CobbleSourceFactoryITTest {
         return root;
     }
 
-    private Path sinkRootWithSidecar(String name, String valueName, String valueLogicalType)
-            throws Exception {
-        return sinkRootWithSidecar(name, "id", 0, valueName, valueLogicalType, 1, 0);
-    }
-
-    private Path sinkRootWithSidecar(
-            String name,
-            String keyName,
-            int keyRowIndex,
-            String valueName,
-            String valueLogicalType,
-            int valueRowIndex,
-            int valueStructuredColumnIndex)
-            throws Exception {
+    private Path legacySinkRoot(String name) throws Exception {
         Path root = tempDir.resolve(name);
-        SinkInspectSchemaStore store =
-                SinkInspectSchemaStore.of(
-                        new SinkInspectSchema(
-                                Collections.singletonList(
-                                        SinkInspectField.key(keyName, "BIGINT", keyRowIndex, -1)),
-                                Collections.singletonList(
-                                        SinkInspectField.value(
-                                                valueName,
-                                                valueLogicalType,
-                                                valueRowIndex,
-                                                valueStructuredColumnIndex))));
-        byte[] bytes = store.toBytes();
-        String hash = InspectSchemaRegistryLayout.sha256(bytes);
-        Path base = root.resolve("inspect-schema");
-        write(base.resolve("blobs").resolve(InspectSchemaRegistryLayout.blobFileName(hash)), bytes);
-        write(
-                base.resolve("events").resolve(InspectSchemaRegistryLayout.eventFileName(7L, hash)),
-                new byte[0]);
+        Path event = root.resolve("inspect-schema/events/CSNK-7-legacy.ref");
+        write(event, new byte[0]);
         write(root.resolve("snapshot").resolve("CURRENT"), new byte[] {1});
         return root;
     }

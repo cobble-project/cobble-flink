@@ -1,6 +1,5 @@
 package io.cobble.flink.inspect.internal;
 
-import io.cobble.flink.common.inspect.SinkInspectField;
 import io.cobble.flink.common.inspect.StateInspectExactLookupSupport;
 import io.cobble.flink.common.inspect.StateInspectField;
 import io.cobble.flink.common.inspect.StateInspectType;
@@ -36,11 +35,11 @@ final class PublicInspectModels {
         }
         List<SemanticField> keyFields = new ArrayList<>();
         List<SemanticField> valueFields = new ArrayList<>();
-        if (source.sinkSchema != null) {
-            for (SinkInspectField field : source.sinkSchema.keyFields()) {
+        if (source.tableSchema != null) {
+            for (TableInspectSchema.Field field : source.tableSchema.keyFields) {
                 keyFields.add(new SemanticField(field.name(), scalar(field.logicalType())));
             }
-            for (SinkInspectField field : source.sinkSchema.valueFields()) {
+            for (TableInspectSchema.Field field : source.tableSchema.valueFields) {
                 valueFields.add(new SemanticField(field.name(), scalar(field.logicalType())));
             }
         }
@@ -55,7 +54,7 @@ final class PublicInspectModels {
         return new io.cobble.flink.inspect.InspectTarget(
                 source.id,
                 source.name,
-                targetKind(source.kind, source.schema == null && source.sinkSchema == null),
+                targetKind(source.kind, source.schema == null && source.tableSchema == null),
                 source.columnFamily,
                 source.allowsColumns,
                 source.stateKind,

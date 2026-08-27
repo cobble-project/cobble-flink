@@ -1,6 +1,5 @@
 package io.cobble.flink.inspect.internal;
 
-import io.cobble.flink.common.inspect.SinkInspectField;
 import io.cobble.flink.common.inspect.StateInspectExactLookupSupport;
 import io.cobble.flink.common.inspect.StateKind;
 import io.cobble.flink.common.inspect.StateSourceSchemaLayout;
@@ -10,10 +9,7 @@ import io.cobble.flink.inspect.SourceSqlExample;
 
 import java.util.ArrayList;
 import java.util.Collections;
-import java.util.Comparator;
-import java.util.HashSet;
 import java.util.List;
-import java.util.Set;
 
 /** Generates source-compatible Overview and SQL from one pinned inspect session. */
 public final class InspectOverviewGenerator {
@@ -24,7 +20,7 @@ public final class InspectOverviewGenerator {
         List<InspectOverviewItem> items = new ArrayList<>();
         for (InspectTarget target : targets) {
             try {
-                if (target.sinkSchema != null) {
+                if (target.tableSchema != null) {
                     items.add(sink(sourcePath, checkpointId, target));
                 } else if (target.schema != null) {
                     items.add(state(sourcePath, checkpointId, operatorId, target));
@@ -40,31 +36,22 @@ public final class InspectOverviewGenerator {
 
     private static InspectOverviewItem sink(
             String sourcePath, long checkpointId, InspectTarget target) {
-        List<SinkInspectField> physical = new ArrayList<>();
-        physical.addAll(target.sinkSchema.keyFields());
-        physical.addAll(target.sinkSchema.valueFields());
-        physical.sort(Comparator.comparingInt(SinkInspectField::rowIndex));
-        validateSinkLayout(
-                target.sinkSchema.keyFields(), target.sinkSchema.valueFields(), physical);
-
         List<InspectOverviewItem.Field> fields = new ArrayList<>();
         List<String> required = new ArrayList<>();
-        for (SinkInspectField key : target.sinkSchema.keyFields()) {
+        for (TableInspectSchema.Field key : target.tableSchema.keyFields) {
             required.add(key.name());
         }
-        for (SinkInspectField field : physical) {
+        for (TableInspectSchema.Field field : target.tableSchema.fields) {
             fields.add(
                     new InspectOverviewItem.Field(
-                            target.sinkSchema.keyFields().contains(field)
-                                    ? "Primary key"
-                                    : "Column",
+                            field.primaryKey ? "Primary key" : "Column",
                             field.name(),
                             field.logicalType()));
         }
         String ddl =
                 ddl(
                         tableName(sourcePath, "cobble_source"),
-                        physicalFields(physical),
+                        physicalFields(target.tableSchema.fields),
                         required,
                         sinkOptions(sourcePath, checkpointId));
         SourceSqlExample sql =
@@ -76,7 +63,7 @@ public final class InspectOverviewGenerator {
                         null,
                         "Use this source for batch scans and exact temporal lookup joins.");
         return new InspectOverviewItem(
-                target.id, target.name, "Sink", "Cobble SQL sink snapshot", fields, sql);
+                target.id, target.name, "Table", "Native Cobble Table snapshot", fields, sql);
     }
 
     private static InspectOverviewItem state(
@@ -198,38 +185,6 @@ public final class InspectOverviewGenerator {
                 null, false, false, Collections.<String>emptyList(), reason, reason);
     }
 
-    private static void validateSinkLayout(
-            List<SinkInspectField> keyFields,
-            List<SinkInspectField> valueFields,
-            List<SinkInspectField> fields) {
-        if (keyFields.isEmpty()) {
-            throw new InspectInputException("Sink inspect schema has no primary-key fields");
-        }
-        Set<String> names = new HashSet<>();
-        for (int index = 0; index < fields.size(); index++) {
-            if (fields.get(index).rowIndex() != index) {
-                throw new InspectInputException(
-                        "Sink inspect schema has no unique field for rowIndex " + index);
-            }
-            if (!names.add(fields.get(index).name())) {
-                throw new InspectInputException(
-                        "Sink inspect schema contains duplicate field '"
-                                + fields.get(index).name()
-                                + "'");
-            }
-        }
-        Set<Integer> structuredColumns = new HashSet<>();
-        for (SinkInspectField field : valueFields) {
-            int column = field.structuredColumnIndex();
-            if (column < 0 || column >= valueFields.size() || !structuredColumns.add(column)) {
-                throw new InspectInputException(
-                        "Sink inspect schema has an invalid structured column index for field '"
-                                + field.name()
-                                + "'");
-            }
-        }
-    }
-
     private static String displayKind(InspectTarget target) {
         if ("timer".equals(target.kind)) {
             return "Timer";
@@ -243,9 +198,9 @@ public final class InspectOverviewGenerator {
         return "Raw";
     }
 
-    private static List<FieldSql> physicalFields(List<SinkInspectField> fields) {
+    private static List<FieldSql> physicalFields(List<TableInspectSchema.Field> fields) {
         List<FieldSql> output = new ArrayList<>();
-        for (SinkInspectField field : fields) {
+        for (TableInspectSchema.Field field : fields) {
             output.add(new FieldSql(field.name(), field.logicalType()));
         }
         return output;

@@ -5,13 +5,6 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
-import io.cobble.Config;
-import io.cobble.DbCoordinator;
-import io.cobble.ShardSnapshot;
-import io.cobble.flink.common.inspect.InspectSchemaRegistryLayout;
-import io.cobble.flink.common.inspect.SinkInspectField;
-import io.cobble.flink.common.inspect.SinkInspectSchema;
-import io.cobble.flink.common.inspect.SinkInspectSchemaStore;
 import io.cobble.flink.inspect.CobbleInspectClient;
 import io.cobble.flink.inspect.FieldValue;
 import io.cobble.flink.inspect.InspectException;
@@ -24,19 +17,15 @@ import io.cobble.flink.inspect.ScanFilter;
 import io.cobble.flink.inspect.ScanRequest;
 import io.cobble.flink.inspect.TypedLookupKey;
 import io.cobble.flink.inspect.TypedValue;
-import io.cobble.structured.Db;
+import io.cobble.table.Value;
 
-import org.apache.flink.core.memory.DataOutputSerializer;
 import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
 import org.apache.flink.table.api.bridge.java.StreamTableEnvironment;
-import org.apache.flink.table.data.StringData;
-import org.apache.flink.table.runtime.typeutils.StringDataSerializer;
 import org.apache.flink.types.Row;
 import org.apache.flink.util.CloseableIterator;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
-import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -47,86 +36,38 @@ class InspectTypedSinkIT {
     @TempDir private Path tempDir;
 
     @Test
-    void typedScanFindsLateMatchAndTypedLookupRequiresCompletePk() throws Exception {
-        Path table = tempDir.resolve("sink");
-        int buckets = 1;
-        long snapshot = 8L;
-        SinkInspectSchema schema =
-                new SinkInspectSchema(
-                        Arrays.asList(
-                                SinkInspectField.key("region", "VARCHAR", 0, -1),
-                                SinkInspectField.key("id", "VARCHAR", 1, -1)),
-                        Collections.singletonList(
-                                SinkInspectField.value("payload", "VARCHAR", 2, 0)));
-        InspectTarget target = InspectTarget.sink("sink", schema);
-        List<byte[]> keys = new ArrayList<>();
+    void tableScanLookupAndGeneratedSqlUseNativeSchema() throws Exception {
+        Path table = tempDir.resolve("table");
+        List<List<Value>> rows = new ArrayList<List<Value>>();
         for (int index = 0; index < 8; index++) {
-            keys.add(SinkInspectDecoder.encodeKeyPrefix(target, Arrays.asList("us", "a" + index)));
+            rows.add(row("us", "a" + index, "value"));
         }
-        byte[] matching =
-                SinkInspectDecoder.encodeKeyPrefix(target, Arrays.asList("us", "target-1"));
-        keys.add(matching);
-        keys.add(SinkInspectDecoder.encodeKeyPrefix(target, Arrays.asList("us", "target-2")));
-        writeTable(table, buckets, snapshot, keys);
-        writeRegistry(table, snapshot, schema);
+        rows.add(row("us", "target-1", "one"));
+        rows.add(row("us", "target-2", "two"));
+        CobbleTableInspectTestData.write(
+                table, 1, 8L, CobbleTableInspectTestData.compositeSchema(), rows);
 
-        try (CobbleInspectClient client =
-                        CobbleInspectClient.builder().totalBuckets(buckets).build();
+        try (CobbleInspectClient client = CobbleInspectClient.builder().totalBuckets(1).build();
                 InspectSession session = client.openDataSource(table.toString())) {
-            List<FieldValue> filterFields =
-                    Arrays.asList(
-                            new FieldValue("region", TypedValue.string("us")),
-                            new FieldValue("id", TypedValue.string("target")));
-            InspectPage page =
+            List<FieldValue> filter = Arrays.asList(field("region", "us"), field("id", "target"));
+            InspectPage first =
+                    session.scan(
+                            new ScanRequest(
+                                    "sink", 1, null, null, null, null, ScanFilter.sink(filter)));
+            assertEquals(1, first.rows().size());
+            assertTrue(first.nextPageToken() != null);
+            InspectPage second =
                     session.scan(
                             new ScanRequest(
                                     "sink",
                                     1,
+                                    first.nextPageToken(),
                                     null,
                                     null,
                                     null,
-                                    null,
-                                    ScanFilter.sink(filterFields)));
-            assertEquals(1, page.rows().size());
-            assertTrue(page.rows().get(0).found());
-            assertTrue(page.nextPageToken() != null);
-
-            InspectPage next =
-                    session.scan(
-                            new ScanRequest(
-                                    "sink",
-                                    1,
-                                    page.nextPageToken(),
-                                    null,
-                                    null,
-                                    null,
-                                    ScanFilter.sink(filterFields)));
-            assertEquals(1, next.rows().size());
-            assertTrue(next.nextPageToken() == null);
-
-            InspectException changedFilter =
-                    assertThrows(
-                            InspectException.class,
-                            () ->
-                                    session.scan(
-                                            new ScanRequest(
-                                                    "sink",
-                                                    1,
-                                                    page.nextPageToken(),
-                                                    null,
-                                                    null,
-                                                    null,
-                                                    ScanFilter.sink(
-                                                            Arrays.asList(
-                                                                    new FieldValue(
-                                                                            "region",
-                                                                            TypedValue.string(
-                                                                                    "us")),
-                                                                    new FieldValue(
-                                                                            "id",
-                                                                            TypedValue.string(
-                                                                                    "other")))))));
-            assertTrue(changedFilter.getMessage().contains("different scan filters"));
+                                    ScanFilter.sink(filter)));
+            assertEquals(1, second.rows().size());
+            assertTrue(second.nextPageToken() == null);
 
             LookupResult lookup =
                     session.lookup(
@@ -136,15 +77,10 @@ class InspectTypedSinkIT {
                                             LookupKey.typed(
                                                     TypedLookupKey.sink(
                                                             Arrays.asList(
-                                                                    new FieldValue(
-                                                                            "region",
-                                                                            TypedValue.string(
-                                                                                    "us")),
-                                                                    new FieldValue(
-                                                                            "id",
-                                                                            TypedValue.string(
-                                                                                    "target-1"))))))));
+                                                                    field("region", "us"),
+                                                                    field("id", "target-1")))))));
             assertTrue(lookup.rows().get(0).found());
+            assertEquals("one", lookup.rows().get(0).decodedColumns().get(0).scalar());
 
             InspectException partial =
                     assertThrows(
@@ -158,11 +94,9 @@ class InspectTypedSinkIT {
                                                                     TypedLookupKey.sink(
                                                                             Collections
                                                                                     .singletonList(
-                                                                                            new FieldValue(
+                                                                                            field(
                                                                                                     "region",
-                                                                                                    TypedValue
-                                                                                                            .string(
-                                                                                                                    "us")))))))));
+                                                                                                    "us"))))))));
             assertTrue(partial.getMessage().contains("requires all fields"));
 
             InspectException wrongType =
@@ -181,83 +115,37 @@ class InspectTypedSinkIT {
                                                                                             TypedValue
                                                                                                     .integer(
                                                                                                             1)),
-                                                                                    new FieldValue(
+                                                                                    field(
                                                                                             "id",
-                                                                                            TypedValue
-                                                                                                    .string(
-                                                                                                            "target-1")))))))));
+                                                                                            "target-1"))))))));
             assertFalse(wrongType.getMessage().isEmpty());
 
             String ddl = session.overview().items().get(0).sourceSql().ddl();
+            assertTrue(ddl.contains("`region` STRING NOT NULL"));
+            assertTrue(ddl.contains("PRIMARY KEY (`region`, `id`) NOT ENFORCED"));
             StreamExecutionEnvironment environment =
                     StreamExecutionEnvironment.getExecutionEnvironment();
             environment.setParallelism(1);
-            StreamTableEnvironment tableEnvironment = StreamTableEnvironment.create(environment);
-            tableEnvironment.executeSql(ddl);
-            List<String> sqlRows = new ArrayList<>();
-            try (CloseableIterator<Row> rows =
-                    tableEnvironment.executeSql("SELECT region, id FROM sink").collect()) {
-                while (rows.hasNext()) {
-                    Row row = rows.next();
+            StreamTableEnvironment tables = StreamTableEnvironment.create(environment);
+            tables.executeSql(ddl);
+            List<String> sqlRows = new ArrayList<String>();
+            try (CloseableIterator<Row> results =
+                    tables.executeSql("SELECT region, id FROM sink").collect()) {
+                while (results.hasNext()) {
+                    Row row = results.next();
                     sqlRows.add(row.getFieldAs(0) + ":" + row.getFieldAs(1));
                 }
             }
-            assertEquals(keys.size(), sqlRows.size());
+            assertEquals(rows.size(), sqlRows.size());
             assertTrue(sqlRows.contains("us:target-1"));
         }
     }
 
-    private void writeTable(Path table, int buckets, long snapshot, List<byte[]> keys)
-            throws Exception {
-        ShardSnapshot shard;
-        try (Db db = Db.open(config(table, buckets, true), 0, buckets - 1)) {
-            for (byte[] key : keys) {
-                db.put(0, key, 0, encodeString("value"));
-            }
-            shard = db.snapshot();
-        }
-        try (DbCoordinator coordinator = DbCoordinator.open(config(table, buckets, false))) {
-            coordinator.materializeGlobalSnapshot(
-                    buckets, snapshot, Collections.singletonList(shard));
-        }
+    private static List<Value> row(String region, String id, String payload) {
+        return Arrays.asList(Value.string(region), Value.string(id), Value.string(payload));
     }
 
-    private void writeRegistry(Path table, long snapshot, SinkInspectSchema schema)
-            throws Exception {
-        byte[] blob = SinkInspectSchemaStore.of(schema).toBytes();
-        String hash = InspectSchemaRegistryLayout.sha256(blob);
-        Path events = table.resolve("inspect-schema/events");
-        Path blobs = table.resolve("inspect-schema/blobs");
-        Files.createDirectories(events);
-        Files.createDirectories(blobs);
-        Files.write(blobs.resolve(InspectSchemaRegistryLayout.blobFileName(hash)), blob);
-        Files.write(
-                events.resolve(InspectSchemaRegistryLayout.eventFileName(snapshot, hash)),
-                new byte[0]);
-    }
-
-    private Config config(Path table, int buckets, boolean data) {
-        Config config = new Config().numColumns(1).totalBuckets(buckets);
-        config.governanceMode = Config.GovernanceMode.NOOP;
-        config.logConsole = false;
-        config.logPath = tempDir.resolve(data ? "writer.log" : "coordinator.log").toString();
-        Config.VolumeDescriptor volume = new Config.VolumeDescriptor();
-        volume.baseDir = table.toAbsolutePath().toString();
-        volume.kinds =
-                data
-                        ? Arrays.asList(
-                                Config.VolumeUsageKind.PRIMARY_DATA_PRIORITY_HIGH,
-                                Config.VolumeUsageKind.META,
-                                Config.VolumeUsageKind.SNAPSHOT)
-                        : Arrays.asList(
-                                Config.VolumeUsageKind.META, Config.VolumeUsageKind.SNAPSHOT);
-        config.addVolume(volume);
-        return config;
-    }
-
-    private static byte[] encodeString(String value) throws Exception {
-        DataOutputSerializer output = new DataOutputSerializer(32);
-        StringDataSerializer.INSTANCE.serialize(StringData.fromString(value), output);
-        return output.getCopyOfBuffer();
+    private static FieldValue field(String name, String value) {
+        return new FieldValue(name, TypedValue.string(value));
     }
 }

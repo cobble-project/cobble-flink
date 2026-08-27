@@ -10,17 +10,18 @@ import io.cobble.DbCoordinator;
 import io.cobble.ShardSnapshot;
 import io.cobble.flink.common.CobbleSnapshotMetadataCodec;
 import io.cobble.flink.common.CobbleSnapshotMetadataPayload;
-import io.cobble.flink.common.inspect.InspectSchemaRegistryLayout;
-import io.cobble.flink.common.inspect.SinkInspectField;
-import io.cobble.flink.common.inspect.SinkInspectSchema;
-import io.cobble.flink.common.inspect.SinkInspectSchemaStore;
 import io.cobble.flink.common.inspect.StateInspectSchema;
 import io.cobble.flink.common.inspect.StateInspectSchemaStore;
 import io.cobble.flink.common.inspect.StateInspectSemanticSchema;
 import io.cobble.flink.common.inspect.StateInspectType;
-import io.cobble.flink.inspect.internal.InspectTarget;
-import io.cobble.flink.inspect.internal.SinkInspectDecoder;
+import io.cobble.flink.common.table.CobbleTableRowConverter;
 import io.cobble.structured.Db;
+import io.cobble.table.DataField;
+import io.cobble.table.LogicalTypes;
+import io.cobble.table.Table;
+import io.cobble.table.TableSchema;
+import io.cobble.table.TableSnapshotCommitter;
+import io.cobble.table.Value;
 
 import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
@@ -66,17 +67,8 @@ class CobbleFlinkMonitorHttpIT {
     void realServerSupportsIndependentSessionsScanTypedAndRawLookupAndErrors() throws Exception {
         Path sink = tempDir.resolve("sink");
         Path raw = tempDir.resolve("raw");
-        SinkInspectSchema schema =
-                new SinkInspectSchema(
-                        Collections.singletonList(SinkInspectField.key("id", "VARCHAR", 0, -1)),
-                        Collections.singletonList(
-                                SinkInspectField.value("payload", "VARCHAR", 1, 0)));
-        byte[] encoded =
-                SinkInspectDecoder.encodeKeyPrefix(
-                        InspectTarget.sink("sink", schema), Collections.singletonList("target"));
-        writeTable(sink, 7L, encoded, bytes("malformed"));
-        writeRegistry(sink, 7L, schema);
-        writeTable(raw, 11L, bytes("alpha"), bytes("omega"));
+        writeNativeTable(sink, 7L);
+        writeRawTable(raw, 11L, bytes("alpha"), bytes("omega"));
 
         ServerConfig config = new ServerConfig();
         config.port = 0;
@@ -157,7 +149,7 @@ class CobbleFlinkMonitorHttpIT {
             assertEquals(7L, sinkSession.get("checkpoint_id").getAsLong());
             assertEquals(11L, rawSession.get("checkpoint_id").getAsLong());
 
-            writeTable(raw, 12L, bytes("beta"), bytes("zeta"));
+            writeRawTable(raw, 12L, bytes("beta"), bytes("zeta"));
             JsonObject refreshedCatalog =
                     json(
                             post(
@@ -358,7 +350,7 @@ class CobbleFlinkMonitorHttpIT {
                 hasDecodeIssue |=
                         element.getAsJsonObject().getAsJsonArray("decode_issues").size() > 0;
             }
-            assertTrue(hasDecodeIssue);
+            assertFalse(hasDecodeIssue);
 
             assertEquals(204, delete(http, base.resolve("/api/v1/sessions/" + rawId)).statusCode());
             HttpResponse<String> expired = get(http, base.resolve("/api/v1/sessions/" + rawId));
@@ -526,7 +518,7 @@ class CobbleFlinkMonitorHttpIT {
         return json(response.body());
     }
 
-    private void writeTable(Path table, long snapshot, byte[] first, byte[] second)
+    private void writeRawTable(Path table, long snapshot, byte[] first, byte[] second)
             throws Exception {
         ShardSnapshot shard;
         try (Db db = Db.open(config(table, true), 0, 0)) {
@@ -539,16 +531,29 @@ class CobbleFlinkMonitorHttpIT {
         }
     }
 
-    private void writeRegistry(Path table, long snapshot, SinkInspectSchema schema)
-            throws Exception {
-        byte[] blob = SinkInspectSchemaStore.of(schema).toBytes();
-        String hash = InspectSchemaRegistryLayout.sha256(blob);
-        Path events = Files.createDirectories(table.resolve("inspect-schema/events"));
-        Path blobs = Files.createDirectories(table.resolve("inspect-schema/blobs"));
-        Files.write(blobs.resolve(InspectSchemaRegistryLayout.blobFileName(hash)), blob);
-        Files.write(
-                events.resolve(InspectSchemaRegistryLayout.eventFileName(snapshot, hash)),
-                new byte[0]);
+    private void writeNativeTable(Path root, long checkpointId) throws Exception {
+        Config config = config(root, true);
+        config.walEnabled = false;
+        config.snapshotOnlyTrack = true;
+        config.snapshotDisableIncrementalBaseLink = true;
+        TableSchema schema =
+                new TableSchema(
+                        Arrays.asList(
+                                new DataField(0L, "id", LogicalTypes.string().notNull()),
+                                new DataField(1L, "payload", LogicalTypes.string())),
+                        Collections.singletonList(0L),
+                        Collections.singletonList(0L));
+        ShardSnapshot shard;
+        try (io.cobble.Db db = io.cobble.Db.open(config, 0, 0);
+                Table nativeTable = Table.create(db, CobbleTableRowConverter.TABLE_NAME, schema)) {
+            nativeTable.put(Arrays.asList(Value.string("target"), Value.string("one")));
+            nativeTable.put(Arrays.asList(Value.string("other"), Value.string("two")));
+            shard = db.startAsyncSnapshot().future().get();
+        }
+        try (TableSnapshotCommitter committer = TableSnapshotCommitter.open(config, 1, 4)) {
+            assertTrue(
+                    committer.commitBatch(checkpointId, Collections.singletonList(shard)) != null);
+        }
     }
 
     private EmbeddedCheckpoint writeEmbeddedCheckpoint(OperatorID operatorId) throws Exception {

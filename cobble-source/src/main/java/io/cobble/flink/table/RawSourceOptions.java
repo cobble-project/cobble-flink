@@ -14,7 +14,7 @@ import java.util.Optional;
  *
  * <p>V1 requires explicit column indexes via {@code raw.columns}. The value {@code 'all'} is
  * rejected at the parse layer because Cobble {@code ScanOptions} has no "all columns" sentinel —
- * the column-family width is unknown without sink sidecar schema.
+ * the column-family width is unknown without opening a native Table schema.
  */
 final class RawSourceOptions {
 

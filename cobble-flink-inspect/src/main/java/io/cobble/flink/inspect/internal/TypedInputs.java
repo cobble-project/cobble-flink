@@ -1,6 +1,5 @@
 package io.cobble.flink.inspect.internal;
 
-import io.cobble.flink.common.inspect.SinkInspectField;
 import io.cobble.flink.common.inspect.StateInspectField;
 import io.cobble.flink.common.inspect.StateInspectType;
 import io.cobble.flink.common.inspect.StateInspectTypeKind;
@@ -19,10 +18,10 @@ import java.util.List;
 final class TypedInputs {
     private TypedInputs() {}
 
-    static List<String> sink(
-            List<FieldValue> actual, List<SinkInspectField> expected, boolean complete) {
+    static List<String> table(
+            List<FieldValue> actual, List<TableInspectSchema.Field> expected, boolean complete) {
         List<FieldSpec> fields = new ArrayList<>();
-        for (SinkInspectField field : expected) {
+        for (TableInspectSchema.Field field : expected) {
             fields.add(new FieldSpec(field.name(), field.logicalType()));
         }
         return validate(actual, fields, complete, "sink primary key");
@@ -128,7 +127,7 @@ final class TypedInputs {
             LogicalType parsed =
                     LogicalTypeParser.parse(logicalType, TypedInputs.class.getClassLoader());
             root = parsed.getTypeRoot();
-            SinkInspectDecoder.parseFieldInput(parsed, value.text());
+            InspectFieldInputParser.parse(parsed, value.text());
         } catch (Exception error) {
             throw InspectSessionImpl.invalid(
                     "Invalid value for typed field '"

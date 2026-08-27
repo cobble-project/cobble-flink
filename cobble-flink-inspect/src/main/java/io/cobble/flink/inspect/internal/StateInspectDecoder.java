@@ -796,8 +796,7 @@ public final class StateInspectDecoder {
                         LogicalTypeParser.parse(
                                 fields.get(index).logicalType(),
                                 StateInspectDecoder.class.getClassLoader());
-                row.setField(
-                        index, SinkInspectDecoder.parseFieldInput(logicalType, values.get(index)));
+                row.setField(index, InspectFieldInputParser.parse(logicalType, values.get(index)));
             }
             key = row;
         } else {
@@ -886,8 +885,7 @@ public final class StateInspectDecoder {
                         LogicalTypeParser.parse(
                                 fieldTypes.get(index).logicalType(),
                                 StateInspectDecoder.class.getClassLoader());
-                row.setField(
-                        index, SinkInspectDecoder.parseFieldInput(logicalType, values.get(index)));
+                row.setField(index, InspectFieldInputParser.parse(logicalType, values.get(index)));
             }
             value = row;
         } else {

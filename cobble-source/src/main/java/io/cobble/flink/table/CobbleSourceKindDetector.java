@@ -4,7 +4,6 @@ import io.cobble.flink.common.CobbleConnectorStorageOptions;
 import io.cobble.flink.common.CobbleEmbeddedCheckpoint;
 import io.cobble.flink.common.CobbleMetadataFileIO;
 import io.cobble.flink.common.inspect.InspectSchemaRegistryLayout;
-import io.cobble.flink.common.inspect.SinkInspectSchemaStore;
 import io.cobble.flink.common.inspect.StateInspectSchemaStore;
 
 import org.apache.flink.core.fs.FSDataInputStream;
@@ -27,8 +26,6 @@ import java.io.IOException;
  *       embedded {@code _metadata} → STATE.
  *   <li>A checkpoint root with {@code chk-N/_metadata} and a Cobble manifest copy → STATE through
  *       the existing global-sidecar path.
- *   <li>{@code <path>/inspect-schema/blobs/*.csch} whose blob begins with {@link
- *       SinkInspectSchemaStore#MAGIC} (CSNK) → SINK.
  *   <li>{@code <path>/inspect-schema/blobs/*.csch} whose blob begins with {@link
  *       StateInspectSchemaStore#MAGIC} (CSCH) → STATE operator root.
  *   <li>{@code <path>/snapshot/CURRENT} or {@code <path>/writer-paths.properties} present but no
@@ -93,7 +90,16 @@ final class CobbleSourceKindDetector {
             boolean sinkShapedSchema,
             CobbleConnectorStorageOptions storageOptions) {
         if (requestedKind == CobbleSourceKind.STATE) {
-            return resolveExplicitState(pathUri, probeStatePath(pathUri, true));
+            Probe stateProbe = probeStatePath(pathUri, true);
+            if (stateProbe == Probe.UNKNOWN) {
+                Probe tableProbe = probeTableRoot(pathUri, storageOptions);
+                if (tableProbe == Probe.AMBIGUOUS || tableProbe == Probe.SINK) {
+                    throw new ValidationException(
+                            "source.kind='state' was requested, but path appears to be a Cobble"
+                                    + " Table root.");
+                }
+            }
+            return resolveExplicitState(pathUri, stateProbe);
         }
 
         Probe probe;
@@ -154,9 +160,6 @@ final class CobbleSourceKindDetector {
                 throw new ValidationException("Cobble source path does not exist: " + pathUri);
             }
             int magic = inspectSchemaBlobMagic(fileIO);
-            if (magic == SinkInspectSchemaStore.MAGIC) {
-                return Probe.SINK;
-            }
             if (magic == StateInspectSchemaStore.MAGIC) {
                 return Probe.STATE_OPERATOR;
             }
@@ -198,9 +201,6 @@ final class CobbleSourceKindDetector {
         int magic = inspectSchemaBlobMagic(fileSystem, root, pathUri);
         if (magic == StateInspectSchemaStore.MAGIC) {
             return Probe.STATE_OPERATOR;
-        }
-        if (magic == SinkInspectSchemaStore.MAGIC) {
-            return Probe.SINK;
         }
         return Probe.UNKNOWN;
     }
@@ -361,9 +361,6 @@ final class CobbleSourceKindDetector {
     private static String rawDiagnostics(String pathUri, Probe probe) {
         String signal;
         switch (probe) {
-            case SINK:
-                signal = "inspect-schema sidecar (CSNK)";
-                break;
             case AMBIGUOUS:
                 signal = "snapshot/CURRENT or writer-paths.properties";
                 break;

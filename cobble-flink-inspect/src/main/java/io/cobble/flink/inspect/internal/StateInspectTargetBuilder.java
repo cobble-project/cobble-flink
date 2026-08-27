@@ -28,17 +28,6 @@ public final class StateInspectTargetBuilder {
 
     public static List<InspectTarget> build(
             GlobalSnapshot snapshot, SchemaResolveResult schemaResult) {
-        return build(snapshot, schemaResult, null);
-    }
-
-    public static List<InspectTarget> build(
-            GlobalSnapshot snapshot,
-            SchemaResolveResult schemaResult,
-            SinkSchemaResolveResult sinkSchemaResult) {
-        if (sinkSchemaResult != null && sinkSchemaResult.hasSchema()) {
-            return Collections.singletonList(
-                    InspectTarget.sink("sink", sinkSchemaResult.store.schema()));
-        }
         if (schemaResult != null
                 && schemaResult.hasSchema()
                 && !schemaResult.store.isEmpty()

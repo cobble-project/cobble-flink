@@ -10,8 +10,8 @@ import java.util.Arrays;
  * Scan-source config for {@code source.kind='raw'}.
  *
  * <p>This is a deliberately small, schema-less config: it carries no Flink {@code TypeSerializer},
- * no typed key/value field mappings, and no sink sidecar schema. It only knows the table root path,
- * the scan mode, and the explicit column indexes the user requested.
+ * no typed key/value field mappings and does not open a native Table schema. It only knows the
+ * table root path, the scan mode, and the explicit column indexes the user requested.
  *
  * <p>{@link #scanColumnCount()} returns {@code max(selectedColumns) + 1} — the DB-open
  * column-family width that the Cobble reader needs so its read view matches the writer's column

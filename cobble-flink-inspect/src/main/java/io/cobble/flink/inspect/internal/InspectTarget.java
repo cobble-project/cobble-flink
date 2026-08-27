@@ -1,7 +1,5 @@
 package io.cobble.flink.inspect.internal;
 
-import io.cobble.flink.common.inspect.SinkInspectField;
-import io.cobble.flink.common.inspect.SinkInspectSchema;
 import io.cobble.flink.common.inspect.StateInspectExactLookupSupport;
 import io.cobble.flink.common.inspect.StateInspectField;
 import io.cobble.flink.common.inspect.StateInspectSchema;
@@ -24,7 +22,7 @@ public final class InspectTarget {
     public final Map<String, String> serializerClasses;
     public final StateInspectSchema schema;
     public final StateInspectSemanticSchema semanticSchema;
-    public final SinkInspectSchema sinkSchema;
+    public final TableInspectSchema tableSchema;
 
     public InspectTarget(
             String id,
@@ -35,7 +33,7 @@ public final class InspectTarget {
             String stateKind,
             Map<String, String> serializerClasses,
             StateInspectSchema schema,
-            SinkInspectSchema sinkSchema) {
+            TableInspectSchema tableSchema) {
         this(
                 id,
                 name,
@@ -46,7 +44,7 @@ public final class InspectTarget {
                 serializerClasses,
                 schema,
                 null,
-                sinkSchema);
+                tableSchema);
     }
 
     public InspectTarget(
@@ -59,7 +57,7 @@ public final class InspectTarget {
             Map<String, String> serializerClasses,
             StateInspectSchema schema,
             StateInspectSemanticSchema semanticSchema,
-            SinkInspectSchema sinkSchema) {
+            TableInspectSchema tableSchema) {
         this.id = id;
         this.name = name;
         this.kind = kind;
@@ -69,15 +67,15 @@ public final class InspectTarget {
         this.serializerClasses = serializerClasses;
         this.schema = schema;
         this.semanticSchema = semanticSchema;
-        this.sinkSchema = sinkSchema;
+        this.tableSchema = tableSchema;
     }
 
     public static InspectTarget sink(String name) {
-        return sink(name, null);
+        return new InspectTarget("sink", name, "sink", null, true, null, null, null, null);
     }
 
-    public static InspectTarget sink(String name, SinkInspectSchema schema) {
-        return new InspectTarget("sink", name, "sink", null, true, null, null, null, schema);
+    public static InspectTarget table(String name, TableInspectSchema schema) {
+        return new InspectTarget("sink", name, "sink", "data", true, null, null, null, schema);
     }
 
     static InspectTarget state(String stateName, String columnFamily) {
@@ -125,22 +123,22 @@ public final class InspectTarget {
                 output.put("exact_lookup_reason", support.reason());
             }
         }
-        if (sinkSchema != null) {
-            output.put("key_fields", fieldsToJson(sinkSchema.keyFields()));
-            output.put("value_fields", fieldsToJson(sinkSchema.valueFields()));
+        if (tableSchema != null) {
+            output.put("key_fields", fieldsToJson(tableSchema.keyFields));
+            output.put("value_fields", fieldsToJson(tableSchema.valueFields));
         }
         return output;
     }
 
-    private static List<Map<String, Object>> fieldsToJson(List<SinkInspectField> fields) {
+    private static List<Map<String, Object>> fieldsToJson(List<TableInspectSchema.Field> fields) {
         List<Map<String, Object>> output = new ArrayList<>(fields.size());
-        for (SinkInspectField field : fields) {
+        for (TableInspectSchema.Field field : fields) {
             Map<String, Object> item = new LinkedHashMap<>();
             item.put("name", field.name());
             item.put("logical_type", field.logicalType());
-            item.put("row_index", field.rowIndex());
-            item.put("structured_column_index", field.structuredColumnIndex());
-            item.put("role", field.role().name());
+            item.put("row_index", field.rowIndex);
+            item.put("structured_column_index", field.valueColumnIndex);
+            item.put("role", field.primaryKey ? "KEY" : "VALUE");
             output.add(item);
         }
         return output;

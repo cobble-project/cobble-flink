@@ -5,14 +5,15 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
-import io.cobble.flink.common.inspect.SinkInspectField;
-import io.cobble.flink.common.inspect.SinkInspectSchema;
 import io.cobble.flink.common.inspect.StateInspectField;
 import io.cobble.flink.common.inspect.StateInspectSchema;
 import io.cobble.flink.common.inspect.StateInspectSemanticSchema;
 import io.cobble.flink.common.inspect.StateInspectType;
 import io.cobble.flink.inspect.InspectOverview;
 import io.cobble.flink.inspect.InspectOverviewItem;
+import io.cobble.table.DataField;
+import io.cobble.table.LogicalTypes;
+import io.cobble.table.TableSchema;
 
 import org.apache.flink.api.common.typeutils.base.IntSerializer;
 import org.apache.flink.api.common.typeutils.base.StringSerializer;
@@ -24,25 +25,28 @@ import java.util.Collections;
 
 class InspectOverviewGeneratorTest {
     @Test
-    void sinkDdlUsesRowIndexPkSidecarOrderAndPinnedSnapshot() {
-        SinkInspectSchema schema =
-                new SinkInspectSchema(
+    void tableDdlUsesPhysicalOrderPrimaryKeyAndPinnedSnapshot() {
+        TableSchema schema =
+                new TableSchema(
                         Arrays.asList(
-                                SinkInspectField.key("region", "VARCHAR", 2, -1),
-                                SinkInspectField.key("id", "BIGINT", 0, -1)),
-                        Collections.singletonList(
-                                SinkInspectField.value("payload", "VARCHAR", 1, 0)));
+                                new DataField(0L, "id", LogicalTypes.int64().notNull()),
+                                new DataField(1L, "payload", LogicalTypes.string()),
+                                new DataField(2L, "region", LogicalTypes.string().notNull())),
+                        Arrays.asList(2L, 0L),
+                        Arrays.asList(2L, 0L));
         InspectOverviewItem item =
                 only(
                         InspectOverviewGenerator.generate(
                                 "s3://bucket/a'b/table-name",
                                 19L,
                                 "sink",
-                                Collections.singletonList(InspectTarget.sink("sink", schema))));
+                                Collections.singletonList(
+                                        InspectTarget.table(
+                                                "table", new TableInspectSchema(schema)))));
 
         String ddl = item.sourceSql().ddl();
-        assertTrue(ddl.indexOf("`id` BIGINT") < ddl.indexOf("`payload` VARCHAR"));
-        assertTrue(ddl.indexOf("`payload` VARCHAR") < ddl.indexOf("`region` VARCHAR"));
+        assertTrue(ddl.indexOf("`id` BIGINT") < ddl.indexOf("`payload` STRING"));
+        assertTrue(ddl.indexOf("`payload` STRING") < ddl.indexOf("`region` STRING"));
         assertTrue(ddl.contains("PRIMARY KEY (`region`, `id`) NOT ENFORCED"));
         assertTrue(ddl.contains("'scan.checkpoint-id' = '19'"));
         assertTrue(ddl.contains("s3://bucket/a''b/table-name"));
@@ -76,19 +80,12 @@ class InspectOverviewGeneratorTest {
     }
 
     @Test
-    void timerRawAndMalformedSinkReturnItemLocalUnavailable() {
+    void timerAndRawTargetsReturnItemLocalUnavailable() {
         InspectTarget timer = InspectTarget.timer("event-time", "timer-cf");
         InspectTarget raw = InspectTarget.sink("raw");
-        SinkInspectSchema malformed =
-                new SinkInspectSchema(
-                        Collections.singletonList(SinkInspectField.key("id", "INT", 2, -1)),
-                        Collections.singletonList(SinkInspectField.value("value", "INT", 2, 0)));
         InspectOverview overview =
                 InspectOverviewGenerator.generate(
-                        "file:///data",
-                        3L,
-                        "op",
-                        Arrays.asList(timer, raw, InspectTarget.sink("broken", malformed)));
+                        "file:///data", 3L, "op", Arrays.asList(timer, raw));
 
         assertEquals("Timer", overview.items().get(0).kind());
         for (InspectOverviewItem item : overview.items()) {

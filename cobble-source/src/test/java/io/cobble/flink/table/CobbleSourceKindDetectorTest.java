@@ -8,7 +8,6 @@ import io.cobble.ShardSnapshot;
 import io.cobble.flink.common.CobbleSnapshotMetadataCodec;
 import io.cobble.flink.common.CobbleSnapshotMetadataPayload;
 import io.cobble.flink.common.inspect.InspectSchemaRegistryLayout;
-import io.cobble.flink.common.inspect.SinkInspectSchemaStore;
 import io.cobble.flink.common.inspect.StateInspectSchemaStore;
 
 import org.apache.flink.core.memory.DataOutputViewStreamWrapper;
@@ -39,16 +38,6 @@ class CobbleSourceKindDetectorTest {
     private static final boolean NOT_SINK_SHAPED = false;
 
     @TempDir private Path tempDir;
-
-    @Test
-    void autoDetectsSinkRootFromSinkInspectSchema() throws Exception {
-        Path root = sinkRoot("sink-root");
-
-        CobbleResolvedSource resolved =
-                CobbleSourceKindDetector.detect(uri(root), CobbleSourceKind.AUTO, NOT_SINK_SHAPED);
-
-        assertEquals(CobbleSourceKind.SINK, resolved.kind());
-    }
 
     @Test
     void autoDetectsSidecarCheckpointRootWhenEmbeddedMetadataIsUnreadable() throws Exception {
@@ -332,10 +321,6 @@ class CobbleSourceKindDetectorTest {
 
     private Path sinkRoot(String name) throws Exception {
         Path root = tempDir.resolve(name);
-        byte[] blob = new SinkInspectSchemaStore(null).toBytes();
-        writeInspectSchemaBlob(root, blob);
-        // Secondary sink signal; on its own it must not be enough, but it should not break sink
-        // detection either.
         write(root.resolve("snapshot").resolve("CURRENT"), new byte[] {1});
         return root;
     }

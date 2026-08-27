@@ -2190,7 +2190,7 @@ function renderOverview() {
   }
   const items = overviewItems(state.meta)
   if (items.length === 0) {
-    empty.textContent = 'No Cobble states or sink schema found for this selection.'
+    empty.textContent = 'No Cobble states or table schema found for this selection.'
     empty.classList.remove('hidden')
     list.innerHTML = ''
     return
@@ -2319,7 +2319,7 @@ function showView(view) {
     $('page-subtitle').textContent = 'Read raw key/value rows from a Cobble Flink snapshot.'
   } else if (view === 'overview') {
     $('page-title').textContent = 'Overview'
-    $('page-subtitle').textContent = 'Review states, sink schema, and source table definitions.'
+    $('page-subtitle').textContent = 'Review states, Cobble Table schema, and source definitions.'
     renderOverview()
   } else {
     $('page-title').textContent = 'Datasource'

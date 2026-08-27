@@ -138,7 +138,7 @@ public final class CobbleDynamicTableSourceFactory implements DynamicTableSource
                     resolvedSchema);
         }
 
-        // Resolved as a Cobble sink table: existing sink source behavior, unchanged.
+        // Resolved as a native Cobble Table.
         // Reject state.* and raw.* options here so a misspelled source.kind (or a stray option)
         // on a sink table fails loudly instead of being silently ignored.
         StateSourceOptions.rejectStateOptionsForSink(options);
@@ -320,7 +320,7 @@ public final class CobbleDynamicTableSourceFactory implements DynamicTableSource
     /**
      * Returns whether the table schema is sink-shaped: it declares a primary key and has at least
      * one non-primary-key column. This lets {@code auto} keep treating an ambiguous path as a sink
-     * source, preserving existing behavior for sink tables without an inspect-schema sidecar.
+     * source for native Table roots without a separate schema sidecar.
      */
     private static boolean isSinkShaped(ResolvedSchema resolvedSchema) {
         if (!resolvedSchema.getPrimaryKey().isPresent()) {
