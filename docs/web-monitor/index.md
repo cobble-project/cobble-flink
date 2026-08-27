@@ -21,7 +21,7 @@ The web monitor is useful when you want to:
 - check which checkpoints or Cobble snapshots are available
 - follow `latest` while a job is still producing checkpoints
 - keep a small set of rows tracked while newer snapshots appear
-- generate Flink SQL source DDL from supported non-timer Cobble state or sink schemas
+- generate Flink SQL source DDL from supported non-timer Cobble state or Table schemas
 - inspect Cobble state by state name, verify decoded state keys, MapState keys, ListState values, and timer entries
 - inspect Cobble sink rows, primary keys, and value columns
 
@@ -172,9 +172,9 @@ are removed from the list on refresh.
 
 ## Overview Page
 
-The `Overview` page shows the states or sink schema in the selected datasource.
-It generates Flink SQL `CREATE TABLE` DDL for supported non-timer states and
-sink schemas.
+The `Overview` page shows the states or Cobble Table schema in the selected
+datasource. It generates Flink SQL `CREATE TABLE` DDL for supported non-timer
+states and Cobble Tables.
 
 For checkpoint datasources, each state card shows the decoded key, namespace,
 MapState key, and value fields. Generated state DDL uses
@@ -214,5 +214,6 @@ server is unauthenticated and binds to loopback by default.
 - Each open session pins `latest` to a concrete id. Refresh opens a replacement
   session only after a newer checkpoint or snapshot is available.
 - Checkpoint datasources support operator discovery.
-- Schema-aware inspection depends on metadata written with the checkpoint or
-  sink snapshot. Older or raw datasources still fall back to bytes.
+- Cobble Tables include their schema. Flink state inspection uses schema
+  metadata from the checkpoint; explicit raw inspection remains available for
+  byte-oriented Cobble data.

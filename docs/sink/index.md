@@ -6,7 +6,8 @@ nav_order: 7
 # Sink
 
 Use the Cobble sink when you want Flink SQL results written into a Cobble
-table.
+table. The sink stores the SQL schema in Cobble's native Table format, so the
+same data can be read by Cobble source or inspected by the Web Monitor.
 
 ## Why Use Cobble Sink
 

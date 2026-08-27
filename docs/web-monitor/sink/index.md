@@ -18,9 +18,9 @@ choose a concrete snapshot when you need a stable result set.
 
 ## Scan By Primary Key
 
-When the sink snapshot contains schema metadata, the `Inspect` page shows each
-primary-key field in schema order. Leave every key field empty to scan the
-whole snapshot, or fill fields from left to right to narrow the result.
+The `Inspect` page reads the native Cobble Table schema and shows each
+primary-key field in key order. Leave every key field empty to scan the whole
+snapshot, or fill fields from left to right to narrow the result.
 
 Every key before the last supplied key is an exact match. The last supplied key
 is a prefix match. For example, with primary key `(id, tenant)`, entering
@@ -37,16 +37,13 @@ to request selected value-column indexes such as `0,2`.
 
 ## Read Typed Columns
 
-With sink schema metadata, the result table expands primary-key fields and
-value columns into separate, named columns. Logical types appear below the
-field names, and the table scrolls horizontally when a table has many columns.
+The result table expands primary-key fields and value columns into separate,
+named columns. Logical types appear below the field names, and the table scrolls
+horizontally when a table has many columns.
 
 The row menu can track a row or copy its raw key and value. `Track` keeps the
 same typed presentation and can refresh multiple rows together.
 
-## Older Or Raw Sink Paths
-
-Some existing sink paths may not include inspect schema metadata. The monitor
-still opens them and falls back to the raw key, raw columns, and the original
-UTF-8 prefix filter. Schema-aware decoding is an enhancement, not a requirement
-for reading a sink snapshot.
+The monitor reads the current native Cobble Table format. It rejects the legacy
+Cobble Flink sink format with a clear upgrade error; rewrite that data before
+inspection.

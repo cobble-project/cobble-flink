@@ -80,14 +80,13 @@ Cobble Flink. `auto` works for the common on-disk layouts, but never selects
 
 ## Semantic Columns
 
-When Cobble data is produced by Cobble Flink, the writer can persist inspect
-schema metadata beside the data. The source reads that metadata during planning
-and exposes typed SQL columns instead of asking you to work with raw key/value
-bytes.
+Cobble tables persist their schema as part of the table format. The source reads
+that schema during planning and exposes typed SQL columns instead of asking you
+to work with raw key/value bytes.
 
-For a Cobble sink table, semantic columns are the table columns from the sink
-DDL: primary-key columns first according to the declared primary key, and value
-columns with their original names and logical types.
+For a Cobble sink table, semantic columns keep the names, physical order, and
+logical types from the sink DDL. The declared primary-key order is preserved for
+exact lookup.
 
 For Cobble state written by a Flink SQL job, semantic columns come from the SQL
 operator state when Flink still has enough type information. Common examples
@@ -155,6 +154,10 @@ FROM orders AS o
 LEFT JOIN cobble_source FOR SYSTEM_TIME AS OF o.pt AS d
 ON o.id = d.id;
 ```
+
+The source reads the current native Cobble Table format. It rejects the legacy
+Cobble Flink sink format with a clear upgrade error; rewrite that data before
+reading it with this release.
 
 ### Read from remote storage
 
