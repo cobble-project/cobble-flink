@@ -28,6 +28,7 @@ import java.util.concurrent.Executors;
  */
 public final class CobbleFlinkFileSystems {
     private static boolean registered;
+    private static volatile FlinkFileSystemFastCopyResolver fastCopyResolver;
     private static final CustomFileSystemRegistry REGISTRY = new FlinkRegistry();
     private static final ExecutorService DELETE_EXECUTOR =
             Executors.newSingleThreadExecutor(
@@ -44,6 +45,11 @@ public final class CobbleFlinkFileSystems {
             ProcessFileSystems.registerCustomRegistry(REGISTRY);
             registered = true;
         }
+    }
+
+    /** Registers the fast-copy bridge for the active Flink version. */
+    public static void registerFastCopyResolver(FlinkFileSystemFastCopyResolver resolver) {
+        fastCopyResolver = Objects.requireNonNull(resolver, "resolver");
     }
 
     static CustomFileSystem tryResolve(ProcessFileSystemRequest request) {
@@ -76,11 +82,11 @@ public final class CobbleFlinkFileSystems {
         }
     }
 
-    private static final class FlinkCustomFileSystem implements CustomFileSystem {
+    static final class FlinkCustomFileSystem implements CustomFileSystem {
         private final FileSystem fileSystem;
         private final Path rootPath;
 
-        private FlinkCustomFileSystem(FileSystem fileSystem, Path rootPath) {
+        FlinkCustomFileSystem(FileSystem fileSystem, Path rootPath) {
             this.fileSystem = Objects.requireNonNull(fileSystem, "fileSystem");
             this.rootPath = Objects.requireNonNull(rootPath, "rootPath");
         }
@@ -100,6 +106,66 @@ public final class CobbleFlinkFileSystems {
                 return fileSystem.exists(resolve(path));
             } catch (IOException e) {
                 throw new IllegalStateException("Failed to check path " + path, e);
+            }
+        }
+
+        @Override
+        public Long fileSize(String path) {
+            try {
+                FileStatus status = fileSystem.getFileStatus(resolve(path));
+                return status.isDir() ? null : status.getLen();
+            } catch (IOException e) {
+                throw new IllegalStateException("Failed to read file size for path " + path, e);
+            }
+        }
+
+        @Override
+        public boolean canFastCopyTo(
+                String sourcePath, CustomFileSystem destinationFileSystem, String destinationPath) {
+            if (!(destinationFileSystem instanceof FlinkCustomFileSystem)) {
+                return false;
+            }
+            FlinkCustomFileSystem destination = (FlinkCustomFileSystem) destinationFileSystem;
+            FlinkFileSystemFastCopyResolver resolver = fastCopyResolver;
+            return resolver != null
+                    && resolver.canCopy(
+                            fileSystem,
+                            resolve(sourcePath),
+                            destination.fileSystem,
+                            destination.resolve(destinationPath));
+        }
+
+        @Override
+        public void fastCopyTo(
+                String sourcePath, CustomFileSystem destinationFileSystem, String destinationPath) {
+            if (!(destinationFileSystem instanceof FlinkCustomFileSystem)) {
+                throw new UnsupportedOperationException(
+                        "Flink filesystem fast copy requires a Flink filesystem destination");
+            }
+            FlinkCustomFileSystem destination = (FlinkCustomFileSystem) destinationFileSystem;
+            Path source = resolve(sourcePath);
+            Path target = destination.resolve(destinationPath);
+            try {
+                FlinkFileSystemFastCopyResolver resolver = fastCopyResolver;
+                if (resolver == null) {
+                    throw new UnsupportedOperationException(
+                            "No fast-copy resolver is registered for this Flink version");
+                }
+                resolver.copy(fileSystem, source, destination.fileSystem, target);
+            } catch (IOException | RuntimeException e) {
+                try {
+                    if (!destination.fileSystem.delete(target, true)
+                            && destination.fileSystem.exists(target)) {
+                        e.addSuppressed(
+                                new IOException(
+                                        "Failed to remove partial fast-copy destination "
+                                                + target));
+                    }
+                } catch (IOException cleanupError) {
+                    e.addSuppressed(cleanupError);
+                }
+                throw new IllegalStateException(
+                        "Failed to fast-copy path " + sourcePath + " to " + destinationPath, e);
             }
         }
 

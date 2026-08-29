@@ -1,7 +1,10 @@
 package io.cobble.flink.common;
 
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 
 import io.cobble.CustomFileSystem;
 import io.cobble.CustomSequentialWriteFile;
@@ -36,6 +39,10 @@ class CobbleFlinkFileSystemsTest {
             output.close();
             assertArrayEquals(
                     new byte[] {7, 8, 9}, fileSystem.openRead("metadata.bin").readAt(0, 3));
+            assertEquals(Long.valueOf(3L), fileSystem.fileSize("metadata.bin"));
+            fileSystem.createDir("nested");
+            assertNull(fileSystem.fileSize("nested"));
+            assertThrows(IllegalStateException.class, () -> fileSystem.fileSize("missing.bin"));
         } finally {
             fileSystem.close();
         }

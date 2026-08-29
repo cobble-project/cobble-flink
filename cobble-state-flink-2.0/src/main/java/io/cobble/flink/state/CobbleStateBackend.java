@@ -3,6 +3,7 @@ package io.cobble.flink.state;
 import static org.apache.flink.configuration.description.TextElement.text;
 
 import io.cobble.flink.common.CobbleLoader;
+import io.cobble.flink.common.FlinkPathsCopyingFileSystemFastCopyResolver;
 
 import org.apache.flink.api.common.JobID;
 import org.apache.flink.configuration.CheckpointingOptions;
@@ -115,6 +116,7 @@ public class CobbleStateBackend extends AbstractManagedMemoryStateBackend
 
     /** Ensures the Cobble JNI library is loaded before any backend work starts. */
     static void ensureCobbleLoaded() {
+        FlinkPathsCopyingFileSystemFastCopyResolver.register();
         CobbleLoader.ensureCobbleLoaded();
     }
 
