@@ -2,6 +2,7 @@ package io.cobble.flink.state;
 
 import static org.apache.flink.runtime.state.FullSnapshotUtil.END_OF_KEY_GROUP_MARK;
 import static org.apache.flink.runtime.state.FullSnapshotUtil.setMetaDataFollowsFlagInKey;
+import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -2289,7 +2290,7 @@ class CobbleStateBackendTest {
     }
 
     @Test
-    void nativePhysicalBatchesAreNotSafeOrderedPrefixes(@TempDir Path tempDir) throws Exception {
+    void nativePhysicalBatchesResumeInOrder(@TempDir Path tempDir) throws Exception {
         final int bucket = 0;
         final int timerCount = 4_096;
         try (TestBackendContext context =
@@ -2306,10 +2307,6 @@ class CobbleStateBackendTest {
                             context.cobbleBackend
                                     .getCobbleDb()
                                     .getOrNewPriorityQueue("native-poll-batches");
-                    PriorityQueue advancedPollQueue =
-                            context.cobbleBackend
-                                    .getCobbleDb()
-                                    .getOrNewPriorityQueue("native-poll-advance-batches");
                     PriorityQueue peekedQueue =
                             context.cobbleBackend
                                     .getCobbleDb()
@@ -2319,34 +2316,39 @@ class CobbleStateBackendTest {
                                     .getCobbleDb()
                                     .getOrNewPriorityQueue("native-fixed-peek-advance-batches")) {
                 populateNativePriorityQueue(polledQueue, bucket, timerCount);
-                NativePriorityQueueBatch firstPolledBatch =
-                        pollNativePriorityQueueBatch(polledQueue, bucket);
-                NativePriorityQueueBatch secondPolledBatch =
-                        pollNativePriorityQueueBatch(polledQueue, bucket);
-                assertTrue(firstPolledBatch.size > 0);
-                assertTrue(firstPolledBatch.size < timerCount);
-                assertEquals(0, secondPolledBatch.size);
-                assertTrue(Arrays.equals(firstPolledBatch.lastKey, polledQueue.cursor(bucket)));
-
-                populateNativePriorityQueue(advancedPollQueue, bucket, timerCount);
-                NativePriorityQueueBatch firstAdvancedPollBatch =
-                        pollNativePriorityQueueBatch(advancedPollQueue, bucket);
-                advancedPollQueue.advance(bucket, firstAdvancedPollBatch.lastKey);
-                NativePriorityQueueBatch secondAdvancedPollBatch =
-                        pollNativePriorityQueueBatch(advancedPollQueue, bucket);
-                // pollBatchDirect() consumes the first native physical batch and leaves the
-                // queue stopped at its boundary. Advancing the returned last key cannot clear
-                // that boundary, so callers that cache a batch must use peekBatchDirect().
-                assertEquals(0, secondAdvancedPollBatch.size);
+                int polledTimerCount = 0;
+                int polledBatchCount = 0;
+                while (true) {
+                    NativePriorityQueueBatch batch =
+                            pollNativePriorityQueueBatch(polledQueue, bucket);
+                    if (batch.size == 0) {
+                        break;
+                    }
+                    assertNativePriorityQueueBatch(batch, polledTimerCount);
+                    polledTimerCount += batch.size;
+                    polledBatchCount++;
+                    assertArrayEquals(batch.lastKey, polledQueue.cursor(bucket));
+                }
+                assertTrue(polledBatchCount > 1);
+                assertEquals(timerCount, polledTimerCount);
 
                 populateNativePriorityQueue(peekedQueue, bucket, timerCount);
-                NativePriorityQueueBatch physicalPeekBatch =
-                        peekNativePriorityQueueBatch(peekedQueue, bucket);
-                assertTrue(physicalPeekBatch.size > 0);
-                assertTrue(physicalPeekBatch.size < timerCount);
-                peekedQueue.advance(bucket, physicalPeekBatch.lastKey);
-                assertEquals(0, peekNativePriorityQueueBatch(peekedQueue, bucket).size);
-                assertTrue(Arrays.equals(physicalPeekBatch.lastKey, peekedQueue.cursor(bucket)));
+                int peekedTimerCount = 0;
+                int peekedBatchCount = 0;
+                while (true) {
+                    NativePriorityQueueBatch batch =
+                            peekNativePriorityQueueBatch(peekedQueue, bucket);
+                    if (batch.size == 0) {
+                        break;
+                    }
+                    assertNativePriorityQueueBatch(batch, peekedTimerCount);
+                    peekedTimerCount += batch.size;
+                    peekedBatchCount++;
+                    peekedQueue.advance(bucket, batch.lastKey);
+                    assertArrayEquals(batch.lastKey, peekedQueue.cursor(bucket));
+                }
+                assertTrue(peekedBatchCount > 1);
+                assertEquals(timerCount, peekedTimerCount);
 
                 populateNativePriorityQueue(fixedPeekedQueue, bucket, timerCount);
                 int fixedPeekedTimerCount = 0;
@@ -2357,6 +2359,7 @@ class CobbleStateBackendTest {
                     if (batch.size == 0) {
                         break;
                     }
+                    assertNativePriorityQueueBatch(batch, fixedPeekedTimerCount);
                     fixedPeekedTimerCount += batch.size;
                     fixedPeekedBatchCount++;
                     fixedPeekedQueue.advance(bucket, batch.lastKey);
@@ -8444,15 +8447,24 @@ class CobbleStateBackendTest {
     private static NativePriorityQueueBatch copyNativePriorityQueueBatch(
             DirectPriorityQueueBatch batch) {
         int count = 0;
+        List<Long> timers = new ArrayList<>();
         byte[] lastKey = null;
         for (DirectPriorityQueueEntry entry : batch) {
             ByteBuffer key = entry.getKey().duplicate();
             byte[] copiedKey = new byte[key.remaining()];
             key.get(copiedKey);
+            timers.add(ByteBuffer.wrap(copiedKey).getLong());
             lastKey = copiedKey;
             count++;
         }
-        return new NativePriorityQueueBatch(count, lastKey);
+        return new NativePriorityQueueBatch(count, timers, lastKey);
+    }
+
+    private static void assertNativePriorityQueueBatch(
+            NativePriorityQueueBatch batch, int expectedFirstTimer) {
+        for (int index = 0; index < batch.size; index++) {
+            assertEquals((long) expectedFirstTimer + index, batch.timers.get(index).longValue());
+        }
     }
 
     private static byte[] nativePriorityQueueKey(long timer) {
@@ -10009,10 +10021,12 @@ class CobbleStateBackendTest {
     /** Copied metadata for one direct native priority-queue batch. */
     private static final class NativePriorityQueueBatch {
         private final int size;
+        private final List<Long> timers;
         private final byte[] lastKey;
 
-        private NativePriorityQueueBatch(int size, byte[] lastKey) {
+        private NativePriorityQueueBatch(int size, List<Long> timers, byte[] lastKey) {
             this.size = size;
+            this.timers = timers;
             this.lastKey = lastKey;
         }
     }

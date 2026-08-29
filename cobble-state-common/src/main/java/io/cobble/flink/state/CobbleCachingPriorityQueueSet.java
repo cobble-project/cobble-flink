@@ -40,9 +40,8 @@ import java.util.TreeSet;
  * PriorityQueue#peekBatchDirect(int, int)}. Native storage remains the durable owner until the
  * overlay is drained or exported for a snapshot.
  *
- * <p>The fixed-size batch is deliberately used instead of the physical-boundary overload. A
- * physical batch may not be a contiguous key prefix across merged sources, so advancing to its
- * last key could hide timers that were not prefetched.
+ * <p>The fixed-size batch keeps overlay memory and refill work predictable regardless of the
+ * physical SST or Parquet layout.
  */
 final class CobbleCachingPriorityQueueSet<T>
         implements InternalPriorityQueue<T>, HeapPriorityQueueElement {
