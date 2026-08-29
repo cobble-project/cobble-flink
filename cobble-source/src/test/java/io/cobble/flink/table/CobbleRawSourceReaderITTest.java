@@ -234,11 +234,10 @@ class CobbleRawSourceReaderITTest {
     }
 
     /**
-     * Streaming raw scan: writes snapshot 1, starts the raw source, writes snapshot 2 with
-     * accumulated data (old + new keys), and verifies all rows are read without duplicates or loss.
+     * Streaming raw scan emits the prefix already read from snapshot 1, then snapshot 2 in full.
      */
     @Test
-    void rawStreamingReplacesSnapshotWithoutDuplicatesOrLoss() throws Exception {
+    void rawStreamingEmitsCurrentSnapshotInFullAfterReplacement() throws Exception {
         Path tablePath = tempDir.resolve("raw-streaming");
         int bucketCount = 1;
         int numColumns = 2;
@@ -269,19 +268,16 @@ class CobbleRawSourceReaderITTest {
         try {
             reader.start();
             reader.addSplits(initialSplits);
-            // Consume only part of snapshot 1 so the split is still ACTIVE (not IDLE) when the
-            // replacement arrives — this exercises the WRAP replacement path.
+            // Consume only part of snapshot 1 so replacement has to wrap from the saved boundary.
             pollUntilRowCount(reader, output, 2);
 
-            // Write a second snapshot with all previous rows PLUS a new key that sorts AFTER the
-            // last consumed key. In normal streaming replacement (not checkpoint restore), the
-            // ACTIVE part scans from the resume boundary forward, so only keys after the boundary
-            // are emitted. This matches the existing sink source replacement semantics.
+            // The second snapshot has refreshed values for old keys plus a new key. The completed
+            // WRAP scan must include both keys before the boundary and keys after it.
             DirectRow[] allRowsForSnapshot2 = {
-                new DirectRow(bytes("s1-k1"), bytes("a1"), bytes("b1"), null),
-                new DirectRow(bytes("s1-k2"), bytes("a2"), bytes("b2"), null),
-                new DirectRow(bytes("s1-k3"), bytes("a3"), bytes("b3"), null),
-                new DirectRow(bytes("s2-k4"), bytes("a4"), bytes("b4"), null),
+                new DirectRow(bytes("s1-k1"), bytes("a1-v2"), bytes("b1"), null),
+                new DirectRow(bytes("s1-k2"), bytes("a2-v2"), bytes("b2"), null),
+                new DirectRow(bytes("s1-k3"), bytes("a3-v2"), bytes("b3"), null),
+                new DirectRow(bytes("s2-k4"), bytes("a4-v2"), bytes("b4"), null),
             };
             long snapshot2 =
                     writeDirectTable(tablePath, bucketCount, numColumns, allRowsForSnapshot2, 2L);
@@ -295,23 +291,23 @@ class CobbleRawSourceReaderITTest {
             reader.close();
         }
 
-        // The streaming source is an incremental scan: rows already consumed from snapshot 1 are
-        // not re-emitted from snapshot 2. Only keys NOT yet seen are emitted from the replacement.
+        // The first two rows are the snapshot-1 prefix. The following four rows are the complete
+        // insert-only snapshot-2 stream, including keys before the saved boundary.
+        assertEquals(6, output.rows.size());
+        assertEquals("a1", value(output.rows.get(0)));
+        assertEquals("a2", value(output.rows.get(1)));
         Map<String, byte[]> valueByKey = new TreeMap<>();
-        for (RowData row : output.rows) {
+        for (RowData row : output.rows.subList(2, output.rows.size())) {
             String key = new String(row.getBinary(0), StandardCharsets.UTF_8);
             ArrayData cols = row.getArray(1);
             valueByKey.put(key, cols.getBinary(0));
         }
 
-        // All 4 distinct keys should be present: s1-k1, s1-k2 from snapshot 1 (consumed before
-        // replacement), s1-k3 and s2-k4 from snapshot 2 ACTIVE (after the resume boundary).
-        // No duplicates for already-consumed keys.
-        assertEquals(4, valueByKey.size(), "expected 4 distinct keys, got " + valueByKey);
-        assertEquals("a1", new String(valueByKey.get("s1-k1"), StandardCharsets.UTF_8));
-        assertEquals("a2", new String(valueByKey.get("s1-k2"), StandardCharsets.UTF_8));
-        assertEquals("a3", new String(valueByKey.get("s1-k3"), StandardCharsets.UTF_8));
-        assertEquals("a4", new String(valueByKey.get("s2-k4"), StandardCharsets.UTF_8));
+        assertEquals(4, valueByKey.size(), "expected snapshot 2 in full, got " + valueByKey);
+        assertEquals("a1-v2", new String(valueByKey.get("s1-k1"), StandardCharsets.UTF_8));
+        assertEquals("a2-v2", new String(valueByKey.get("s1-k2"), StandardCharsets.UTF_8));
+        assertEquals("a3-v2", new String(valueByKey.get("s1-k3"), StandardCharsets.UTF_8));
+        assertEquals("a4-v2", new String(valueByKey.get("s2-k4"), StandardCharsets.UTF_8));
     }
 
     // ------------------------------------------------------------------------------------------
@@ -406,6 +402,10 @@ class CobbleRawSourceReaderITTest {
             b[i] = (byte) ints[i];
         }
         return b;
+    }
+
+    private static String value(RowData row) {
+        return new String(row.getArray(1).getBinary(0), StandardCharsets.UTF_8);
     }
 
     private static String toHexString(byte[] bytes) {

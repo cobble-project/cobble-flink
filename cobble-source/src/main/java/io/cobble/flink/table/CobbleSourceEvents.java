@@ -2,6 +2,9 @@ package io.cobble.flink.table;
 
 import org.apache.flink.api.connector.source.SourceEvent;
 
+import java.util.LinkedHashMap;
+import java.util.Map;
+
 /** Source events exchanged between the Cobble reader and enumerator. */
 final class CobbleSourceEvents {
 
@@ -22,10 +25,10 @@ final class CobbleSourceEvents {
     static final class OwnedSplitsEvent implements SourceEvent {
         private static final long serialVersionUID = 1L;
 
-        final String[] splitIds;
+        final Map<String, Long> snapshotIdsBySplit;
 
-        OwnedSplitsEvent(String[] splitIds) {
-            this.splitIds = splitIds;
+        OwnedSplitsEvent(Map<String, Long> snapshotIdsBySplit) {
+            this.snapshotIdsBySplit = new LinkedHashMap<>(snapshotIdsBySplit);
         }
     }
 }

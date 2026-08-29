@@ -21,7 +21,8 @@ final class CobbleSourceSplit implements SourceSplit, Serializable {
     /** Minimal reader lifecycle persisted in checkpoints. */
     enum ScanState {
         ACTIVE,
-        WRAP,
+        WRAP_AFTER,
+        WRAP_BEFORE,
         IDLE
     }
 
@@ -32,6 +33,8 @@ final class CobbleSourceSplit implements SourceSplit, Serializable {
     final int startBucket;
     final byte[] startKeyExclusive;
     final ScanState scanState;
+    final int wrapBoundaryBucket;
+    final byte[] wrapBoundaryKeyInclusive;
 
     CobbleSourceSplit(
             int rangeStartBucket,
@@ -41,6 +44,28 @@ final class CobbleSourceSplit implements SourceSplit, Serializable {
             int startBucket,
             byte[] startKeyExclusive,
             ScanState scanState) {
+        this(
+                rangeStartBucket,
+                rangeEndBucket,
+                totalBuckets,
+                snapshotId,
+                startBucket,
+                startKeyExclusive,
+                scanState,
+                -1,
+                null);
+    }
+
+    CobbleSourceSplit(
+            int rangeStartBucket,
+            int rangeEndBucket,
+            int totalBuckets,
+            long snapshotId,
+            int startBucket,
+            byte[] startKeyExclusive,
+            ScanState scanState,
+            int wrapBoundaryBucket,
+            byte[] wrapBoundaryKeyInclusive) {
         this.rangeStartBucket = rangeStartBucket;
         this.rangeEndBucket = rangeEndBucket;
         this.totalBuckets = totalBuckets;
@@ -48,6 +73,8 @@ final class CobbleSourceSplit implements SourceSplit, Serializable {
         this.startBucket = startBucket;
         this.startKeyExclusive = copyOrNull(startKeyExclusive);
         this.scanState = scanState;
+        this.wrapBoundaryBucket = wrapBoundaryBucket;
+        this.wrapBoundaryKeyInclusive = copyOrNull(wrapBoundaryKeyInclusive);
     }
 
     static CobbleSourceSplit forSnapshot(
@@ -73,7 +100,7 @@ final class CobbleSourceSplit implements SourceSplit, Serializable {
 
     /** Serializer for checkpointing split metadata without embedding raw ScanSplit payloads. */
     static final class Serializer implements SimpleVersionedSerializer<CobbleSourceSplit> {
-        private static final int VERSION = 1;
+        private static final int VERSION = 2;
 
         @Override
         public int getVersion() {
@@ -91,6 +118,8 @@ final class CobbleSourceSplit implements SourceSplit, Serializable {
             dataOut.writeInt(split.startBucket);
             writeBytes(dataOut, split.startKeyExclusive);
             dataOut.writeInt(split.scanState.ordinal());
+            dataOut.writeInt(split.wrapBoundaryBucket);
+            writeBytes(dataOut, split.wrapBoundaryKeyInclusive);
             dataOut.flush();
             return out.toByteArray();
         }
@@ -108,7 +137,9 @@ final class CobbleSourceSplit implements SourceSplit, Serializable {
                     input.readLong(),
                     input.readInt(),
                     readBytes(input),
-                    ScanState.values()[input.readInt()]);
+                    ScanState.values()[input.readInt()],
+                    input.readInt(),
+                    readBytes(input));
         }
 
         private static void writeBytes(DataOutputStream out, byte[] bytes) throws IOException {

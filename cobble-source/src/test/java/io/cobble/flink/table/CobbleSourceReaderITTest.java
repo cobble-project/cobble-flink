@@ -136,17 +136,19 @@ class CobbleSourceReaderITTest {
 
         CollectingOutput output = new CollectingOutput();
         CobbleSourceReader reader = new CobbleSourceReader(config, new TestingContext());
-        List<Long> idsSeenBeforeReplacement;
         try {
             reader.start();
             reader.addSplits(initialSplits);
             pollUntilRowCount(reader, output, 20);
-            idsSeenBeforeReplacement = extractIds(output.rows);
 
             long snapshot2Id = writeRows(tablePath, 1, rows("v2", 2000));
             GlobalSnapshot snapshot2 = CobbleSourceRuntime.loadSnapshotById(config, snapshot2Id);
             for (CobbleSourceSplit split :
                     CobbleSourceRuntime.createSourceSplits(config, snapshot2)) {
+                reader.handleSourceEvents(new CobbleSourceEvents.ReplaceSplitEvent(split));
+                reader.handleSourceEvents(new CobbleSourceEvents.ReplaceSplitEvent(split));
+            }
+            for (CobbleSourceSplit split : initialSplits) {
                 reader.handleSourceEvents(new CobbleSourceEvents.ReplaceSplitEvent(split));
             }
             drainStreamingReader(reader, output);
@@ -155,15 +157,19 @@ class CobbleSourceReaderITTest {
         }
 
         java.util.Map<Long, String> namesById = new java.util.HashMap<>();
+        long replacementRows = 0L;
         for (RowData row : output.rows) {
-            namesById.put(Long.valueOf(row.getLong(0)), row.getString(1).toString());
+            String name = row.getString(1).toString();
+            namesById.put(Long.valueOf(row.getLong(0)), name);
+            if (name.startsWith("reader-v2-")) {
+                replacementRows++;
+            }
         }
-        assertEquals(64, output.rows.size());
+        assertEquals(84, output.rows.size());
+        assertEquals(64L, replacementRows);
         assertEquals(64, namesById.size());
         for (long id = 1L; id <= 64L; id++) {
-            String expectedSuffix =
-                    idsSeenBeforeReplacement.contains(Long.valueOf(id)) ? "v1" : "v2";
-            assertEquals("reader-" + expectedSuffix + "-" + id, namesById.get(Long.valueOf(id)));
+            assertEquals("reader-v2-" + id, namesById.get(Long.valueOf(id)));
         }
     }
 
@@ -192,6 +198,7 @@ class CobbleSourceReaderITTest {
 
         CollectingOutput resumedOutput = new CollectingOutput();
         CobbleSourceReader resumedReader = new CobbleSourceReader(config, new TestingContext());
+        List<CobbleSourceSplit> wrapCheckpointedSplits;
         try {
             resumedReader.start();
             resumedReader.addSplits(checkpointedSplits);
@@ -203,13 +210,27 @@ class CobbleSourceReaderITTest {
                     CobbleSourceRuntime.createSourceSplits(config, snapshot2)) {
                 resumedReader.handleSourceEvents(new CobbleSourceEvents.ReplaceSplitEvent(split));
             }
-            drainStreamingReader(resumedReader, resumedOutput);
+            // Checkpoint while the after-boundary WRAP phase is in progress.
+            pollUntilRowCount(resumedReader, resumedOutput, 60);
+            wrapCheckpointedSplits = resumedReader.snapshotState(2L);
         } finally {
             resumedReader.close();
         }
 
+        CollectingOutput wrapRestoredOutput = new CollectingOutput();
+        CobbleSourceReader wrapRestoredReader =
+                new CobbleSourceReader(config, new TestingContext());
+        try {
+            wrapRestoredReader.start();
+            wrapRestoredReader.addSplits(wrapCheckpointedSplits);
+            drainStreamingReader(wrapRestoredReader, wrapRestoredOutput);
+        } finally {
+            wrapRestoredReader.close();
+        }
+
         java.util.Map<Long, List<String>> namesById = new java.util.HashMap<>();
-        List<RowData> combined = combine(initialOutput.rows, resumedOutput.rows);
+        List<RowData> combined =
+                combine(combine(initialOutput.rows, resumedOutput.rows), wrapRestoredOutput.rows);
         for (RowData row : combined) {
             namesById
                     .computeIfAbsent(Long.valueOf(row.getLong(0)), ignored -> new ArrayList<>())
@@ -225,6 +246,11 @@ class CobbleSourceReaderITTest {
         for (long id = 1L; id <= 640L; id++) {
             org.junit.jupiter.api.Assertions.assertTrue(namesById.containsKey(Long.valueOf(id)));
         }
+        long replacementRows =
+                combined.stream()
+                        .filter(row -> row.getString(1).toString().startsWith("reader-v2-"))
+                        .count();
+        assertEquals(640L, replacementRows);
     }
 
     @Test
@@ -285,6 +311,11 @@ class CobbleSourceReaderITTest {
                 org.junit.jupiter.api.Assertions.assertTrue(names.contains("reader-v2-" + id));
             }
         }
+        long replacementRows =
+                combined.stream()
+                        .filter(row -> row.getString(1).toString().startsWith("reader-v2-"))
+                        .count();
+        assertEquals(200L, replacementRows);
     }
 
     private long writeRows(Path tablePath, int bucketCount, List<String> rows) throws Exception {

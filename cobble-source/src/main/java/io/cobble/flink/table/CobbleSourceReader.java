@@ -125,7 +125,7 @@ final class CobbleSourceReader implements SourceReader<RowData, CobbleSourceSpli
                 ownedStatesBySplit.put(split.splitId(), state);
                 enqueueIfRunnable(state);
             } else {
-                existing.restoreFromSplit(split);
+                existing.applyReplacement(split);
                 enqueueIfRunnable(existing);
             }
         }
@@ -230,11 +230,12 @@ final class CobbleSourceReader implements SourceReader<RowData, CobbleSourceSpli
         }
         List<String> splitIds = new ArrayList<>(ownedStatesBySplit.keySet());
         Collections.sort(splitIds);
-        String[] ids = new String[splitIds.size()];
-        for (int i = 0; i < splitIds.size(); i++) {
-            ids[i] = splitIds.get(i);
+        Map<String, Long> snapshotIdsBySplit = new java.util.LinkedHashMap<>();
+        for (String splitId : splitIds) {
+            snapshotIdsBySplit.put(splitId, ownedStatesBySplit.get(splitId).snapshotId);
         }
-        context.sendSourceEventToCoordinator(new CobbleSourceEvents.OwnedSplitsEvent(ids));
+        context.sendSourceEventToCoordinator(
+                new CobbleSourceEvents.OwnedSplitsEvent(snapshotIdsBySplit));
     }
 
     private void signalAvailable() {
@@ -266,10 +267,11 @@ final class CobbleSourceReader implements SourceReader<RowData, CobbleSourceSpli
         private final boolean streamingOwned;
         private long snapshotId;
         private ScanSplit scanSplit;
-        private ScanSplit wrapSplit;
         private int startBucket;
         private byte[] startKeyExclusive;
         private CobbleSourceSplit.ScanState scanState;
+        private int wrapBoundaryBucket;
+        private byte[] wrapBoundaryKeyInclusive;
         private boolean enqueued;
         private int resolvedTotalBuckets;
         private ScanCursor cursor;
@@ -277,7 +279,6 @@ final class CobbleSourceReader implements SourceReader<RowData, CobbleSourceSpli
         // split snapshot is serialized.
         private int checkpointBucket;
         private byte[] checkpointKeyExclusive;
-        private boolean restoredFromCheckpoint;
 
         private SourceSplitState(CobbleSourceSplit split, boolean streamingOwned) {
             this.splitId = split.splitId();
@@ -296,13 +297,13 @@ final class CobbleSourceReader implements SourceReader<RowData, CobbleSourceSpli
         private void restoreFromSplit(CobbleSourceSplit split) {
             this.snapshotId = split.snapshotId;
             this.scanSplit = null;
-            this.wrapSplit = null;
             this.startBucket = split.startBucket;
             this.startKeyExclusive = copy(split.startKeyExclusive);
             this.scanState = split.scanState;
+            this.wrapBoundaryBucket = split.wrapBoundaryBucket;
+            this.wrapBoundaryKeyInclusive = copy(split.wrapBoundaryKeyInclusive);
             this.checkpointBucket = -1;
             this.checkpointKeyExclusive = null;
-            this.restoredFromCheckpoint = split.startBucket >= 0 && split.startKeyExclusive != null;
             if (config.hasConfiguredBucketCount()) {
                 this.resolvedTotalBuckets = config.bucketCount();
             }
@@ -313,16 +314,18 @@ final class CobbleSourceReader implements SourceReader<RowData, CobbleSourceSpli
         }
 
         private void applyReplacement(CobbleSourceSplit replacement) {
+            if (replacement.snapshotId <= snapshotId) {
+                return;
+            }
             this.snapshotId = replacement.snapshotId;
             this.scanSplit = null;
-            this.wrapSplit = null;
-            if (!hasStartBoundary()) {
+            if (scanState == CobbleSourceSplit.ScanState.IDLE || !hasStartBoundary()) {
                 this.scanState = CobbleSourceSplit.ScanState.ACTIVE;
                 clearStartBoundary();
-            } else if (restoredFromCheckpoint) {
-                this.scanState = CobbleSourceSplit.ScanState.WRAP;
             } else {
-                this.scanState = CobbleSourceSplit.ScanState.ACTIVE;
+                this.scanState = CobbleSourceSplit.ScanState.WRAP_AFTER;
+                this.wrapBoundaryBucket = currentBoundaryBucket();
+                this.wrapBoundaryKeyInclusive = copy(currentBoundaryKeyExclusive());
             }
             closeRuntime();
         }
@@ -336,15 +339,14 @@ final class CobbleSourceReader implements SourceReader<RowData, CobbleSourceSpli
                 ensureCursor();
                 ScanCursor.Entry entry = cursor.nextEntry();
                 if (entry != null) {
-                    if (scanState == CobbleSourceSplit.ScanState.ACTIVE) {
-                        advanceStartBoundary(entry);
-                    }
+                    advanceStartBoundary(entry);
                     return entry;
                 }
-                if (scanState == CobbleSourceSplit.ScanState.WRAP && wrapSplit != null) {
+                if (scanState == CobbleSourceSplit.ScanState.WRAP_AFTER) {
                     closeRuntime();
-                    scanSplit = wrapSplit;
-                    wrapSplit = null;
+                    scanSplit = null;
+                    clearResumeBoundary();
+                    scanState = CobbleSourceSplit.ScanState.WRAP_BEFORE;
                     continue;
                 }
                 clearStartBoundary();
@@ -360,22 +362,25 @@ final class CobbleSourceReader implements SourceReader<RowData, CobbleSourceSpli
             }
             if (scanSplit == null) {
                 ScanSplit resolved = CobbleSourceRuntime.resolveSourceSplit(config, toSplit());
-                if (scanState == CobbleSourceSplit.ScanState.WRAP && hasStartBoundary()) {
+                if (scanState == CobbleSourceSplit.ScanState.WRAP_AFTER
+                        || scanState == CobbleSourceSplit.ScanState.WRAP_BEFORE) {
+                    if (!hasWrapBoundary()) {
+                        throw new IOException("Cobble source wrap scan is missing its boundary.");
+                    }
                     ScanSplit.Partition partition =
-                            resolved.splitAfter(
-                                    currentBoundaryBucket(), currentBoundaryKeyExclusive());
-                    scanSplit = partition.after;
-                    wrapSplit = partition.before;
+                            resolved.splitAfter(wrapBoundaryBucket, wrapBoundaryKeyInclusive);
+                    scanSplit =
+                            scanState == CobbleSourceSplit.ScanState.WRAP_BEFORE
+                                    ? partition.before
+                                    : partition.after;
                 } else {
                     scanSplit = resolved;
-                    wrapSplit = null;
-                    if (hasStartBoundary()) {
-                        scanSplit =
-                                scanSplit.splitAfter(
-                                                currentBoundaryBucket(),
-                                                currentBoundaryKeyExclusive())
-                                        .after;
-                    }
+                }
+                if (hasStartBoundary()) {
+                    scanSplit =
+                            scanSplit.splitAfter(
+                                            currentBoundaryBucket(), currentBoundaryKeyExclusive())
+                                    .after;
                 }
             }
             cursor =
@@ -403,7 +408,9 @@ final class CobbleSourceReader implements SourceReader<RowData, CobbleSourceSpli
                     snapshotId,
                     boundaryBucket,
                     boundaryKeyExclusive,
-                    scanState);
+                    scanState,
+                    wrapBoundaryBucket,
+                    wrapBoundaryKeyInclusive);
         }
 
         private void closeRuntime() {
@@ -422,11 +429,20 @@ final class CobbleSourceReader implements SourceReader<RowData, CobbleSourceSpli
         }
 
         private void clearStartBoundary() {
+            clearResumeBoundary();
+            wrapBoundaryBucket = -1;
+            wrapBoundaryKeyInclusive = null;
+        }
+
+        private void clearResumeBoundary() {
             startBucket = -1;
             startKeyExclusive = null;
             checkpointBucket = -1;
             checkpointKeyExclusive = null;
-            restoredFromCheckpoint = false;
+        }
+
+        private boolean hasWrapBoundary() {
+            return wrapBoundaryBucket >= 0 && wrapBoundaryKeyInclusive != null;
         }
 
         private void advanceStartBoundary(ScanCursor.Entry entry) {

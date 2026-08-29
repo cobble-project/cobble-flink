@@ -12,7 +12,15 @@ class CobbleSourceSplitSerializerTest {
         CobbleSourceSplit.Serializer serializer = new CobbleSourceSplit.Serializer();
         CobbleSourceSplit split =
                 new CobbleSourceSplit(
-                        2, 3, 8, 9L, 3, new byte[] {4, 5}, CobbleSourceSplit.ScanState.WRAP);
+                        2,
+                        3,
+                        8,
+                        9L,
+                        3,
+                        new byte[] {4, 5},
+                        CobbleSourceSplit.ScanState.WRAP_BEFORE,
+                        2,
+                        new byte[] {1, 2});
 
         byte[] bytes = serializer.serialize(split);
         CobbleSourceSplit restored = serializer.deserialize(serializer.getVersion(), bytes);
@@ -25,7 +33,10 @@ class CobbleSourceSplitSerializerTest {
         assertEquals(3, restored.startBucket);
         org.junit.jupiter.api.Assertions.assertArrayEquals(
                 new byte[] {4, 5}, restored.startKeyExclusive);
-        assertEquals(CobbleSourceSplit.ScanState.WRAP, restored.scanState);
+        assertEquals(CobbleSourceSplit.ScanState.WRAP_BEFORE, restored.scanState);
+        assertEquals(2, restored.wrapBoundaryBucket);
+        org.junit.jupiter.api.Assertions.assertArrayEquals(
+                new byte[] {1, 2}, restored.wrapBoundaryKeyInclusive);
     }
 
     @Test

@@ -138,13 +138,19 @@ final class CobbleSourceEnumerator
         }
         CobbleSourceEvents.OwnedSplitsEvent event =
                 (CobbleSourceEvents.OwnedSplitsEvent) sourceEvent;
-        for (String splitId : event.splitIds) {
+        for (Map.Entry<String, Long> ownedSplit : event.snapshotIdsBySplit.entrySet()) {
+            String splitId = ownedSplit.getKey();
             activeReaderBySplit.put(splitId, subtaskId);
             preferredReaderBySplit.put(splitId, subtaskId);
             CobbleSourceSplit pending = pendingSplitsById.remove(splitId);
-            if (pending != null) {
+            CobbleSourceSplit latest = latestSplitsById.get(splitId);
+            CobbleSourceSplit desired =
+                    latest == null || (pending != null && pending.snapshotId > latest.snapshotId)
+                            ? pending
+                            : latest;
+            if (desired != null && desired.snapshotId > ownedSplit.getValue().longValue()) {
                 context.sendEventToSourceReader(
-                        subtaskId, new CobbleSourceEvents.ReplaceSplitEvent(pending));
+                        subtaskId, new CobbleSourceEvents.ReplaceSplitEvent(desired));
             }
         }
         assignAvailableSplits();

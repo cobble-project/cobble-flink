@@ -29,7 +29,7 @@ final class CobbleSourceEnumeratorState {
 
     static final class Serializer
             implements SimpleVersionedSerializer<CobbleSourceEnumeratorState> {
-        private static final int VERSION = 1;
+        private static final int VERSION = 2;
         private final CobbleSourceSplit.Serializer splitSerializer =
                 new CobbleSourceSplit.Serializer();
 
