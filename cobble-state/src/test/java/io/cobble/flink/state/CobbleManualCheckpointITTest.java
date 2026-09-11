@@ -1,9 +1,5 @@
 package io.cobble.flink.state;
 
-import static org.apache.flink.runtime.testutils.CommonTestUtils.waitForAllTaskRunning;
-import static org.apache.flink.runtime.testutils.CommonTestUtils.waitForCheckpoint;
-
-import org.apache.flink.api.common.JobID;
 import org.apache.flink.api.common.functions.RichFlatMapFunction;
 import org.apache.flink.api.common.restartstrategy.RestartStrategies;
 import org.apache.flink.api.common.state.ValueState;
@@ -20,7 +16,7 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
 import java.nio.file.Path;
-import java.util.concurrent.TimeUnit;
+import java.time.Duration;
 
 class CobbleManualCheckpointITTest {
 
@@ -74,18 +70,16 @@ class CobbleManualCheckpointITTest {
 
             org.apache.flink.runtime.jobgraph.JobGraph jobGraph =
                     env.getStreamGraph().getJobGraph();
-            JobID jobId = jobGraph.getJobID();
-            cluster.getClusterClient().submitJob(jobGraph).get(30, TimeUnit.SECONDS);
-
-            waitForAllTaskRunning(cluster.getMiniCluster(), jobId, false);
+            CobbleCheckpointingITSupport.submitJobAndWaitForRunning(cluster, jobGraph);
 
             if (periodic) {
-                waitForCheckpoint(jobId, cluster.getMiniCluster(), 1);
+                CobbleCheckpointingITSupport.waitForCompletedCheckpointCount(
+                        cluster.getMiniCluster(), jobGraph.getJobID(), 1, Duration.ofSeconds(30));
             }
 
-            cluster.getMiniCluster().triggerCheckpoint(jobId).get(30, TimeUnit.SECONDS);
-            waitForCheckpoint(jobId, cluster.getMiniCluster(), periodic ? 2 : 1);
-            cluster.getClusterClient().cancel(jobId).get(30, TimeUnit.SECONDS);
+            CobbleCheckpointingITSupport.triggerCheckpointAndWait(
+                    cluster.getMiniCluster(), jobGraph.getJobID());
+            CobbleCheckpointingITSupport.cancelJobAndWait(cluster, jobGraph.getJobID());
         } finally {
             cluster.after();
         }

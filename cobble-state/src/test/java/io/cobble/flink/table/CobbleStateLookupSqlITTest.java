@@ -1,6 +1,5 @@
 package io.cobble.flink.table;
 
-import static org.apache.flink.runtime.testutils.CommonTestUtils.waitForAllTaskRunning;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -18,12 +17,12 @@ import io.cobble.flink.inspect.LookupResult;
 import io.cobble.flink.inspect.StateKey;
 import io.cobble.flink.inspect.TypedLookupKey;
 import io.cobble.flink.inspect.TypedValue;
+import io.cobble.flink.state.CobbleCheckpointingITSupport;
 import io.cobble.flink.state.CobbleHighAvailabilityServicesFactory;
 import io.cobble.flink.state.CobbleOptions;
 import io.cobble.flink.state.CobbleStateBackend;
 
 import org.apache.flink.api.common.JobID;
-import org.apache.flink.api.common.JobStatus;
 import org.apache.flink.api.common.functions.AggregateFunction;
 import org.apache.flink.api.common.functions.ReduceFunction;
 import org.apache.flink.api.common.functions.RichMapFunction;
@@ -47,7 +46,6 @@ import org.apache.flink.configuration.JobManagerOptions;
 import org.apache.flink.configuration.MemorySize;
 import org.apache.flink.configuration.RestOptions;
 import org.apache.flink.runtime.jobgraph.JobGraph;
-import org.apache.flink.runtime.minicluster.MiniCluster;
 import org.apache.flink.runtime.testutils.MiniClusterResourceConfiguration;
 import org.apache.flink.streaming.api.environment.CheckpointConfig;
 import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
@@ -79,6 +77,7 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.stream.Stream;
 
 /**
@@ -617,6 +616,7 @@ class CobbleStateLookupSqlITTest {
                                 .build());
         cluster.before();
         try {
+            FixedIntegerSource.reset();
             Configuration jobConfig = new Configuration();
             jobConfig.set(
                     CheckpointingOptions.CHECKPOINTS_DIRECTORY, checkpointRoot.toUri().toString());
@@ -656,17 +656,17 @@ class CobbleStateLookupSqlITTest {
 
             JobGraph jobGraph = env.getStreamGraph().getJobGraph();
             JobID jobId = jobGraph.getJobID();
-            cluster.getClusterClient().submitJob(jobGraph).get(30, TimeUnit.SECONDS);
-            waitForAllTaskRunning(cluster.getMiniCluster(), jobId, false);
-            Thread.sleep(1_000L);
-            cluster.getMiniCluster().triggerCheckpoint(jobId).get(30, TimeUnit.SECONDS);
-            waitForCompletedCheckpoint(cluster.getMiniCluster(), jobId, 1, Duration.ofSeconds(60));
-            Thread.sleep(2_000L);
-            try {
-                cluster.getClusterClient().cancel(jobId).get(30, TimeUnit.SECONDS);
-            } catch (Exception ignored) {
-                // Checkpoint artifacts are already materialized.
-            }
+            CobbleCheckpointingITSupport.submitJobAndWaitForRunning(cluster, jobGraph);
+            CobbleCheckpointingITSupport.waitForJobCondition(
+                    cluster.getMiniCluster(),
+                    jobId,
+                    () -> FixedIntegerSource.finishedSubtasks() == PARALLELISM,
+                    Duration.ofSeconds(30),
+                    "all lookup sources to finish emitting");
+            CobbleCheckpointingITSupport.triggerCheckpointAndWait(cluster.getMiniCluster(), jobId);
+            CobbleCheckpointingITSupport.waitForCheckpointArtifacts(
+                    cluster.getMiniCluster(), jobId, checkpointRoot, Duration.ofSeconds(60));
+            CobbleCheckpointingITSupport.cancelJobAndWait(cluster, jobId);
         } finally {
             cluster.after();
         }
@@ -872,45 +872,6 @@ class CobbleStateLookupSqlITTest {
                         + ".");
     }
 
-    private static void waitForCompletedCheckpoint(
-            MiniCluster miniCluster, JobID jobId, long checkpointId, Duration timeout)
-            throws Exception {
-        long deadlineNanos = System.nanoTime() + timeout.toNanos();
-        while (System.nanoTime() < deadlineNanos) {
-            org.apache.flink.runtime.executiongraph.AccessExecutionGraph graph =
-                    miniCluster.getExecutionGraph(jobId).get();
-            JobStatus status = graph.getState();
-            if (status.isGloballyTerminalState()) {
-                throw new AssertionError(
-                        "Job "
-                                + jobId
-                                + " entered terminal state "
-                                + status
-                                + " before checkpoint "
-                                + checkpointId
-                                + " completed.");
-            }
-            org.apache.flink.runtime.checkpoint.CheckpointStatsSnapshot stats =
-                    graph.getCheckpointStatsSnapshot();
-            if (stats != null
-                    && stats.getHistory() != null
-                    && stats.getHistory().getLatestCompletedCheckpoint() != null
-                    && stats.getHistory().getLatestCompletedCheckpoint().getCheckpointId()
-                            >= checkpointId) {
-                return;
-            }
-            Thread.sleep(200L);
-        }
-        throw new AssertionError(
-                "Timed out waiting for checkpoint "
-                        + checkpointId
-                        + " on job "
-                        + jobId
-                        + " after "
-                        + timeout
-                        + ".");
-    }
-
     // ------------------------------------------------------------------------------------------
     //  Stateful mappers
     // ------------------------------------------------------------------------------------------
@@ -921,6 +882,7 @@ class CobbleStateLookupSqlITTest {
      * deterministic and assertable.
      */
     private static final class FixedIntegerSource extends RichParallelSourceFunction<Integer> {
+        private static final AtomicInteger FINISHED_SUBTASKS = new AtomicInteger();
         private volatile boolean running = true;
 
         @Override
@@ -931,6 +893,7 @@ class CobbleStateLookupSqlITTest {
                     ctx.collect(key + offset * PARALLELISM);
                 }
             }
+            FINISHED_SUBTASKS.incrementAndGet();
             while (running) {
                 Thread.sleep(50L);
             }
@@ -939,6 +902,14 @@ class CobbleStateLookupSqlITTest {
         @Override
         public void cancel() {
             running = false;
+        }
+
+        private static void reset() {
+            FINISHED_SUBTASKS.set(0);
+        }
+
+        private static int finishedSubtasks() {
+            return FINISHED_SUBTASKS.get();
         }
     }
 

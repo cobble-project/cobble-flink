@@ -1,10 +1,10 @@
 package io.cobble.flink.state;
 
-import static org.apache.flink.runtime.testutils.CommonTestUtils.waitForAllTaskRunning;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 
 import org.apache.flink.api.common.JobID;
+import org.apache.flink.api.common.JobStatus;
 import org.apache.flink.api.common.functions.RichFlatMapFunction;
 import org.apache.flink.api.common.restartstrategy.RestartStrategies;
 import org.apache.flink.api.common.state.ListState;
@@ -20,7 +20,6 @@ import org.apache.flink.core.execution.SavepointFormatType;
 import org.apache.flink.runtime.jobgraph.JobGraph;
 import org.apache.flink.runtime.jobgraph.RestoreMode;
 import org.apache.flink.runtime.jobgraph.SavepointRestoreSettings;
-import org.apache.flink.runtime.minicluster.MiniCluster;
 import org.apache.flink.runtime.state.StateBackend;
 import org.apache.flink.streaming.api.environment.CheckpointConfig;
 import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
@@ -46,9 +45,9 @@ import java.util.concurrent.atomic.AtomicInteger;
  * API → restore at a different parallelism (or into a different backend) → verify state
  * correctness.
  *
- * <p><b>Source design:</b> The source emits a fixed set of keys, writes state, then blocks on a
- * {@link CountDownLatch}. It does NOT terminate — the savepoint is triggered while the job is still
- * running, eliminating the race condition between source completion and savepoint trigger.
+ * <p><b>Source design:</b> The source emits a fixed set of keys, writes state, then waits for
+ * cancellation. The test confirms every source subtask reached that boundary before triggering the
+ * savepoint.
  *
  * <p><b>Restore verification:</b> The restore job uses a probe-only topology: it reads the same
  * fixed keys, queries state values without writing, and outputs them to a collecting sink. No
@@ -91,17 +90,11 @@ class CobbleCanonicalSavepointITTest {
         cluster.before();
         try {
             // Phase 1: submit job, write state, trigger canonical savepoint.
-            String savepointPath =
-                    triggerCanonicalSavepoint(
-                            cluster.getMiniCluster(), tempDir, initialParallelism);
+            String savepointPath = triggerCanonicalSavepoint(cluster, tempDir, initialParallelism);
 
             // Phase 2: restore at new parallelism (or new backend) with a probe-only topology.
             restoreAndProbe(
-                    cluster.getMiniCluster(),
-                    tempDir,
-                    savepointPath,
-                    restoredParallelism,
-                    useRocksDbForRestore);
+                    cluster, tempDir, savepointPath, restoredParallelism, useRocksDbForRestore);
         } finally {
             cluster.after();
         }
@@ -111,8 +104,8 @@ class CobbleCanonicalSavepointITTest {
     //  Phase 1: write state + trigger savepoint
     // =====================================================================================
 
-    private String triggerCanonicalSavepoint(MiniCluster miniCluster, Path tempDir, int parallelism)
-            throws Exception {
+    private String triggerCanonicalSavepoint(
+            MiniClusterWithClientResource cluster, Path tempDir, int parallelism) throws Exception {
         BlockingKeySource.reset();
         CollectingSink.clear();
 
@@ -123,28 +116,31 @@ class CobbleCanonicalSavepointITTest {
                         parallelism);
         JobID jobId = jobGraph.getJobID();
 
-        miniCluster.submitJob(jobGraph).get(30, TimeUnit.SECONDS);
-        waitForAllTaskRunning(miniCluster, jobId, false);
+        CobbleCheckpointingITSupport.submitJobAndWaitForRunning(cluster, jobGraph);
 
         // Wait until all source subtasks have emitted their keys and written state.
-        waitForCondition(
+        CobbleCheckpointingITSupport.waitForJobCondition(
+                cluster.getMiniCluster(),
+                jobId,
                 () -> BlockingKeySource.finishedSubtasks() == parallelism,
                 Duration.ofSeconds(30),
-                "all source subtasks finished emitting");
+                "all source subtasks to finish emitting");
 
         // Trigger a canonical savepoint. cancelJob=true cancels the job after the savepoint
         // completes — no additional cancel call needed.
         CompletableFuture<String> savepointFuture =
-                miniCluster.triggerSavepoint(
-                        jobId,
-                        tempDir.resolve("savepoint").toString(),
-                        true,
-                        SavepointFormatType.CANONICAL);
+                cluster.getMiniCluster()
+                        .triggerSavepoint(
+                                jobId,
+                                tempDir.resolve("savepoint").toString(),
+                                true,
+                                SavepointFormatType.CANONICAL);
         String savepointPath = savepointFuture.get(60, TimeUnit.SECONDS);
         assertNotNull(savepointPath, "savepoint path must not be null");
 
         // Wait for the job to reach terminal state (CANCELLED via triggerSavepoint).
-        miniCluster.requestJobResult(jobId).get(60, TimeUnit.SECONDS);
+        CobbleCheckpointingITSupport.waitForJobStatus(
+                cluster.getMiniCluster(), jobId, JobStatus.CANCELED, Duration.ofSeconds(60));
 
         return savepointPath;
     }
@@ -187,7 +183,7 @@ class CobbleCanonicalSavepointITTest {
     // =====================================================================================
 
     private void restoreAndProbe(
-            MiniCluster miniCluster,
+            MiniClusterWithClientResource cluster,
             Path tempDir,
             String savepointPath,
             int restoredParallelism,
@@ -203,8 +199,9 @@ class CobbleCanonicalSavepointITTest {
         restoredJobGraph.setSavepointRestoreSettings(
                 SavepointRestoreSettings.forPath(savepointPath, false, RestoreMode.CLAIM));
 
-        miniCluster.submitJob(restoredJobGraph).get(30, TimeUnit.SECONDS);
-        miniCluster.requestJobResult(restoredJobGraph.getJobID()).get(120, TimeUnit.SECONDS);
+        cluster.getMiniCluster().submitJob(restoredJobGraph).get(30, TimeUnit.SECONDS);
+        CobbleCheckpointingITSupport.waitForJobFinished(
+                cluster, restoredJobGraph.getJobID(), Duration.ofSeconds(120));
 
         // Verify: every key should have been probed and output its state values.
         Map<Integer, Tuple2<Integer, Integer>> results = CollectingSink.snapshot();
@@ -260,24 +257,6 @@ class CobbleCanonicalSavepointITTest {
     // =====================================================================================
     //  Utilities
     // =====================================================================================
-
-    private void waitForCondition(
-            CheckedBooleanSupplier condition, Duration timeout, String description)
-            throws Exception {
-        long deadlineNanos = System.nanoTime() + timeout.toNanos();
-        while (System.nanoTime() < deadlineNanos) {
-            if (condition.getAsBoolean()) {
-                return;
-            }
-            Thread.sleep(50L);
-        }
-        throw new AssertionError("Timed out waiting for " + description + ".");
-    }
-
-    @FunctionalInterface
-    private interface CheckedBooleanSupplier {
-        boolean getAsBoolean() throws Exception;
-    }
 
     // =====================================================================================
     //  Source / operators

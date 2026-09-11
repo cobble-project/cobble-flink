@@ -1,6 +1,5 @@
 package io.cobble.flink.table;
 
-import static org.apache.flink.runtime.testutils.CommonTestUtils.waitForAllTaskRunning;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
@@ -14,6 +13,7 @@ import io.cobble.flink.common.inspect.StateInspectSchemaStore;
 import io.cobble.flink.common.inspect.StateInspectSemanticSchema;
 import io.cobble.flink.common.inspect.StateInspectType;
 import io.cobble.flink.common.inspect.StateInspectTypeKind;
+import io.cobble.flink.state.CobbleCheckpointingITSupport;
 import io.cobble.flink.state.CobbleHighAvailabilityServicesFactory;
 import io.cobble.flink.state.CobbleOptions;
 import io.cobble.flink.state.CobbleStateBackend;
@@ -22,7 +22,6 @@ import org.apache.avro.SchemaBuilder;
 import org.apache.avro.generic.GenericData;
 import org.apache.avro.generic.GenericRecord;
 import org.apache.flink.api.common.JobID;
-import org.apache.flink.api.common.JobStatus;
 import org.apache.flink.api.common.functions.RichMapFunction;
 import org.apache.flink.api.common.restartstrategy.RestartStrategies;
 import org.apache.flink.api.common.state.ListState;
@@ -41,7 +40,6 @@ import org.apache.flink.configuration.MemorySize;
 import org.apache.flink.configuration.RestOptions;
 import org.apache.flink.formats.avro.typeutils.AvroSerializer;
 import org.apache.flink.runtime.jobgraph.JobGraph;
-import org.apache.flink.runtime.minicluster.MiniCluster;
 import org.apache.flink.runtime.testutils.MiniClusterResourceConfiguration;
 import org.apache.flink.streaming.api.environment.CheckpointConfig;
 import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
@@ -79,6 +77,7 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.stream.Stream;
 
 /**
@@ -510,6 +509,7 @@ class CobbleStateSnapshotPipelineITTest {
                                 .build());
         cluster.before();
         try {
+            FixedIntegerSource.reset();
             Configuration jobConfig = new Configuration();
             jobConfig.set(
                     CheckpointingOptions.CHECKPOINTS_DIRECTORY, checkpointRoot.toUri().toString());
@@ -541,17 +541,17 @@ class CobbleStateSnapshotPipelineITTest {
 
             JobGraph jobGraph = env.getStreamGraph().getJobGraph();
             JobID jobId = jobGraph.getJobID();
-            cluster.getClusterClient().submitJob(jobGraph).get(30, TimeUnit.SECONDS);
-            waitForAllTaskRunning(cluster.getMiniCluster(), jobId, false);
-            Thread.sleep(1_000L);
-            cluster.getMiniCluster().triggerCheckpoint(jobId).get(30, TimeUnit.SECONDS);
-            waitForCompletedCheckpoint(cluster.getMiniCluster(), jobId, 1, Duration.ofSeconds(60));
-            Thread.sleep(2_000L);
-            try {
-                cluster.getClusterClient().cancel(jobId).get(30, TimeUnit.SECONDS);
-            } catch (Exception ignored) {
-                // Checkpoint artifacts are already materialized.
-            }
+            CobbleCheckpointingITSupport.submitJobAndWaitForRunning(cluster, jobGraph);
+            CobbleCheckpointingITSupport.waitForJobCondition(
+                    cluster.getMiniCluster(),
+                    jobId,
+                    () -> FixedIntegerSource.finishedSubtasks() == PARALLELISM,
+                    Duration.ofSeconds(30),
+                    "all snapshot-pipeline sources to finish emitting");
+            CobbleCheckpointingITSupport.triggerCheckpointAndWait(cluster.getMiniCluster(), jobId);
+            CobbleCheckpointingITSupport.waitForCheckpointArtifacts(
+                    cluster.getMiniCluster(), jobId, checkpointRoot, Duration.ofSeconds(60));
+            CobbleCheckpointingITSupport.cancelJobAndWait(cluster, jobId);
         } finally {
             cluster.after();
         }
@@ -855,45 +855,6 @@ class CobbleStateSnapshotPipelineITTest {
                         + ".");
     }
 
-    private static void waitForCompletedCheckpoint(
-            MiniCluster miniCluster, JobID jobId, long checkpointId, Duration timeout)
-            throws Exception {
-        long deadlineNanos = System.nanoTime() + timeout.toNanos();
-        while (System.nanoTime() < deadlineNanos) {
-            org.apache.flink.runtime.executiongraph.AccessExecutionGraph graph =
-                    miniCluster.getExecutionGraph(jobId).get();
-            JobStatus status = graph.getState();
-            if (status.isGloballyTerminalState()) {
-                throw new AssertionError(
-                        "Job "
-                                + jobId
-                                + " entered terminal state "
-                                + status
-                                + " before checkpoint "
-                                + checkpointId
-                                + " completed.");
-            }
-            org.apache.flink.runtime.checkpoint.CheckpointStatsSnapshot stats =
-                    graph.getCheckpointStatsSnapshot();
-            if (stats != null
-                    && stats.getHistory() != null
-                    && stats.getHistory().getLatestCompletedCheckpoint() != null
-                    && stats.getHistory().getLatestCompletedCheckpoint().getCheckpointId()
-                            >= checkpointId) {
-                return;
-            }
-            Thread.sleep(200L);
-        }
-        throw new AssertionError(
-                "Timed out waiting for checkpoint "
-                        + checkpointId
-                        + " on job "
-                        + jobId
-                        + " after "
-                        + timeout
-                        + ".");
-    }
-
     // ------------------------------------------------------------------------------------------
     //  Test fixtures
     // ------------------------------------------------------------------------------------------
@@ -917,6 +878,7 @@ class CobbleStateSnapshotPipelineITTest {
                             new String[] {"mk_id", "mk_region"}));
 
     private static final class FixedIntegerSource extends RichParallelSourceFunction<Integer> {
+        private static final AtomicInteger FINISHED_SUBTASKS = new AtomicInteger();
         private volatile boolean running = true;
 
         @Override
@@ -927,6 +889,7 @@ class CobbleStateSnapshotPipelineITTest {
                     ctx.collect(key + offset * PARALLELISM);
                 }
             }
+            FINISHED_SUBTASKS.incrementAndGet();
             while (running) {
                 Thread.sleep(50L);
             }
@@ -935,6 +898,14 @@ class CobbleStateSnapshotPipelineITTest {
         @Override
         public void cancel() {
             running = false;
+        }
+
+        private static void reset() {
+            FINISHED_SUBTASKS.set(0);
+        }
+
+        private static int finishedSubtasks() {
+            return FINISHED_SUBTASKS.get();
         }
     }
 

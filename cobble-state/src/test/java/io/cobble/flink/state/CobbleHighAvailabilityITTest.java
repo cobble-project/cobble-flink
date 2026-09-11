@@ -1,8 +1,6 @@
 package io.cobble.flink.state;
 
 import static org.apache.flink.api.common.restartstrategy.RestartStrategies.noRestart;
-import static org.apache.flink.runtime.testutils.CommonTestUtils.waitForAllTaskRunning;
-import static org.apache.flink.runtime.testutils.CommonTestUtils.waitForCheckpoint;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import org.apache.flink.api.common.JobID;
@@ -36,7 +34,7 @@ import java.time.Duration;
 import java.util.Comparator;
 import java.util.LinkedHashSet;
 import java.util.Set;
-import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.stream.Stream;
 
 class CobbleHighAvailabilityITTest {
@@ -69,19 +67,27 @@ class CobbleHighAvailabilityITTest {
                     createJobGraph(checkpointRoot, localStateRoot.resolve("first"), 2, null);
             JobID firstJobId = firstJobGraph.getJobID();
 
-            firstCluster.getClusterClient().submitJob(firstJobGraph).get(30, TimeUnit.SECONDS);
-            waitForAllTaskRunning(firstCluster.getMiniCluster(), firstJobId, false);
-            waitForCheckpoint(firstJobId, firstCluster.getMiniCluster(), 2);
+            CobbleCheckpointingITSupport.submitJobAndWaitForRunning(firstCluster, firstJobGraph);
+            CobbleCheckpointingITSupport.triggerCheckpointAndWait(
+                    firstCluster.getMiniCluster(), firstJobId);
+            CobbleCheckpointingITSupport.triggerCheckpointAndWait(
+                    firstCluster.getMiniCluster(), firstJobId);
 
             firstObservation =
-                    waitForSnapshotArtifacts(checkpointRoot, 2L, 2, Duration.ofSeconds(60));
+                    waitForSnapshotArtifacts(
+                            firstCluster,
+                            firstJobId,
+                            checkpointRoot,
+                            2L,
+                            2,
+                            Duration.ofSeconds(60));
             assertTrue(firstObservation.latestCompletedCheckpointId() >= 2L);
             assertTrue(firstObservation.maxManifestCopiesPerCheckpoint >= 2);
             assertTrue(firstObservation.maxOperatorDirectories >= 2);
 
             restoreCheckpoint = firstObservation.latestCompletedCheckpointPath();
 
-            firstCluster.getClusterClient().cancel(firstJobId).get(30, TimeUnit.SECONDS);
+            CobbleCheckpointingITSupport.cancelJobAndWait(firstCluster, firstJobId);
         } finally {
             firstCluster.after();
         }
@@ -97,12 +103,17 @@ class CobbleHighAvailabilityITTest {
                             restoreCheckpoint.toUri().toString());
             JobID rescaledJobId = rescaledJobGraph.getJobID();
 
-            secondCluster.getClusterClient().submitJob(rescaledJobGraph).get(30, TimeUnit.SECONDS);
-            waitForAllTaskRunning(secondCluster.getMiniCluster(), rescaledJobId, false);
-            waitForCheckpoint(rescaledJobId, secondCluster.getMiniCluster(), 2);
+            CobbleCheckpointingITSupport.submitJobAndWaitForRunning(
+                    secondCluster, rescaledJobGraph);
+            CobbleCheckpointingITSupport.triggerCheckpointAndWait(
+                    secondCluster.getMiniCluster(), rescaledJobId);
+            CobbleCheckpointingITSupport.triggerCheckpointAndWait(
+                    secondCluster.getMiniCluster(), rescaledJobId);
 
             SnapshotObservation rescaledObservation =
                     waitForSnapshotArtifacts(
+                            secondCluster,
+                            rescaledJobId,
                             checkpointRoot,
                             firstObservation.latestCompletedCheckpointId() + 1L,
                             2,
@@ -113,7 +124,7 @@ class CobbleHighAvailabilityITTest {
             assertTrue(rescaledObservation.maxManifestCopiesPerCheckpoint >= 2);
             assertTrue(rescaledObservation.maxOperatorDirectories >= 2);
 
-            secondCluster.getClusterClient().cancel(rescaledJobId).get(30, TimeUnit.SECONDS);
+            CobbleCheckpointingITSupport.cancelJobAndWait(secondCluster, rescaledJobId);
         } finally {
             secondCluster.after();
         }
@@ -142,7 +153,7 @@ class CobbleHighAvailabilityITTest {
         StreamExecutionEnvironment env =
                 StreamExecutionEnvironment.getExecutionEnvironment(jobConfiguration);
         env.setParallelism(parallelism);
-        env.enableCheckpointing(5_000L, CheckpointingMode.EXACTLY_ONCE);
+        env.enableCheckpointing(Duration.ofHours(1).toMillis(), CheckpointingMode.EXACTLY_ONCE);
         env.getCheckpointConfig().setMinPauseBetweenCheckpoints(1_000L);
         env.getCheckpointConfig().setCheckpointTimeout(180_000L);
         env.getCheckpointConfig().setTolerableCheckpointFailureNumber(3);
@@ -177,34 +188,31 @@ class CobbleHighAvailabilityITTest {
     }
 
     private static SnapshotObservation waitForSnapshotArtifacts(
+            MiniClusterWithClientResource cluster,
+            JobID jobId,
             Path checkpointRoot,
             long minimumLatestCompletedCheckpointId,
             int minimumOperatorDirectories,
             Duration timeout)
             throws Exception {
-        long deadline = System.nanoTime() + timeout.toNanos();
-        SnapshotObservation lastObservation = SnapshotObservation.empty();
-        while (System.nanoTime() < deadline) {
-            lastObservation = observeSnapshotArtifacts(checkpointRoot);
-            if (!lastObservation.completedCheckpointPaths.isEmpty()
-                    && lastObservation.latestCompletedCheckpointId()
-                            >= minimumLatestCompletedCheckpointId
-                    && lastObservation.maxManifestCopiesPerCheckpoint >= minimumOperatorDirectories
-                    && lastObservation.maxOperatorDirectories >= minimumOperatorDirectories) {
-                return lastObservation;
-            }
-            Thread.sleep(200L);
-        }
-
-        throw new AssertionError(
-                "Timed out waiting for Cobble HA checkpoint artifacts. Observed checkpoints="
-                        + lastObservation.completedCheckpointPaths
-                        + ", latestCompletedCheckpointId="
-                        + lastObservation.latestCompletedCheckpointIdOrDefault(-1L)
-                        + ", maxManifestCopiesPerCheckpoint="
-                        + lastObservation.maxManifestCopiesPerCheckpoint
-                        + ", maxOperatorDirectories="
-                        + lastObservation.maxOperatorDirectories);
+        AtomicReference<SnapshotObservation> lastObservation =
+                new AtomicReference<>(SnapshotObservation.empty());
+        CobbleCheckpointingITSupport.waitForJobCondition(
+                cluster.getMiniCluster(),
+                jobId,
+                () -> {
+                    SnapshotObservation observation = observeSnapshotArtifacts(checkpointRoot);
+                    lastObservation.set(observation);
+                    return !observation.completedCheckpointPaths.isEmpty()
+                            && observation.latestCompletedCheckpointId()
+                                    >= minimumLatestCompletedCheckpointId
+                            && observation.maxManifestCopiesPerCheckpoint
+                                    >= minimumOperatorDirectories
+                            && observation.maxOperatorDirectories >= minimumOperatorDirectories;
+                },
+                timeout,
+                "Cobble HA checkpoint artifacts");
+        return lastObservation.get();
     }
 
     private static SnapshotObservation observeSnapshotArtifacts(Path checkpointRoot)
@@ -338,12 +346,6 @@ class CobbleHighAvailabilityITTest {
 
         private long latestCompletedCheckpointId() {
             return checkpointId(latestCompletedCheckpointPath());
-        }
-
-        private long latestCompletedCheckpointIdOrDefault(long defaultValue) {
-            return completedCheckpointPaths.isEmpty()
-                    ? defaultValue
-                    : latestCompletedCheckpointId();
         }
 
         private static SnapshotObservation empty() {

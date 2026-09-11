@@ -1,6 +1,5 @@
 package io.cobble.flink.state;
 
-import static org.apache.flink.runtime.testutils.CommonTestUtils.waitForAllTaskRunning;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 
 import org.apache.flink.api.common.JobID;
@@ -15,7 +14,6 @@ import org.apache.flink.configuration.Configuration;
 import org.apache.flink.runtime.jobgraph.JobGraph;
 import org.apache.flink.runtime.jobgraph.RestoreMode;
 import org.apache.flink.runtime.jobgraph.SavepointRestoreSettings;
-import org.apache.flink.runtime.minicluster.MiniCluster;
 import org.apache.flink.streaming.api.environment.CheckpointConfig;
 import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
 import org.apache.flink.streaming.api.functions.sink.RichSinkFunction;
@@ -58,13 +56,10 @@ class CobbleRescaleCheckpointManuallyITTest {
         try {
             String checkpointPath =
                     runJobAndGetCheckpoint(
-                            cluster.getMiniCluster(),
-                            tempDir,
-                            initialParallelism,
-                            INITIAL_NUMBER_OF_ELEMENTS);
+                            cluster, tempDir, initialParallelism, INITIAL_NUMBER_OF_ELEMENTS);
 
             restoreAndAssert(
-                    cluster.getMiniCluster(),
+                    cluster,
                     tempDir,
                     checkpointPath,
                     restoredParallelism,
@@ -75,7 +70,10 @@ class CobbleRescaleCheckpointManuallyITTest {
     }
 
     private String runJobAndGetCheckpoint(
-            MiniCluster miniCluster, Path tempDir, int parallelism, int numberOfElementsPerKey)
+            MiniClusterWithClientResource cluster,
+            Path tempDir,
+            int parallelism,
+            int numberOfElementsPerKey)
             throws Exception {
         DefiniteKeySource.reset();
         CollectingSink.clear();
@@ -90,22 +88,25 @@ class CobbleRescaleCheckpointManuallyITTest {
                         true);
         JobID jobId = jobGraph.getJobID();
 
-        miniCluster.submitJob(jobGraph).get(30, TimeUnit.SECONDS);
-        waitForAllTaskRunning(miniCluster, jobId, false);
-        waitForCondition(
+        CobbleCheckpointingITSupport.submitJobAndWaitForRunning(cluster, jobGraph);
+        CobbleCheckpointingITSupport.waitForJobCondition(
+                cluster.getMiniCluster(),
+                jobId,
                 () -> DefiniteKeySource.finishedSubtasks() == parallelism,
                 Duration.ofSeconds(30),
-                "all source subtasks finished emitting");
+                "all source subtasks to finish emitting");
         // Periodic checkpoints may contain partial state, so capture an exact post-emission
         // checkpoint.
-        String checkpointPath = miniCluster.triggerCheckpoint(jobId).get(30, TimeUnit.SECONDS);
+        String checkpointPath =
+                CobbleCheckpointingITSupport.triggerCheckpointAndWait(
+                        cluster.getMiniCluster(), jobId);
 
-        miniCluster.cancelJob(jobId).get(30, TimeUnit.SECONDS);
+        CobbleCheckpointingITSupport.cancelJobAndWait(cluster, jobId);
         return checkpointPath;
     }
 
     private void restoreAndAssert(
-            MiniCluster miniCluster,
+            MiniClusterWithClientResource cluster,
             Path tempDir,
             String checkpointPath,
             int restoredParallelism,
@@ -125,8 +126,9 @@ class CobbleRescaleCheckpointManuallyITTest {
         restoredJobGraph.setSavepointRestoreSettings(
                 SavepointRestoreSettings.forPath(checkpointPath, false, RestoreMode.CLAIM));
 
-        miniCluster.submitJob(restoredJobGraph).get(30, TimeUnit.SECONDS);
-        miniCluster.requestJobResult(restoredJobGraph.getJobID()).get(180, TimeUnit.SECONDS);
+        cluster.getMiniCluster().submitJob(restoredJobGraph).get(30, TimeUnit.SECONDS);
+        CobbleCheckpointingITSupport.waitForJobFinished(
+                cluster, restoredJobGraph.getJobID(), Duration.ofSeconds(180));
 
         Set<Tuple2<Integer, Integer>> expected = new HashSet<>();
         for (int key = 0; key < NUMBER_OF_KEYS; key++) {
@@ -183,25 +185,6 @@ class CobbleRescaleCheckpointManuallyITTest {
                 .uid("collecting-sink");
 
         return env.getStreamGraph().getJobGraph();
-    }
-
-    private void waitForCondition(
-            CheckedBooleanSupplier condition, Duration timeout, String description)
-            throws Exception {
-        long deadlineNanos = System.nanoTime() + timeout.toNanos();
-        while (System.nanoTime() < deadlineNanos) {
-            if (condition.getAsBoolean()) {
-                return;
-            }
-            Thread.sleep(50L);
-        }
-
-        throw new AssertionError("Timed out waiting for " + description + ".");
-    }
-
-    @FunctionalInterface
-    private interface CheckedBooleanSupplier {
-        boolean getAsBoolean() throws Exception;
     }
 
     private static final class DefiniteKeySource extends RichParallelSourceFunction<Integer> {

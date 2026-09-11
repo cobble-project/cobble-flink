@@ -1,6 +1,5 @@
 package io.cobble.flink.table;
 
-import static org.apache.flink.runtime.testutils.CommonTestUtils.waitForAllTaskRunning;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
@@ -9,11 +8,11 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import io.cobble.ScanCursor;
 import io.cobble.ScanOptions;
 import io.cobble.flink.common.inspect.InspectSchemaRegistryLayout;
+import io.cobble.flink.state.CobbleCheckpointingITSupport;
 import io.cobble.flink.state.CobbleOptions;
 import io.cobble.flink.state.CobbleStateBackend;
 
 import org.apache.flink.api.common.JobID;
-import org.apache.flink.api.common.JobStatus;
 import org.apache.flink.api.common.functions.RichMapFunction;
 import org.apache.flink.api.common.restartstrategy.RestartStrategies;
 import org.apache.flink.api.common.state.ListState;
@@ -34,7 +33,6 @@ import org.apache.flink.metrics.Counter;
 import org.apache.flink.metrics.groups.OperatorIOMetricGroup;
 import org.apache.flink.metrics.groups.SourceReaderMetricGroup;
 import org.apache.flink.runtime.jobgraph.JobGraph;
-import org.apache.flink.runtime.minicluster.MiniCluster;
 import org.apache.flink.runtime.testutils.MiniClusterResourceConfiguration;
 import org.apache.flink.streaming.api.environment.CheckpointConfig;
 import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
@@ -55,7 +53,7 @@ import java.util.Arrays;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.stream.Stream;
 
 /**
@@ -251,6 +249,7 @@ class CobbleStateSourceProofITTest {
                                 .build());
         cluster.before();
         try {
+            ValueStateMapper.reset();
             Configuration jobConfig = new Configuration();
             jobConfig.set(
                     CheckpointingOptions.CHECKPOINTS_DIRECTORY, checkpointRoot.toUri().toString());
@@ -283,23 +282,17 @@ class CobbleStateSourceProofITTest {
 
             JobGraph jobGraph = env.getStreamGraph().getJobGraph();
             JobID jobId = jobGraph.getJobID();
-            cluster.getClusterClient().submitJob(jobGraph).get(30, TimeUnit.SECONDS);
-            waitForAllTaskRunning(cluster.getMiniCluster(), jobId, false);
-            // Wait for a completed checkpoint and give the CobbleCompletedCheckpointStore time to
-            // materialize the global snapshot and inspect-schema registry.
-            cluster.getMiniCluster().triggerCheckpoint(jobId).get(30, TimeUnit.SECONDS);
-            // CommonTestUtils.waitForCheckpoint has no timeout and never checks for job failure, so
-            // a
-            // failed job would loop forever. Poll the checkpoint stats with an explicit deadline
-            // and
-            // bail out immediately when the job enters a globally terminal state.
-            waitForCompletedCheckpoint(cluster.getMiniCluster(), jobId, 1, Duration.ofSeconds(60));
-            Thread.sleep(2_000L);
-            try {
-                cluster.getClusterClient().cancel(jobId).get(30, TimeUnit.SECONDS);
-            } catch (Exception ignored) {
-                // The job may have already finished; the checkpoint artifacts are already on disk.
-            }
+            CobbleCheckpointingITSupport.submitJobAndWaitForRunning(cluster, jobGraph);
+            CobbleCheckpointingITSupport.waitForJobCondition(
+                    cluster.getMiniCluster(),
+                    jobId,
+                    () -> ValueStateMapper.processedRecords() >= 100,
+                    Duration.ofSeconds(30),
+                    "the stateful operator to process input");
+            CobbleCheckpointingITSupport.triggerCheckpointAndWait(cluster.getMiniCluster(), jobId);
+            CobbleCheckpointingITSupport.waitForCheckpointArtifacts(
+                    cluster.getMiniCluster(), jobId, checkpointRoot, Duration.ofSeconds(60));
+            CobbleCheckpointingITSupport.cancelJobAndWait(cluster, jobId);
         } finally {
             cluster.after();
         }
@@ -415,50 +408,6 @@ class CobbleStateSourceProofITTest {
         }
         assertTrue(best > 0, "no inspect-schema event found");
         return best;
-    }
-
-    /**
-     * Polls the checkpoint stats until {@code checkpointId} is completed, with an explicit deadline
-     * and job-failure detection. Unlike {@code CommonTestUtils.waitForCheckpoint}, this never loops
-     * forever: it fails fast when the job enters a globally terminal state and always times out.
-     */
-    private static void waitForCompletedCheckpoint(
-            MiniCluster miniCluster, JobID jobId, long checkpointId, Duration timeout)
-            throws Exception {
-        long deadlineNanos = System.nanoTime() + timeout.toNanos();
-        while (System.nanoTime() < deadlineNanos) {
-            org.apache.flink.runtime.executiongraph.AccessExecutionGraph graph =
-                    miniCluster.getExecutionGraph(jobId).get();
-            JobStatus status = graph.getState();
-            if (status.isGloballyTerminalState()) {
-                throw new AssertionError(
-                        "Job "
-                                + jobId
-                                + " entered terminal state "
-                                + status
-                                + " before checkpoint "
-                                + checkpointId
-                                + " completed.");
-            }
-            org.apache.flink.runtime.checkpoint.CheckpointStatsSnapshot stats =
-                    graph.getCheckpointStatsSnapshot();
-            if (stats != null
-                    && stats.getHistory() != null
-                    && stats.getHistory().getLatestCompletedCheckpoint() != null
-                    && stats.getHistory().getLatestCompletedCheckpoint().getCheckpointId()
-                            >= checkpointId) {
-                return;
-            }
-            Thread.sleep(200L);
-        }
-        throw new AssertionError(
-                "Timed out waiting for checkpoint "
-                        + checkpointId
-                        + " on job "
-                        + jobId
-                        + " after "
-                        + timeout
-                        + ".");
     }
 
     private static void pollUntilRows(
@@ -672,6 +621,7 @@ class CobbleStateSourceProofITTest {
     }
 
     private static final class ValueStateMapper extends RichMapFunction<Integer, Integer> {
+        private static final AtomicInteger PROCESSED_RECORDS = new AtomicInteger();
         private transient ValueState<Integer> valueState;
         private transient ListState<Integer> listState;
 
@@ -694,7 +644,16 @@ class CobbleStateSourceProofITTest {
             Integer current = valueState.value();
             valueState.update(current == null ? value : current + value);
             listState.add(value);
+            PROCESSED_RECORDS.incrementAndGet();
             return value;
+        }
+
+        private static void reset() {
+            PROCESSED_RECORDS.set(0);
+        }
+
+        private static int processedRecords() {
+            return PROCESSED_RECORDS.get();
         }
     }
 }
