@@ -6,11 +6,17 @@ import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import io.cobble.Config;
 import io.cobble.CounterMetricValue;
 import io.cobble.GaugeMetricValue;
 import io.cobble.HistogramMetricValue;
 import io.cobble.MetricSample;
 import io.cobble.MetricValue;
+import io.cobble.table.DataField;
+import io.cobble.table.LogicalTypes;
+import io.cobble.table.Table;
+import io.cobble.table.TableSchema;
+import io.cobble.table.Value;
 
 import org.apache.flink.metrics.Counter;
 import org.apache.flink.metrics.Gauge;
@@ -20,7 +26,11 @@ import org.apache.flink.metrics.Metric;
 import org.apache.flink.metrics.MetricGroup;
 import org.apache.flink.metrics.View;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 
+import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
@@ -35,6 +45,135 @@ import java.util.concurrent.atomic.AtomicInteger;
 
 /** Unit coverage for the generic, cached native metric monitor. */
 class CobbleNativeMetricsTest {
+
+    @Test
+    void aggregatesBucketSamplesBeforeNameNormalizationAndPreservesLabels() {
+        CapturingMetricGroup group = new CapturingMetricGroup();
+        CobbleNativeMetrics.Monitor monitor =
+                CobbleNativeMetrics.registerAggregated(
+                        group,
+                        Arrays.asList(
+                                () ->
+                                        Arrays.asList(
+                                                sample(
+                                                        "memtable_flushes_total",
+                                                        labels("db_id", "bucket-0"),
+                                                        new CounterMetricValue(2L)),
+                                                sample(
+                                                        "storage_file_bytes",
+                                                        labels(
+                                                                "db_id",
+                                                                "bucket-0",
+                                                                "cf",
+                                                                "default",
+                                                                "level",
+                                                                "0",
+                                                                "volume",
+                                                                "1"),
+                                                        new GaugeMetricValue(1.5d)),
+                                                sample(
+                                                        "sst_block_compression_ratio",
+                                                        labels(
+                                                                "db_id",
+                                                                "bucket-0",
+                                                                "compression",
+                                                                "lz4"),
+                                                        new HistogramMetricValue(
+                                                                2L, 4.0d, 1.0d, 3.0d))),
+                                () ->
+                                        Arrays.asList(
+                                                sample(
+                                                        "memtable_flushes_total",
+                                                        labels("db_id", "bucket-1"),
+                                                        new CounterMetricValue(5L)),
+                                                sample(
+                                                        "storage_file_bytes",
+                                                        labels(
+                                                                "db_id",
+                                                                "bucket-1",
+                                                                "cf",
+                                                                "default",
+                                                                "level",
+                                                                "0",
+                                                                "volume",
+                                                                "1"),
+                                                        new GaugeMetricValue(2.5d)),
+                                                sample(
+                                                        "storage_file_bytes",
+                                                        labels(
+                                                                "db_id",
+                                                                "bucket-1",
+                                                                "cf",
+                                                                "default",
+                                                                "level",
+                                                                "0",
+                                                                "volume",
+                                                                "2"),
+                                                        new GaugeMetricValue(10.0d)),
+                                                sample(
+                                                        "sst_block_compression_ratio",
+                                                        labels(
+                                                                "db_id",
+                                                                "bucket-1",
+                                                                "compression",
+                                                                "lz4"),
+                                                        new HistogramMetricValue(
+                                                                3L, 9.0d, 2.0d, 4.0d)))));
+
+        assertEquals(7L, group.findCounter("cobble.memtableFlushesTotal").getCount());
+        assertEquals(
+                4.0d,
+                group.findGauge("cf=default.level=0.volume=1.cobble.storageFileBytes").getValue());
+        assertEquals(
+                10.0d,
+                group.findGauge("cf=default.level=0.volume=2.cobble.storageFileBytes").getValue());
+        Histogram histogram =
+                group.findHistogram("compression=lz4.cobble.sstBlockCompressionRatio");
+        assertEquals(5L, histogram.getCount());
+        assertEquals(2.6d, histogram.getStatistics().getMean());
+        assertEquals(1L, histogram.getStatistics().getMin());
+        assertEquals(4L, histogram.getStatistics().getMax());
+        assertFalse(group.metricNames().stream().anyMatch(name -> name.contains("dbId")));
+        monitor.close();
+    }
+
+    @Test
+    void aggregatesTwoNativeBucketTablesAfterWrites(@TempDir Path root) throws Exception {
+        CobbleLoader.ensureCobbleLoaded();
+        Config runtime = new Config().addVolume(root.toUri().toString()).totalBuckets(2);
+        TableSchema schema =
+                new TableSchema(
+                        Arrays.asList(
+                                new DataField(1L, "id", LogicalTypes.int64()),
+                                new DataField(2L, "value", LogicalTypes.string().nullable())),
+                        Collections.singletonList(1L),
+                        Collections.singletonList(1L));
+        try (Table first =
+                        Table.writerBuilder(runtime).tableName("events").bucket(0).create(schema);
+                Table second =
+                        Table.writerBuilder(runtime).tableName("events").bucket(1).create(schema)) {
+            first.put(Arrays.asList(Value.int64(keyInBucket(first, 0)), Value.string("first")));
+            second.put(Arrays.asList(Value.int64(keyInBucket(second, 1)), Value.string("second")));
+            first.startAsyncSnapshot().future().get(30L, TimeUnit.SECONDS);
+            second.startAsyncSnapshot().future().get(30L, TimeUnit.SECONDS);
+
+            List<MetricSample> firstMetrics = first.metrics();
+            List<MetricSample> secondMetrics = second.metrics();
+            MetricSample firstFlush = counterNamed(firstMetrics, "memtable_flushes_total");
+            MetricSample secondFlush = counterNamed(secondMetrics, "memtable_flushes_total");
+            assertTrue(((CounterMetricValue) firstFlush.value()).value() > 0L);
+            assertTrue(((CounterMetricValue) secondFlush.value()).value() > 0L);
+            List<MetricSample> aggregated =
+                    CobbleNativeMetrics.aggregate(Arrays.asList(first::metrics, second::metrics));
+            MetricSample aggregatedFlush = counterNamed(aggregated, "memtable_flushes_total");
+
+            assertEquals(
+                    ((CounterMetricValue) firstFlush.value()).value()
+                            + ((CounterMetricValue) secondFlush.value()).value(),
+                    ((CounterMetricValue) aggregatedFlush.value()).value());
+            assertFalse(aggregatedFlush.labels().containsKey("db_id"));
+        }
+    }
 
     @Test
     void registersEveryTypeWithCamelNamesAndSortedArbitraryLabels() {
@@ -172,6 +311,54 @@ class CobbleNativeMetricsTest {
         assertEquals(17L, counter.getCount());
     }
 
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void aggregatedMonitorRetainsItsCompleteSnapshotAndStopsReadsAfterClose(
+            boolean closingProviderReturnsNull) {
+        AtomicInteger firstCalls = new AtomicInteger();
+        AtomicInteger secondCalls = new AtomicInteger();
+        CapturingMetricGroup group = new CapturingMetricGroup();
+        List<CobbleNativeMetrics.MetricSnapshotProvider> providers =
+                Arrays.asList(
+                        () -> {
+                            firstCalls.incrementAndGet();
+                            return Collections.singletonList(
+                                    sample(
+                                            "memtable_flushes_total",
+                                            labels("db_id", "bucket-0"),
+                                            new CounterMetricValue(3L)));
+                        },
+                        () -> {
+                            int call = secondCalls.incrementAndGet();
+                            if (call > 1) {
+                                if (closingProviderReturnsNull) {
+                                    return null;
+                                }
+                                throw new IllegalStateException("bucket is closing");
+                            }
+                            return Collections.singletonList(
+                                    sample(
+                                            "memtable_flushes_total",
+                                            labels("db_id", "bucket-1"),
+                                            new CounterMetricValue(4L)));
+                        });
+        CobbleNativeMetrics.Monitor monitor =
+                CobbleNativeMetrics.register(
+                        group, () -> CobbleNativeMetrics.aggregate(providers), 0L);
+        Counter counter = group.findCounter("cobble.memtableFlushesTotal");
+        assertEquals(7L, counter.getCount());
+
+        ((View) counter).update();
+        assertEquals(7L, counter.getCount());
+        assertEquals(2, firstCalls.get());
+        assertEquals(2, secondCalls.get());
+
+        monitor.close();
+        ((View) counter).update();
+        assertEquals(2, firstCalls.get());
+        assertEquals(2, secondCalls.get());
+    }
+
     @Test
     void registrationFailureIsBestEffortAfterInitialSnapshot() {
         AtomicInteger calls = new AtomicInteger();
@@ -267,6 +454,24 @@ class CobbleNativeMetricsTest {
 
     private static MetricSample sample(String name, Map<String, String> labels, MetricValue value) {
         return new MetricSample(name, labels, value);
+    }
+
+    private static long keyInBucket(Table table, int bucket) {
+        for (long candidate = 1L; candidate <= 1_000_000L; candidate++) {
+            if (table.keyBuilder().push(Value.int64(candidate)).build().bucket() == bucket) {
+                return candidate;
+            }
+        }
+        throw new AssertionError("did not find a key for bucket " + bucket);
+    }
+
+    private static MetricSample counterNamed(List<MetricSample> samples, String name) {
+        for (MetricSample sample : samples) {
+            if (name.equals(sample.name()) && sample.value() instanceof CounterMetricValue) {
+                return sample;
+            }
+        }
+        throw new AssertionError("expected native counter " + name);
     }
 
     private static Map<String, String> labels(String... values) {

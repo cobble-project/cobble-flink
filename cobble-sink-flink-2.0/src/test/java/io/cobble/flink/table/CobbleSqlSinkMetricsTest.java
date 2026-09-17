@@ -180,6 +180,9 @@ class CobbleSqlSinkMetricsTest {
         long expectedDeleteBytes =
                 new CobbleRowDataCodecs.RuntimeKeyEncoder(config.keyFields).encode(insert).length;
         try {
+            assertTrue(
+                    metrics.metrics.keySet().stream().anyMatch(name -> name.startsWith("cobble.")),
+                    "sink writer must register native table metrics");
             writer.write(insert, null);
             writer.write(rowData(RowKind.UPDATE_BEFORE, 1L, "one", 1), null);
             writer.write(rowData(RowKind.DELETE, 1L, "one", 1), null);

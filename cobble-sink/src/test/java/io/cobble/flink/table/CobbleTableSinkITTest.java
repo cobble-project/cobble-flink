@@ -453,20 +453,28 @@ class CobbleTableSinkITTest {
         CobbleSqlSink sink = new CobbleSqlSink(config);
         TwoPhaseCommittingSink.PrecommittingSinkWriter<RowData, CobbleShardCommittable> writer =
                 sink.createWriter(context);
-        GenericRowData insert = rowData(RowKind.INSERT, 1L, "one", 1);
-        long expectedInsertBytes = encodedUpsertBytes(config, insert);
-        long expectedDeleteBytes =
-                new CobbleRowDataCodecs.RuntimeKeyEncoder(config.keyFields).encode(insert).length;
-        writer.write(insert, null);
-        writer.write(rowData(RowKind.UPDATE_BEFORE, 1L, "one", 1), null);
-        writer.write(rowData(RowKind.DELETE, 1L, "one", 1), null);
-        GenericRowData invalid = rowData(RowKind.INSERT, 0L, "bad", 1);
-        invalid.setField(0, null);
-        assertThrows(RuntimeException.class, () -> writer.write(invalid, null));
-        assertEquals(2L, metrics.count("send"));
-        assertEquals(expectedInsertBytes + expectedDeleteBytes, metrics.count("bytes"));
-        assertEquals(1L, metrics.count("errors"));
-        writer.close();
+        try {
+            assertTrue(
+                    metrics.metrics.keySet().stream().anyMatch(name -> name.startsWith("cobble.")),
+                    "sink writer must register native table metrics");
+            GenericRowData insert = rowData(RowKind.INSERT, 1L, "one", 1);
+            long expectedInsertBytes = encodedUpsertBytes(config, insert);
+            long expectedDeleteBytes =
+                    new CobbleRowDataCodecs.RuntimeKeyEncoder(config.keyFields)
+                            .encode(insert)
+                            .length;
+            writer.write(insert, null);
+            writer.write(rowData(RowKind.UPDATE_BEFORE, 1L, "one", 1), null);
+            writer.write(rowData(RowKind.DELETE, 1L, "one", 1), null);
+            GenericRowData invalid = rowData(RowKind.INSERT, 0L, "bad", 1);
+            invalid.setField(0, null);
+            assertThrows(RuntimeException.class, () -> writer.write(invalid, null));
+            assertEquals(2L, metrics.count("send"));
+            assertEquals(expectedInsertBytes + expectedDeleteBytes, metrics.count("bytes"));
+            assertEquals(1L, metrics.count("errors"));
+        } finally {
+            writer.close();
+        }
     }
 
     @Test

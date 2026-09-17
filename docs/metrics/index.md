@@ -17,7 +17,11 @@ reporter when you need job-level values.
 
 ## Storage And State Backend
 
-The state backend exposes the following storage metrics:
+The state backend and sink writers expose the following storage metrics. A sink
+subtask aggregates the metrics from each bucket table it owns: counters and
+gauges are summed, histogram counts and sums are combined, and empty histogram
+snapshots do not affect minimum or maximum. Bucket-local `db_id` is omitted;
+labels such as `cf`, `level`, and `volume` are retained.
 
 | Metric | Type | Labels | Meaning |
 | --- | --- | --- | --- |
@@ -101,9 +105,8 @@ Successful `INSERT`, `UPDATE_AFTER`, and `DELETE` mutations count one record;
 values. Delete bytes include the encoded key. Encoding, ownership, unsupported
 row-kind, and database mutation failures count one send error.
 
-Sink writers expose their standard row counters; the table-handler Java API does
-not currently expose native storage metrics. The state backend exposes the
-[storage metrics](#storage-and-state-backend) for its Cobble database.
+Sink writers also expose aggregated native [storage metrics](#storage-and-state-backend)
+for their owned bucket tables.
 
 ## Dedicated Compaction
 

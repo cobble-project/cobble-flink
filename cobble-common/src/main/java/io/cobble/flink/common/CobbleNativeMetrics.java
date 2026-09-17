@@ -15,6 +15,8 @@ import org.apache.flink.metrics.MetricGroup;
 import org.apache.flink.metrics.View;
 
 import java.io.Closeable;
+import java.util.ArrayList;
+import java.util.Collection;
 import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -43,6 +45,19 @@ public final class CobbleNativeMetrics {
     /** Registers the current native samples with the default five-second snapshot TTL. */
     public static Monitor register(MetricGroup parent, MetricSnapshotProvider provider) {
         return register(parent, provider, DEFAULT_TTL_MILLIS);
+    }
+
+    /** Registers native metrics aggregated across multiple independent Cobble handlers. */
+    public static Monitor registerAggregated(
+            MetricGroup parent, Collection<? extends MetricSnapshotProvider> providers) {
+        if (providers == null) {
+            throw new IllegalArgumentException("providers must not be null");
+        }
+        List<MetricSnapshotProvider> copied = new ArrayList<MetricSnapshotProvider>(providers);
+        if (copied.contains(null)) {
+            throw new IllegalArgumentException("providers must not contain null");
+        }
+        return register(parent, () -> aggregate(copied), DEFAULT_TTL_MILLIS);
     }
 
     static Monitor register(MetricGroup parent, MetricSnapshotProvider provider, long ttlMillis) {
@@ -88,6 +103,63 @@ public final class CobbleNativeMetrics {
             capitalize = false;
         }
         return result.toString();
+    }
+
+    static List<MetricSample> aggregate(Collection<? extends MetricSnapshotProvider> providers) {
+        Map<RawMetricKey, Aggregate> aggregates = new LinkedHashMap<RawMetricKey, Aggregate>();
+        for (MetricSnapshotProvider provider : providers) {
+            List<MetricSample> source = provider.metrics();
+            if (source == null) {
+                throw new IllegalStateException("native metric snapshot was null");
+            }
+            for (MetricSample sample : source) {
+                if (sample == null) {
+                    warnSample("native metric snapshot contained a null sample", null);
+                    continue;
+                }
+                try {
+                    MetricType type = sample.type();
+                    MetricValue value = sample.value();
+                    if (sample.name() == null
+                            || sample.name().isEmpty()
+                            || type == null
+                            || !matchesType(type, value)) {
+                        warnSample("ignored malformed native metric sample", null);
+                        continue;
+                    }
+                    RawMetricKey key =
+                            new RawMetricKey(sample.name(), type, withoutDbId(sample.labels()));
+                    Aggregate aggregate = aggregates.get(key);
+                    if (aggregate == null) {
+                        aggregate = new Aggregate(type);
+                        aggregates.put(key, aggregate);
+                    }
+                    aggregate.add(value);
+                } catch (RuntimeException | LinkageError error) {
+                    warnSample("ignored malformed native metric sample", error);
+                }
+            }
+        }
+
+        List<MetricSample> result = new ArrayList<MetricSample>(aggregates.size());
+        for (Map.Entry<RawMetricKey, Aggregate> entry : aggregates.entrySet()) {
+            RawMetricKey key = entry.getKey();
+            result.add(new MetricSample(key.name, key.labels, entry.getValue().value()));
+        }
+        return result;
+    }
+
+    private static Map<String, String> withoutDbId(Map<String, String> labels) {
+        Map<String, String> result = new LinkedHashMap<String, String>();
+        if (labels == null) {
+            throw new IllegalArgumentException("metric labels must not be null");
+        }
+        for (Map.Entry<String, String> entry : labels.entrySet()) {
+            if (!"db_id".equals(entry.getKey())) {
+                result.put(entry.getKey(), entry.getValue());
+            }
+        }
+        return result;
     }
 
     private static Map<MetricKey, MetricValue> normalizeSamples(List<MetricSample> source) {
@@ -158,6 +230,87 @@ public final class CobbleNativeMetrics {
         return new NormalizedLabels(
                 Collections.unmodifiableMap(new LinkedHashMap<String, String>(labels)),
                 Collections.unmodifiableMap(new LinkedHashMap<String, String>(sourceLabels)));
+    }
+
+    private static final class RawMetricKey {
+        private final String name;
+        private final MetricType type;
+        private final Map<String, String> labels;
+
+        private RawMetricKey(String name, MetricType type, Map<String, String> labels) {
+            this.name = name;
+            this.type = type;
+            this.labels = Collections.unmodifiableMap(new LinkedHashMap<String, String>(labels));
+        }
+
+        @Override
+        public boolean equals(Object other) {
+            if (!(other instanceof RawMetricKey)) {
+                return false;
+            }
+            RawMetricKey that = (RawMetricKey) other;
+            return name.equals(that.name) && type == that.type && labels.equals(that.labels);
+        }
+
+        @Override
+        public int hashCode() {
+            return name.hashCode() * 31 * 31 + type.hashCode() * 31 + labels.hashCode();
+        }
+    }
+
+    private static final class Aggregate {
+        private final MetricType type;
+        private long counter;
+        private double gauge;
+        private long histogramCount;
+        private double histogramSum;
+        private double histogramMin;
+        private double histogramMax;
+        private boolean hasHistogramValues;
+
+        private Aggregate(MetricType type) {
+            this.type = type;
+        }
+
+        private void add(MetricValue value) {
+            if (type == MetricType.COUNTER) {
+                counter = saturatedAdd(counter, ((CounterMetricValue) value).value());
+            } else if (type == MetricType.GAUGE) {
+                gauge += ((GaugeMetricValue) value).value();
+            } else {
+                HistogramMetricValue histogram = (HistogramMetricValue) value;
+                histogramCount = saturatedAdd(histogramCount, histogram.count());
+                histogramSum += histogram.sum();
+                if (histogram.count() > 0L) {
+                    if (!hasHistogramValues) {
+                        histogramMin = histogram.min();
+                        histogramMax = histogram.max();
+                        hasHistogramValues = true;
+                    } else {
+                        histogramMin = Math.min(histogramMin, histogram.min());
+                        histogramMax = Math.max(histogramMax, histogram.max());
+                    }
+                }
+            }
+        }
+
+        private MetricValue value() {
+            if (type == MetricType.COUNTER) {
+                return new CounterMetricValue(counter);
+            }
+            if (type == MetricType.GAUGE) {
+                return new GaugeMetricValue(gauge);
+            }
+            return new HistogramMetricValue(
+                    histogramCount,
+                    histogramSum,
+                    hasHistogramValues ? histogramMin : 0.0d,
+                    hasHistogramValues ? histogramMax : 0.0d);
+        }
+    }
+
+    private static long saturatedAdd(long left, long right) {
+        return Long.MAX_VALUE - left < right ? Long.MAX_VALUE : left + right;
     }
 
     private static final class NormalizedLabels {

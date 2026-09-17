@@ -7,6 +7,7 @@ import io.cobble.SnapshotTools;
 import io.cobble.flink.catalog.CobbleCatalogTableReference;
 import io.cobble.flink.common.CobbleConnectorMetrics;
 import io.cobble.flink.common.CobbleLoader;
+import io.cobble.flink.common.CobbleNativeMetrics;
 import io.cobble.flink.common.table.CobbleTableRowConverter;
 import io.cobble.table.Table;
 import io.cobble.table.TableKey;
@@ -119,6 +120,7 @@ final class CobbleSqlSink
         private final CobbleTableRowConverter rowConverter;
         private final TableSchema tableSchema;
         private final CobbleConnectorMetrics.SinkMetrics metrics;
+        private final CobbleNativeMetrics.Monitor nativeMetrics;
         private List<CobbleShardCommittable> endOfInputCommittables;
         private final Map<Integer, CobbleBucketWriterState> lastPreparedByBucket;
         private boolean snapshotFailed;
@@ -147,6 +149,7 @@ final class CobbleSqlSink
             this.tableSchema = config.tableSchema();
             this.writers = new LinkedHashMap<Integer, CobbleSingleBucketWriter>();
             this.lastPreparedByBucket = new LinkedHashMap<Integer, CobbleBucketWriterState>();
+            CobbleNativeMetrics.Monitor openedNativeMetrics = null;
             try {
                 for (Integer bucket : ownedBuckets) {
                     CobbleSingleBucketWriter writer =
@@ -158,8 +161,15 @@ final class CobbleSqlSink
                                     restored.get(bucket));
                     writers.put(bucket, writer);
                 }
+                openedNativeMetrics =
+                        CobbleNativeMetrics.registerAggregated(
+                                context.metricGroup(), writers.values());
                 this.metrics = CobbleConnectorMetrics.sink(context.metricGroup());
+                this.nativeMetrics = openedNativeMetrics;
             } catch (IOException | RuntimeException | LinkageError e) {
+                if (openedNativeMetrics != null) {
+                    openedNativeMetrics.close();
+                }
                 RuntimeException closeFailure = closeAll(writers.values());
                 if (closeFailure != null) {
                     e.addSuppressed(closeFailure);
@@ -263,6 +273,7 @@ final class CobbleSqlSink
 
         @Override
         public void close() throws Exception {
+            nativeMetrics.close();
             RuntimeException closeFailure = closeAll(writers.values());
             if (closeFailure != null) {
                 throw closeFailure;

@@ -173,8 +173,8 @@ This section lists the main configuration keys for the Cobble sink.
 
 Sink writers register Flink standard send counters. See
 [Cobble Flink Metrics](../metrics/#sink) for row-kind accounting and byte
-semantics. Native table-handler storage metrics are not exposed by the current
-Java API.
+semantics. They also aggregate native storage metrics across the bucket tables
+owned by the sink subtask.
 
 ## Usage Notes
 

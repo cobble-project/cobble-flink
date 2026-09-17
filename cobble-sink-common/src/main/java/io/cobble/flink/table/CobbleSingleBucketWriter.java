@@ -1,16 +1,22 @@
 package io.cobble.flink.table;
 
 import io.cobble.Config;
+import io.cobble.MetricSample;
 import io.cobble.ShardSnapshot;
+import io.cobble.flink.common.CobbleNativeMetrics;
 import io.cobble.flink.common.table.CobbleTableRowConverter;
 import io.cobble.table.Table;
 import io.cobble.table.TableWriterBuilder;
 
 import java.io.IOException;
+import java.util.List;
 import java.util.concurrent.CompletableFuture;
 
 /** One native table handler for one deterministic physical bucket. */
-final class CobbleSingleBucketWriter implements AutoCloseable, CobbleConcurrentSnapshots.Trigger {
+final class CobbleSingleBucketWriter
+        implements AutoCloseable,
+                CobbleConcurrentSnapshots.Trigger,
+                CobbleNativeMetrics.MetricSnapshotProvider {
     final int bucketId;
     final String writerPath;
     final Table table;
@@ -83,6 +89,14 @@ final class CobbleSingleBucketWriter implements AutoCloseable, CobbleConcurrentS
         }
         activeSnapshot = table.startAsyncSnapshot().future();
         return activeSnapshot;
+    }
+
+    @Override
+    public synchronized List<MetricSample> metrics() {
+        if (closeRequested || closed) {
+            throw new IllegalStateException("Cobble bucket writer is closing.");
+        }
+        return table.metrics();
     }
 
     @Override
