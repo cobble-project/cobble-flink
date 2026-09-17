@@ -1,8 +1,10 @@
 package io.cobble.flink.table;
 
+import io.cobble.flink.catalog.CobbleCatalogTableReference;
 import io.cobble.flink.common.CobbleConnectorStorageOptions;
 import io.cobble.flink.common.table.CobbleTableRowConverter;
 import io.cobble.table.TableSchema;
+import io.cobble.table.TableWritePlan;
 
 import org.apache.flink.core.memory.ManagedMemoryUseCase;
 import org.apache.flink.table.connector.ChangelogMode;
@@ -13,9 +15,9 @@ import org.apache.flink.table.data.RowData;
 import java.io.Serializable;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.Comparator;
 import java.util.List;
 import java.util.Optional;
-import java.util.Comparator;
 
 /** Cobble SQL sink with primary-key upsert semantics. */
 final class CobbleDynamicTableSink implements DynamicTableSink {
@@ -40,15 +42,16 @@ final class CobbleDynamicTableSink implements DynamicTableSink {
             public org.apache.flink.streaming.api.datastream.DataStreamSink<?> consumeDataStream(
                     org.apache.flink.table.connector.ProviderContext providerContext,
                     org.apache.flink.streaming.api.datastream.DataStream<RowData> dataStream) {
-                final CobbleRowDataCodecs.RuntimeKeyEncoder keyEncoder =
-                        new CobbleRowDataCodecs.RuntimeKeyEncoder(config.keyFields);
                 org.apache.flink.streaming.api.datastream.DataStream<RowData> routed =
                         dataStream.partitionCustom(
-                                new BucketOwnerPartitioner(),
-                                new BucketOwnerKeySelector(
-                                        keyEncoder, config.bucketCount, config.sinkParallelism));
+                                new BucketOwnerPartitioner(), new BucketOwnerKeySelector(config));
+                long checkpointTimeoutMillis =
+                        dataStream
+                                .getExecutionEnvironment()
+                                .getCheckpointConfig()
+                                .getCheckpointTimeout();
                 org.apache.flink.streaming.api.datastream.DataStreamSink<?> sink =
-                        routed.sinkTo(new CobbleSqlSink(config))
+                        routed.sinkTo(new CobbleSqlSink(config, checkpointTimeoutMillis))
                                 .setParallelism(config.sinkParallelism);
                 if (config.sinkUseManagedMemoryAllocator) {
                     // We only declare here, but not allocate and return since the sink v2 does
@@ -82,23 +85,25 @@ final class CobbleDynamicTableSink implements DynamicTableSink {
             implements org.apache.flink.api.java.functions.KeySelector<RowData, Integer> {
         private static final long serialVersionUID = 1L;
 
-        private final CobbleRowDataCodecs.RuntimeKeyEncoder keyEncoder;
-        private final int bucketCount;
-        private final int sinkParallelism;
+        private final SerializableConfig config;
+        private transient CobbleTableRowConverter rowConverter;
+        private transient TableSchema tableSchema;
 
-        private BucketOwnerKeySelector(
-                CobbleRowDataCodecs.RuntimeKeyEncoder keyEncoder,
-                int bucketCount,
-                int sinkParallelism) {
-            this.keyEncoder = keyEncoder;
-            this.bucketCount = bucketCount;
-            this.sinkParallelism = sinkParallelism;
+        private BucketOwnerKeySelector(SerializableConfig config) {
+            this.config = config;
         }
 
         @Override
-        public Integer getKey(RowData value) throws Exception {
-            int bucket = CobbleSqlSink.hashFixedBucket(keyEncoder.encode(value), bucketCount);
-            return CobbleSqlSink.bucketOwnerSubtask(bucket, bucketCount, sinkParallelism);
+        public Integer getKey(RowData value) {
+            if (rowConverter == null) {
+                rowConverter = new CobbleTableRowConverter(config.rowType());
+                tableSchema = config.tableSchema();
+            }
+            int bucket =
+                    CobbleTableRowConverter.bucket(
+                            tableSchema, rowConverter.toValues(value), config.bucketCount);
+            return CobbleSqlSink.bucketOwnerSubtask(
+                    bucket, config.bucketCount, config.sinkParallelism);
         }
     }
 
@@ -125,6 +130,9 @@ final class CobbleDynamicTableSink implements DynamicTableSink {
         final long sinkWriterBufferMemoryBytes;
         final List<SerializableField> keyFields;
         final List<SerializableField> valueFields;
+        final CobbleCatalogTableReference catalogTable;
+        final TableWritePlan catalogWritePlan;
+        final TableSchema catalogSchema;
 
         SerializableConfig(
                 String pathUri,
@@ -166,19 +174,49 @@ final class CobbleDynamicTableSink implements DynamicTableSink {
             this.sinkWriterBufferMemoryBytes = sinkWriterBufferMemoryBytes;
             this.keyFields = Collections.unmodifiableList(new ArrayList<>(keyFields));
             this.valueFields = Collections.unmodifiableList(new ArrayList<>(valueFields));
+            this.catalogTable = null;
+            this.catalogWritePlan = null;
+            this.catalogSchema = null;
+        }
+
+        SerializableConfig(
+                SerializableConfig legacy,
+                CobbleCatalogTableReference catalogTable,
+                TableWritePlan catalogWritePlan,
+                TableSchema catalogSchema) {
+            this.pathUri = legacy.pathUri;
+            this.storageOptions = legacy.storageOptions;
+            this.bucketCount = legacy.bucketCount;
+            this.snapshotRetention = legacy.snapshotRetention;
+            this.sinkParallelism = legacy.sinkParallelism;
+            this.sinkUseManagedMemoryAllocator = legacy.sinkUseManagedMemoryAllocator;
+            this.sinkWriterBufferMemoryBytes = legacy.sinkWriterBufferMemoryBytes;
+            this.keyFields = legacy.keyFields;
+            this.valueFields = legacy.valueFields;
+            this.catalogTable = catalogTable;
+            this.catalogWritePlan = catalogWritePlan;
+            this.catalogSchema = catalogSchema;
+        }
+
+        boolean isCatalogTable() {
+            return catalogTable != null;
         }
 
         SerializableConfig copy() {
-            return new SerializableConfig(
-                    pathUri,
-                    bucketCount,
-                    snapshotRetention,
-                    sinkParallelism,
-                    sinkUseManagedMemoryAllocator,
-                    sinkWriterBufferMemoryBytes,
-                    keyFields,
-                    valueFields,
-                    storageOptions);
+            SerializableConfig copied =
+                    new SerializableConfig(
+                            pathUri,
+                            bucketCount,
+                            snapshotRetention,
+                            sinkParallelism,
+                            sinkUseManagedMemoryAllocator,
+                            sinkWriterBufferMemoryBytes,
+                            keyFields,
+                            valueFields,
+                            storageOptions);
+            return catalogTable == null
+                    ? copied
+                    : new SerializableConfig(copied, catalogTable, catalogWritePlan, catalogSchema);
         }
 
         List<SerializableField> physicalFields() {
@@ -207,6 +245,9 @@ final class CobbleDynamicTableSink implements DynamicTableSink {
         }
 
         TableSchema tableSchema() {
+            if (catalogSchema != null) {
+                return catalogSchema;
+            }
             List<String> primaryKey = new ArrayList<String>(keyFields.size());
             for (SerializableField field : keyFields) {
                 primaryKey.add(field.name);

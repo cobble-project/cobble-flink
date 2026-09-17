@@ -74,6 +74,7 @@ The diagram shows how Cobble connects Flink storage and consumption paths:
 | --- | --- |
 | [Getting Started](getting-started/) | Install Cobble Flink and choose a version |
 | [State Backend](state-backend/) | Store Flink managed state in Cobble |
+| [Catalog](catalog/) | Create and use native Cobble SQL tables |
 | [Source](source/) | Read Cobble data from Flink SQL |
 | [Sink](sink/) | Write Flink SQL results to Cobble |
 | [Web Monitor](web-monitor/) | Inspect checkpoints and tables |

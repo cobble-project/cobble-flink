@@ -43,6 +43,12 @@ class CobbleConnectorStorageOptionsTest {
         assertEquals("false", volume.customOptions.get("enable_virtual_host_style"));
         assertEquals("access", volume.customOptions.get("access_key_id"));
         assertEquals("secret", volume.customOptions.get("secret_access_key"));
+
+        Config.VolumeDescriptor restored = volume("s3://bucket/table");
+        CobbleConnectorStorageOptions.from(options.asTableOptions()).applyTo(restored);
+        assertEquals(volume.accessId, restored.accessId);
+        assertEquals(volume.secretKey, restored.secretKey);
+        assertEquals(volume.customOptions, restored.customOptions);
     }
 
     @Test

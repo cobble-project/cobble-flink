@@ -38,6 +38,7 @@
 
     <modules>
         <module>cobble-common</module>
+        <module>cobble-catalog</module>
         <module>cobble-state</module>
         <module>cobble-state-flink-1.19</module>
         <module>cobble-state-flink-2.0</module>

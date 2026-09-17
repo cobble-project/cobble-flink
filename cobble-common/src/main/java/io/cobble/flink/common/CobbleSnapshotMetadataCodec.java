@@ -11,9 +11,7 @@ import org.slf4j.LoggerFactory;
 import java.io.EOFException;
 import java.io.IOException;
 import java.util.ArrayList;
-import java.util.LinkedHashMap;
 import java.util.List;
-import java.util.Map;
 
 /** Wire codec for the Cobble payload stored in Flink's generic checkpoint metadata stream. */
 public final class CobbleSnapshotMetadataCodec {
@@ -23,7 +21,7 @@ public final class CobbleSnapshotMetadataCodec {
     /** Identifies a Cobble keyed-state payload inside a Flink metadata stream. */
     public static final int MAGIC = 0x43425348;
 
-    public static final int VERSION = 1;
+    public static final int VERSION = 2;
     private static final int MAX_STATE_DESCRIPTORS = 100_000;
     public static final int MAX_SCHEMA_BYTES = 16 * 1024 * 1024;
 
@@ -54,23 +52,7 @@ public final class CobbleSnapshotMetadataCodec {
         ShardSnapshot shardSnapshot = payload.shardSnapshot();
         output.writeInt(MAGIC);
         output.writeInt(VERSION);
-        output.writeUTF(nullToEmpty(shardSnapshot.dbId));
-        output.writeLong(shardSnapshot.snapshotId);
-        output.writeUTF(nullToEmpty(shardSnapshot.manifestPath));
-        output.writeLong(shardSnapshot.timestampSeconds);
-        output.writeLong(shardSnapshot.dataSizeBytes);
-        output.writeLong(shardSnapshot.incrementalDataSizeBytes);
-
-        output.writeInt(shardSnapshot.ranges.size());
-        for (ShardSnapshot.Range range : shardSnapshot.ranges) {
-            output.writeInt(range.start);
-            output.writeInt(range.end);
-        }
-        output.writeInt(shardSnapshot.columnFamilyIds.size());
-        for (Map.Entry<String, Integer> entry : shardSnapshot.columnFamilyIds.entrySet()) {
-            output.writeUTF(entry.getKey());
-            output.writeInt(entry.getValue());
-        }
+        CobbleShardSnapshotCodec.write(shardSnapshot, output);
         output.writeBoolean(payload.containsCobbleTimers());
 
         List<CobbleStateDescriptor> stateDescriptors = payload.stateDescriptors();
@@ -106,26 +88,7 @@ public final class CobbleSnapshotMetadataCodec {
                             + VERSION
                             + ")");
         }
-        ShardSnapshot shardSnapshot = new ShardSnapshot();
-        shardSnapshot.dbId = input.readUTF();
-        shardSnapshot.snapshotId = input.readLong();
-        shardSnapshot.manifestPath = input.readUTF();
-        shardSnapshot.timestampSeconds = input.readLong();
-        shardSnapshot.dataSizeBytes = input.readLong();
-        shardSnapshot.incrementalDataSizeBytes = input.readLong();
-        int rangeCount = input.readInt();
-        for (int index = 0; index < rangeCount; index++) {
-            ShardSnapshot.Range range = new ShardSnapshot.Range();
-            range.start = input.readInt();
-            range.end = input.readInt();
-            shardSnapshot.ranges.add(range);
-        }
-        int columnFamilyCount = input.readInt();
-        Map<String, Integer> columnFamilyIds = new LinkedHashMap<>(columnFamilyCount);
-        for (int index = 0; index < columnFamilyCount; index++) {
-            columnFamilyIds.put(input.readUTF(), input.readInt());
-        }
-        shardSnapshot.columnFamilyIds = columnFamilyIds;
+        ShardSnapshot shardSnapshot = CobbleShardSnapshotCodec.read(input);
         boolean containsCobbleTimers = input.readBoolean();
         return new CobbleSnapshotMetadataPayload(
                 shardSnapshot,
@@ -257,9 +220,5 @@ public final class CobbleSnapshotMetadataCodec {
                     e.getMessage());
             return StateInspectSchemaStore.empty();
         }
-    }
-
-    private static String nullToEmpty(String value) {
-        return value == null ? "" : value;
     }
 }

@@ -6,8 +6,11 @@ import org.apache.flink.streaming.api.operators.OneInputStreamOperatorFactory;
 import org.apache.flink.streaming.api.operators.StreamOperator;
 import org.apache.flink.streaming.api.operators.StreamOperatorParameters;
 
-final class GlobalCommitOperatorFactory extends AbstractStreamOperatorFactory<Void>
-        implements OneInputStreamOperatorFactory<CommittableMessage<CobbleShardCommittable>, Void> {
+final class GlobalCommitOperatorFactory
+        extends AbstractStreamOperatorFactory<CommittableMessage<CobbleShardCommittable>>
+        implements OneInputStreamOperatorFactory<
+                CommittableMessage<CobbleShardCommittable>,
+                CommittableMessage<CobbleShardCommittable>> {
 
     private final CobbleDynamicTableSink.SerializableConfig config;
 
@@ -17,8 +20,10 @@ final class GlobalCommitOperatorFactory extends AbstractStreamOperatorFactory<Vo
 
     @Override
     @SuppressWarnings("unchecked")
-    public <T extends StreamOperator<Void>> T createStreamOperator(
-            StreamOperatorParameters<Void> parameters) {
+    public <T extends StreamOperator<CommittableMessage<CobbleShardCommittable>>>
+            T createStreamOperator(
+                    StreamOperatorParameters<CommittableMessage<CobbleShardCommittable>>
+                            parameters) {
         return (T) new GlobalCommitOperator(parameters, config);
     }
 

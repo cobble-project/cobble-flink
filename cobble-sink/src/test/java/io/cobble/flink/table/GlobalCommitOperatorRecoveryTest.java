@@ -4,7 +4,6 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 
-import io.cobble.Db;
 import io.cobble.DbCoordinator;
 import io.cobble.GlobalSnapshot;
 import io.cobble.ShardSnapshot;
@@ -35,7 +34,7 @@ class GlobalCommitOperatorRecoveryTest {
         CobbleShardCommittable committable = createCommittable(config);
         OperatorSubtaskState snapshot = snapshotPending(config, committable, 7L);
 
-        try (OneInputStreamOperatorTestHarness<CommittableMessage<CobbleShardCommittable>, Void>
+        try (OneInputStreamOperatorTestHarness<CommittableMessage<CobbleShardCommittable>, ?>
                 restored = harness(config)) {
             restored.initializeState(snapshot);
             restored.open();
@@ -60,7 +59,7 @@ class GlobalCommitOperatorRecoveryTest {
                 new CobbleShardCommittable(2, 0, "/writer", shardSnapshot("db", 1L, 0, 0));
 
         OperatorSubtaskState retrySnapshot;
-        try (OneInputStreamOperatorTestHarness<CommittableMessage<CobbleShardCommittable>, Void>
+        try (OneInputStreamOperatorTestHarness<CommittableMessage<CobbleShardCommittable>, ?>
                 first = harness(config)) {
             first.initializeEmptyState();
             first.open();
@@ -69,7 +68,7 @@ class GlobalCommitOperatorRecoveryTest {
             retrySnapshot = first.snapshot(10L, 10L);
         }
 
-        try (OneInputStreamOperatorTestHarness<CommittableMessage<CobbleShardCommittable>, Void>
+        try (OneInputStreamOperatorTestHarness<CommittableMessage<CobbleShardCommittable>, ?>
                 restored = harness(config)) {
             restored.initializeState(retrySnapshot);
             assertThrows(IOException.class, restored::open);
@@ -81,7 +80,7 @@ class GlobalCommitOperatorRecoveryTest {
             CobbleShardCommittable committable,
             long checkpointId)
             throws Exception {
-        try (OneInputStreamOperatorTestHarness<CommittableMessage<CobbleShardCommittable>, Void>
+        try (OneInputStreamOperatorTestHarness<CommittableMessage<CobbleShardCommittable>, ?>
                 first = harness(config)) {
             first.initializeEmptyState();
             first.processElement(message(committable, checkpointId));
@@ -91,18 +90,20 @@ class GlobalCommitOperatorRecoveryTest {
 
     private CobbleShardCommittable createCommittable(
             CobbleDynamicTableSink.SerializableConfig config) throws Exception {
-        String writerPath = CobbleSinkPaths.writerLocalDirectory(config, 0).getAbsolutePath();
-        try (Db db = Db.open(CobbleSinkPaths.createWriterConfig(config, 0), 0, 0);
-                Table table =
-                        Table.create(
-                                db, CobbleTableRowConverter.TABLE_NAME, config.tableSchema())) {
+        String writerPath =
+                CobbleSinkPaths.bucketWriterLocalDirectory(config, 0, 0).getAbsolutePath();
+        try (Table table =
+                Table.writerBuilder(CobbleSinkPaths.createTableWriterRuntime(config, 0, 0, 1))
+                        .tableName(CobbleTableRowConverter.TABLE_NAME)
+                        .bucket(0)
+                        .create(config.tableSchema())) {
             table.put(Arrays.asList(Value.int64(1L), Value.string("one")));
-            ShardSnapshot snapshot = db.startAsyncSnapshot().future().get();
+            ShardSnapshot snapshot = table.snapshot();
             return new CobbleShardCommittable(1, 0, writerPath, snapshot);
         }
     }
 
-    private OneInputStreamOperatorTestHarness<CommittableMessage<CobbleShardCommittable>, Void>
+    private OneInputStreamOperatorTestHarness<CommittableMessage<CobbleShardCommittable>, ?>
             harness(CobbleDynamicTableSink.SerializableConfig config) throws Exception {
         return new OneInputStreamOperatorTestHarness<>(new GlobalCommitOperatorFactory(config));
     }

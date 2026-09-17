@@ -24,8 +24,8 @@ jobs:
       MAVEN_GPG_PRIVATE_KEY: ${{ secrets.MAVEN_GPG_PRIVATE_KEY }}
       MAVEN_GPG_PASSPHRASE: ${{ secrets.MAVEN_GPG_PASSPHRASE }}
       RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.release_tag || github.event.release.tag_name }}
-      RELEASE_MODULES: .,cobble-common,cobble-state,cobble-state-flink-1.19,cobble-state-flink-2.0,cobble-state-flink-2.1,cobble-sink,cobble-sink-flink-2.0,cobble-source,cobble-dist,cobble-dist-flink-1.19,cobble-dist-flink-2.0,cobble-dist-flink-2.1,cobble-flink-inspect,cobble-flink-monitor
-      CORE_RELEASE_MODULES: .,cobble-common,cobble-state,cobble-state-flink-1.19,cobble-state-flink-2.0,cobble-state-flink-2.1,cobble-sink,cobble-sink-flink-2.0,cobble-source,cobble-flink-inspect
+      RELEASE_MODULES: .,cobble-common,cobble-catalog,cobble-state,cobble-state-flink-1.19,cobble-state-flink-2.0,cobble-state-flink-2.1,cobble-sink,cobble-sink-flink-2.0,cobble-source,cobble-dist,cobble-dist-flink-1.19,cobble-dist-flink-2.0,cobble-dist-flink-2.1,cobble-flink-inspect,cobble-flink-monitor
+      CORE_RELEASE_MODULES: .,cobble-common,cobble-catalog,cobble-state,cobble-state-flink-1.19,cobble-state-flink-2.0,cobble-state-flink-2.1,cobble-sink,cobble-sink-flink-2.0,cobble-source,cobble-flink-inspect
 
     steps:
       - name: Checkout

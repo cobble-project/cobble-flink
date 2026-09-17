@@ -28,10 +28,16 @@ final class CobbleSinkPaths {
 
     static File writerLocalDirectory(
             CobbleDynamicTableSink.SerializableConfig config, int subtaskId) {
-        if (!isRemoteTable(config)) {
-            return tableRootDirectory(config);
-        }
-        return new File(stagingRoot(config), "writer-" + subtaskId);
+        File writerRoot =
+                isRemoteTable(config)
+                        ? stagingRoot(config)
+                        : new File(tableRootDirectory(config), ".writers");
+        return new File(writerRoot, "writer-" + subtaskId);
+    }
+
+    static File bucketWriterLocalDirectory(
+            CobbleDynamicTableSink.SerializableConfig config, int subtaskId, int bucketId) {
+        return new File(writerLocalDirectory(config, subtaskId), "bucket-" + bucketId);
     }
 
     static int writerRangeStart(CobbleDynamicTableSink.SerializableConfig config, int subtaskId) {
@@ -61,16 +67,51 @@ final class CobbleSinkPaths {
             CobbleDynamicTableSink.SerializableConfig config, int subtaskId) throws IOException {
         File localDir = writerLocalDirectory(config, subtaskId);
         Files.createDirectories(localDir.toPath());
-        return createWriterConfigForLocalDir(config, localDir);
+        return createWriterConfigForLocalDir(config, localDir, 1);
+    }
+
+    static Config createTableWriterRuntime(
+            CobbleDynamicTableSink.SerializableConfig config,
+            int subtaskId,
+            int bucketId,
+            int ownedBucketCount)
+            throws IOException {
+        File localDir = bucketWriterLocalDirectory(config, subtaskId, bucketId);
+        Files.createDirectories(localDir.toPath());
+        return createWriterConfigForLocalDir(config, localDir, ownedBucketCount);
+    }
+
+    static Config createCatalogWriterRuntime(
+            CobbleDynamicTableSink.SerializableConfig config, int ownedBucketCount) {
+        Config runtime = config.catalogTable.runtimeConfig().totalBuckets(config.bucketCount);
+        runtime.walEnabled = false;
+        runtime.snapshotRetention = null;
+        runtime.snapshotOnlyTrack = true;
+        runtime.snapshotDisableIncrementalBaseLink = true;
+        runtime.memtableType = Config.MemtableType.VEC;
+        runtime.governanceMode = Config.GovernanceMode.NOOP;
+        runtime.blockCacheSize = 0;
+        runtime.blockCacheHybridEnabled = false;
+        runtime.blockCacheHybridDiskSize = 0;
+        runtime.memtableCapacity =
+                writerMemtableCapacity(
+                        config.sinkWriterBufferMemoryBytes, ownedBucketCount,
+                        CobbleTableOptions.SINK_WRITER_BUFFER_MEMORY.key());
+        runtime.memtableBufferCount = 1;
+        return runtime;
+    }
+
+    static Config createCatalogWriterRuntime(CobbleDynamicTableSink.SerializableConfig config) {
+        return createCatalogWriterRuntime(config, 1);
     }
 
     static Config createWriterConfigForWriterPath(
             CobbleDynamicTableSink.SerializableConfig config, String writerPath) {
-        return createWriterConfigForLocalDir(config, new File(writerPath));
+        return createWriterConfigForLocalDir(config, new File(writerPath), 1);
     }
 
     private static Config createWriterConfigForLocalDir(
-            CobbleDynamicTableSink.SerializableConfig config, File localDir) {
+            CobbleDynamicTableSink.SerializableConfig config, File localDir, int ownedBucketCount) {
         Config dbConfig = new Config().totalBuckets(config.bucketCount);
         // Sink commits are snapshot-based. Keep WAL disabled so recovery cannot cross the committed
         // snapshot boundary.
@@ -87,8 +128,8 @@ final class CobbleSinkPaths {
         dbConfig.blockCacheHybridEnabled = false;
         dbConfig.blockCacheHybridDiskSize = 0;
         dbConfig.memtableCapacity =
-                positiveInt(
-                        config.sinkWriterBufferMemoryBytes,
+                writerMemtableCapacity(
+                        config.sinkWriterBufferMemoryBytes, ownedBucketCount,
                         CobbleTableOptions.SINK_WRITER_BUFFER_MEMORY.key());
         dbConfig.memtableBufferCount = 1;
 
@@ -117,6 +158,15 @@ final class CobbleSinkPaths {
         return (int) value;
     }
 
+    private static int writerMemtableCapacity(
+            long totalBytes, int ownedBucketCount, String optionKey) {
+        if (ownedBucketCount <= 0) {
+            throw new IllegalArgumentException("ownedBucketCount must be > 0");
+        }
+        long perBucket = Math.max(1L, totalBytes / ownedBucketCount);
+        return positiveInt(perBucket, optionKey);
+    }
+
     static Config createCoordinatorConfig(CobbleDynamicTableSink.SerializableConfig config)
             throws IOException {
         File localDir = coordinatorLocalDirectory(config);
@@ -141,8 +191,8 @@ final class CobbleSinkPaths {
         return new File(tableRootDirectory(config), "writer-paths.properties");
     }
 
-    static Map<String, String> loadWriterPathIndex(
-            CobbleDynamicTableSink.SerializableConfig config) throws IOException {
+    static Map<String, String> loadWriterPathIndex(CobbleDynamicTableSink.SerializableConfig config)
+            throws IOException {
         if (!isRemoteTable(config)) {
             File pathIndexFile = writerPathIndexFile(config);
             Map<String, String> result = new HashMap<>();
@@ -168,8 +218,7 @@ final class CobbleSinkPaths {
     }
 
     static void storeWriterPathIndex(
-            CobbleDynamicTableSink.SerializableConfig config,
-            Map<String, String> writerPathByDbId)
+            CobbleDynamicTableSink.SerializableConfig config, Map<String, String> writerPathByDbId)
             throws IOException {
         Properties properties = new Properties();
         for (Map.Entry<String, String> entry : writerPathByDbId.entrySet()) {
@@ -181,8 +230,7 @@ final class CobbleSinkPaths {
             if (parent != null) {
                 parent.mkdirs();
             }
-            try (java.io.FileOutputStream output =
-                    new java.io.FileOutputStream(pathIndexFile)) {
+            try (java.io.FileOutputStream output = new java.io.FileOutputStream(pathIndexFile)) {
                 properties.store(output, "Cobble writer path index by dbId");
             }
             return;
@@ -193,8 +241,7 @@ final class CobbleSinkPaths {
     }
 
     static String coordinatorWriterPath(
-            CobbleDynamicTableSink.SerializableConfig config,
-            CobbleShardCommittable committable) {
+            CobbleDynamicTableSink.SerializableConfig config, CobbleShardCommittable committable) {
         if (!isRemoteTable(config)) {
             return committable.writerPath;
         }
@@ -227,8 +274,8 @@ final class CobbleSinkPaths {
                 fileIO = openMetadata(config);
                 int count = 0;
                 for (String name : fileIO.list(".eoi-markers")) {
-                    Integer slot = markerSlot(name);
-                    if (slot != null && slot.intValue() < config.sinkParallelism) {
+                    Integer bucket = markerBucket(name);
+                    if (bucket != null && bucket.intValue() < config.bucketCount) {
                         count++;
                     }
                 }
@@ -241,8 +288,8 @@ final class CobbleSinkPaths {
         File[] files =
                 markerDir.listFiles(
                         (dir, name) -> {
-                            Integer slot = markerSlot(name);
-                            return slot != null && slot.intValue() < config.sinkParallelism;
+                            Integer bucket = markerBucket(name);
+                            return bucket != null && bucket.intValue() < config.bucketCount;
                         });
         return files == null ? 0 : files.length;
     }
@@ -277,27 +324,27 @@ final class CobbleSinkPaths {
             CobbleShardCommittable.Serializer serializer = new CobbleShardCommittable.Serializer();
             CobbleMetadataFileIO fileIO = openMetadata(config);
             for (String name : fileIO.list(".eoi-markers")) {
-                Integer slot = markerSlot(name);
-                if (slot == null) {
+                Integer bucket = markerBucket(name);
+                if (bucket == null) {
                     continue;
                 }
                 committables.add(
                         deserializeMarker(
                                 serializer,
-                                slot.intValue(),
+                                bucket.intValue(),
                                 fileIO.read(".eoi-markers/" + name)));
             }
             return committables;
         }
         File markerDir = endOfInputMarkerDirectory(config);
-        File[] files = markerDir.listFiles((dir, name) -> markerSlot(name) != null);
+        File[] files = markerDir.listFiles((dir, name) -> markerBucket(name) != null);
         List<CobbleShardCommittable> committables = new ArrayList<>();
         if (files == null) {
             return committables;
         }
         CobbleShardCommittable.Serializer serializer = new CobbleShardCommittable.Serializer();
         for (File file : files) {
-            Integer slot = markerSlot(file.getName());
+            Integer slot = markerBucket(file.getName());
             committables.add(
                     deserializeMarker(
                             serializer, slot.intValue(), Files.readAllBytes(file.toPath())));
@@ -310,45 +357,44 @@ final class CobbleSinkPaths {
             List<CobbleShardCommittable> committables,
             Map<String, String> writerPathByDbId)
             throws IOException {
-        Map<Integer, CobbleShardCommittable> bySubtask = new TreeMap<>();
+        Map<Integer, CobbleShardCommittable> byBucket = new TreeMap<>();
         for (CobbleShardCommittable committable : committables) {
             validateEndOfInputCommittable(config, committable);
             CobbleShardCommittable previous =
-                    bySubtask.put(Integer.valueOf(committable.bucketId), committable);
+                    byBucket.put(Integer.valueOf(committable.bucketId), committable);
             if (previous != null) {
                 throw new IOException(
-                        "Duplicate end-of-input marker for sink subtask "
+                        "Duplicate end-of-input marker for bucket "
                                 + committable.bucketId
                                 + ".");
             }
         }
 
-        List<ShardSnapshot> snapshots = new ArrayList<>(config.sinkParallelism);
-        for (int subtask = 0; subtask < config.sinkParallelism; subtask++) {
-            CobbleShardCommittable committable = bySubtask.get(Integer.valueOf(subtask));
+        List<ShardSnapshot> snapshots = new ArrayList<>(config.bucketCount);
+        for (int bucket = 0; bucket < config.bucketCount; bucket++) {
+            CobbleShardCommittable committable = byBucket.get(Integer.valueOf(bucket));
             if (committable == null) {
                 throw new IOException(
-                        "Missing end-of-input marker for sink subtask " + subtask + ".");
+                        "Missing end-of-input marker for bucket " + bucket + ".");
             }
             ShardSnapshot snapshot = committable.shardSnapshot;
             snapshots.add(snapshot);
             writerPathByDbId.put(snapshot.dbId, coordinatorWriterPath(config, committable));
         }
-        if (bySubtask.size() != config.sinkParallelism) {
+        if (byBucket.size() != config.bucketCount) {
             throw new IOException(
-                    "Unexpected end-of-input markers outside the configured sink parallelism.");
+                    "Unexpected end-of-input markers outside the configured bucket count.");
         }
         return snapshots;
     }
 
     private static void validateEndOfInputCommittable(
-            CobbleDynamicTableSink.SerializableConfig config,
-            CobbleShardCommittable committable)
+            CobbleDynamicTableSink.SerializableConfig config, CobbleShardCommittable committable)
             throws IOException {
         if (committable == null
                 || committable.bucketId < 0
-                || committable.bucketId >= config.sinkParallelism) {
-            throw new IOException("Invalid sink subtask in end-of-input marker.");
+                || committable.bucketId >= config.bucketCount) {
+            throw new IOException("Invalid bucket in end-of-input marker.");
         }
         if (committable.totalBuckets != config.bucketCount) {
             throw new IOException("Mismatched bucket count in end-of-input marker.");
@@ -376,25 +422,26 @@ final class CobbleSinkPaths {
     }
 
     private static CobbleShardCommittable deserializeMarker(
-            CobbleShardCommittable.Serializer serializer, int markerSlot, byte[] bytes)
+            CobbleShardCommittable.Serializer serializer, int markerBucket, byte[] bytes)
             throws IOException {
-        CobbleShardCommittable committable =
-                serializer.deserialize(serializer.getVersion(), bytes);
-        if (committable.bucketId != markerSlot) {
+        CobbleShardCommittable committable = serializer.deserialize(serializer.getVersion(), bytes);
+        if (committable.bucketId != markerBucket) {
             throw new IOException(
-                    "End-of-input marker slot does not match its serialized sink subtask.");
+                    "End-of-input marker bucket does not match its serialized bucket.");
         }
         return committable;
     }
 
-    private static Integer markerSlot(String name) {
+    private static Integer markerBucket(String name) {
         if (name == null || !name.endsWith(".marker")) {
             return null;
         }
         String value = name.substring(0, name.length() - ".marker".length());
         try {
-            int slot = Integer.parseInt(value);
-            return slot >= 0 && markerFileName(slot).equals(name) ? Integer.valueOf(slot) : null;
+            int bucket = Integer.parseInt(value);
+            return bucket >= 0 && markerFileName(bucket).equals(name)
+                    ? Integer.valueOf(bucket)
+                    : null;
         } catch (NumberFormatException ignored) {
             return null;
         }
@@ -430,8 +477,7 @@ final class CobbleSinkPaths {
         return CobbleMetadataFileIO.open(config.pathUri, config.storageOptions);
     }
 
-    private static void copyProperties(
-            Properties properties, Map<String, String> destination) {
+    private static void copyProperties(Properties properties, Map<String, String> destination) {
         for (String name : properties.stringPropertyNames()) {
             destination.put(name, properties.getProperty(name));
         }

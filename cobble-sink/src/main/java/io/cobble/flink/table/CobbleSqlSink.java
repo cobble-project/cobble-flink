@@ -1,36 +1,30 @@
 package io.cobble.flink.table;
 
-import io.cobble.Db;
 import io.cobble.DbCoordinator;
-import io.cobble.ExpandStorageMode;
 import io.cobble.GlobalSnapshot;
-import io.cobble.PendingSnapshot;
-import io.cobble.RecoveryMode;
 import io.cobble.ShardSnapshot;
 import io.cobble.SnapshotTools;
+import io.cobble.flink.catalog.CobbleCatalogTableReference;
 import io.cobble.flink.common.CobbleConnectorMetrics;
 import io.cobble.flink.common.CobbleLoader;
-import io.cobble.flink.common.CobbleNativeMetrics;
 import io.cobble.flink.common.table.CobbleTableRowConverter;
 import io.cobble.table.Table;
 import io.cobble.table.TableKey;
 import io.cobble.table.TableKeyBuilder;
+import io.cobble.table.TableSchema;
 import io.cobble.table.TableSnapshotCommitter;
 import io.cobble.table.Value;
 
-import org.apache.flink.api.common.typeinfo.Types;
 import org.apache.flink.api.connector.sink2.Committer;
 import org.apache.flink.api.connector.sink2.Sink;
+import org.apache.flink.api.connector.sink2.StatefulSink;
 import org.apache.flink.api.connector.sink2.TwoPhaseCommittingSink;
 import org.apache.flink.core.io.SimpleVersionedSerializer;
 import org.apache.flink.streaming.api.connector.sink2.CommittableMessage;
-import org.apache.flink.streaming.api.connector.sink2.WithPostCommitTopology;
+import org.apache.flink.streaming.api.connector.sink2.WithPreCommitTopology;
 import org.apache.flink.streaming.api.datastream.DataStream;
 import org.apache.flink.table.data.RowData;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
 
-import java.io.File;
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.Collection;
@@ -41,25 +35,47 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
-import java.util.concurrent.TimeUnit;
 
-/** Sink implementation with a global post-commit topology for snapshot materialization. */
+/** Sink with synchronous snapshots and checkpointed global snapshot commits. */
 final class CobbleSqlSink
         implements TwoPhaseCommittingSink<RowData, CobbleShardCommittable>,
-                WithPostCommitTopology<RowData, CobbleShardCommittable> {
+                WithPreCommitTopology<RowData, CobbleShardCommittable>,
+                StatefulSink<RowData, CobbleBucketWriterState> {
 
     private static final long serialVersionUID = 1L;
+    // Flink's default checkpoint timeout; SQL sinks receive the environment's actual value.
+    private static final long DEFAULT_SNAPSHOT_TIMEOUT_MILLIS = 600_000L;
 
     private final CobbleDynamicTableSink.SerializableConfig config;
+    private final long snapshotTimeoutMillis;
 
     CobbleSqlSink(CobbleDynamicTableSink.SerializableConfig config) {
+        this(config, DEFAULT_SNAPSHOT_TIMEOUT_MILLIS);
+    }
+
+    CobbleSqlSink(CobbleDynamicTableSink.SerializableConfig config, long snapshotTimeoutMillis) {
         this.config = config;
+        this.snapshotTimeoutMillis =
+                snapshotTimeoutMillis > 0L
+                        ? snapshotTimeoutMillis
+                        : DEFAULT_SNAPSHOT_TIMEOUT_MILLIS;
     }
 
     @Override
-    public PrecommittingSinkWriter<RowData, CobbleShardCommittable> createWriter(
-            Sink.InitContext context) throws IOException {
-        return new Writer(config, context);
+    public Writer createWriter(Sink.InitContext context) throws IOException {
+        return new Writer(config, snapshotTimeoutMillis, context, null);
+    }
+
+    @Override
+    public Writer restoreWriter(
+            Sink.InitContext context, Collection<CobbleBucketWriterState> recoveredState)
+            throws IOException {
+        return new Writer(config, snapshotTimeoutMillis, context, recoveredState);
+    }
+
+    @Override
+    public SimpleVersionedSerializer<CobbleBucketWriterState> getWriterStateSerializer() {
+        return new CobbleBucketWriterState.Serializer();
     }
 
     @Override
@@ -73,82 +89,80 @@ final class CobbleSqlSink
     }
 
     @Override
-    public void addPostCommitTopology(
+    public DataStream<CommittableMessage<CobbleShardCommittable>> addPreCommitTopology(
             DataStream<CommittableMessage<CobbleShardCommittable>> committables) {
-        committables
+        return committables
                 .global()
                 .transform(
                         "Cobble Global Commit Operator",
-                        Types.VOID,
+                        committables.getType(),
                         new GlobalCommitOperatorFactory(config))
                 .setParallelism(1)
-                .name("Cobble Global Commit Operator");
+                // Flink's committer retains the writer parallelism. Keep each writer's
+                // summary and lineage together when returning from the global operator.
+                .partitionCustom(
+                        (Integer subtaskId, int partitions) -> subtaskId % partitions,
+                        CommittableMessage::getSubtaskId);
     }
 
     private static final class Writer
             implements TwoPhaseCommittingSink.PrecommittingSinkWriter<
-                    RowData, CobbleShardCommittable> {
-        private static final Logger LOG = LoggerFactory.getLogger(Writer.class);
-
+                            RowData, CobbleShardCommittable>,
+                    StatefulSink.StatefulSinkWriter<RowData, CobbleBucketWriterState> {
         private final CobbleDynamicTableSink.SerializableConfig config;
+        private final long snapshotTimeoutMillis;
         private final int subtaskId;
         private final int totalBuckets;
-        private final int ownedRangeStart;
-        private final int ownedRangeEnd;
-        private final String writerPath;
+        private final List<Integer> ownedBuckets;
+        private final Map<Integer, CobbleSingleBucketWriter> writers;
         private final CobbleRowDataCodecs.RuntimeKeyEncoder keyEncoder;
         private final CobbleTableRowConverter rowConverter;
-        private final Db db;
-        private final Table table;
+        private final TableSchema tableSchema;
         private final CobbleConnectorMetrics.SinkMetrics metrics;
-        private final CobbleNativeMetrics.Monitor nativeMetrics;
-        private boolean hasStateToRetain;
-        private boolean dirty;
-        private CobbleShardCommittable endOfInputCommittable;
+        private List<CobbleShardCommittable> endOfInputCommittables;
+        private final Map<Integer, CobbleBucketWriterState> lastPreparedByBucket;
+        private boolean snapshotFailed;
 
-        private Writer(CobbleDynamicTableSink.SerializableConfig config, Sink.InitContext context)
+        private Writer(
+                CobbleDynamicTableSink.SerializableConfig config,
+                long snapshotTimeoutMillis,
+                Sink.InitContext context,
+                Collection<CobbleBucketWriterState> recoveredState)
                 throws IOException {
             CobbleLoader.ensureCobbleLoaded();
             this.config = config;
+            this.snapshotTimeoutMillis = snapshotTimeoutMillis;
             this.subtaskId = context.getSubtaskId();
             this.totalBuckets = config.bucketCount;
-            this.ownedRangeStart = CobbleSinkPaths.writerRangeStart(config, subtaskId);
-            this.ownedRangeEnd = CobbleSinkPaths.writerRangeEnd(config, subtaskId);
-            this.writerPath =
-                    CobbleSinkPaths.writerLocalDirectory(config, subtaskId).getAbsolutePath();
+            this.ownedBuckets = CobbleBucketWriterStates.ownedBuckets(config, subtaskId);
+            Map<Integer, CobbleBucketWriterState> restored =
+                    CobbleBucketWriterStates.restoredByBucket(recoveredState, ownedBuckets);
+            if (recoveredState == null) {
+                restored =
+                        CobbleBucketWriterStates.currentByBucket(
+                                loadCurrentTableSnapshot(config), ownedBuckets);
+            }
             this.keyEncoder = new CobbleRowDataCodecs.RuntimeKeyEncoder(config.keyFields);
             this.rowConverter = new CobbleTableRowConverter(config.rowType());
-            OpenedDb openedDb = null;
-            Table openedTable = null;
-            CobbleNativeMetrics.Monitor monitor = null;
+            this.tableSchema = config.tableSchema();
+            this.writers = new LinkedHashMap<Integer, CobbleSingleBucketWriter>();
+            this.lastPreparedByBucket = new LinkedHashMap<Integer, CobbleBucketWriterState>();
             try {
-                openedDb = restoreOrCreateDb(config, context);
-                openedTable =
-                        Table.create(
-                                openedDb.db,
-                                CobbleTableRowConverter.TABLE_NAME,
-                                config.tableSchema());
-                monitor = CobbleNativeMetrics.register(context.metricGroup(), openedDb.db::metrics);
-                this.db = openedDb.db;
-                this.table = openedTable;
-                this.nativeMetrics = monitor;
+                for (Integer bucket : ownedBuckets) {
+                    CobbleSingleBucketWriter writer =
+                            CobbleSingleBucketWriter.open(
+                                    config,
+                                    subtaskId,
+                                    bucket.intValue(),
+                                    ownedBuckets.size(),
+                                    restored.get(bucket));
+                    writers.put(bucket, writer);
+                }
                 this.metrics = CobbleConnectorMetrics.sink(context.metricGroup());
-                this.hasStateToRetain = openedDb.restoredFromSnapshot;
-                // Every writer must contribute a shard snapshot, including an empty shard whose
-                // table schema was just created.
-                this.dirty = !openedDb.restoredFromSnapshot;
             } catch (IOException | RuntimeException | LinkageError e) {
-                try {
-                    if (monitor != null) {
-                        monitor.close();
-                    }
-                } finally {
-                    if (openedTable != null) {
-                        openedTable.close();
-                    }
-                    if (openedDb != null) {
-                        openedDb.db.close();
-                    }
+                RuntimeException closeFailure = closeAll(writers.values());
+                if (closeFailure != null) {
+                    e.addSuppressed(closeFailure);
                 }
                 throw e;
             }
@@ -156,24 +170,22 @@ final class CobbleSqlSink
 
         @Override
         public void write(RowData element, Context context) throws IOException {
+            ensureSnapshotAvailable();
             try {
                 byte[] encodedKey = keyEncoder.encode(element);
-                int bucket = hashFixedBucket(encodedKey, totalBuckets);
-                if (bucket < ownedRangeStart || bucket > ownedRangeEnd) {
+                List<Value> values = rowConverter.toValues(element);
+                int bucket = CobbleTableRowConverter.bucket(tableSchema, values, totalBuckets);
+                CobbleSingleBucketWriter writer = writers.get(Integer.valueOf(bucket));
+                if (writer == null) {
                     throw new IOException(
                             "Record bucket "
                                     + bucket
-                                    + " is outside writer-owned range ["
-                                    + ownedRangeStart
-                                    + ", "
-                                    + ownedRangeEnd
-                                    + "] for subtask "
+                                    + " is not assigned to sink subtask "
                                     + subtaskId
                                     + ".");
                 }
                 MutationStats stats =
-                        applyRowChange(table, rowConverter, config, encodedKey, element);
-                dirty = true;
+                        applyRowChange(writer.table, config, encodedKey, element, values);
                 if (stats.mutated) {
                     metrics.sent(stats.bytes);
                 }
@@ -188,192 +200,94 @@ final class CobbleSqlSink
 
         @Override
         public void flush(boolean endOfInput) throws IOException, InterruptedException {
-            if (!endOfInput || endOfInputCommittable != null) {
+            ensureSnapshotAvailable();
+            if (!endOfInput || endOfInputCommittables != null) {
                 return;
             }
-            if (!dirty && !hasStateToRetain) {
-                return;
+            endOfInputCommittables = snapshotCommittables();
+            if (!config.isCatalogTable()) {
+                for (CobbleShardCommittable committable : endOfInputCommittables) {
+                    CobbleSinkPaths.markEndOfInputSnapshot(config, committable);
+                }
             }
-            endOfInputCommittable = snapshotCommittable();
-            CobbleSinkPaths.markEndOfInputSnapshot(config, endOfInputCommittable);
         }
 
         @Override
         public Collection<CobbleShardCommittable> prepareCommit()
                 throws IOException, InterruptedException {
-            if (endOfInputCommittable != null) {
-                CobbleShardCommittable committable = endOfInputCommittable;
-                endOfInputCommittable = null;
-                LOG.info(
-                        "Writer {} emitting endOfInput committable snapshotId={}",
-                        Integer.valueOf(subtaskId),
-                        Long.valueOf(committable.shardSnapshot.snapshotId));
-                return Collections.singletonList(committable);
+            ensureSnapshotAvailable();
+            if (endOfInputCommittables != null) {
+                List<CobbleShardCommittable> committables = endOfInputCommittables;
+                endOfInputCommittables = null;
+                return committables;
             }
-            if (!dirty && !hasStateToRetain) {
-                return Collections.emptyList();
-            }
-            return Collections.singletonList(snapshotCommittable());
+            return snapshotCommittables();
         }
 
-        private CobbleShardCommittable snapshotCommittable()
+        private List<CobbleShardCommittable> snapshotCommittables()
                 throws IOException, InterruptedException {
-            PendingSnapshot<ShardSnapshot> pending = db.startAsyncSnapshot();
-            ShardSnapshot shardSnapshot;
+            List<CobbleConcurrentSnapshots.Completed> completed;
             try {
-                shardSnapshot = pending.future().get();
-            } catch (java.util.concurrent.ExecutionException e) {
-                throw new IOException("Failed to prepare Cobble shard snapshot", e.getCause());
+                completed =
+                        CobbleConcurrentSnapshots.snapshotAll(
+                                writers.values(), snapshotTimeoutMillis);
+            } catch (IOException | InterruptedException | RuntimeException | LinkageError error) {
+                snapshotFailed = true;
+                throw error;
             }
-            dirty = false;
-            hasStateToRetain = true;
-            LOG.info(
-                    "Prepared Cobble shard snapshot {} for bucket {} at {}",
-                    Long.valueOf(shardSnapshot.snapshotId),
-                    Integer.valueOf(subtaskId),
-                    shardSnapshot.manifestPath);
-            return new CobbleShardCommittable(totalBuckets, subtaskId, writerPath, shardSnapshot);
+            List<CobbleShardCommittable> committables =
+                    new ArrayList<CobbleShardCommittable>(completed.size());
+            Map<Integer, CobbleBucketWriterState> prepared =
+                    new LinkedHashMap<Integer, CobbleBucketWriterState>();
+            for (CobbleConcurrentSnapshots.Completed completion : completed) {
+                CobbleSingleBucketWriter writer = writers.get(Integer.valueOf(completion.bucketId));
+                ShardSnapshot snapshot = completion.snapshot;
+                prepared.put(
+                        Integer.valueOf(writer.bucketId),
+                        CobbleBucketWriterState.bucket(
+                                snapshot.dbId, snapshot.snapshotId, writer.bucketId));
+                committables.add(
+                        new CobbleShardCommittable(
+                                totalBuckets, writer.bucketId, writer.writerPath, snapshot));
+            }
+            lastPreparedByBucket.clear();
+            lastPreparedByBucket.putAll(prepared);
+            return committables;
+        }
+
+        private void ensureSnapshotAvailable() throws IOException {
+            if (snapshotFailed) {
+                throw new IOException("Cobble writer cannot continue after a failed snapshot.");
+            }
         }
 
         @Override
         public void close() throws Exception {
-            try {
-                nativeMetrics.close();
-            } finally {
+            RuntimeException closeFailure = closeAll(writers.values());
+            if (closeFailure != null) {
+                throw closeFailure;
+            }
+        }
+
+        @Override
+        public List<CobbleBucketWriterState> snapshotState(long checkpointId) {
+            return new ArrayList<CobbleBucketWriterState>(lastPreparedByBucket.values());
+        }
+
+        private static RuntimeException closeAll(Collection<CobbleSingleBucketWriter> writers) {
+            RuntimeException failure = null;
+            for (CobbleSingleBucketWriter writer : writers) {
                 try {
-                    table.close();
-                } finally {
-                    db.close();
-                }
-            }
-        }
-
-        private static OpenedDb restoreOrCreateDb(
-                CobbleDynamicTableSink.SerializableConfig config, Sink.InitContext context)
-                throws IOException {
-            int subtaskId = context.getSubtaskId();
-            int targetRangeStart = CobbleSinkPaths.writerRangeStart(config, subtaskId);
-            int targetRangeEnd = CobbleSinkPaths.writerRangeEnd(config, subtaskId);
-            GlobalSnapshot globalSnapshot = loadCurrentGlobalSnapshot(config);
-            if (globalSnapshot == null) {
-                return new OpenedDb(
-                        Db.open(
-                                CobbleSinkPaths.createWriterConfig(config, subtaskId),
-                                targetRangeStart,
-                                targetRangeEnd),
-                        false);
-            }
-            return new OpenedDb(
-                    restoreRescaledDb(
-                            config, subtaskId, globalSnapshot, targetRangeStart, targetRangeEnd),
-                    true);
-        }
-
-        private static Db restoreRescaledDb(
-                CobbleDynamicTableSink.SerializableConfig config,
-                int subtaskId,
-                GlobalSnapshot globalSnapshot,
-                int targetRangeStart,
-                int targetRangeEnd)
-                throws IOException {
-            List<RestoreSource> relevantSources =
-                    collectRelevantSources(globalSnapshot, targetRangeStart, targetRangeEnd);
-            LOG.info(
-                    "Cobble sink writer {} restore target range [{}-{}], relevant sources={}",
-                    Integer.valueOf(subtaskId),
-                    Integer.valueOf(targetRangeStart),
-                    Integer.valueOf(targetRangeEnd),
-                    Integer.valueOf(relevantSources.size()));
-            if (relevantSources.isEmpty()) {
-                throw new IOException(
-                        "Cobble sink restore could not find any checkpoint shard covering writer range ["
-                                + targetRangeStart
-                                + ", "
-                                + targetRangeEnd
-                                + "].");
-            }
-            ensureRestoreCoverage(relevantSources, targetRangeStart, targetRangeEnd);
-
-            RestoreSource baseSource = selectBaseSource(relevantSources);
-            LOG.info(
-                    "Cobble sink writer {} base restore source dbId={} snapshotId={} intersections={}",
-                    Integer.valueOf(subtaskId),
-                    baseSource.shardSnapshot.dbId,
-                    Long.valueOf(baseSource.shardSnapshot.snapshotId),
-                    baseSource.intersections);
-            Db db =
-                    Db.restoreWithManifest(
-                            CobbleSinkPaths.createWriterConfig(config, subtaskId),
-                            baseSource.shardSnapshot.manifestPath);
-            boolean success = false;
-            try {
-                shrinkBaseSourceToTargetRange(db, baseSource, targetRangeStart, targetRangeEnd);
-                for (RestoreSource source : relevantSources) {
-                    if (source == baseSource) {
-                        continue;
+                    writer.close();
+                } catch (RuntimeException error) {
+                    if (failure == null) {
+                        failure = error;
+                    } else {
+                        failure.addSuppressed(error);
                     }
-                    materializeSourceSnapshotLocally(config, subtaskId, source.shardSnapshot);
-                    int[] starts = new int[source.intersections.size()];
-                    int[] ends = new int[source.intersections.size()];
-                    for (int i = 0; i < source.intersections.size(); i++) {
-                        starts[i] = source.intersections.get(i).start;
-                        ends[i] = source.intersections.get(i).end;
-                    }
-                    LOG.info(
-                            "Cobble sink writer {} expanding from dbId={} snapshotId={} intersections={}",
-                            Integer.valueOf(subtaskId),
-                            source.shardSnapshot.dbId,
-                            Long.valueOf(source.shardSnapshot.snapshotId),
-                            source.intersections);
-                    db.expandBucket(
-                            source.shardSnapshot.dbId,
-                            source.shardSnapshot.snapshotId,
-                            starts,
-                            ends,
-                            ExpandStorageMode.ADOPT_ASYNC);
-                }
-                success = true;
-                return db;
-            } finally {
-                if (!success) {
-                    db.close();
                 }
             }
-        }
-
-        private static void materializeSourceSnapshotLocally(
-                CobbleDynamicTableSink.SerializableConfig config,
-                int subtaskId,
-                ShardSnapshot sourceSnapshot)
-                throws IOException {
-            File localSourceSnapshotManifest =
-                    new File(
-                            new File(
-                                    new File(
-                                            CobbleSinkPaths.writerLocalDirectory(config, subtaskId),
-                                            sourceSnapshot.dbId),
-                                    "snapshot"),
-                            "SNAPSHOT-" + sourceSnapshot.snapshotId);
-            if (localSourceSnapshotManifest.exists()) {
-                return;
-            }
-            try (Db ignored =
-                    Db.restoreWithManifest(
-                            CobbleSinkPaths.createWriterConfig(config, subtaskId),
-                            sourceSnapshot.manifestPath)) {
-                // Materialize source shard snapshot into current writer scope for expandBucket
-                // lookup.
-            }
-        }
-
-        private static final class OpenedDb {
-            private final Db db;
-            private final boolean restoredFromSnapshot;
-
-            private OpenedDb(Db db, boolean restoredFromSnapshot) {
-                this.db = db;
-                this.restoredFromSnapshot = restoredFromSnapshot;
-            }
+            return failure;
         }
     }
 
@@ -390,22 +304,42 @@ final class CobbleSqlSink
     }
 
     static final class Global implements Committer<CobbleShardCommittable> {
-        private static final Logger LOG = LoggerFactory.getLogger(Global.class);
-
         private final CobbleDynamicTableSink.SerializableConfig config;
         private final DbCoordinator coordinator;
         private final TableSnapshotCommitter tableCommitter;
+        private final CobbleCatalogTableReference.Opened catalogOpened;
+        private long greatestCommitId = -1L;
 
         Global(CobbleDynamicTableSink.SerializableConfig config) throws IOException {
             CobbleLoader.ensureCobbleLoaded();
             this.config = config;
-            io.cobble.Config coordinatorConfig = CobbleSinkPaths.createCoordinatorConfig(config);
-            this.coordinator = DbCoordinator.open(coordinatorConfig);
-            this.tableCommitter =
-                    TableSnapshotCommitter.open(
-                            coordinatorConfig,
-                            config.bucketCount,
-                            Math.max(4, config.snapshotRetention + 2));
+            if (config.isCatalogTable()) {
+                CobbleCatalogTableReference.Opened opened = config.catalogTable.openValidated();
+                try {
+                    io.cobble.Config catalogRuntime =
+                            config.catalogTable.runtimeConfig().totalBuckets(config.bucketCount);
+                    this.coordinator = opened.table().coordinator(catalogRuntime);
+                    this.tableCommitter =
+                            opened.table()
+                                    .snapshotCommitter(
+                                            catalogRuntime,
+                                            Math.max(4, config.snapshotRetention + 2));
+                    this.catalogOpened = opened;
+                } catch (RuntimeException error) {
+                    opened.close();
+                    throw error;
+                }
+            } else {
+                io.cobble.Config coordinatorConfig =
+                        CobbleSinkPaths.createCoordinatorConfig(config);
+                this.coordinator = DbCoordinator.open(coordinatorConfig);
+                this.tableCommitter =
+                        TableSnapshotCommitter.open(
+                                coordinatorConfig,
+                                config.bucketCount,
+                                Math.max(4, config.snapshotRetention + 2));
+                this.catalogOpened = null;
+            }
         }
 
         @Override
@@ -434,12 +368,24 @@ final class CobbleSqlSink
                 expireAbandonedCommittables(abandonedCommittables, Collections.emptyList());
                 return;
             }
-            materialize(checkpointId, committables);
+            materialize(resolveCommitId(checkpointId, committables), committables);
             expireAbandonedCommittables(abandonedCommittables, committables);
         }
 
         @Override
         public void close() throws Exception {
+            if (catalogOpened != null) {
+                try {
+                    tableCommitter.close();
+                } finally {
+                    try {
+                        coordinator.close();
+                    } finally {
+                        catalogOpened.close();
+                    }
+                }
+                return;
+            }
             try {
                 waitForEndOfInputMarkers();
                 if (CobbleSinkPaths.countEndOfInputMarkers(config) > 0) {
@@ -457,9 +403,10 @@ final class CobbleSqlSink
 
         private void waitForEndOfInputMarkers() throws InterruptedException {
             long deadlineNanos = System.nanoTime() + 5_000_000_000L;
-            int target = Math.max(1, config.sinkParallelism);
+            int target = config.bucketCount;
             while (System.nanoTime() < deadlineNanos) {
-                if (CobbleSinkPaths.countEndOfInputMarkers(config) >= target) {
+                int count = CobbleSinkPaths.countEndOfInputMarkers(config);
+                if (count >= target) {
                     return;
                 }
                 Thread.sleep(50L);
@@ -481,6 +428,23 @@ final class CobbleSqlSink
             }
             validateCompleteCoverage(shardSnapshots, totalBuckets);
 
+            if (catalogOpened != null) {
+                try (CobbleCatalogTableReference.Opened ignored =
+                        config.catalogTable.openValidated()) {
+                    // Re-check the captured identity at every materialization boundary.
+                }
+                GlobalSnapshot committed = tableCommitter.commitBatch(checkpointId, shardSnapshots);
+                GlobalSnapshot current =
+                        committed == null ? coordinator.loadCurrentGlobalSnapshot() : committed;
+                if (current == null) {
+                    throw new IOException(
+                            "Cobble catalog table commit did not produce a global snapshot.");
+                }
+                greatestCommitId = Math.max(greatestCommitId, checkpointId);
+                expireOlderSnapshots(current.id, Collections.emptyMap());
+                return;
+            }
+
             Map<String, String> writerPathByDbId = CobbleSinkPaths.loadWriterPathIndex(config);
             for (CobbleShardCommittable committable : committables) {
                 writerPathByDbId.put(
@@ -494,6 +458,7 @@ final class CobbleSqlSink
             if (current == null) {
                 throw new IOException("Cobble table commit did not produce a global snapshot.");
             }
+            greatestCommitId = Math.max(greatestCommitId, checkpointId);
             expireOlderSnapshots(current.id, writerPathByDbId);
         }
 
@@ -557,6 +522,11 @@ final class CobbleSqlSink
                 List<CobbleShardCommittable> abandonedCommittables,
                 List<CobbleShardCommittable> retainedCommittables)
                 throws IOException {
+            if (catalogOpened != null) {
+                // Catalog storage has no writer-local path namespace. Preserve unreferenced
+                // shard snapshots until the native catalog gains ownership-aware shard GC.
+                return;
+            }
             if (abandonedCommittables == null || abandonedCommittables.isEmpty()) {
                 return;
             }
@@ -591,13 +561,16 @@ final class CobbleSqlSink
                 if (snapshot.id == retainedSnapshotId) {
                     continue;
                 }
-                for (ShardSnapshot shardSnapshot : snapshot.shardSnapshots) {
-                    String writerPath = writerPathByDbId.get(shardSnapshot.dbId);
-                    if (writerPath == null) {
-                        throw new IOException(
-                                "Missing writer path mapping for shard dbId " + shardSnapshot.dbId);
+                if (catalogOpened == null) {
+                    for (ShardSnapshot shardSnapshot : snapshot.shardSnapshots) {
+                        String writerPath = writerPathByDbId.get(shardSnapshot.dbId);
+                        if (writerPath == null) {
+                            throw new IOException(
+                                    "Missing writer path mapping for shard dbId "
+                                            + shardSnapshot.dbId);
+                        }
+                        pruneWriterSnapshot(shardSnapshot, writerPath);
                     }
-                    pruneWriterSnapshot(shardSnapshot, writerPath);
                 }
                 coordinator.expireSnapshot(snapshot.id);
                 toExpire--;
@@ -607,30 +580,7 @@ final class CobbleSqlSink
         private void refreshLatestSnapshotOnClose() throws IOException {
             GlobalSnapshot latest = coordinator.loadCurrentGlobalSnapshot();
             Map<String, String> writerPathByDbId = CobbleSinkPaths.loadWriterPathIndex(config);
-            if (CobbleSinkPaths.isRemoteTable(config)) {
-                List<ShardSnapshot> refreshed =
-                        CobbleSinkPaths.resolveEndOfInputSnapshots(
-                                config,
-                                CobbleSinkPaths.listEndOfInputCommittables(config),
-                                writerPathByDbId);
-                materializeRefreshedSnapshot(latest, refreshed, writerPathByDbId);
-                return;
-            }
-            if (latest == null
-                    || latest.shardSnapshots == null
-                    || latest.shardSnapshots.isEmpty()) {
-                List<ShardSnapshot> initial = collectEndOfInputLatestShards(writerPathByDbId);
-                if (initial.isEmpty()) {
-                    return;
-                }
-                CobbleSinkPaths.storeWriterPathIndex(config, writerPathByDbId);
-                commitEndOfInputSnapshot(initial, writerPathByDbId);
-                return;
-            }
-            List<ShardSnapshot> refreshed = new ArrayList<>(latest.shardSnapshots.size());
-            for (ShardSnapshot shard : latest.shardSnapshots) {
-                refreshed.add(loadLatestShardSnapshot(shard.dbId, writerPathByDbId, shard));
-            }
+            List<ShardSnapshot> refreshed = collectEndOfInputLatestShards(writerPathByDbId);
             materializeRefreshedSnapshot(latest, refreshed, writerPathByDbId);
         }
 
@@ -656,125 +606,44 @@ final class CobbleSqlSink
         private void commitEndOfInputSnapshot(
                 List<ShardSnapshot> snapshots, Map<String, String> writerPathByDbId)
                 throws IOException {
-            GlobalSnapshot committed = tableCommitter.commitBatch(Long.MAX_VALUE, snapshots);
+            long commitId = nextCommitIdForSnapshots(snapshots);
+            GlobalSnapshot committed = tableCommitter.commitBatch(commitId, snapshots);
             GlobalSnapshot current =
                     committed == null ? coordinator.loadCurrentGlobalSnapshot() : committed;
             if (current == null) {
                 throw new IOException("Cobble end-of-input commit did not produce a snapshot.");
             }
+            greatestCommitId = Math.max(greatestCommitId, commitId);
             expireOlderSnapshots(current.id, writerPathByDbId);
+        }
+
+        private long resolveCommitId(long checkpointId, List<CobbleShardCommittable> committables)
+                throws IOException {
+            if (checkpointId != Long.MAX_VALUE) {
+                return checkpointId;
+            }
+            List<ShardSnapshot> snapshots = new ArrayList<>(committables.size());
+            for (CobbleShardCommittable committable : committables) {
+                snapshots.add(committable.shardSnapshot);
+            }
+            return nextCommitIdForSnapshots(snapshots);
+        }
+
+        private long nextCommitIdForSnapshots(List<ShardSnapshot> snapshots) throws IOException {
+            long latestSnapshotId = -1L;
+            for (ShardSnapshot snapshot : snapshots) {
+                latestSnapshotId = Math.max(latestSnapshotId, snapshot.snapshotId);
+            }
+            if (latestSnapshotId == Long.MAX_VALUE || greatestCommitId == Long.MAX_VALUE) {
+                throw new IOException("Cobble end-of-input commit id cannot be incremented.");
+            }
+            return Math.max(latestSnapshotId + 1L, greatestCommitId + 1L);
         }
 
         private List<ShardSnapshot> collectEndOfInputLatestShards(
                 Map<String, String> writerPathByDbId) throws IOException {
             return CobbleSinkPaths.resolveEndOfInputSnapshots(
                     config, CobbleSinkPaths.listEndOfInputCommittables(config), writerPathByDbId);
-        }
-
-        private ShardSnapshot loadLatestShardSnapshot(
-                String dbId, Map<String, String> writerPathByDbId, ShardSnapshot fallback)
-                throws IOException {
-            long deadlineNanos = System.nanoTime() + TimeUnit.SECONDS.toNanos(5L);
-            while (true) {
-                for (String writerPath : candidateWriterPaths(dbId, writerPathByDbId)) {
-                    try (Db db =
-                            Db.resume(
-                                    CobbleSinkPaths.createWriterConfigForWriterPath(
-                                            config, writerPath),
-                                    dbId,
-                                    RecoveryMode.SNAPSHOT_ONLY)) {
-                        ShardSnapshot latestShard = loadLatestShardSnapshot(db, writerPath);
-                        if (latestShard != null) {
-                            writerPathByDbId.put(dbId, writerPath);
-                            return latestShard;
-                        }
-                    } catch (IllegalArgumentException e) {
-                        if (e.getMessage() == null
-                                || !e.getMessage().contains("snapshotId out of range")) {
-                            throw new IOException(
-                                    "Failed to refresh end-of-input shard snapshot for dbId "
-                                            + dbId,
-                                    e);
-                        }
-                    }
-                }
-                if (System.nanoTime() >= deadlineNanos) {
-                    return fallback;
-                }
-                try {
-                    Thread.sleep(50L);
-                } catch (InterruptedException e) {
-                    Thread.currentThread().interrupt();
-                    throw new IOException(
-                            "Interrupted while waiting for end-of-input shard snapshot for dbId "
-                                    + dbId,
-                            e);
-                }
-            }
-        }
-
-        private List<String> candidateWriterPaths(
-                String dbId, Map<String, String> writerPathByDbId) {
-            String indexedWriterPath = writerPathByDbId.get(dbId);
-            if (indexedWriterPath != null) {
-                return Collections.singletonList(indexedWriterPath);
-            }
-            File tableRoot = CobbleSinkPaths.tableRootPath(config);
-            List<String> candidates = new ArrayList<>(2);
-            candidates.add(new File(tableRoot, dbId).getAbsolutePath());
-            candidates.add(tableRoot.getAbsolutePath());
-            return candidates;
-        }
-
-        private ShardSnapshot loadLatestShardSnapshot(Db db, String writerPath) {
-            ShardSnapshot latestShard = getShardSnapshotIfExists(db, -1L);
-            if (latestShard != null) {
-                return latestShard;
-            }
-            for (Long snapshotId : snapshotIdsFromFiles(writerPath)) {
-                ShardSnapshot shardSnapshot = getShardSnapshotIfExists(db, snapshotId.longValue());
-                if (shardSnapshot != null) {
-                    return shardSnapshot;
-                }
-            }
-            return null;
-        }
-
-        private ShardSnapshot getShardSnapshotIfExists(Db db, long snapshotId) {
-            try {
-                return db.getShardSnapshot(snapshotId);
-            } catch (IllegalArgumentException e) {
-                if (e.getMessage() != null && e.getMessage().contains("snapshotId out of range")) {
-                    return null;
-                }
-                throw e;
-            } catch (IllegalStateException e) {
-                if (e.getMessage() != null && e.getMessage().contains("No such file")) {
-                    return null;
-                }
-                throw e;
-            }
-        }
-
-        private List<Long> snapshotIdsFromFiles(String writerPath) {
-            File snapshotDirectory = new File(writerPath, "snapshot");
-            File[] snapshots =
-                    snapshotDirectory.listFiles(
-                            (dir, name) -> name != null && name.startsWith("SNAPSHOT-"));
-            if (snapshots == null || snapshots.length == 0) {
-                return Collections.emptyList();
-            }
-            List<Long> snapshotIds = new ArrayList<>(snapshots.length);
-            for (File snapshot : snapshots) {
-                String suffix = snapshot.getName().substring("SNAPSHOT-".length());
-                try {
-                    snapshotIds.add(Long.valueOf(Long.parseLong(suffix)));
-                } catch (NumberFormatException ignored) {
-                    // Ignore unrelated files under the snapshot directory.
-                }
-            }
-            snapshotIds.sort(Collections.reverseOrder());
-            return snapshotIds;
         }
     }
 
@@ -792,117 +661,20 @@ final class CobbleSqlSink
         }
     }
 
-    private static List<RestoreSource> collectRelevantSources(
-            GlobalSnapshot globalSnapshot, int targetRangeStart, int targetRangeEnd) {
-        if (globalSnapshot == null || globalSnapshot.shardSnapshots == null) {
-            return Collections.emptyList();
+    private static GlobalSnapshot loadCurrentTableSnapshot(
+            CobbleDynamicTableSink.SerializableConfig config) throws IOException {
+        if (!config.isCatalogTable()) {
+            return loadCurrentGlobalSnapshot(config);
         }
-        Map<String, RestoreSource> byIdentity = new LinkedHashMap<>();
-        for (ShardSnapshot shardSnapshot : globalSnapshot.shardSnapshots) {
-            if (shardSnapshot == null
-                    || shardSnapshot.ranges == null
-                    || shardSnapshot.ranges.isEmpty()) {
-                continue;
-            }
-            String identity = snapshotIdentity(shardSnapshot);
-            for (ShardSnapshot.Range range : shardSnapshot.ranges) {
-                if (range == null) {
-                    continue;
-                }
-                int start = Math.max(range.start, targetRangeStart);
-                int end = Math.min(range.end, targetRangeEnd);
-                if (start > end) {
-                    continue;
-                }
-                RestoreSource source =
-                        byIdentity.computeIfAbsent(
-                                identity, ignored -> new RestoreSource(shardSnapshot));
-                source.intersections.add(new BucketRange(start, end));
-            }
+        try (CobbleCatalogTableReference.Opened opened = config.catalogTable.openValidated();
+                DbCoordinator coordinator =
+                        opened.table()
+                                .coordinator(
+                                        config.catalogTable
+                                                .runtimeConfig()
+                                                .totalBuckets(config.bucketCount))) {
+            return coordinator.loadCurrentGlobalSnapshot();
         }
-        List<RestoreSource> relevantSources = new ArrayList<>(byIdentity.values());
-        for (RestoreSource source : relevantSources) {
-            source.intersections.sort(Comparator.comparingInt(range -> range.start));
-        }
-        return relevantSources;
-    }
-
-    private static RestoreSource selectBaseSource(List<RestoreSource> restoreSources) {
-        RestoreSource baseSource = null;
-        int bestOverlap = -1;
-        for (RestoreSource source : restoreSources) {
-            int overlapSize = source.intersectionSize();
-            if (overlapSize > bestOverlap) {
-                bestOverlap = overlapSize;
-                baseSource = source;
-            }
-        }
-        return baseSource;
-    }
-
-    private static void shrinkBaseSourceToTargetRange(
-            Db db, RestoreSource baseSource, int targetRangeStart, int targetRangeEnd) {
-        List<Integer> starts = new ArrayList<>();
-        List<Integer> ends = new ArrayList<>();
-        for (ShardSnapshot.Range sourceRange : baseSource.shardSnapshot.ranges) {
-            if (sourceRange == null) {
-                continue;
-            }
-            if (sourceRange.start < targetRangeStart) {
-                int leftEnd = Math.min(sourceRange.end, targetRangeStart - 1);
-                if (sourceRange.start <= leftEnd) {
-                    starts.add(sourceRange.start);
-                    ends.add(leftEnd);
-                }
-            }
-            if (sourceRange.end > targetRangeEnd) {
-                int rightStart = Math.max(sourceRange.start, targetRangeEnd + 1);
-                if (rightStart <= sourceRange.end) {
-                    starts.add(rightStart);
-                    ends.add(sourceRange.end);
-                }
-            }
-        }
-        if (starts.isEmpty()) {
-            return;
-        }
-        db.shrinkBucket(
-                starts.stream().mapToInt(Integer::intValue).toArray(),
-                ends.stream().mapToInt(Integer::intValue).toArray());
-    }
-
-    private static void ensureRestoreCoverage(
-            List<RestoreSource> restoreSources, int targetRangeStart, int targetRangeEnd)
-            throws IOException {
-        List<BucketRange> ranges = new ArrayList<>();
-        for (RestoreSource source : restoreSources) {
-            ranges.addAll(source.intersections);
-        }
-        ranges.sort(
-                Comparator.comparingInt((BucketRange range) -> range.start)
-                        .thenComparingInt(range -> range.end));
-
-        int nextExpected = targetRangeStart;
-        for (BucketRange range : ranges) {
-            if (range.start > nextExpected) {
-                throw new IOException(
-                        "Cobble sink restore is missing checkpoint shard coverage for bucket range ["
-                                + nextExpected
-                                + ", "
-                                + (range.start - 1)
-                                + "].");
-            }
-            nextExpected = Math.max(nextExpected, range.end + 1);
-            if (nextExpected > targetRangeEnd) {
-                return;
-            }
-        }
-        throw new IOException(
-                "Cobble sink restore is missing checkpoint shard coverage for bucket range ["
-                        + nextExpected
-                        + ", "
-                        + targetRangeEnd
-                        + "].");
     }
 
     private static String snapshotIdentity(ShardSnapshot shardSnapshot) {
@@ -955,42 +727,6 @@ final class CobbleSqlSink
         return byBucket;
     }
 
-    private static final class RestoreSource {
-        private final ShardSnapshot shardSnapshot;
-        private final List<BucketRange> intersections = new ArrayList<>();
-
-        private RestoreSource(ShardSnapshot shardSnapshot) {
-            this.shardSnapshot = shardSnapshot;
-        }
-
-        private int intersectionSize() {
-            int total = 0;
-            for (BucketRange range : intersections) {
-                total += range.end - range.start + 1;
-            }
-            return total;
-        }
-    }
-
-    private static final class BucketRange {
-        private final int start;
-        private final int end;
-
-        private BucketRange(int start, int end) {
-            this.start = start;
-            this.end = end;
-        }
-
-        @Override
-        public String toString() {
-            return "[" + start + "-" + end + "]";
-        }
-    }
-
-    static int hashFixedBucket(byte[] encodedKey, int totalBuckets) {
-        return Math.floorMod(java.util.Arrays.hashCode(encodedKey), totalBuckets);
-    }
-
     static MutationStats applyRowChange(
             Table table,
             CobbleTableRowConverter rowConverter,
@@ -998,6 +734,15 @@ final class CobbleSqlSink
             byte[] encodedKey,
             RowData element) {
         List<Value> values = rowConverter.toValues(element);
+        return applyRowChange(table, config, encodedKey, element, values);
+    }
+
+    private static MutationStats applyRowChange(
+            Table table,
+            CobbleDynamicTableSink.SerializableConfig config,
+            byte[] encodedKey,
+            RowData element,
+            List<Value> values) {
         switch (element.getRowKind()) {
             case INSERT:
             case UPDATE_AFTER:

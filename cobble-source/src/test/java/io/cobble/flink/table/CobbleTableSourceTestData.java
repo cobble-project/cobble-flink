@@ -1,7 +1,6 @@
 package io.cobble.flink.table;
 
 import io.cobble.Config;
-import io.cobble.Db;
 import io.cobble.GlobalSnapshot;
 import io.cobble.ShardSnapshot;
 import io.cobble.flink.common.CobbleLoader;
@@ -13,6 +12,7 @@ import io.cobble.table.Value;
 
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
@@ -31,19 +31,32 @@ final class CobbleTableSourceTestData {
         CobbleLoader.ensureCobbleLoaded();
         Files.createDirectories(root);
         Config config = config(root, bucketCount);
-        ShardSnapshot shard;
-        try (Db db = Db.open(config, 0, bucketCount - 1);
-                Table table = Table.create(db, CobbleTableRowConverter.TABLE_NAME, schema)) {
-            for (List<Value> row : rows) {
-                table.put(row);
+        List<Table> tables = new ArrayList<Table>(bucketCount);
+        List<ShardSnapshot> shards = new ArrayList<ShardSnapshot>(bucketCount);
+        try {
+            for (int bucket = 0; bucket < bucketCount; bucket++) {
+                tables.add(
+                        Table.writerBuilder(config)
+                                .tableName(CobbleTableRowConverter.TABLE_NAME)
+                                .bucket(bucket)
+                                .create(schema));
             }
-            shard = db.startAsyncSnapshot().future().get();
+            for (List<Value> row : rows) {
+                int bucket = CobbleTableRowConverter.bucket(schema, row, bucketCount);
+                tables.get(bucket).put(row);
+            }
+            for (Table table : tables) {
+                shards.add(table.snapshot());
+            }
+        } finally {
+            for (Table table : tables) {
+                table.close();
+            }
         }
         try (TableSnapshotCommitter committer =
                 TableSnapshotCommitter.open(config, bucketCount, 4)) {
             GlobalSnapshot snapshot =
-                    committer.commitBatch(
-                            CHECKPOINT_IDS.getAndIncrement(), Collections.singletonList(shard));
+                    committer.commitBatch(CHECKPOINT_IDS.getAndIncrement(), shards);
             if (snapshot == null) {
                 throw new IllegalStateException("Table snapshot commit did not complete.");
             }

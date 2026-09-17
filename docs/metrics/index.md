@@ -17,7 +17,7 @@ reporter when you need job-level values.
 
 ## Storage And State Backend
 
-The state backend and sink writers expose the following storage metrics:
+The state backend exposes the following storage metrics:
 
 | Metric | Type | Labels | Meaning |
 | --- | --- | --- | --- |
@@ -101,8 +101,9 @@ Successful `INSERT`, `UPDATE_AFTER`, and `DELETE` mutations count one record;
 values. Delete bytes include the encoded key. Encoding, ownership, unsupported
 row-kind, and database mutation failures count one send error.
 
-Sink writers also expose the [storage metrics](#storage-and-state-backend) for
-their Cobble database.
+Sink writers expose their standard row counters; the table-handler Java API does
+not currently expose native storage metrics. The state backend exposes the
+[storage metrics](#storage-and-state-backend) for its Cobble database.
 
 ## Dedicated Compaction
 

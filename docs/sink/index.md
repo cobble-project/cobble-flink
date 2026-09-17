@@ -9,6 +9,11 @@ Use the Cobble sink when you want Flink SQL results written into a Cobble
 table. The sink stores the SQL schema in Cobble's native Table format, so the
 same data can be read by Cobble source or inspected by the Web Monitor.
 
+At each checkpoint, every owned bucket starts its snapshot upload concurrently.
+The writer consumes completed uploads until every bucket succeeds, then the
+global commit makes the table visible. Slow storage can delay or time out the
+checkpoint.
+
 ## Why Use Cobble Sink
 
 Cobble sink is useful when you want a Flink SQL result table to be materialized
@@ -166,9 +171,10 @@ This section lists the main configuration keys for the Cobble sink.
 
 ## Metrics
 
-Sink writers register Flink standard send counters and Cobble storage metrics
-automatically. See [Cobble Flink Metrics](../metrics/#sink) for row-kind
-accounting and byte semantics.
+Sink writers register Flink standard send counters. See
+[Cobble Flink Metrics](../metrics/#sink) for row-kind accounting and byte
+semantics. Native table-handler storage metrics are not exposed by the current
+Java API.
 
 ## Usage Notes
 
@@ -178,3 +184,8 @@ accounting and byte semantics.
 - `UPDATE_BEFORE` is ignored.
 - `bucket`, `sink.parallelism`, and `sink.writer-buffer-memory` must all be
   greater than zero.
+- Restoring a checkpoint requires the same bucket-to-writer assignment;
+  changing `sink.parallelism` is rejected.
+- Snapshot waits use Flink's configured checkpoint timeout. A timeout fails the
+  writer attempt; any native upload already in progress is left to finish before
+  its table handler is closed.

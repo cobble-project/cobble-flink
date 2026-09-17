@@ -25,9 +25,12 @@ import java.util.Map;
 import java.util.NavigableMap;
 import java.util.TreeMap;
 
-/** Commits checkpointed committables and keeps only the latest shard per subtask. */
-final class GlobalCommitOperator extends AbstractStreamOperator<Void>
-        implements OneInputStreamOperator<CommittableMessage<CobbleShardCommittable>, Void>,
+/** Commits checkpointed committables and keeps only the latest shard per physical bucket. */
+final class GlobalCommitOperator
+        extends AbstractStreamOperator<CommittableMessage<CobbleShardCommittable>>
+        implements OneInputStreamOperator<
+                        CommittableMessage<CobbleShardCommittable>,
+                        CommittableMessage<CobbleShardCommittable>>,
                 BoundedOneInput,
                 CheckpointListener {
 
@@ -40,7 +43,7 @@ final class GlobalCommitOperator extends AbstractStreamOperator<Void>
     private transient ListState<byte[]> pendingState;
 
     GlobalCommitOperator(
-            StreamOperatorParameters<Void> parameters,
+            StreamOperatorParameters<CommittableMessage<CobbleShardCommittable>> parameters,
             CobbleDynamicTableSink.SerializableConfig config) {
         this.config = config;
         setup(parameters.getContainingTask(), parameters.getStreamConfig(), parameters.getOutput());
@@ -85,9 +88,11 @@ final class GlobalCommitOperator extends AbstractStreamOperator<Void>
     }
 
     @Override
-    public void processElement(StreamRecord<CommittableMessage<CobbleShardCommittable>> element) {
+    public void processElement(StreamRecord<CommittableMessage<CobbleShardCommittable>> element)
+            throws IOException {
         CommittableMessage<CobbleShardCommittable> message = element.getValue();
         if (!(message instanceof CommittableWithLineage)) {
+            output.collect(element);
             return;
         }
         CommittableWithLineage<CobbleShardCommittable> withLineage =
@@ -96,6 +101,7 @@ final class GlobalCommitOperator extends AbstractStreamOperator<Void>
         pendingByCheckpoint
                 .computeIfAbsent(checkpointId, ignored -> new ArrayList<>())
                 .add(withLineage.getCommittable());
+        output.collect(element);
     }
 
     @Override
@@ -123,18 +129,17 @@ final class GlobalCommitOperator extends AbstractStreamOperator<Void>
             return;
         }
 
-        Map<Integer, CobbleShardCommittable> latestBySubtask = new LinkedHashMap<>();
+        Map<Integer, CobbleShardCommittable> latestByBucket = new LinkedHashMap<>();
         List<CobbleShardCommittable> abandoned = new ArrayList<>();
         for (CobbleShardCommittable committable : merged) {
-            CobbleShardCommittable replaced =
-                    latestBySubtask.put(committable.bucketId, committable);
+            CobbleShardCommittable replaced = latestByBucket.put(committable.bucketId, committable);
             if (replaced != null) {
                 abandoned.add(replaced);
             }
         }
 
         global.commitCommittables(
-                checkpointId, new ArrayList<>(latestBySubtask.values()), abandoned);
+                checkpointId, new ArrayList<>(latestByBucket.values()), abandoned);
         head.clear();
     }
 

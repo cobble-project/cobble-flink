@@ -17,6 +17,12 @@
     <dependencies>
         <dependency>
             <groupId>io.github.cobble-project</groupId>
+            <artifactId>cobble-flink-state</artifactId>
+            <version>${cobble.flink.version.1.17}</version>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>io.github.cobble-project</groupId>
             <artifactId>cobble-flink-sink</artifactId>
             <version>${cobble.flink.version.1.17}</version>
             <scope>test</scope>

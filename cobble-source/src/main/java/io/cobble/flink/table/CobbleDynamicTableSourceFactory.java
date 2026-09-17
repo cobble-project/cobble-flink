@@ -63,6 +63,9 @@ public final class CobbleDynamicTableSourceFactory implements DynamicTableSource
     @Override
     public DynamicTableSource createDynamicTableSource(Context context) {
         CobbleLoader.ensureCobbleLoaded();
+        if (context.getCatalogTable().getOptions().containsKey("cobble.catalog.path")) {
+            return CobbleCatalogDynamicTableSource.create(context);
+        }
         FactoryUtil.TableFactoryHelper helper = FactoryUtil.createTableFactoryHelper(this, context);
         helper.validate();
 

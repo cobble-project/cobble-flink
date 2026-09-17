@@ -311,6 +311,30 @@ public final class CobbleConnectorStorageOptions implements Serializable {
         return !hasExplicitOptions();
     }
 
+    /**
+     * Returns the connector option spelling suitable for carrying settings through catalog tables.
+     */
+    public Map<String, String> asTableOptions() {
+        Map<String, String> options = new HashMap<String, String>();
+        for (Map.Entry<String, String> entry : genericOptions.entrySet()) {
+            options.put(STORAGE_OPTION_PREFIX + entry.getKey(), entry.getValue());
+        }
+        if (s3AccessId != null) {
+            options.put(S3_ACCESS_KEY, s3AccessId);
+            options.put(S3_SECRET_KEY, s3SecretKey);
+        }
+        String endpoint = s3Options.get(ENDPOINT_OPTION);
+        if (endpoint != null) options.put(S3_ENDPOINT_KEY, endpoint);
+        String region = s3Options.get(REGION_OPTION);
+        if (region != null) options.put(S3_REGION_KEY, region);
+        String virtualHost = s3Options.get(VIRTUAL_HOST_STYLE_OPTION);
+        if (virtualHost != null) {
+            options.put(
+                    S3_PATH_STYLE_ACCESS_KEY, Boolean.toString(!Boolean.parseBoolean(virtualHost)));
+        }
+        return Collections.unmodifiableMap(options);
+    }
+
     /** Applies connector-scoped options to any non-local table-root volume. */
     public void applyTo(Config.VolumeDescriptor volume) {
         if (volume == null

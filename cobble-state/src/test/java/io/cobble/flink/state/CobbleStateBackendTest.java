@@ -3270,7 +3270,7 @@ class CobbleStateBackendTest {
             assertEquals(backend.getCobbleDb().id(), shardSnapshot.dbId);
             assertFalse(shardSnapshot.manifestPath.isEmpty());
             assertFalse(shardSnapshot.ranges.isEmpty());
-            assertTrue(shardSnapshot.columnFamilyIds.containsKey("snapshot-state"));
+            assertTrue(shardSnapshot.columnFamilies.containsKey("snapshot-state"));
             assertTrue(shardSnapshot.dataSizeBytes > 0L);
             assertTrue(shardSnapshot.incrementalDataSizeBytes > 0L);
             assertTrue(

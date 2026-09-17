@@ -12,11 +12,17 @@ import io.cobble.Db;
 import io.cobble.DbCoordinator;
 import io.cobble.GlobalSnapshot;
 import io.cobble.ShardSnapshot;
+import io.cobble.flink.catalog.CobbleCatalogTableReference;
 import io.cobble.flink.common.CobbleConnectorStorageOptions;
 import io.cobble.flink.common.CobbleMetadataFileIO;
 import io.cobble.flink.common.table.CobbleTableRowConverter;
+import io.cobble.table.CatalogTable;
+import io.cobble.table.FileCatalog;
 import io.cobble.table.Table;
+import io.cobble.table.TableIdentifier;
 import io.cobble.table.TableKey;
+import io.cobble.table.TableReader;
+import io.cobble.table.TableWritePlan;
 import io.cobble.table.Value;
 
 import org.apache.flink.api.common.JobStatus;
@@ -30,7 +36,6 @@ import org.apache.flink.core.execution.JobClient;
 import org.apache.flink.core.memory.DataInputDeserializer;
 import org.apache.flink.metrics.Counter;
 import org.apache.flink.metrics.Metric;
-import org.apache.flink.metrics.View;
 import org.apache.flink.metrics.groups.SinkWriterMetricGroup;
 import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
 import org.apache.flink.streaming.api.functions.source.RichSourceFunction;
@@ -56,6 +61,7 @@ import java.nio.file.Path;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Collection;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
@@ -415,7 +421,7 @@ class CobbleTableSinkITTest {
                                         config, Collections.singletonList(first), new HashMap<>()));
 
         assertTrue(duplicateError.getMessage().contains("Duplicate"));
-        assertTrue(missingError.getMessage().contains("subtask 1"));
+        assertTrue(missingError.getMessage().contains("bucket 1"));
     }
 
     @Test
@@ -460,11 +466,7 @@ class CobbleTableSinkITTest {
         assertEquals(2L, metrics.count("send"));
         assertEquals(expectedInsertBytes + expectedDeleteBytes, metrics.count("bytes"));
         assertEquals(1L, metrics.count("errors"));
-        View nativeView = (View) metrics.metric("cobble.memtableFlushesTotal");
-        assertNotNull(nativeView);
-        nativeView.update();
         writer.close();
-        nativeView.update();
     }
 
     @Test
@@ -479,20 +481,100 @@ class CobbleTableSinkITTest {
             assertEquals(0L, metrics.count("send"));
             assertEquals(0L, metrics.count("bytes"));
             assertEquals(0L, metrics.count("errors"));
+            Collection<CobbleShardCommittable> committables = writer.prepareCommit();
             assertEquals(
                     1,
-                    writer.prepareCommit().size(),
+                    committables.size(),
                     "successful UPDATE_BEFORE must retain the writer's dirty checkpoint state");
+            assertNotNull(committables.iterator().next().shardSnapshot);
         } finally {
             writer.close();
         }
     }
 
+    @Test
+    void catalogSinkWriterCommitsThroughCapturedCatalogTable() throws Exception {
+        Path warehouse = tempDir.resolve("catalog-sink");
+        CobbleDynamicTableSink.SerializableConfig legacy = writerMetricsConfig(warehouse, 2);
+        Config runtime = new Config().addVolume(warehouse.toUri().toString()).totalBuckets(2);
+        TableIdentifier identifier = new TableIdentifier(Collections.singletonList("db"), "orders");
+        try (FileCatalog catalog = FileCatalog.open(runtime, "test")) {
+            catalog.createNamespace(Collections.singletonList("db"));
+            try (CatalogTable created = catalog.createTable(identifier, legacy.tableSchema())) {
+                CobbleCatalogTableReference reference =
+                        new CobbleCatalogTableReference(
+                                warehouse.toUri().toString(),
+                                "test",
+                                "db",
+                                "orders",
+                                created.tableId(),
+                                created.catalogSchemaId());
+                TableWritePlan plan = created.newWriteBuilder().totalBuckets(2).build();
+                CobbleDynamicTableSink.SerializableConfig config =
+                        new CobbleDynamicTableSink.SerializableConfig(
+                                legacy, reference, plan, created.schema());
+                CobbleSqlSink sink = new CobbleSqlSink(config);
+                TwoPhaseCommittingSink.PrecommittingSinkWriter<RowData, CobbleShardCommittable>
+                        writer = sink.createWriter(sinkInitContext(new CapturingSinkMetrics()));
+                try (CobbleSqlSink.Global global = new CobbleSqlSink.Global(config)) {
+                    List<CobbleShardCommittable> pending =
+                            new ArrayList<CobbleShardCommittable>(writer.prepareCommit());
+                    assertEquals(2, pending.size());
+                    assertTrue(pending.stream().allMatch(value -> value.shardSnapshot != null));
+                    List<CobbleBucketWriterState> state =
+                            ((org.apache.flink.api.connector.sink2.StatefulSink.StatefulSinkWriter<
+                                                    RowData, CobbleBucketWriterState>)
+                                            writer)
+                                    .snapshotState(0L);
+                    assertEquals(2, state.size());
+                    global.commitCommittables(0L, pending, Collections.emptyList());
+                    writer.close();
+                    writer = sink.restoreWriter(sinkInitContext(new CapturingSinkMetrics()), state);
+
+                    writer.write(rowData(RowKind.INSERT, 7L, "catalog", 3), null);
+                    pending = new ArrayList<CobbleShardCommittable>(writer.prepareCommit());
+                    state =
+                            ((org.apache.flink.api.connector.sink2.StatefulSink.StatefulSinkWriter<
+                                                    RowData, CobbleBucketWriterState>)
+                                            writer)
+                                    .snapshotState(1L);
+                    assertEquals(2, state.size());
+                    global.commitCommittables(1L, pending, Collections.emptyList());
+                    writer.close();
+                    writer = sink.restoreWriter(sinkInitContext(new CapturingSinkMetrics()), state);
+                    pending = new ArrayList<CobbleShardCommittable>(writer.prepareCommit());
+                    assertEquals(2, pending.size());
+                    assertTrue(pending.stream().allMatch(value -> value.shardSnapshot != null));
+                    assertEquals(
+                            2,
+                            ((org.apache.flink.api.connector.sink2.StatefulSink.StatefulSinkWriter<
+                                                    RowData, CobbleBucketWriterState>)
+                                            writer)
+                                    .snapshotState(2L)
+                                    .size());
+                    global.commitCommittables(2L, pending, Collections.emptyList());
+                } finally {
+                    writer.close();
+                }
+                try (TableReader reader =
+                        created.readerBuilder(runtime).currentGlobalSnapshot().open()) {
+                    TableKey key = reader.keyBuilder().push(Value.int64(7L)).build();
+                    assertEquals("catalog", reader.get(key).get(1).raw());
+                }
+            }
+        }
+    }
+
     private CobbleDynamicTableSink.SerializableConfig writerMetricsConfig(Path tablePath) {
+        return writerMetricsConfig(tablePath, 1);
+    }
+
+    private CobbleDynamicTableSink.SerializableConfig writerMetricsConfig(
+            Path tablePath, int buckets) {
         return new CobbleDynamicTableSink.SerializableConfig(
                 tablePath.toUri().toString(),
-                1,
-                1,
+                buckets,
+                buckets,
                 1,
                 false,
                 1024L * 1024L,

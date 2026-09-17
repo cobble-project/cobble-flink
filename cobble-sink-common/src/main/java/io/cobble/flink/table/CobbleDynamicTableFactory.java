@@ -1,9 +1,15 @@
 package io.cobble.flink.table;
 
+import io.cobble.flink.catalog.CobbleCatalog;
+import io.cobble.flink.catalog.CobbleCatalogTableReference;
 import io.cobble.flink.common.CobbleConnectorStorageOptions;
 import io.cobble.flink.common.CobbleLoader;
+import io.cobble.table.CatalogTable;
+import io.cobble.table.TableSchema;
+import io.cobble.table.TableWritePlan;
 
 import org.apache.flink.configuration.ConfigOption;
+import org.apache.flink.configuration.ConfigOptions;
 import org.apache.flink.configuration.MemorySize;
 import org.apache.flink.configuration.ReadableConfig;
 import org.apache.flink.table.api.ValidationException;
@@ -24,7 +30,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 
-/** Flink SQL sink factory that writes insert-only rows into a shared-path Cobble structured DB. */
+/** Flink SQL sink factory for path-based and catalog-managed Cobble tables. */
 public final class CobbleDynamicTableFactory implements DynamicTableSinkFactory {
 
     public static final String IDENTIFIER = "cobble";
@@ -36,20 +42,24 @@ public final class CobbleDynamicTableFactory implements DynamicTableSinkFactory 
 
     @Override
     public Set<ConfigOption<?>> requiredOptions() {
-        Set<ConfigOption<?>> options = new HashSet<>();
-        options.add(CobbleTableOptions.PATH);
-        options.add(CobbleTableOptions.BUCKET);
-        options.add(FactoryUtil.SINK_PARALLELISM);
-        return options;
+        return new HashSet<>();
     }
 
     @Override
     public Set<ConfigOption<?>> optionalOptions() {
         Set<ConfigOption<?>> options = new HashSet<>();
+        options.add(CobbleTableOptions.PATH);
+        options.add(CobbleTableOptions.BUCKET);
         options.add(CobbleTableOptions.SNAPSHOT_RETENTION);
         options.add(CobbleTableOptions.SINK_USE_MANAGED_MEMORY_ALLOCATOR);
         options.add(CobbleTableOptions.SINK_WRITER_BUFFER_MEMORY);
         options.add(FactoryUtil.SINK_PARALLELISM);
+        options.add(ConfigOptions.key(CobbleCatalog.OPTION_PATH).stringType().noDefaultValue());
+        options.add(
+                ConfigOptions.key(CobbleCatalog.OPTION_STORAGE_ID).stringType().noDefaultValue());
+        options.add(ConfigOptions.key(CobbleCatalog.OPTION_TABLE_ID).stringType().noDefaultValue());
+        options.add(
+                ConfigOptions.key(CobbleCatalog.OPTION_SCHEMA_ID).stringType().noDefaultValue());
         CobbleConnectorStorageOptions.addFactoryOptions(options);
         return options;
     }
@@ -61,16 +71,29 @@ public final class CobbleDynamicTableFactory implements DynamicTableSinkFactory 
         helper.validate();
 
         ReadableConfig options = helper.getOptions();
+        boolean catalogTable =
+                context.getCatalogTable().getOptions().containsKey(CobbleCatalog.OPTION_TABLE_ID);
         CobbleConnectorStorageOptions storageOptions =
                 parseStorageOptions(context.getCatalogTable().getOptions());
-        String pathUri = normalizePathToUri(options.get(CobbleTableOptions.PATH));
-        int bucketCount = options.get(CobbleTableOptions.BUCKET);
+        String pathUri =
+                catalogTable
+                        ? context.getCatalogTable().getOptions().get(CobbleCatalog.OPTION_PATH)
+                        : normalizePathToUri(options.get(CobbleTableOptions.PATH));
+        Integer configuredBucketCount = options.get(CobbleTableOptions.BUCKET);
+        if (configuredBucketCount == null) {
+            throw new ValidationException(CobbleTableOptions.BUCKET.key() + " must be configured.");
+        }
+        int bucketCount = configuredBucketCount.intValue();
         int snapshotRetention = options.get(CobbleTableOptions.SNAPSHOT_RETENTION);
         boolean sinkUseManagedMemoryAllocator =
                 options.get(CobbleTableOptions.SINK_USE_MANAGED_MEMORY_ALLOCATOR);
         MemorySize sinkWriterBufferMemory =
                 options.get(CobbleTableOptions.SINK_WRITER_BUFFER_MEMORY);
-        Integer sinkParallelism = options.get(FactoryUtil.SINK_PARALLELISM);
+        Integer configuredSinkParallelism = options.get(FactoryUtil.SINK_PARALLELISM);
+        Integer sinkParallelism =
+                configuredSinkParallelism == null && catalogTable
+                        ? Integer.valueOf(1)
+                        : configuredSinkParallelism;
 
         if (bucketCount <= 0) {
             throw new ValidationException(CobbleTableOptions.BUCKET.key() + " must be > 0");
@@ -82,6 +105,13 @@ public final class CobbleDynamicTableFactory implements DynamicTableSinkFactory 
         if (sinkParallelism == null || sinkParallelism.intValue() <= 0) {
             throw new ValidationException(
                     FactoryUtil.SINK_PARALLELISM.key() + " must be configured with a value > 0.");
+        }
+        if (sinkParallelism.intValue() > bucketCount) {
+            throw new ValidationException(
+                    FactoryUtil.SINK_PARALLELISM.key()
+                            + " must not exceed "
+                            + CobbleTableOptions.BUCKET.key()
+                            + ".");
         }
         if (sinkWriterBufferMemory.getBytes() <= 0L) {
             throw new ValidationException(
@@ -157,10 +187,33 @@ public final class CobbleDynamicTableFactory implements DynamicTableSinkFactory 
                         keyFields,
                         valueFields,
                         storageOptions);
+        TableSchema expectedSchema;
         try {
-            config.tableSchema();
+            expectedSchema = config.tableSchema();
         } catch (IllegalArgumentException e) {
             throw new ValidationException("Unsupported Cobble table schema: " + e.getMessage(), e);
+        }
+        if (catalogTable) {
+            CobbleCatalogTableReference reference =
+                    CobbleCatalogTableReference.fromOptions(
+                            context.getCatalogTable().getOptions(),
+                            context.getObjectIdentifier().getDatabaseName(),
+                            context.getObjectIdentifier().getObjectName());
+            try (CobbleCatalogTableReference.Opened opened = reference.openValidated()) {
+                CatalogTable nativeTable = opened.table();
+                TableSchema nativeSchema = nativeTable.schema();
+                if (!matchesCatalogSchema(nativeSchema, expectedSchema)) {
+                    throw new ValidationException(
+                            "Flink DDL no longer matches the captured Cobble catalog table schema.");
+                }
+                TableWritePlan plan =
+                        nativeTable.newWriteBuilder().totalBuckets(bucketCount).build();
+                config =
+                        new CobbleDynamicTableSink.SerializableConfig(
+                                config, reference, plan, nativeSchema);
+            } catch (IllegalArgumentException e) {
+                throw new ValidationException("Invalid Cobble catalog table identity.", e);
+            }
         }
         return new CobbleDynamicTableSink(config, context.getObjectIdentifier().asSummaryString());
     }
@@ -176,6 +229,33 @@ public final class CobbleDynamicTableFactory implements DynamicTableSinkFactory 
                             + field.getType(),
                     e);
         }
+    }
+
+    private static boolean matchesCatalogSchema(TableSchema actual, TableSchema expected) {
+        if (actual.fields().size() != expected.fields().size()) {
+            return false;
+        }
+        for (int index = 0; index < actual.fields().size(); index++) {
+            io.cobble.table.DataField actualField = actual.fields().get(index);
+            io.cobble.table.DataField expectedField = expected.fields().get(index);
+            if (!actualField.name().equals(expectedField.name())
+                    || !actualField.logicalType().equals(expectedField.logicalType())) {
+                return false;
+            }
+        }
+        return keyNames(actual).equals(keyNames(expected));
+    }
+
+    private static List<String> keyNames(TableSchema schema) {
+        Map<Long, String> names = new HashMap<Long, String>();
+        for (io.cobble.table.DataField field : schema.fields()) {
+            names.put(Long.valueOf(field.id()), field.name());
+        }
+        List<String> result = new ArrayList<String>();
+        for (Long id : schema.primaryKey()) {
+            result.add(names.get(id));
+        }
+        return result;
     }
 
     private static CobbleConnectorStorageOptions parseStorageOptions(

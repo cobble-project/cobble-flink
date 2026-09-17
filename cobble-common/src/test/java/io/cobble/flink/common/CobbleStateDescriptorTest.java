@@ -1,7 +1,10 @@
 package io.cobble.flink.common;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
 
 import io.cobble.ShardSnapshot;
 import io.cobble.flink.common.inspect.StateInspectSchemaStore;
@@ -13,6 +16,7 @@ import org.junit.jupiter.api.Test;
 
 import java.util.Arrays;
 import java.util.Collections;
+import java.util.LinkedHashMap;
 import java.util.List;
 
 class CobbleStateDescriptorTest {
@@ -72,6 +76,32 @@ class CobbleStateDescriptorTest {
                         new DataInputDeserializer(output.getCopyOfBuffer()));
 
         assertEquals(descriptors, restored.stateDescriptors());
+        assertEquals(Collections.emptyMap(), restored.shardSnapshot().columnFamilyIds);
+    }
+
+    @Test
+    void snapshotMetadataRoundTripsDirectShardSchema() throws Exception {
+        ShardSnapshot shard = directShard();
+        CobbleSnapshotMetadataPayload payload =
+                new CobbleSnapshotMetadataPayload(
+                        shard, false, Collections.emptyList(), StateInspectSchemaStore.empty());
+        DataOutputSerializer output = new DataOutputSerializer(256);
+
+        CobbleSnapshotMetadataCodec.write(payload, output);
+        ShardSnapshot restored =
+                CobbleSnapshotMetadataCodec.read(
+                                new DataInputDeserializer(output.getCopyOfBuffer()))
+                        .shardSnapshot();
+
+        assertEquals(shard.dbId, restored.dbId);
+        assertEquals(shard.schemaId, restored.schemaId);
+        assertNull(restored.columnFamilyIds);
+        ShardSnapshot.SnapshotColumnFamily family = restored.columnFamilies.get("state");
+        assertNotNull(family);
+        assertEquals(7, family.id);
+        assertEquals(2, family.numColumns);
+        assertFalse(family.options.valueHasTtl);
+        assertEquals("{\"logical_type\":\"BIGINT\"}", family.options.metadata);
     }
 
     @Test
@@ -113,6 +143,20 @@ class CobbleStateDescriptorTest {
         shard.snapshotId = 1L;
         shard.manifestPath = "file:///snapshot/SNAPSHOT-1";
         shard.columnFamilyIds = Collections.emptyMap();
+        return shard;
+    }
+
+    private static ShardSnapshot directShard() {
+        ShardSnapshot shard = shard();
+        shard.columnFamilyIds = null;
+        shard.schemaId = 9L;
+        ShardSnapshot.SnapshotColumnFamily family = new ShardSnapshot.SnapshotColumnFamily();
+        family.id = 7;
+        family.numColumns = 2;
+        family.options.valueHasTtl = false;
+        family.options.metadata = "{\"logical_type\":\"BIGINT\"}";
+        shard.columnFamilies = new LinkedHashMap<>();
+        shard.columnFamilies.put("state", family);
         return shard;
     }
 }
