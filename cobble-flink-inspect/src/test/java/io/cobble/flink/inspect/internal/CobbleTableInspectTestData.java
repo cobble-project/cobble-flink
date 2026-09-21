@@ -20,11 +20,11 @@ import java.util.Collections;
 import java.util.List;
 
 /** Native Cobble Table fixtures shared by inspect integration tests. */
-final class CobbleTableInspectTestData {
+public final class CobbleTableInspectTestData {
 
     private CobbleTableInspectTestData() {}
 
-    static GlobalSnapshot write(
+    public static GlobalSnapshot write(
             Path root, int buckets, long checkpointId, TableSchema schema, List<List<Value>> rows)
             throws Exception {
         CobbleLoader.ensureCobbleLoaded();
@@ -48,7 +48,7 @@ final class CobbleTableInspectTestData {
         }
     }
 
-    static TableSchema stringKeyValueSchema() {
+    public static TableSchema stringKeyValueSchema() {
         return new TableSchema(
                 Arrays.asList(
                         new DataField(0L, "id", LogicalTypes.string().notNull()),

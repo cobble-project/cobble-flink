@@ -1,16 +1,13 @@
 package io.cobble.flink.inspect;
 
-import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
-import io.cobble.Config;
-import io.cobble.DbCoordinator;
-import io.cobble.ShardSnapshot;
-import io.cobble.structured.Db;
+import io.cobble.flink.inspect.internal.CobbleTableInspectTestData;
+import io.cobble.table.Value;
 
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
@@ -18,28 +15,27 @@ import org.junit.jupiter.api.io.TempDir;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
 import java.util.Arrays;
-import java.util.Collections;
 
 class CobbleInspectClientIT {
     @TempDir private Path tempDir;
 
     @Test
-    void discoversPinsScansPagesAndLooksUpRawDatasource() throws Exception {
+    void discoversPinsScansPagesAndLooksUpTable() throws Exception {
         Path table = tempDir.resolve("table");
         int totalBuckets = 2;
         byte[] firstKey = bytes("alpha");
         byte[] secondKey = bytes("omega");
-        writeTable(table, totalBuckets, 11L, firstKey, secondKey);
+        long snapshotId = writeTable(table, totalBuckets, 11L, firstKey, secondKey);
 
         try (CobbleInspectClient client =
                         CobbleInspectClient.builder().totalBuckets(totalBuckets).build();
                 InspectSession session = client.openDataSource(table.toString())) {
             InspectCatalog catalog = session.catalog();
             assertEquals("data_source", catalog.sourceKind());
-            assertEquals(11L, session.info().selection().checkpointId());
+            assertEquals(snapshotId, session.info().selection().checkpointId());
             assertFalse(session.info().selection().latest());
             assertEquals(1, session.targets().size());
-            assertEquals(InspectTargetKind.RAW, session.targets().get(0).kind());
+            assertEquals(InspectTargetKind.SINK, session.targets().get(0).kind());
 
             String target = session.targets().get(0).id();
             InspectPage first = session.scan(new ScanRequest(target, 1, null));
@@ -51,18 +47,21 @@ class CobbleInspectClientIT {
                     Arrays.equals(
                             first.rows().get(0).key().value(), second.rows().get(0).key().value()));
 
-            int firstBucket = Math.floorMod(Arrays.hashCode(firstKey), totalBuckets);
+            InspectRow firstRow = first.rows().get(0);
+            int firstBucket = firstRow.bucket();
             LookupResult lookup =
                     session.lookup(
                             new LookupRequest(
                                     target,
                                     Arrays.asList(
-                                            new LookupKey(firstBucket, new RawBytes(firstKey)),
+                                            new LookupKey(firstBucket, firstRow.key()),
                                             new LookupKey(
                                                     firstBucket, new RawBytes(bytes("missing"))))));
             assertEquals(2, lookup.rows().size());
             assertTrue(lookup.rows().get(0).found());
-            assertArrayEquals(bytes("one"), lookup.rows().get(0).value().value());
+            assertEquals(
+                    firstRow.decodedColumns().get(0).fields().get(0).value().scalar(),
+                    lookup.rows().get(0).decodedColumns().get(0).fields().get(0).value().scalar());
             assertFalse(lookup.rows().get(1).found());
 
             InspectException invalidProjection =
@@ -98,15 +97,15 @@ class CobbleInspectClientIT {
     void sessionsOwnIndependentReadersAndClientClosesRemainingSessions() throws Exception {
         Path first = tempDir.resolve("first-table");
         Path second = tempDir.resolve("second-table");
-        writeTable(first, 1, 3L, bytes("a"), bytes("b"));
-        writeTable(second, 1, 9L, bytes("x"), bytes("y"));
+        long firstSnapshot = writeTable(first, 1, 3L, bytes("a"), bytes("b"));
+        long secondSnapshot = writeTable(second, 1, 9L, bytes("x"), bytes("y"));
 
         CobbleInspectClient client = CobbleInspectClient.builder().totalBuckets(1).build();
         InspectSession firstSession = client.openDataSource(first.toString());
         InspectSession secondSession = client.openDataSource(second.toString());
         try {
-            assertEquals(3L, firstSession.info().selection().checkpointId());
-            assertEquals(9L, secondSession.info().selection().checkpointId());
+            assertEquals(firstSnapshot, firstSession.info().selection().checkpointId());
+            assertEquals(secondSnapshot, secondSession.info().selection().checkpointId());
             firstSession.close();
             assertEquals(
                     2,
@@ -125,47 +124,22 @@ class CobbleInspectClientIT {
         }
     }
 
-    private void writeTable(
+    private long writeTable(
             Path table, int totalBuckets, long snapshotId, byte[] firstKey, byte[] secondKey)
             throws Exception {
-        Config writer = config(table, totalBuckets, true);
-        ShardSnapshot shard;
-        try (Db db = Db.open(writer, 0, totalBuckets - 1)) {
-            db.put(
-                    Math.floorMod(Arrays.hashCode(firstKey), totalBuckets),
-                    firstKey,
-                    0,
-                    bytes("one"));
-            db.put(
-                    Math.floorMod(Arrays.hashCode(secondKey), totalBuckets),
-                    secondKey,
-                    0,
-                    bytes("two"));
-            shard = db.snapshot();
-        }
-        try (DbCoordinator coordinator = DbCoordinator.open(config(table, totalBuckets, false))) {
-            coordinator.materializeGlobalSnapshot(
-                    totalBuckets, snapshotId, Collections.singletonList(shard));
-        }
-    }
-
-    private Config config(Path table, int totalBuckets, boolean data) {
-        Config config = new Config().numColumns(1).totalBuckets(totalBuckets);
-        config.governanceMode = Config.GovernanceMode.NOOP;
-        config.logConsole = false;
-        config.logPath = tempDir.resolve(data ? "writer.log" : "coordinator.log").toString();
-        Config.VolumeDescriptor volume = new Config.VolumeDescriptor();
-        volume.baseDir = table.toAbsolutePath().toString();
-        volume.kinds =
-                data
-                        ? Arrays.asList(
-                                Config.VolumeUsageKind.PRIMARY_DATA_PRIORITY_HIGH,
-                                Config.VolumeUsageKind.META,
-                                Config.VolumeUsageKind.SNAPSHOT)
-                        : Arrays.asList(
-                                Config.VolumeUsageKind.META, Config.VolumeUsageKind.SNAPSHOT);
-        config.addVolume(volume);
-        return config;
+        return CobbleTableInspectTestData.write(
+                        table,
+                        totalBuckets,
+                        snapshotId,
+                        CobbleTableInspectTestData.stringKeyValueSchema(),
+                        Arrays.asList(
+                                Arrays.asList(
+                                        Value.string(new String(firstKey, StandardCharsets.UTF_8)),
+                                        Value.string("one")),
+                                Arrays.asList(
+                                        Value.string(new String(secondKey, StandardCharsets.UTF_8)),
+                                        Value.string("two"))))
+                .id;
     }
 
     private static byte[] bytes(String value) {
