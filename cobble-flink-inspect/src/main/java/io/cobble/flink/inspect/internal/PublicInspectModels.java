@@ -197,7 +197,11 @@ final class PublicInspectModels {
                     Map<String, Object> field = castMap(rawField);
                     fields.add(
                             new DecodedValue.DecodedField(
-                                    string(field.get("name")), decoded(field.get("value"))));
+                                    string(field.get("name")),
+                                    decoded(
+                                            field.containsKey("kind")
+                                                    ? field
+                                                    : field.get("value"))));
                 }
             } else {
                 for (Map.Entry<String, Object> entry : value.entrySet()) {
@@ -219,7 +223,8 @@ final class PublicInspectModels {
         }
         if ("LIST".equals(kind) || value.containsKey("elements")) {
             List<DecodedValue> elements = new ArrayList<>();
-            Object rawElements = value.get("elements");
+            Object rawElements =
+                    value.containsKey("values") ? value.get("values") : value.get("elements");
             if (rawElements instanceof List) {
                 for (Object element : (List<?>) rawElements) {
                     elements.add(decoded(element));

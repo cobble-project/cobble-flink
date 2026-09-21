@@ -33,6 +33,15 @@ class MonitorAppJsTest {
                         + "const keyHtml = renderSinkExpandedCells([{ name: 'id' }], key, 'key');\n"
                         + "const valueHtml = renderSinkExpandedCells([{ name: 'name' }, { name: 'score' }], columns, 'column');\n"
                         + "const projected = projectedSinkValueFields([{ name: 'name' }, { name: 'score' }], '1,0').map((field) => field.name);\n"
+                        + "const mapPart = scalar('INT', 48020079);\n"
+                        + "if (semanticTableValue(mapPart, {name:'value'}, 0) !== mapPart) throw Error('scalar lost');\n"
+                        + "const semanticRow = row([{name:'count', value:mapPart}]);\n"
+                        + "if (semanticTableValue(semanticRow, {name:'count'}, 0) !== mapPart) throw Error('row field lost');\n"
+                        + "const list = {kind:'LIST', fields:[], entries:[], elements:[scalar('STRING','first'),scalar('STRING','second')]};\n"
+                        + "const listHtml = renderSemanticTableValue(list, 'test-list');\n"
+                        + "if (!listHtml.includes('first') || !listHtml.includes('second') || listHtml.includes('empty map')) throw Error('list rendering');\n"
+                        + "if (renderSemanticTableValue(semanticRow, '').includes('empty map')) throw Error('row rendering');\n"
+                        + "if (!renderSemanticTableValue(mapPart, '').includes('48020079')) throw Error('map value rendering');\n"
                         + "console.log(JSON.stringify({ keyHtml, valueHtml, projected }));\n";
 
         Process process = new ProcessBuilder("node", "--input-type=module", "-").start();

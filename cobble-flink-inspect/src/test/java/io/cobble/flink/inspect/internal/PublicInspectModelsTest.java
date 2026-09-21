@@ -22,6 +22,30 @@ import java.util.Map;
 class PublicInspectModelsTest {
 
     @Test
+    void preservesSemanticListElementsAndNestedFieldTypes() {
+        Map<String, Object> scalar = new LinkedHashMap<>();
+        scalar.put("kind", "SCALAR");
+        scalar.put("logical_type", "INT");
+        scalar.put("value", 42);
+        Map<String, Object> list = new LinkedHashMap<>();
+        list.put("kind", "LIST");
+        list.put("values", Arrays.asList(scalar, null));
+        DecodedValue decoded = PublicInspectModels.decoded(list);
+        assertEquals(2, decoded.elements().size());
+        assertEquals(42, decoded.elements().get(0).scalar());
+        assertEquals(null, decoded.elements().get(1).scalar());
+
+        list.put("name", "items");
+        Map<String, Object> row = new LinkedHashMap<>();
+        row.put("kind", "ROW");
+        row.put("fields", Collections.singletonList(list));
+        DecodedValue field = PublicInspectModels.decoded(row).fields().get(0).value();
+        assertEquals(DecodedValue.Kind.LIST, field.kind());
+        assertEquals("INT", field.elements().get(0).logicalType());
+        assertEquals(42, field.elements().get(0).scalar());
+    }
+
+    @Test
     void preservesRecursiveTupleAndMapSemanticTypes() {
         StateInspectType tuple =
                 StateInspectType.tuple(

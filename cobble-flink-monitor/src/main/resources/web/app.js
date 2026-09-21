@@ -1659,8 +1659,9 @@ function renderStateExpandedCells(groups, decodedParts, item, target, displayId)
 function semanticTableValue(part, field, index) {
   if (part === null) return index === 0 ? null : undefined
   if (part === undefined || typeof part !== 'object') return undefined
-  if (Array.isArray(part.fields)) {
-    return part.fields.find((candidate) => candidate?.name === field.name) || part.fields[index]
+  if (part.kind === 'ROW' || part.kind === 'TUPLE') {
+    const selected = part.fields.find((candidate) => candidate?.name === field.name) || part.fields[index]
+    return selected?.kind ? selected : selected?.value
   }
   return index === 0 ? part : undefined
 }
@@ -1670,16 +1671,16 @@ function renderSemanticTableValue(value, displayId) {
   if (Object.prototype.hasOwnProperty.call(value, 'value')) {
     return renderDecodedValue(value.value)
   }
-  if (Array.isArray(value.values)) {
-    return renderDecodedSection(value.values, { state_kind: 'LIST' }, displayId)
+  if (value.kind === 'LIST') {
+    return renderDecodedSection(value.elements || value.values || [], { state_kind: 'LIST' }, displayId)
   }
-  if (Array.isArray(value.entries)) {
+  if (value.kind === 'MAP') {
     return renderDecodedMapEntries(value.entries)
   }
   if (Array.isArray(value.fields)) {
     return renderDecodedBlock(value.fields.map((field) => renderDecodedPair(field.name, field.value)))
   }
-  return renderDecodedValue(value)
+  return renderCode(JSON.stringify(value))
 }
 
 function renderDecodedMapEntries(entries = []) {
@@ -1961,6 +1962,7 @@ function renderDecodedKey(decodedKey, target = null) {
 
 function renderDecodedSection(value, target = null, displayId = '') {
   if (value === undefined || value === null) return ''
+  if (value.kind) return renderSemanticTableValue(value, displayId)
   if (target?.state_kind === 'LIST' && Array.isArray(value)) {
     const type = target.serializer_classes?.element
     const visible = visibleListLimit(displayId, value.length)
