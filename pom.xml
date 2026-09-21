@@ -75,6 +75,19 @@
     </properties>
 
     <build>
+        <pluginManagement>
+            <plugins>
+                <plugin>
+                    <artifactId>maven-jar-plugin</artifactId>
+                    <version>3.4.2</version>
+                    <configuration>
+                        <!-- Rebuild the thin jar before shading so incremental builds cannot
+                             retain classes or native libraries from an earlier dependency. -->
+                        <forceCreation>true</forceCreation>
+                    </configuration>
+                </plugin>
+            </plugins>
+        </pluginManagement>
         <plugins>
             <plugin>
                 <groupId>org.codehaus.mojo</groupId>
