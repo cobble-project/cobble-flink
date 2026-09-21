@@ -62,13 +62,14 @@ cluster. The shaded jar includes the common Flink filesystem plugins.
 The monitor exposes:
 
 - `GET /healthz`
-- `GET /api/v1/meta`
-- `GET /api/v1/snapshots`
-- `POST /api/v1/mode`
-- `GET /api/v1/inspect`
+- `POST /api/v1/discovery`
+- `POST /api/v1/sessions`
+- `GET /api/v1/sessions/{id}/overview`
+- `POST /api/v1/sessions/{id}/scan`
+- `POST /api/v1/sessions/{id}/lookup`
+- `DELETE /api/v1/sessions/{id}`
 
-`/api/v1/inspect` supports `mode=lookup` with `keys`, `keys_b64`, or `lookup_items`, and
-`mode=scan` with `bucket`, `prefix`/`prefix_b64`, `start_after`/`start_after_b64`, and `limit`.
-Pass `target=<state name>` for Flink state, `target=timer:<state name>` for timer queues, or
-leave `target` empty for the selected default. State targets expose raw key/value bytes without
-column selection. Sink snapshots expose the `sink` target and support `columns=0,1,...` projection.
+Open a session for a checkpoint or Table snapshot, then use its target IDs to scan or look up
+rows. Overview returns the available schemas and SQL source examples. Close the session when
+finished to release its readers. See the [HTTP API guide](../docs/web-monitor/api/index.md)
+for request bodies and examples.
