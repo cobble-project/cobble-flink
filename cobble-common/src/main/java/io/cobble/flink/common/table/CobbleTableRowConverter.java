@@ -129,22 +129,47 @@ public final class CobbleTableRowConverter {
     }
 
     public static int bucket(TableSchema schema, List<Value> row, int totalBuckets) {
-        Map<Long, Integer> positionsById = new LinkedHashMap<Long, Integer>();
-        for (int i = 0; i < schema.fields().size(); i++) {
-            positionsById.put(Long.valueOf(schema.fields().get(i).id()), Integer.valueOf(i));
-        }
-        List<io.cobble.table.LogicalType> keyTypes =
-                new ArrayList<io.cobble.table.LogicalType>(schema.bucketKey().size());
-        List<Value> keyValues = new ArrayList<Value>(schema.bucketKey().size());
-        for (Long fieldId : schema.bucketKey()) {
-            Integer position = positionsById.get(fieldId);
-            if (position == null) {
-                throw new IllegalArgumentException("bucket key field is missing from table schema");
+        return bucketEncoder(schema, totalBuckets).bucket(row);
+    }
+
+    /** Precomputed bucket-key layout for writers that route many rows through one table schema. */
+    public static BucketEncoder bucketEncoder(TableSchema schema, int totalBuckets) {
+        return new BucketEncoder(schema, totalBuckets);
+    }
+
+    public static final class BucketEncoder {
+        private final int[] keyPositions;
+        private final List<io.cobble.table.LogicalType> keyTypes;
+        private final BucketHash bucketHash;
+
+        private BucketEncoder(TableSchema schema, int totalBuckets) {
+            Objects.requireNonNull(schema, "schema");
+            Map<Long, Integer> positionsById = new LinkedHashMap<Long, Integer>();
+            for (int i = 0; i < schema.fields().size(); i++) {
+                positionsById.put(Long.valueOf(schema.fields().get(i).id()), Integer.valueOf(i));
             }
-            keyTypes.add(schema.fields().get(position.intValue()).logicalType());
-            keyValues.add(row.get(position.intValue()));
+            this.keyPositions = new int[schema.bucketKey().size()];
+            this.keyTypes = new ArrayList<io.cobble.table.LogicalType>(schema.bucketKey().size());
+            for (int index = 0; index < keyPositions.length; index++) {
+                Long fieldId = schema.bucketKey().get(index);
+                Integer position = positionsById.get(fieldId);
+                if (position == null) {
+                    throw new IllegalArgumentException(
+                            "bucket key field is missing from table schema");
+                }
+                keyPositions[index] = position.intValue();
+                keyTypes.add(schema.fields().get(position.intValue()).logicalType());
+            }
+            this.bucketHash = new BucketHash(totalBuckets);
         }
-        return new BucketHash(totalBuckets).bucket(KeyCodec.encode(keyTypes, keyValues));
+
+        public int bucket(List<Value> row) {
+            List<Value> keyValues = new ArrayList<Value>(keyPositions.length);
+            for (int position : keyPositions) {
+                keyValues.add(row.get(position));
+            }
+            return bucketHash.bucket(KeyCodec.encode(keyTypes, keyValues));
+        }
     }
 
     public static io.cobble.table.LogicalType toCobbleType(

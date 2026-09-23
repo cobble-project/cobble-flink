@@ -12,7 +12,6 @@ import io.cobble.flink.common.table.CobbleTableRowConverter;
 import io.cobble.table.Table;
 import io.cobble.table.TableKey;
 import io.cobble.table.TableKeyBuilder;
-import io.cobble.table.TableSchema;
 import io.cobble.table.TableSnapshotCommitter;
 import io.cobble.table.Value;
 
@@ -118,7 +117,7 @@ final class CobbleSqlSink
         private final Map<Integer, CobbleSingleBucketWriter> writers;
         private final CobbleRowDataCodecs.RuntimeKeyEncoder keyEncoder;
         private final CobbleTableRowConverter rowConverter;
-        private final TableSchema tableSchema;
+        private final CobbleTableRowConverter.BucketEncoder bucketEncoder;
         private final CobbleConnectorMetrics.SinkMetrics metrics;
         private final CobbleNativeMetrics.Monitor nativeMetrics;
         private List<CobbleShardCommittable> endOfInputCommittables;
@@ -146,7 +145,8 @@ final class CobbleSqlSink
             }
             this.keyEncoder = new CobbleRowDataCodecs.RuntimeKeyEncoder(config.keyFields);
             this.rowConverter = new CobbleTableRowConverter(config.rowType());
-            this.tableSchema = config.tableSchema();
+            this.bucketEncoder =
+                    CobbleTableRowConverter.bucketEncoder(config.tableSchema(), totalBuckets);
             this.writers = new LinkedHashMap<Integer, CobbleSingleBucketWriter>();
             this.lastPreparedByBucket = new LinkedHashMap<Integer, CobbleBucketWriterState>();
             CobbleNativeMetrics.Monitor openedNativeMetrics = null;
@@ -184,7 +184,7 @@ final class CobbleSqlSink
             try {
                 byte[] encodedKey = keyEncoder.encode(element);
                 List<Value> values = rowConverter.toValues(element);
-                int bucket = CobbleTableRowConverter.bucket(tableSchema, values, totalBuckets);
+                int bucket = bucketEncoder.bucket(values);
                 CobbleSingleBucketWriter writer = writers.get(Integer.valueOf(bucket));
                 if (writer == null) {
                     throw new IOException(
