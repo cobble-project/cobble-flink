@@ -1,9 +1,15 @@
 package io.cobble.flink.table;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import io.cobble.Config;
+import io.cobble.DbCoordinator;
 import io.cobble.ShardSnapshot;
+import io.cobble.flink.common.CobbleEmbeddedCheckpoint;
+import io.cobble.flink.common.CobbleEmbeddedCheckpointReader;
 import io.cobble.flink.common.CobbleSnapshotMetadataCodec;
 import io.cobble.flink.common.CobbleSnapshotMetadataPayload;
 import io.cobble.flink.common.inspect.InspectSchemaRegistryLayout;
@@ -34,6 +40,7 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
 import java.io.DataOutputStream;
+import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.util.Arrays;
@@ -93,31 +100,55 @@ class CobbleEmbeddedCheckpointSourceTest {
     }
 
     @Test
-    void opensReaderAgainstMaterializedNativeShard() throws Exception {
-        OperatorID operatorId = new OperatorID(17L, 19L);
+    void sharedReaderReusesExactManifestAndCleansWorkerWorkspace() throws Exception {
+        OperatorID operatorId = new OperatorID(25L, 27L);
         ReadableSavepoint fixture = writeReadableNativeSavepoint(operatorId);
-        java.nio.file.Path savepoint = fixture.directory;
-        StateSourceConfig config =
-                new StateSourceConfig(
-                        savepoint.toUri().toString(),
-                        StateSourceConfig.Layout.EMBEDDED_CHECKPOINT,
-                        operatorId.toHexString(),
-                        "state",
-                        "value",
-                        "latest",
-                        "batch",
-                        3L,
-                        4,
-                        0L,
-                        Collections.emptyList());
         try {
-            assertEquals(3L, CobbleStateSourceRuntime.resolveCheckpointId(config));
-            try (CobbleStateSourceRuntime.ReaderHandle handle =
-                    CobbleStateSourceRuntime.openReader(config, 3L)) {
+            CobbleEmbeddedCheckpoint.OperatorSnapshot operator =
+                    CobbleEmbeddedCheckpoint.read(
+                                    new Path(fixture.directory.resolve("_metadata").toUri()))
+                            .operator(operatorId.toHexString());
+            Config readerConfig = new Config().numColumns(1).totalBuckets(4);
+
+            java.nio.file.Path globalRoot = Files.createDirectory(tempDir.resolve("global"));
+            Config globalConfig = new Config().addVolume(globalRoot.toString()).totalBuckets(4);
+            try (DbCoordinator coordinator = DbCoordinator.open(globalConfig)) {
+                coordinator.materializeGlobalSnapshot(4, 3L, operator.shards());
+            }
+            java.nio.file.Path manifest = globalRoot.resolve("snapshot").resolve("SNAPSHOT-3");
+            byte[] before = Files.readAllBytes(manifest);
+            java.io.File workspace;
+            try (CobbleEmbeddedCheckpointReader.Prepared prepared =
+                    CobbleEmbeddedCheckpointReader.open(
+                            readerConfig, 3L, 4, operator.shards(), manifest.toString())) {
+                workspace = prepared.workspace();
+                assertTrue(workspace.exists());
                 assertEquals(
                         "value",
-                        new String(handle.reader.get(0, "key".getBytes("UTF-8"), 0), "UTF-8"));
+                        new String(prepared.reader().get(0, "key".getBytes("UTF-8"), 0), "UTF-8"));
             }
+            assertFalse(workspace.exists());
+            assertTrue(Arrays.equals(before, Files.readAllBytes(manifest)));
+
+            java.nio.file.Path wrongRoot = Files.createDirectory(tempDir.resolve("wrong-global"));
+            Config wrongConfig = new Config().addVolume(wrongRoot.toString()).totalBuckets(4);
+            try (DbCoordinator coordinator = DbCoordinator.open(wrongConfig)) {
+                coordinator.materializeGlobalSnapshot(4, 999L, operator.shards());
+            }
+            IOException wrong =
+                    assertThrows(
+                            IOException.class,
+                            () ->
+                                    CobbleEmbeddedCheckpointReader.open(
+                                            readerConfig,
+                                            3L,
+                                            4,
+                                            operator.shards(),
+                                            wrongRoot
+                                                    .resolve("snapshot")
+                                                    .resolve("SNAPSHOT-999")
+                                                    .toString()));
+            assertTrue(wrong.getMessage().contains("id 999 does not match checkpoint 3"));
         } finally {
             fixture.close();
         }

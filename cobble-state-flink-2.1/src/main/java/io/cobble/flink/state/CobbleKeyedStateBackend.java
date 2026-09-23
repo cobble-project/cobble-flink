@@ -4,6 +4,7 @@ import io.cobble.ColumnFamilyOptions;
 import io.cobble.Config;
 import io.cobble.flink.common.CobbleNativeMetrics;
 import io.cobble.flink.common.CobbleStateDescriptor;
+import io.cobble.flink.common.CobbleStateReadFormatMetadata;
 import io.cobble.flink.common.inspect.StateInspectSchema;
 import io.cobble.flink.common.inspect.StateInspectSchemaStore;
 import io.cobble.flink.common.inspect.StateInspectSemanticSchema;
@@ -333,6 +334,7 @@ final class CobbleKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
                         (ValueStateDescriptor<SV>) stateDesc;
                 registerValueSchema(
                         stateName, ttlEnabled, namespaceSerializer, valueStateDescriptor);
+                publishStateReadMetadata(runtimeDescriptor, ttlEnabled);
                 CobbleValueState<K, N, SV> valueState =
                         new CobbleValueState<>(
                                 this,
@@ -357,6 +359,7 @@ final class CobbleKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
                         ttlEnabled,
                         namespaceSerializer,
                         (ListStateDescriptor<?>) stateDesc);
+                publishStateReadMetadata(runtimeDescriptor, ttlEnabled);
                 trackStateResource((AbstractCobbleState<?, ?, ?>) listState);
                 restoredCanonicalMetadata.remove(stateName);
                 return listState;
@@ -371,6 +374,7 @@ final class CobbleKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
                         ttlEnabled,
                         namespaceSerializer,
                         (MapStateDescriptor<?, ?>) stateDesc);
+                publishStateReadMetadata(runtimeDescriptor, ttlEnabled);
                 trackStateResource((AbstractCobbleState<?, ?, ?>) mapState);
                 restoredCanonicalMetadata.remove(stateName);
                 return mapState;
@@ -385,6 +389,7 @@ final class CobbleKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
                         ttlEnabled,
                         namespaceSerializer,
                         (ReducingStateDescriptor<?>) stateDesc);
+                publishStateReadMetadata(runtimeDescriptor, ttlEnabled);
                 trackStateResource((AbstractCobbleState<?, ?, ?>) reducingState);
                 restoredCanonicalMetadata.remove(stateName);
                 return reducingState;
@@ -399,6 +404,7 @@ final class CobbleKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
                         ttlEnabled,
                         namespaceSerializer,
                         (AggregatingStateDescriptor<?, ?, ?>) stateDesc);
+                publishStateReadMetadata(runtimeDescriptor, ttlEnabled);
                 trackStateResource((AbstractCobbleState<?, ?, ?>) aggregatingState);
                 restoredCanonicalMetadata.remove(stateName);
                 return aggregatingState;
@@ -1217,5 +1223,28 @@ final class CobbleKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
         }
         return new StateInspectSchemaStore(
                 new ArrayList<>(stateInspectSchemas.values()), stateInspectSemanticSchemas);
+    }
+
+    /** Captures one keyed state's inspect schema in its CF metadata without changing row bytes. */
+    private void publishStateReadMetadata(CobbleStateDescriptor descriptor, boolean ttlEnabled)
+            throws IOException {
+        StateInspectSchema schema = stateInspectSchemas.get(descriptor.stateName());
+        if (schema == null) {
+            throw new IOException(
+                    "Cobble state '"
+                            + descriptor.stateName()
+                            + "' has no inspect schema for snapshot read metadata.");
+        }
+        String metadata =
+                CobbleStateReadFormatMetadata.encode(
+                        descriptor,
+                        schema,
+                        stateInspectSemanticSchemas.get(descriptor.stateName()));
+        try (StructuredSchemaBuilder builder = cobbleDb.updateSchema()) {
+            builder.setColumnFamilyOptions(
+                    descriptor.columnFamily(),
+                    ColumnFamilyOptions.defaults().valueHasTtl(ttlEnabled).metadata(metadata));
+            builder.commit();
+        }
     }
 }

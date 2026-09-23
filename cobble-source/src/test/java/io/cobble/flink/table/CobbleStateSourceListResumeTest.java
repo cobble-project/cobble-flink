@@ -1,7 +1,7 @@
 package io.cobble.flink.table;
 
+import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import io.cobble.flink.common.inspect.StateInspectSchema;
 import io.cobble.flink.common.inspect.StateInspectSemanticSchema;
@@ -16,80 +16,20 @@ import org.apache.flink.table.data.RowData;
 import org.junit.jupiter.api.Test;
 
 import java.util.ArrayList;
-import java.util.Arrays;
 import java.util.List;
 
 /**
- * Unit coverage for the intra-entry resume mechanism that prevents ListState data loss when a
- * checkpoint fires mid-entry. A single native LIST entry decodes to multiple rows; the reader must
- * be able to snapshot after emitting a subset and resume without losing or duplicating rows.
+ * Unit coverage for checkpointed ListState positions. The shared table cursor owns intra-entry row
+ * skipping when a physical LIST entry decodes to multiple rows.
  */
 class CobbleStateSourceListResumeTest {
 
     /**
-     * Simulates the core resume scenario: a list entry with 3 elements is decoded, 1 row is
-     * emitted, a checkpoint saves the partial-entry state, and the reader resumes by re-decoding
-     * with a skip. The remaining rows must be exactly elements 2 and 3 — no loss, no duplication.
+     * A completed entry persists its offset too, so restoring it re-reads and skips the entry
+     * before continuing at the next physical row.
      */
     @Test
-    void listEntryResumeSkipsAlreadyEmittedRows() throws Exception {
-        CobbleStateRowDecoder decoder = listDecoder();
-        byte[] rowKey = concat(serialize(IntSerializer.INSTANCE, 1), namespaceBytes());
-        byte[][] columns =
-                new byte[][] {
-                    concat(
-                            serialize(IntSerializer.INSTANCE, 10),
-                            new byte[] {','},
-                            serialize(IntSerializer.INSTANCE, 20),
-                            new byte[] {','},
-                            serialize(IntSerializer.INSTANCE, 30))
-                };
-
-        // Initial decode: entry produces 3 rows [10, 20, 30].
-        List<RowData> initial = decoder.decode(rowKey, columns, "0:0:4", 0);
-        assertEquals(3, initial.size());
-        assertEquals(10, initial.get(0).getInt(1));
-        assertEquals(20, initial.get(1).getInt(1));
-        assertEquals(30, initial.get(2).getInt(1));
-
-        // Simulate: row 0 (value=10) emitted, checkpoint fires with partialEmittedCount=1.
-        int emittedBeforeCheckpoint = 1;
-        CobbleStateSourceSplit checkpointed =
-                new CobbleStateSourceSplit(
-                        "0:3:4",
-                        7L,
-                        4,
-                        0,
-                        3,
-                        "operator-1",
-                        "events",
-                        "list",
-                        0,
-                        null,
-                        rowKey,
-                        emittedBeforeCheckpoint);
-
-        // On resume, the reader re-reads the same entry and decodes with skip=1.
-        List<RowData> resumed =
-                decoder.decode(
-                        checkpointed.partialEntryKey,
-                        columns,
-                        "0:3:4",
-                        0,
-                        checkpointed.partialEmittedCount);
-
-        // Exactly the remaining 2 rows, in order, no duplication of row 0.
-        assertEquals(2, resumed.size());
-        assertEquals(20, resumed.get(0).getInt(1));
-        assertEquals(30, resumed.get(1).getInt(1));
-    }
-
-    /**
-     * Edge case: checkpoint fires after all rows from the entry are emitted. partialEntryKey is
-     * null and partialEmittedCount is 0. Resume produces the next entry normally (no skip).
-     */
-    @Test
-    void fullyConsumedEntryHasNoPartialState() throws Exception {
+    void completedEntryRetainsConsumedOffset() throws Exception {
         CobbleStateRowDecoder decoder = listDecoder();
         byte[] rowKey = concat(serialize(IntSerializer.INSTANCE, 1), namespaceBytes());
         byte[][] columns =
@@ -107,66 +47,56 @@ class CobbleStateSourceListResumeTest {
         // Checkpoint after full consumption: boundary = entry key, no partial state.
         CobbleStateSourceSplit checkpointed =
                 new CobbleStateSourceSplit(
-                        "0:3:4", 7L, 4, 0, 3, "operator-1", "events", "list", 0, rowKey, null, 0);
+                        "0:3:4", 7L, 4, 0, 3, "operator-1", "events", "list", 0, rowKey, 2);
 
-        assertTrue(checkpointed.partialEntryKey == null);
-        assertEquals(0, checkpointed.partialEmittedCount);
+        assertEquals(0, checkpointed.resumeBucket);
+        assertEquals(2, checkpointed.resumeIntraEntryOffset);
 
-        // On resume, the cursor starts from the boundary (inclusive), skips the boundary entry
-        // (already consumed), and returns the next entry. No skip applied to the next entry.
+        // The cursor skips this completed boundary entry and decodes the next one normally.
         List<RowData> nextEntry =
                 decoder.decode(
                         concat(serialize(IntSerializer.INSTANCE, 2), namespaceBytes()),
                         new byte[][] {serialize(IntSerializer.INSTANCE, 99)},
                         "0:3:4",
-                        0,
                         0);
         assertEquals(1, nextEntry.size());
         assertEquals(99, nextEntry.get(0).getInt(1));
     }
 
-    /**
-     * The partial-entry state must survive serializer round-trip so a checkpoint barrier can
-     * serialize it and the restored reader can pick up exactly where it left off.
-     */
+    /** Repeated checkpoints within the same physical LIST entry retain the accumulated offset. */
     @Test
-    void partialEntryStateSurvivesSerializerRoundTrip() throws Exception {
+    void repeatedCheckpointsRetainAccumulatedIntraEntryOffset() throws Exception {
         byte[] entryKey = concat(serialize(IntSerializer.INSTANCE, 1), namespaceBytes());
         CobbleStateSourceSplit split =
                 new CobbleStateSourceSplit(
-                        "0:3:4", 7L, 4, 0, 3, "operator-1", "events", "list", 0, null, entryKey, 2);
+                        "0:3:4", 7L, 4, 0, 3, "operator-1", "events", "list", 0, entryKey, 1);
 
         CobbleStateSourceSplit.Serializer serializer = new CobbleStateSourceSplit.Serializer();
         byte[] bytes = serializer.serialize(split);
         CobbleStateSourceSplit restored = serializer.deserialize(serializer.getVersion(), bytes);
 
         assertEquals(7L, restored.checkpointId);
-        assertEquals(0, restored.startKeyGroup);
-        assertTrue(restored.startKeyExclusive == null);
-        assertTrue(
-                Arrays.equals(entryKey, restored.partialEntryKey),
-                "partialEntryKey must survive round-trip");
-        assertEquals(2, restored.partialEmittedCount);
-    }
+        assertEquals(0, restored.resumeBucket);
+        assertArrayEquals(entryKey, restored.resumePhysicalKey);
+        assertEquals(1, restored.resumeIntraEntryOffset);
 
-    /**
-     * Skip count equal to the total number of decoded rows yields an empty result (all rows already
-     * emitted). The reader treats this as "entry fully consumed" and advances to the next entry.
-     */
-    @Test
-    void skipAllRowsYieldsEmpty() throws Exception {
-        CobbleStateRowDecoder decoder = listDecoder();
-        byte[] rowKey = concat(serialize(IntSerializer.INSTANCE, 1), namespaceBytes());
-        byte[][] columns =
-                new byte[][] {
-                    concat(
-                            serialize(IntSerializer.INSTANCE, 10),
-                            new byte[] {','},
-                            serialize(IntSerializer.INSTANCE, 20))
-                };
-
-        List<RowData> skipped = decoder.decode(rowKey, columns, "0:0:4", 0, 2);
-        assertTrue(skipped.isEmpty());
+        CobbleStateSourceSplit secondCheckpoint =
+                new CobbleStateSourceSplit(
+                        restored.splitId,
+                        restored.checkpointId,
+                        restored.totalKeyGroups,
+                        restored.keyGroupStart,
+                        restored.keyGroupEnd,
+                        restored.operatorId,
+                        restored.stateName,
+                        restored.stateKind,
+                        restored.resumeBucket,
+                        restored.resumePhysicalKey,
+                        restored.resumeIntraEntryOffset + 1);
+        CobbleStateSourceSplit secondRestore =
+                serializer.deserialize(
+                        serializer.getVersion(), serializer.serialize(secondCheckpoint));
+        assertEquals(2, secondRestore.resumeIntraEntryOffset);
     }
 
     private static CobbleStateRowDecoder listDecoder() throws Exception {
@@ -178,36 +108,22 @@ class CobbleStateSourceListResumeTest {
                         IntSerializer.INSTANCE,
                         VoidNamespaceSerializer.INSTANCE,
                         IntSerializer.INSTANCE);
+        List<StateSourceField> fields =
+                fields(
+                        "key",
+                        "INT",
+                        StateSourceField.Group.STATE_KEY,
+                        "value",
+                        "INT",
+                        StateSourceField.Group.LIST_ELEMENT);
         return new CobbleStateRowDecoder(
-                config(
-                        fields(
-                                "key",
-                                "INT",
-                                StateSourceField.Group.STATE_KEY,
-                                "value",
-                                "INT",
-                                StateSourceField.Group.LIST_ELEMENT)),
-                new CobbleStateSourceRuntime.RuntimeSchema(
-                        schema,
-                        StateInspectSemanticSchema.forList(
-                                StateInspectType.scalar("INT"),
-                                StateInspectType.unknown(),
-                                StateInspectType.scalar("INT"))));
-    }
-
-    private static StateSourceConfig config(List<StateSourceField> fields) {
-        return new StateSourceConfig(
-                "file:///tmp/checkpoints",
-                StateSourceConfig.Layout.CHECKPOINT_ROOT,
-                "operator-1",
-                "events",
-                "list",
-                "7",
-                "batch",
-                7L,
-                -1,
-                0L,
-                fields);
+                schema,
+                StateInspectSemanticSchema.forList(
+                        StateInspectType.scalar("INT"),
+                        StateInspectType.unknown(),
+                        StateInspectType.scalar("INT")),
+                fields,
+                "test");
     }
 
     private static List<StateSourceField> fields(Object... values) {

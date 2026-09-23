@@ -1,7 +1,8 @@
 package io.cobble.flink.table;
 
-import io.cobble.ReadOptions;
 import io.cobble.flink.common.CobbleConnectorMetrics;
+import io.cobble.table.TableReadEntry;
+import io.cobble.table.TableReadSession;
 
 import org.apache.flink.table.data.RowData;
 import org.apache.flink.table.functions.FunctionContext;
@@ -11,7 +12,6 @@ import java.io.IOException;
 import java.util.Arrays;
 import java.util.Collection;
 import java.util.Collections;
-import java.util.List;
 
 /**
  * Lookup function that resolves Cobble state rows by exact full key for value-like states
@@ -24,8 +24,8 @@ import java.util.List;
  *
  * <p>Only batch lookup is supported: {@code scan.mode='batch'}. The checkpoint is pinned at {@link
  * #open(FunctionContext)} time via {@link CobbleStateSourceRuntime#resolveCheckpointId}, matching
- * batch scan semantics. Streaming state lookup is rejected because checkpoint-root materialization
- * (manifest/shard copy into a unified temp volume) is checkpoint-specific.
+ * batch scan semantics. Streaming state lookup is rejected because this reader is pinned to one
+ * checkpoint and never advances its fixed snapshot view.
  */
 public final class CobbleStateLookupFunction extends LookupFunction {
 
@@ -35,13 +35,8 @@ public final class CobbleStateLookupFunction extends LookupFunction {
     private final StateSourceConfig config;
     private final int[] lookupKeyPositionsByRequiredField;
 
-    private transient CobbleStateSourceRuntime.RuntimeSchema runtimeSchema;
-    private transient CobbleStateLookupKeyEncoder keyEncoder;
-    private transient CobbleStateRowDecoder rowDecoder;
-    private transient CobbleStateSourceRuntime.ReaderHandle readerHandle;
-    private transient ReadOptions readOptions;
-    private transient long checkpointId;
-    private transient int totalKeyGroups;
+    private transient CobbleStateTableReadProvider provider;
+    private transient TableReadSession<RowData, RowData> session;
     private transient CobbleConnectorMetrics.LookupMetrics metrics;
 
     CobbleStateLookupFunction(StateSourceConfig config, int[] lookupKeyPositionsByRequiredField) {
@@ -58,37 +53,13 @@ public final class CobbleStateLookupFunction extends LookupFunction {
         if (!"batch".equals(config.scanMode())) {
             throw new IOException(STREAMING_LOOKUP_NOT_SUPPORTED);
         }
-        // Use local variables so a failure in any step closes resources already created, preventing
-        // the temporary unified volume from leaking when a later step (e.g. readOptions) throws.
-        long resolvedCheckpointId = CobbleStateSourceRuntime.resolveCheckpointId(config);
-        CobbleStateSourceRuntime.RuntimeSchema resolvedSchema =
-                CobbleStateSourceRuntime.loadRuntimeSchema(config);
-        CobbleStateLookupKeyEncoder resolvedEncoder =
-                new CobbleStateLookupKeyEncoder(
-                        config, resolvedSchema, lookupKeyPositionsByRequiredField);
-        CobbleStateRowDecoder resolvedDecoder = new CobbleStateRowDecoder(config, resolvedSchema);
-        CobbleStateSourceRuntime.ReaderHandle resolvedReader = null;
-        ReadOptions resolvedReadOptions = null;
+        CobbleStateTableReadProvider resolvedProvider =
+                CobbleStateTableReadProvider.forLookup(config, lookupKeyPositionsByRequiredField);
         try {
-            resolvedReader = CobbleStateSourceRuntime.openReader(config, resolvedCheckpointId);
-            int resolvedTotalKeyGroups = resolvedReader.reader.currentGlobalSnapshot().totalBuckets;
-            resolvedReadOptions =
-                    CobbleStateSourceRuntime.readOptions(resolvedSchema.schema.columnFamily(), 0);
-            // All steps succeeded — publish to fields.
-            this.checkpointId = resolvedCheckpointId;
-            this.runtimeSchema = resolvedSchema;
-            this.keyEncoder = resolvedEncoder;
-            this.rowDecoder = resolvedDecoder;
-            this.readerHandle = resolvedReader;
-            this.readOptions = resolvedReadOptions;
-            this.totalKeyGroups = resolvedTotalKeyGroups;
+            this.session = resolvedProvider.open();
+            this.provider = resolvedProvider;
         } catch (Exception e) {
-            if (resolvedReadOptions != null) {
-                resolvedReadOptions.close();
-            }
-            if (resolvedReader != null) {
-                resolvedReader.close();
-            }
+            resolvedProvider.close();
             throw e;
         }
     }
@@ -97,39 +68,7 @@ public final class CobbleStateLookupFunction extends LookupFunction {
     public Collection<RowData> lookup(RowData keyRow) throws IOException {
         metrics.request();
         try {
-            CobbleStateLookupKeyEncoder.EncodedStateLookupKey encoded =
-                    keyEncoder.encode(keyRow, totalKeyGroups);
-            byte[][] columns;
-            try {
-                columns =
-                        readerHandle.reader.getWithOptions(
-                                encoded.keyGroup(), encoded.rowKey(), readOptions);
-            } catch (RuntimeException e) {
-                // A shard may not have registered the state column family when it never wrote data
-                // for that state in this key group. The key is genuinely absent in that shard.
-                if (CobbleStateSourceReader.isUnknownColumnFamily(e)) {
-                    metrics.miss();
-                    return Collections.emptyList();
-                }
-                throw new IOException(
-                        "Failed to read Cobble state lookup row (checkpoint="
-                                + checkpointId
-                                + ", operator="
-                                + config.operatorId()
-                                + ", state="
-                                + config.stateName()
-                                + ", keyGroup="
-                                + encoded.keyGroup()
-                                + "): "
-                                + e.getMessage(),
-                        e);
-            }
-            if (columns == null) {
-                metrics.miss();
-                return Collections.emptyList();
-            }
-            List<RowData> rows =
-                    rowDecoder.decode(encoded.rowKey(), columns, "lookup", encoded.keyGroup());
+            Collection<TableReadEntry<RowData>> rows = session.lookup(keyRow);
             if (rows.isEmpty()) {
                 metrics.miss();
                 return Collections.emptyList();
@@ -142,27 +81,27 @@ public final class CobbleStateLookupFunction extends LookupFunction {
                                 + rows.size()
                                 + " rows for a single key; expected at most one.");
             }
-            metrics.hit(encoded.rowKey(), columns);
-            return Collections.singletonList(rows.get(0));
+            TableReadEntry<RowData> row = rows.iterator().next();
+            metrics.hit(row.physicalBytes());
+            return Collections.singletonList(row.value());
         } catch (IOException e) {
             metrics.error();
             throw e;
         } catch (RuntimeException e) {
             metrics.error();
             throw e;
+        } catch (Exception e) {
+            metrics.error();
+            throw new IOException("Cobble state lookup failed.", e);
         }
     }
 
     @Override
     public void close() {
-        if (readOptions != null) {
-            readOptions.close();
-            readOptions = null;
-        }
-        if (readerHandle != null) {
-            readerHandle.close();
-            readerHandle = null;
-        }
+        if (session != null) session.close();
+        session = null;
+        if (provider != null) provider.close();
+        provider = null;
     }
 
     private static CobbleConnectorMetrics.LookupMetrics lookupMetrics(FunctionContext context) {

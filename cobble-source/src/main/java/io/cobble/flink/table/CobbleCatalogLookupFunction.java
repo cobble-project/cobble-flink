@@ -2,8 +2,7 @@ package io.cobble.flink.table;
 
 import io.cobble.flink.catalog.CobbleCatalogTableReference;
 import io.cobble.flink.common.table.CobbleTableRowConverter;
-import io.cobble.table.TableKeyBuilder;
-import io.cobble.table.TableReader;
+import io.cobble.table.TableReadEntry;
 import io.cobble.table.Value;
 
 import org.apache.flink.table.data.RowData;
@@ -12,6 +11,7 @@ import org.apache.flink.table.functions.LookupFunction;
 import org.apache.flink.table.types.logical.RowType;
 
 import java.io.IOException;
+import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Collections;
 import java.util.List;
@@ -23,7 +23,7 @@ public final class CobbleCatalogLookupFunction extends LookupFunction {
     private final String snapshot;
     private final int[] primaryPositions;
     private final int[] mapping;
-    private transient TableReader reader;
+    private transient io.cobble.table.TableReader reader;
     private transient CobbleTableRowConverter converter;
     private transient RowData.FieldGetter[] keyGetters;
 
@@ -55,28 +55,29 @@ public final class CobbleCatalogLookupFunction extends LookupFunction {
     public Collection<RowData> lookup(RowData arguments) throws IOException {
         try {
             if (reader == null) return Collections.emptyList();
-            TableKeyBuilder key = reader.keyBuilder();
+            List<Value> key = new ArrayList<>(mapping.length);
             for (int i = 0; i < mapping.length; i++) {
                 Object value = keyGetters[i].getFieldOrNull(arguments);
                 if (value == null) return Collections.emptyList();
-                key.push(
+                key.add(
                         CobbleTableRowConverter.toValue(
                                 rowType.getTypeAt(primaryPositions[i]), value));
             }
-            List<Value> row = reader.get(key.build());
-            return row == null
+            Collection<TableReadEntry<List<Value>>> rows = reader.lookup(key);
+            return rows.isEmpty()
                     ? Collections.emptyList()
-                    : Collections.singletonList(converter.toRowData(row));
+                    : Collections.singletonList(
+                            converter.toRowData(rows.iterator().next().value()));
         } catch (RuntimeException error) {
+            throw new IOException("Cobble catalog lookup failed.", error);
+        } catch (Exception error) {
             throw new IOException("Cobble catalog lookup failed.", error);
         }
     }
 
     @Override
     public void close() {
-        if (reader != null) {
-            reader.close();
-            reader = null;
-        }
+        if (reader != null) reader.close();
+        reader = null;
     }
 }

@@ -30,12 +30,32 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
 
 /** Integration test that exercises wide-bucket source scans through the reader directly. */
 class CobbleSourceReaderITTest {
 
     @TempDir private Path tempDir;
+
+    @Test
+    void boundedNoMoreSplitsWakesAnIdleReader() throws Exception {
+        CobbleSourceReader reader =
+                new CobbleSourceReader(
+                        sourceConfig(tempDir.resolve("idle-bounded-reader"), 1, "latest", "batch"),
+                        new TestingContext());
+        try {
+            CompletableFuture<Void> idleAvailability = reader.isAvailable();
+            assertEquals(false, idleAvailability.isDone());
+
+            reader.notifyNoMoreSplits();
+
+            assertEquals(true, idleAvailability.isDone());
+            assertEquals(InputStatus.END_OF_INPUT, reader.pollNext(new CollectingOutput()));
+        } finally {
+            reader.close();
+        }
+    }
 
     @Test
     void readerEmitsAllKeysAcrossLargeBucketRanges() throws Exception {

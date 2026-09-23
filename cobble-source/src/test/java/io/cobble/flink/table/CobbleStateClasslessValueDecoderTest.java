@@ -345,20 +345,7 @@ class CobbleStateClasslessValueDecoderTest {
             String kind,
             List<StateSourceField> outputFields)
             throws Exception {
-        return new CobbleStateRowDecoder(
-                new StateSourceConfig(
-                        "file:///tmp/checkpoints",
-                        StateSourceConfig.Layout.CHECKPOINT_ROOT,
-                        "operator",
-                        "state",
-                        kind,
-                        "7",
-                        "batch",
-                        7L,
-                        -1,
-                        0L,
-                        outputFields),
-                new CobbleStateSourceRuntime.RuntimeSchema(schema, semantic));
+        return new CobbleStateRowDecoder(schema, semantic, outputFields, "test");
     }
 
     private static List<RowData> decodeWithBlockedClasses(

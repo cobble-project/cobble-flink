@@ -72,7 +72,7 @@ class CobbleStateLookupKeyEncoderTest {
                                                 "VARCHAR(2147483647)",
                                                 StateSourceField.Group.STATE_KEY,
                                                 1))));
-        CobbleStateSourceRuntime.RuntimeSchema runtimeSchema =
+        RuntimeSchema runtimeSchema =
                 runtimeSchema(
                         StateInspectSchema.forValue(
                                 "orders",
@@ -91,7 +91,10 @@ class CobbleStateLookupKeyEncoderTest {
                         IllegalArgumentException.class,
                         () ->
                                 new CobbleStateLookupKeyEncoder(
-                                        config, runtimeSchema, new int[] {0, 1}));
+                                        runtimeSchema.schema,
+                                        runtimeSchema.semanticSchema,
+                                        config.lookupKeyContract().requiredFields(),
+                                        new int[] {0, 1}));
         assertTrue(
                 error.getMessage().contains("exact state key reconstruction"), error.getMessage());
         assertTrue(error.getMessage().contains("classless POJO"), error.getMessage());
@@ -117,7 +120,7 @@ class CobbleStateLookupKeyEncoderTest {
                                 field("key", "INT", StateSourceField.Group.STATE_KEY, 0),
                                 field("value", "INT", StateSourceField.Group.VALUE, 0)),
                         contract(fields(field("key", "INT", StateSourceField.Group.STATE_KEY, 0))));
-        CobbleStateSourceRuntime.RuntimeSchema runtimeSchema =
+        RuntimeSchema runtimeSchema =
                 runtimeSchema(
                         StateInspectSchema.forValue(
                                 "orders",
@@ -132,7 +135,11 @@ class CobbleStateLookupKeyEncoderTest {
                                 StateInspectType.scalar("INT")));
 
         CobbleStateLookupKeyEncoder encoder =
-                new CobbleStateLookupKeyEncoder(config, runtimeSchema, new int[] {0});
+                new CobbleStateLookupKeyEncoder(
+                        runtimeSchema.schema,
+                        runtimeSchema.semanticSchema,
+                        config.lookupKeyContract().requiredFields(),
+                        new int[] {0});
 
         RowData keyRow = singleIntRow(12);
         CobbleStateLookupKeyEncoder.EncodedStateLookupKey encoded =
@@ -166,7 +173,7 @@ class CobbleStateLookupKeyEncoderTest {
                                 field("key", "INT", StateSourceField.Group.STATE_KEY, 0),
                                 field("value", "INT", StateSourceField.Group.VALUE, 0)),
                         contract(fields(field("key", "INT", StateSourceField.Group.STATE_KEY, 0))));
-        CobbleStateSourceRuntime.RuntimeSchema runtimeSchema =
+        RuntimeSchema runtimeSchema =
                 runtimeSchema(
                         schema,
                         StateInspectSemanticSchema.forValue(
@@ -175,7 +182,11 @@ class CobbleStateLookupKeyEncoderTest {
                                 StateInspectType.scalar("INT")));
 
         CobbleStateLookupKeyEncoder encoder =
-                new CobbleStateLookupKeyEncoder(config, runtimeSchema, new int[] {0});
+                new CobbleStateLookupKeyEncoder(
+                        runtimeSchema.schema,
+                        runtimeSchema.semanticSchema,
+                        config.lookupKeyContract().requiredFields(),
+                        new int[] {0});
 
         RowData keyRow = singleIntRow(7);
         CobbleStateLookupKeyEncoder.EncodedStateLookupKey encoded =
@@ -207,7 +218,7 @@ class CobbleStateLookupKeyEncoderTest {
                                                 "VARCHAR(2147483647)",
                                                 StateSourceField.Group.NAMESPACE,
                                                 0))));
-        CobbleStateSourceRuntime.RuntimeSchema runtimeSchema =
+        RuntimeSchema runtimeSchema =
                 runtimeSchema(
                         StateInspectSchema.forValue(
                                 "orders",
@@ -222,7 +233,11 @@ class CobbleStateLookupKeyEncoderTest {
                                 StateInspectType.scalar("INT")));
 
         CobbleStateLookupKeyEncoder encoder =
-                new CobbleStateLookupKeyEncoder(config, runtimeSchema, new int[] {0, 1});
+                new CobbleStateLookupKeyEncoder(
+                        runtimeSchema.schema,
+                        runtimeSchema.semanticSchema,
+                        config.lookupKeyContract().requiredFields(),
+                        new int[] {0, 1});
 
         GenericRowData keyRow = new GenericRowData(2);
         keyRow.setField(0, 5);
@@ -280,7 +295,7 @@ class CobbleStateLookupKeyEncoderTest {
                         StringSerializer.INSTANCE,
                         StringSerializer.INSTANCE,
                         IntSerializer.INSTANCE);
-        CobbleStateSourceRuntime.RuntimeSchema runtimeSchema =
+        RuntimeSchema runtimeSchema =
                 runtimeSchema(
                         schema,
                         StateInspectSemanticSchema.forValue(
@@ -289,7 +304,11 @@ class CobbleStateLookupKeyEncoderTest {
                                 StateInspectType.scalar("INT")));
 
         CobbleStateLookupKeyEncoder encoder =
-                new CobbleStateLookupKeyEncoder(config, runtimeSchema, new int[] {0, 1});
+                new CobbleStateLookupKeyEncoder(
+                        runtimeSchema.schema,
+                        runtimeSchema.semanticSchema,
+                        config.lookupKeyContract().requiredFields(),
+                        new int[] {0, 1});
 
         GenericRowData keyRow = new GenericRowData(2);
         keyRow.setField(0, StringData.fromString("customer"));
@@ -336,7 +355,7 @@ class CobbleStateLookupKeyEncoderTest {
                         VoidNamespaceSerializer.INSTANCE,
                         IntSerializer.INSTANCE,
                         IntSerializer.INSTANCE);
-        CobbleStateSourceRuntime.RuntimeSchema runtimeSchema =
+        RuntimeSchema runtimeSchema =
                 runtimeSchema(
                         schema,
                         StateInspectSemanticSchema.forMap(
@@ -346,7 +365,11 @@ class CobbleStateLookupKeyEncoderTest {
                                 StateInspectType.scalar("INT")));
 
         CobbleStateLookupKeyEncoder encoder =
-                new CobbleStateLookupKeyEncoder(config, runtimeSchema, new int[] {0, 1});
+                new CobbleStateLookupKeyEncoder(
+                        runtimeSchema.schema,
+                        runtimeSchema.semanticSchema,
+                        config.lookupKeyContract().requiredFields(),
+                        new int[] {0, 1});
 
         GenericRowData keyRow = new GenericRowData(2);
         keyRow.setField(0, 7);
@@ -414,7 +437,7 @@ class CobbleStateLookupKeyEncoderTest {
                         StringSerializer.INSTANCE,
                         StringSerializer.INSTANCE,
                         IntSerializer.INSTANCE);
-        CobbleStateSourceRuntime.RuntimeSchema runtimeSchema =
+        RuntimeSchema runtimeSchema =
                 runtimeSchema(
                         schema,
                         StateInspectSemanticSchema.forMap(
@@ -424,7 +447,11 @@ class CobbleStateLookupKeyEncoderTest {
                                 StateInspectType.scalar("INT")));
 
         CobbleStateLookupKeyEncoder encoder =
-                new CobbleStateLookupKeyEncoder(config, runtimeSchema, new int[] {0, 1, 2});
+                new CobbleStateLookupKeyEncoder(
+                        runtimeSchema.schema,
+                        runtimeSchema.semanticSchema,
+                        config.lookupKeyContract().requiredFields(),
+                        new int[] {0, 1, 2});
 
         GenericRowData keyRow = new GenericRowData(3);
         keyRow.setField(0, StringData.fromString("k"));
@@ -465,7 +492,7 @@ class CobbleStateLookupKeyEncoderTest {
                                 field("key", "INT", StateSourceField.Group.STATE_KEY, 0),
                                 field("value", "INT", StateSourceField.Group.VALUE, 0)),
                         contract(fields(field("key", "INT", StateSourceField.Group.STATE_KEY, 0))));
-        CobbleStateSourceRuntime.RuntimeSchema runtimeSchema =
+        RuntimeSchema runtimeSchema =
                 runtimeSchema(
                         StateInspectSchema.forValue(
                                 "orders",
@@ -479,7 +506,11 @@ class CobbleStateLookupKeyEncoderTest {
                                 StateInspectType.unknown(),
                                 StateInspectType.scalar("INT")));
         CobbleStateLookupKeyEncoder encoder =
-                new CobbleStateLookupKeyEncoder(config, runtimeSchema, new int[] {0});
+                new CobbleStateLookupKeyEncoder(
+                        runtimeSchema.schema,
+                        runtimeSchema.semanticSchema,
+                        config.lookupKeyContract().requiredFields(),
+                        new int[] {0});
 
         GenericRowData keyRow = new GenericRowData(1);
         keyRow.setField(0, null);
@@ -509,7 +540,7 @@ class CobbleStateLookupKeyEncoderTest {
                                                 "VARCHAR(2147483647)",
                                                 StateSourceField.Group.NAMESPACE,
                                                 0))));
-        CobbleStateSourceRuntime.RuntimeSchema runtimeSchema =
+        RuntimeSchema runtimeSchema =
                 runtimeSchema(
                         StateInspectSchema.forValue(
                                 "orders",
@@ -523,7 +554,11 @@ class CobbleStateLookupKeyEncoderTest {
                                 StateInspectType.scalar("VARCHAR(2147483647)"),
                                 StateInspectType.scalar("INT")));
         CobbleStateLookupKeyEncoder encoder =
-                new CobbleStateLookupKeyEncoder(config, runtimeSchema, new int[] {0, 1});
+                new CobbleStateLookupKeyEncoder(
+                        runtimeSchema.schema,
+                        runtimeSchema.semanticSchema,
+                        config.lookupKeyContract().requiredFields(),
+                        new int[] {0, 1});
 
         GenericRowData keyRow = new GenericRowData(2);
         keyRow.setField(0, 5);
@@ -550,7 +585,7 @@ class CobbleStateLookupKeyEncoderTest {
                                                 "INT",
                                                 StateSourceField.Group.MAP_KEY,
                                                 0))));
-        CobbleStateSourceRuntime.RuntimeSchema runtimeSchema =
+        RuntimeSchema runtimeSchema =
                 runtimeSchema(
                         StateInspectSchema.forMap(
                                 "counters",
@@ -566,7 +601,11 @@ class CobbleStateLookupKeyEncoderTest {
                                 StateInspectType.scalar("INT"),
                                 StateInspectType.scalar("INT")));
         CobbleStateLookupKeyEncoder encoder =
-                new CobbleStateLookupKeyEncoder(config, runtimeSchema, new int[] {0, 1});
+                new CobbleStateLookupKeyEncoder(
+                        runtimeSchema.schema,
+                        runtimeSchema.semanticSchema,
+                        config.lookupKeyContract().requiredFields(),
+                        new int[] {0, 1});
 
         GenericRowData keyRow = new GenericRowData(2);
         keyRow.setField(0, 7);
@@ -602,7 +641,7 @@ class CobbleStateLookupKeyEncoderTest {
                                 field("key", "INT", StateSourceField.Group.STATE_KEY, 0),
                                 field("value", "INT", StateSourceField.Group.VALUE, 0)),
                         contract(fields(field("key", "INT", StateSourceField.Group.STATE_KEY, 0))));
-        CobbleStateSourceRuntime.RuntimeSchema runtimeSchema =
+        RuntimeSchema runtimeSchema =
                 runtimeSchema(
                         schema,
                         StateInspectSemanticSchema.forValue(
@@ -615,7 +654,10 @@ class CobbleStateLookupKeyEncoderTest {
                         IllegalArgumentException.class,
                         () ->
                                 new CobbleStateLookupKeyEncoder(
-                                        config, runtimeSchema, new int[] {0}));
+                                        runtimeSchema.schema,
+                                        runtimeSchema.semanticSchema,
+                                        config.lookupKeyContract().requiredFields(),
+                                        new int[] {0}));
         assertTrue(error.getMessage().contains("state key"), error.getMessage());
     }
 
@@ -635,7 +677,7 @@ class CobbleStateLookupKeyEncoderTest {
                 StateInspectType.tuple(
                         Collections.singletonList(
                                 new StateInspectField("f0", StateInspectType.scalar("INT"))));
-        CobbleStateSourceRuntime.RuntimeSchema runtimeSchema =
+        RuntimeSchema runtimeSchema =
                 runtimeSchema(
                         schema,
                         StateInspectSemanticSchema.forValue(
@@ -650,7 +692,11 @@ class CobbleStateLookupKeyEncoderTest {
                         contract(fields(field("key", "INT", StateSourceField.Group.STATE_KEY, 0))));
 
         CobbleStateLookupKeyEncoder encoder =
-                new CobbleStateLookupKeyEncoder(config, runtimeSchema, new int[] {0});
+                new CobbleStateLookupKeyEncoder(
+                        runtimeSchema.schema,
+                        runtimeSchema.semanticSchema,
+                        config.lookupKeyContract().requiredFields(),
+                        new int[] {0});
         IOException error =
                 assertThrows(
                         IOException.class, () -> encoder.encode(singleIntRow(1), TOTAL_KEY_GROUPS));
@@ -670,7 +716,7 @@ class CobbleStateLookupKeyEncoderTest {
                         IntSerializer.INSTANCE,
                         VoidNamespaceSerializer.INSTANCE,
                         IntSerializer.INSTANCE);
-        CobbleStateSourceRuntime.RuntimeSchema runtimeSchema =
+        RuntimeSchema runtimeSchema =
                 runtimeSchema(
                         schema,
                         StateInspectSemanticSchema.forValue(
@@ -689,7 +735,10 @@ class CobbleStateLookupKeyEncoderTest {
                         IllegalArgumentException.class,
                         () ->
                                 new CobbleStateLookupKeyEncoder(
-                                        config, runtimeSchema, new int[] {0}));
+                                        runtimeSchema.schema,
+                                        runtimeSchema.semanticSchema,
+                                        config.lookupKeyContract().requiredFields(),
+                                        new int[] {0}));
         assertTrue(error.getMessage().contains("state key"), error.getMessage());
     }
 
@@ -737,7 +786,7 @@ class CobbleStateLookupKeyEncoderTest {
                                                 "VARCHAR(2147483647)",
                                                 StateSourceField.Group.NAMESPACE,
                                                 0))));
-        CobbleStateSourceRuntime.RuntimeSchema runtimeSchema =
+        RuntimeSchema runtimeSchema =
                 runtimeSchema(
                         StateInspectSchema.forValue(
                                 "orders",
@@ -751,7 +800,11 @@ class CobbleStateLookupKeyEncoderTest {
                                 StateInspectType.scalar("VARCHAR(2147483647)"),
                                 StateInspectType.scalar("INT")));
         CobbleStateLookupKeyEncoder encoder =
-                new CobbleStateLookupKeyEncoder(config, runtimeSchema, new int[] {0, 1});
+                new CobbleStateLookupKeyEncoder(
+                        runtimeSchema.schema,
+                        runtimeSchema.semanticSchema,
+                        config.lookupKeyContract().requiredFields(),
+                        new int[] {0, 1});
 
         GenericRowData keyRow = new GenericRowData(2);
         keyRow.setField(0, StringData.fromString("customer"));
@@ -826,7 +879,7 @@ class CobbleStateLookupKeyEncoderTest {
                                                 "VARCHAR(2147483647)",
                                                 StateSourceField.Group.MAP_KEY,
                                                 0))));
-        CobbleStateSourceRuntime.RuntimeSchema runtimeSchema =
+        RuntimeSchema runtimeSchema =
                 runtimeSchema(
                         StateInspectSchema.forMap(
                                 "counters",
@@ -842,7 +895,11 @@ class CobbleStateLookupKeyEncoderTest {
                                 StateInspectType.scalar("VARCHAR(2147483647)"),
                                 StateInspectType.scalar("INT")));
         CobbleStateLookupKeyEncoder encoder =
-                new CobbleStateLookupKeyEncoder(config, runtimeSchema, new int[] {0, 1, 2});
+                new CobbleStateLookupKeyEncoder(
+                        runtimeSchema.schema,
+                        runtimeSchema.semanticSchema,
+                        config.lookupKeyContract().requiredFields(),
+                        new int[] {0, 1, 2});
 
         GenericRowData keyRow = new GenericRowData(3);
         keyRow.setField(0, StringData.fromString("k"));
@@ -866,7 +923,7 @@ class CobbleStateLookupKeyEncoderTest {
                                 field("key", "INT", StateSourceField.Group.STATE_KEY, 0),
                                 field("value", "INT", StateSourceField.Group.VALUE, 0)),
                         contract(fields(field("key", "INT", StateSourceField.Group.STATE_KEY, 0))));
-        CobbleStateSourceRuntime.RuntimeSchema runtimeSchema =
+        RuntimeSchema runtimeSchema =
                 runtimeSchema(
                         StateInspectSchema.forValue(
                                 "orders",
@@ -880,7 +937,11 @@ class CobbleStateLookupKeyEncoderTest {
                                 StateInspectType.unknown(),
                                 StateInspectType.scalar("INT")));
         CobbleStateLookupKeyEncoder encoder =
-                new CobbleStateLookupKeyEncoder(config, runtimeSchema, new int[] {0});
+                new CobbleStateLookupKeyEncoder(
+                        runtimeSchema.schema,
+                        runtimeSchema.semanticSchema,
+                        config.lookupKeyContract().requiredFields(),
+                        new int[] {0});
 
         CobbleStateLookupKeyEncoder.EncodedStateLookupKey encoded =
                 encoder.encode(singleIntRow(42), TOTAL_KEY_GROUPS);
@@ -895,7 +956,7 @@ class CobbleStateLookupKeyEncoderTest {
                                 field("key", "INT", StateSourceField.Group.STATE_KEY, 0),
                                 field("value", "INT", StateSourceField.Group.VALUE, 0)),
                         contract(fields(field("key", "INT", StateSourceField.Group.STATE_KEY, 0))));
-        CobbleStateSourceRuntime.RuntimeSchema runtimeSchema =
+        RuntimeSchema runtimeSchema =
                 runtimeSchema(
                         StateInspectSchema.forValue(
                                 "orders",
@@ -909,7 +970,11 @@ class CobbleStateLookupKeyEncoderTest {
                                 StateInspectType.unknown(),
                                 StateInspectType.scalar("INT")));
         CobbleStateLookupKeyEncoder encoder =
-                new CobbleStateLookupKeyEncoder(config, runtimeSchema, new int[] {0});
+                new CobbleStateLookupKeyEncoder(
+                        runtimeSchema.schema,
+                        runtimeSchema.semanticSchema,
+                        config.lookupKeyContract().requiredFields(),
+                        new int[] {0});
 
         for (int key = 0; key < 100; key++) {
             CobbleStateLookupKeyEncoder.EncodedStateLookupKey encoded =
@@ -958,7 +1023,7 @@ class CobbleStateLookupKeyEncoderTest {
                                                 "VARCHAR(2147483647)",
                                                 StateSourceField.Group.STATE_KEY,
                                                 1))));
-        CobbleStateSourceRuntime.RuntimeSchema runtimeSchema =
+        RuntimeSchema runtimeSchema =
                 runtimeSchema(
                         StateInspectSchema.forValue(
                                 "orders",
@@ -972,7 +1037,11 @@ class CobbleStateLookupKeyEncoderTest {
                                 StateInspectType.unknown(),
                                 StateInspectType.scalar("INT")));
         CobbleStateLookupKeyEncoder encoder =
-                new CobbleStateLookupKeyEncoder(config, runtimeSchema, new int[] {0, 1});
+                new CobbleStateLookupKeyEncoder(
+                        runtimeSchema.schema,
+                        runtimeSchema.semanticSchema,
+                        config.lookupKeyContract().requiredFields(),
+                        new int[] {0, 1});
 
         // Build the lookup key row: BIGINT=42, VARCHAR="alice".
         GenericRowData lookupRow = new GenericRowData(2);
@@ -1036,7 +1105,7 @@ class CobbleStateLookupKeyEncoderTest {
                                                 "VARCHAR(2147483647)",
                                                 StateSourceField.Group.STATE_KEY,
                                                 1))));
-        CobbleStateSourceRuntime.RuntimeSchema runtimeSchema =
+        RuntimeSchema runtimeSchema =
                 runtimeSchema(
                         StateInspectSchema.forValue(
                                 "orders",
@@ -1050,7 +1119,11 @@ class CobbleStateLookupKeyEncoderTest {
                                 StateInspectType.unknown(),
                                 StateInspectType.scalar("INT")));
         CobbleStateLookupKeyEncoder encoder =
-                new CobbleStateLookupKeyEncoder(config, runtimeSchema, new int[] {0, 1});
+                new CobbleStateLookupKeyEncoder(
+                        runtimeSchema.schema,
+                        runtimeSchema.semanticSchema,
+                        config.lookupKeyContract().requiredFields(),
+                        new int[] {0, 1});
 
         String[] names = {"alice", "bob", "charlie", "", "x", "a-very-long-name-for-hashing"};
         for (String name : names) {
@@ -1075,9 +1148,9 @@ class CobbleStateLookupKeyEncoderTest {
     //  Helpers
     // ------------------------------------------------------------------------------------------
 
-    private static CobbleStateSourceRuntime.RuntimeSchema runtimeSchema(
+    private static RuntimeSchema runtimeSchema(
             StateInspectSchema schema, StateInspectSemanticSchema semantic) {
-        return new CobbleStateSourceRuntime.RuntimeSchema(schema, semantic);
+        return new RuntimeSchema(schema, semantic);
     }
 
     private static StateSourceConfig valueConfig(
@@ -1177,18 +1250,21 @@ class CobbleStateLookupKeyEncoderTest {
         return out;
     }
 
+    private static CobbleStateRowDecoder decoder(
+            StateSourceConfig config, RuntimeSchema runtimeSchema) throws Exception {
+        return new CobbleStateRowDecoder(
+                runtimeSchema.schema, runtimeSchema.semanticSchema, config.outputFields(), "test");
+    }
+
     /**
      * Round-trips encoder bytes through the value-state decoder.
      *
      * @param expected key, namespace, value (in output-column order)
      */
     private void assertDecoderRoundTripValue(
-            CobbleStateSourceRuntime.RuntimeSchema runtimeSchema,
-            StateSourceConfig config,
-            byte[] rowKey,
-            Object[] expected)
+            RuntimeSchema runtimeSchema, StateSourceConfig config, byte[] rowKey, Object[] expected)
             throws Exception {
-        CobbleStateRowDecoder decoder = new CobbleStateRowDecoder(config, runtimeSchema);
+        CobbleStateRowDecoder decoder = decoder(config, runtimeSchema);
         byte[] valueColumn =
                 serialize(IntSerializer.INSTANCE, (Integer) expected[expected.length - 1]);
         List<RowData> rows = decoder.decode(rowKey, new byte[][] {valueColumn}, "lk", 0);
@@ -1210,12 +1286,9 @@ class CobbleStateLookupKeyEncoderTest {
      * output columns ordered as: key field 0, key field 1, ..., value.
      */
     private void assertDecoderRoundTripRowKey(
-            CobbleStateSourceRuntime.RuntimeSchema runtimeSchema,
-            StateSourceConfig config,
-            byte[] rowKey,
-            Object[] expected)
+            RuntimeSchema runtimeSchema, StateSourceConfig config, byte[] rowKey, Object[] expected)
             throws Exception {
-        CobbleStateRowDecoder decoder = new CobbleStateRowDecoder(config, runtimeSchema);
+        CobbleStateRowDecoder decoder = decoder(config, runtimeSchema);
         byte[] valueColumn =
                 serialize(IntSerializer.INSTANCE, (Integer) expected[expected.length - 1]);
         List<RowData> rows = decoder.decode(rowKey, new byte[][] {valueColumn}, "lk", 0);
@@ -1239,12 +1312,12 @@ class CobbleStateLookupKeyEncoderTest {
      * key, [namespace], map_key, map_value.
      */
     private void assertDecoderRoundTripMap(
-            CobbleStateSourceRuntime.RuntimeSchema runtimeSchema,
+            RuntimeSchema runtimeSchema,
             StateSourceConfig config,
             byte[] rowKey,
             Object[] expectedKeyNamespaceMapKey)
             throws Exception {
-        CobbleStateRowDecoder decoder = new CobbleStateRowDecoder(config, runtimeSchema);
+        CobbleStateRowDecoder decoder = decoder(config, runtimeSchema);
         // Map value column: first byte 0x01 => present-null marker (null value).
         List<RowData> rows = decoder.decode(rowKey, new byte[][] {new byte[] {0x01}}, "lk", 0);
         assertEquals(1, rows.size());
@@ -1260,6 +1333,17 @@ class CobbleStateLookupKeyEncoderTest {
         }
         // The trailing map_value column should be null (present-null marker 0x01).
         assertTrue(row.isNullAt(pos), "map_value column " + pos + " should be null");
+    }
+
+    private static final class RuntimeSchema {
+        private final StateInspectSchema schema;
+        private final StateInspectSemanticSchema semanticSchema;
+
+        private RuntimeSchema(
+                StateInspectSchema schema, StateInspectSemanticSchema semanticSchema) {
+            this.schema = schema;
+            this.semanticSchema = semanticSchema;
+        }
     }
 
     /**

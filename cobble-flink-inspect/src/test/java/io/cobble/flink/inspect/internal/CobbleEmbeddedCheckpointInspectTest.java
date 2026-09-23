@@ -65,21 +65,19 @@ class CobbleEmbeddedCheckpointInspectTest {
             assertEquals(SchemaResolveResult.STATUS_AVAILABLE, schema.status);
             assertEquals(1, schema.store.schemas().size());
 
-            MonitorReaderSession reader =
+            java.util.List<java.io.File> temporaryDirectories;
+            try (MonitorReaderSession reader =
                     MonitorReaderSession.open(
                             4,
                             CobbleConnectorStorageOptions.empty(),
                             catalog.sourceKind,
                             checkpoint,
-                            operator);
-            java.util.List<java.io.File> temporaryDirectories = reader.temporaryDirectories();
-            assertTrue(
-                    temporaryDirectories
-                            .get(0)
-                            .getName()
-                            .startsWith("cobble-flink-embedded-checkpoint-"));
-            assertEquals("value", utf8(reader.reader().get(0, utf8("key"), 0)));
-            reader.close();
+                            operator)) {
+                temporaryDirectories = reader.temporaryDirectories();
+                assertTrue(
+                        temporaryDirectories.get(0).getName().startsWith("cobble-embedded-read-"));
+                assertEquals("value", utf8(reader.reader().get(0, utf8("key"), 0)));
+            }
             for (java.io.File directory : temporaryDirectories) {
                 assertFalse(directory.exists());
             }
@@ -160,11 +158,13 @@ class CobbleEmbeddedCheckpointInspectTest {
         OperatorID operatorId = new OperatorID(29L, 31L);
         try (ReadableCheckpoint fixture = writeCheckpoint(operatorId)) {
             CheckpointEntry merged = mergedGlobalEntry(fixture, operatorId, true);
-            MonitorReaderSession reader = openReader(merged, operatorId);
-            java.util.List<java.io.File> temporaryDirectories = reader.temporaryDirectories();
-            assertTrue(temporaryDirectories.get(0).getName().startsWith("cobble-flink-monitor-"));
-            assertEquals("value", utf8(reader.reader().get(0, utf8("key"), 0)));
-            reader.close();
+            java.util.List<java.io.File> temporaryDirectories;
+            try (MonitorReaderSession reader = openReader(merged, operatorId)) {
+                temporaryDirectories = reader.temporaryDirectories();
+                assertTrue(
+                        temporaryDirectories.get(0).getName().startsWith("cobble-flink-monitor-"));
+                assertEquals("value", utf8(reader.reader().get(0, utf8("key"), 0)));
+            }
             for (java.io.File directory : temporaryDirectories) {
                 assertFalse(directory.exists());
             }
@@ -176,15 +176,13 @@ class CobbleEmbeddedCheckpointInspectTest {
         OperatorID operatorId = new OperatorID(33L, 35L);
         try (ReadableCheckpoint fixture = writeCheckpoint(operatorId)) {
             CheckpointEntry merged = mergedGlobalEntry(fixture, operatorId, false);
-            MonitorReaderSession reader = openReader(merged, operatorId);
-            java.util.List<java.io.File> temporaryDirectories = reader.temporaryDirectories();
-            assertTrue(
-                    temporaryDirectories
-                            .get(0)
-                            .getName()
-                            .startsWith("cobble-flink-embedded-checkpoint-"));
-            assertEquals("value", utf8(reader.reader().get(0, utf8("key"), 0)));
-            reader.close();
+            java.util.List<java.io.File> temporaryDirectories;
+            try (MonitorReaderSession reader = openReader(merged, operatorId)) {
+                temporaryDirectories = reader.temporaryDirectories();
+                assertTrue(
+                        temporaryDirectories.get(0).getName().startsWith("cobble-embedded-read-"));
+                assertEquals("value", utf8(reader.reader().get(0, utf8("key"), 0)));
+            }
             for (java.io.File directory : temporaryDirectories) {
                 assertFalse(directory.exists());
             }

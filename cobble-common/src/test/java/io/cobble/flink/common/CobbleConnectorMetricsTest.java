@@ -43,7 +43,7 @@ class CobbleConnectorMetricsTest {
 
         CobbleConnectorMetrics.LookupMetrics metrics = CobbleConnectorMetrics.lookup(group);
         metrics.request();
-        metrics.hit(new byte[] {1}, new byte[][] {new byte[] {2, 3}});
+        metrics.hit(3L);
         assertEquals(1L, counters.get("cobble.lookupRequestsTotal").getCount());
         assertEquals(1L, counters.get("cobble.lookupHitsTotal").getCount());
         assertEquals(3L, counters.get("cobble.lookupBytesReadTotal").getCount());

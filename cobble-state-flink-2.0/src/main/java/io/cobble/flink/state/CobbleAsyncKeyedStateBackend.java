@@ -4,6 +4,7 @@ import io.cobble.ColumnFamilyOptions;
 import io.cobble.Config;
 import io.cobble.flink.common.CobbleNativeMetrics;
 import io.cobble.flink.common.CobbleStateDescriptor;
+import io.cobble.flink.common.CobbleStateReadFormatMetadata;
 import io.cobble.flink.common.inspect.StateInspectSchema;
 import io.cobble.flink.common.inspect.StateInspectSchemaStore;
 import io.cobble.flink.common.inspect.StateInspectSemanticSchema;
@@ -271,6 +272,9 @@ final class CobbleAsyncKeyedStateBackend<K> implements AsyncKeyedStateBackend<K>
         }
         stateResources.add(state);
         registerInspectSchema(stateDesc, namespaceSerializer);
+        publishStateReadMetadata(
+                runtimeDescriptor,
+                stateDesc.getTtlConfig() != null && stateDesc.getTtlConfig().isEnabled());
         restoredCanonicalMetadata.remove(stateDesc.getStateId());
         return (S) state;
     }
@@ -592,6 +596,29 @@ final class CobbleAsyncKeyedStateBackend<K> implements AsyncKeyedStateBackend<K>
                 ? StateInspectSchemaStore.empty()
                 : new StateInspectSchemaStore(
                         new ArrayList<>(stateInspectSchemas.values()), stateInspectSemanticSchemas);
+    }
+
+    /** Captures one keyed state's inspect schema in its CF metadata without changing row bytes. */
+    private void publishStateReadMetadata(CobbleStateDescriptor descriptor, boolean ttlEnabled)
+            throws IOException {
+        StateInspectSchema schema = stateInspectSchemas.get(descriptor.stateName());
+        if (schema == null) {
+            throw new IOException(
+                    "Cobble state '"
+                            + descriptor.stateName()
+                            + "' has no inspect schema for snapshot read metadata.");
+        }
+        String metadata =
+                CobbleStateReadFormatMetadata.encode(
+                        descriptor,
+                        schema,
+                        stateInspectSemanticSchemas.get(descriptor.stateName()));
+        try (StructuredSchemaBuilder builder = cobbleDb.updateSchema()) {
+            builder.setColumnFamilyOptions(
+                    descriptor.columnFamily(),
+                    ColumnFamilyOptions.defaults().valueHasTtl(ttlEnabled).metadata(metadata));
+            builder.commit();
+        }
     }
 
     private void ensureStateColumnFamily(StateDescriptor<?> descriptor) {

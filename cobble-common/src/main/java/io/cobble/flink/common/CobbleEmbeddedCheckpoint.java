@@ -21,6 +21,8 @@ import org.slf4j.LoggerFactory;
 
 import java.io.DataInputStream;
 import java.io.IOException;
+import java.net.URI;
+import java.nio.file.Paths;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Collections;
@@ -82,14 +84,42 @@ public final class CobbleEmbeddedCheckpoint {
                 return children;
             }
         }
-        Long snapshotId = parseSnapshotId(entry.getName());
-        if (snapshotId != null) {
-            Location location = locateFromShard(entry, snapshotId.longValue());
+        if (parseSnapshotId(entry.getName()) != null) {
+            Location location = locateFromShard(entry);
             if (location != null) {
                 return Collections.singletonList(location);
             }
         }
         throw unsupported(entry, "no readable Cobble embedded checkpoint metadata was found");
+    }
+
+    /**
+     * Discovers completed checkpoint metadata paths without decoding their payloads. Callers can
+     * select one {@code chk-N} directory before strictly loading it, isolating a selected
+     * checkpoint from unrelated retained checkpoint files.
+     */
+    public static List<MetadataLocation> locateMetadataPaths(Path entry) throws IOException {
+        FileSystem fs = entry.getFileSystem();
+        if (!fs.exists(entry)) {
+            throw unsupported(entry, "path does not exist");
+        }
+        FileStatus status = fs.getFileStatus(entry);
+        if (!status.isDir() && METADATA.equals(entry.getName())) {
+            return Collections.singletonList(new MetadataLocation(entry.getParent(), entry));
+        }
+        if (!status.isDir()) {
+            throw unsupported(entry, "expected a checkpoint directory or _metadata file");
+        }
+        Path metadata = new Path(entry, METADATA);
+        if (fs.exists(metadata)) {
+            return Collections.singletonList(new MetadataLocation(entry, metadata));
+        }
+        List<MetadataLocation> locations = new ArrayList<>();
+        collectCheckpointMetadataPaths(fs, entry, 0, locations);
+        if (locations.isEmpty()) {
+            throw unsupported(entry, "no completed checkpoint metadata was found");
+        }
+        return locations;
     }
 
     /** Selects {@code latest} or an exact checkpoint id from {@link #locate(Path)}. */
@@ -127,6 +157,32 @@ public final class CobbleEmbeddedCheckpoint {
                 Comparator.comparingLong((Location value) -> value.checkpoint().checkpointId())
                         .reversed());
         return locations;
+    }
+
+    private static void collectCheckpointMetadataPaths(
+            FileSystem fs, Path root, int depth, List<MetadataLocation> locations)
+            throws IOException {
+        if (depth > MAX_CHECKPOINT_CHILD_DEPTH) {
+            return;
+        }
+        FileStatus[] children = fs.listStatus(root);
+        if (children == null) {
+            return;
+        }
+        for (FileStatus child : children) {
+            if (!child.isDir()) {
+                continue;
+            }
+            Path childPath = child.getPath();
+            Path metadata = new Path(childPath, METADATA);
+            if (fs.exists(metadata)) {
+                locations.add(new MetadataLocation(childPath, metadata));
+                continue;
+            }
+            if (depth < MAX_CHECKPOINT_CHILD_DEPTH && !skipCheckpointChild(childPath.getName())) {
+                collectCheckpointMetadataPaths(fs, childPath, depth + 1, locations);
+            }
+        }
     }
 
     private static void collectCheckpointChildren(
@@ -168,28 +224,72 @@ public final class CobbleEmbeddedCheckpoint {
                 || "snapshot".equals(name);
     }
 
-    private static Location locateFromShard(Path snapshotManifest, long snapshotId)
-            throws IOException {
+    private static Location locateFromShard(Path snapshotManifest) throws IOException {
         Path ancestor = snapshotManifest.getParent();
         for (int depth = 0; ancestor != null && depth < MAX_SHARD_ANCESTORS; depth++) {
-            Path metadata = new Path(new Path(ancestor, CHECKPOINT_PREFIX + snapshotId), METADATA);
-            FileSystem fs = metadata.getFileSystem();
-            if (fs.exists(metadata)) {
-                try {
-                    Location location = readLocation(metadata);
-                    if (location.checkpoint().checkpointId() == snapshotId) {
-                        return location;
-                    }
-                } catch (IOException ignored) {
-                    // This sibling checkpoint is not Cobble embedded state; keep walking upward.
+            Map<String, Location> matching = new LinkedHashMap<>();
+            FileSystem fs = ancestor.getFileSystem();
+            for (Location location : locationsAtOrBelow(fs, ancestor)) {
+                if (referencesShardManifest(location.checkpoint(), snapshotManifest)) {
+                    matching.putIfAbsent(location.checkpointDirectory().toString(), location);
                 }
             }
+            if (matching.size() > 1) {
+                throw new IOException(
+                        "multiple Cobble checkpoints reference shard manifest " + snapshotManifest);
+            }
+            if (!matching.isEmpty()) return matching.values().iterator().next();
             ancestor = ancestor.getParent();
         }
         return null;
     }
 
-    private static Location readLocation(Path metadataPath) throws IOException {
+    private static List<Location> locationsAtOrBelow(FileSystem fs, Path root) throws IOException {
+        List<Location> locations = new ArrayList<>();
+        Path metadata = new Path(root, METADATA);
+        if (fs.exists(metadata)) {
+            try {
+                locations.add(readLocation(metadata));
+            } catch (IOException ignored) {
+                // This ancestor can be a non-Cobble checkpoint. Continue the bounded search.
+            }
+        }
+        locations.addAll(locateCheckpointChildren(fs, root));
+        return locations;
+    }
+
+    private static boolean referencesShardManifest(
+            CobbleEmbeddedCheckpoint checkpoint, Path snapshotManifest) {
+        String expected = normalizePath(snapshotManifest);
+        for (OperatorSnapshot operator : checkpoint.operators().values()) {
+            for (ShardSnapshot shard : operator.shards()) {
+                if (shard != null
+                        && shard.manifestPath != null
+                        && expected.equals(normalizePath(new Path(shard.manifestPath)))) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    private static String normalizePath(Path path) {
+        if (path == null) return "";
+        try {
+            URI uri = path.toUri();
+            if (uri.getScheme() == null || "file".equalsIgnoreCase(uri.getScheme())) {
+                java.nio.file.Path local =
+                        uri.getScheme() == null ? Paths.get(path.toString()) : Paths.get(uri);
+                return local.toAbsolutePath().normalize().toUri().toString().replaceAll("/+$", "");
+            }
+            return uri.normalize().toString().replaceAll("/+$", "");
+        } catch (RuntimeException ignored) {
+            return path.toString().replaceAll("/+$", "");
+        }
+    }
+
+    /** Strictly decodes one selected completed Flink checkpoint metadata file. */
+    public static Location readLocation(Path metadataPath) throws IOException {
         CobbleEmbeddedCheckpoint checkpoint = read(metadataPath);
         return new Location(metadataPath.getParent(), metadataPath, checkpoint);
     }
@@ -337,7 +437,7 @@ public final class CobbleEmbeddedCheckpoint {
         }
         try {
             long id = Long.parseLong(name.substring(SNAPSHOT_PREFIX.length()));
-            return id > 0L ? Long.valueOf(id) : null;
+            return id >= 0L ? Long.valueOf(id) : null;
         } catch (NumberFormatException ignored) {
             return null;
         }
@@ -383,6 +483,32 @@ public final class CobbleEmbeddedCheckpoint {
 
         public CobbleEmbeddedCheckpoint checkpoint() {
             return checkpoint;
+        }
+    }
+
+    /** A completed Flink checkpoint metadata file, intentionally not decoded yet. */
+    public static final class MetadataLocation {
+        private final Path checkpointDirectory;
+        private final Path metadataPath;
+        private final Long directoryCheckpointId;
+
+        private MetadataLocation(Path checkpointDirectory, Path metadataPath) {
+            this.checkpointDirectory = checkpointDirectory;
+            this.metadataPath = metadataPath;
+            this.directoryCheckpointId = parseCheckpointDirectoryId(checkpointDirectory.getName());
+        }
+
+        public Path checkpointDirectory() {
+            return checkpointDirectory;
+        }
+
+        public Path metadataPath() {
+            return metadataPath;
+        }
+
+        /** Returns the {@code chk-N} directory ID when the location is named conventionally. */
+        public Long directoryCheckpointId() {
+            return directoryCheckpointId;
         }
     }
 

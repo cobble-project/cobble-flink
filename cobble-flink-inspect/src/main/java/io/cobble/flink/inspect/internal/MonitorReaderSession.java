@@ -1,12 +1,12 @@
 package io.cobble.flink.inspect.internal;
 
 import io.cobble.Config;
-import io.cobble.DbCoordinator;
 import io.cobble.GlobalSnapshot;
 import io.cobble.Reader;
 import io.cobble.ShardSnapshot;
 import io.cobble.flink.common.CobbleConnectorStorageOptions;
 import io.cobble.flink.common.CobbleEmbeddedCheckpoint;
+import io.cobble.flink.common.CobbleEmbeddedCheckpointReader;
 
 import org.apache.flink.core.fs.FileStatus;
 import org.apache.flink.core.fs.FileSystem;
@@ -33,10 +33,18 @@ import java.util.Map;
 public final class MonitorReaderSession implements AutoCloseable {
     private final Reader reader;
     private final List<File> temporaryDirectories;
+    private final CobbleEmbeddedCheckpointReader.Prepared embedded;
 
     private MonitorReaderSession(Reader reader, List<File> temporaryDirectories) {
         this.reader = reader;
         this.temporaryDirectories = temporaryDirectories;
+        this.embedded = null;
+    }
+
+    private MonitorReaderSession(CobbleEmbeddedCheckpointReader.Prepared embedded) {
+        this.reader = embedded.reader();
+        this.temporaryDirectories = Collections.singletonList(embedded.workspace());
+        this.embedded = embedded;
     }
 
     public static MonitorReaderSession open(
@@ -96,6 +104,10 @@ public final class MonitorReaderSession implements AutoCloseable {
 
     @Override
     public void close() {
+        if (embedded != null) {
+            embedded.close();
+            return;
+        }
         try {
             reader.close();
         } finally {
@@ -178,7 +190,6 @@ public final class MonitorReaderSession implements AutoCloseable {
             CobbleConnectorStorageOptions storageOptions,
             CheckpointEntry checkpoint,
             OperatorEntry operator) {
-        List<File> directories = new ArrayList<>();
         try {
             CobbleEmbeddedCheckpoint.OperatorSnapshot embedded = operator.embeddedCheckpoint;
             if (embedded.maxParallelism() <= 0) {
@@ -188,38 +199,19 @@ public final class MonitorReaderSession implements AutoCloseable {
                                 + " has invalid maxParallelism "
                                 + embedded.maxParallelism());
             }
-            File unifiedVolume =
-                    Files.createTempDirectory(
-                                    "cobble-flink-embedded-checkpoint-"
-                                            + checkpoint.id
-                                            + "-"
-                                            + safeFileName(operator.operatorId)
-                                            + "-")
-                            .toFile();
-            directories.add(unifiedVolume);
-            Config coordinatorConfig = CobbleReaderConfigs.base(embedded.maxParallelism());
-            CobbleReaderConfigs.addVolume(
-                    coordinatorConfig, localVolume(unifiedVolume), storageOptions);
-            try (DbCoordinator coordinator = DbCoordinator.open(coordinatorConfig)) {
-                coordinator.materializeGlobalSnapshot(
-                        embedded.maxParallelism(), checkpoint.id, embedded.shards());
-            }
-
-            Config readerConfig = CobbleReaderConfigs.base(embedded.maxParallelism());
-            CobbleReaderConfigs.addVolume(readerConfig, localVolume(unifiedVolume), storageOptions);
-            Map<String, String> roots = new LinkedHashMap<>();
-            for (ShardSnapshot shard : embedded.shards()) {
-                String root = copyShardMetadata(shard, unifiedVolume);
-                if (root != null) {
-                    roots.putIfAbsent(root, root);
-                }
-            }
-            for (String root : roots.values()) {
-                CobbleReaderConfigs.addVolume(readerConfig, root, storageOptions);
-            }
-            return new MonitorReaderSession(Reader.open(readerConfig, checkpoint.id), directories);
+            Config readerConfig =
+                    CobbleReaderConfigs.checkpoint(
+                            embedded.maxParallelism(),
+                            operator.readerVolumeDirectories,
+                            storageOptions);
+            return new MonitorReaderSession(
+                    CobbleEmbeddedCheckpointReader.open(
+                            readerConfig,
+                            checkpoint.id,
+                            embedded.maxParallelism(),
+                            embedded.shards(),
+                            null));
         } catch (IOException | RuntimeException e) {
-            deleteTemporaryDirectories(directories);
             if (e instanceof InspectInputException) {
                 throw (InspectInputException) e;
             }

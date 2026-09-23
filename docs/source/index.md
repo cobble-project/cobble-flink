@@ -361,6 +361,9 @@ record/byte semantics, and lookup outcomes.
 
 ## Usage Notes
 
+Other Java engines can use the read plugin bundled with `cobble-state` to consume
+state snapshots. See [Read State Outside Flink](../table-read-spi.md).
+
 - `scan.mode = 'streaming'` currently works only with
   `scan.checkpoint-id = 'latest'`.
 - The source currently returns `INSERT` rows only.

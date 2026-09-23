@@ -11,9 +11,8 @@ import java.io.IOException;
 import java.io.Serializable;
 import java.util.Arrays;
 
-/** Checkpointed metadata for one bounded key-group range in a Cobble state checkpoint. */
+/** Checkpointed key-group assignment and its one canonical logical-row resume position. */
 final class CobbleStateSourceSplit implements SourceSplit, Serializable {
-
     private static final long serialVersionUID = 1L;
 
     final String splitId;
@@ -24,15 +23,9 @@ final class CobbleStateSourceSplit implements SourceSplit, Serializable {
     final String operatorId;
     final String stateName;
     final String stateKind;
-    final int startKeyGroup;
-    final byte[] startKeyExclusive;
-    // Intra-entry resume state for LIST (and any multi-row kind): when a checkpoint fires
-    // mid-entry, partialEntryKey is the native entry being consumed and partialEmittedCount is how
-    // many of its decoded rows have already been emitted. On restore the reader re-reads that entry
-    // and skips the first partialEmittedCount rows. Both are null/0 when the entry was fully
-    // emitted before the checkpoint.
-    final byte[] partialEntryKey;
-    final int partialEmittedCount;
+    final int resumeBucket;
+    final byte[] resumePhysicalKey;
+    final int resumeIntraEntryOffset;
 
     CobbleStateSourceSplit(
             String splitId,
@@ -43,36 +36,9 @@ final class CobbleStateSourceSplit implements SourceSplit, Serializable {
             String operatorId,
             String stateName,
             String stateKind,
-            int startKeyGroup,
-            byte[] startKeyExclusive) {
-        this(
-                splitId,
-                checkpointId,
-                totalKeyGroups,
-                keyGroupStart,
-                keyGroupEnd,
-                operatorId,
-                stateName,
-                stateKind,
-                startKeyGroup,
-                startKeyExclusive,
-                null,
-                0);
-    }
-
-    CobbleStateSourceSplit(
-            String splitId,
-            long checkpointId,
-            int totalKeyGroups,
-            int keyGroupStart,
-            int keyGroupEnd,
-            String operatorId,
-            String stateName,
-            String stateKind,
-            int startKeyGroup,
-            byte[] startKeyExclusive,
-            byte[] partialEntryKey,
-            int partialEmittedCount) {
+            int resumeBucket,
+            byte[] resumePhysicalKey,
+            int resumeIntraEntryOffset) {
         this.splitId = splitId;
         this.checkpointId = checkpointId;
         this.totalKeyGroups = totalKeyGroups;
@@ -81,10 +47,9 @@ final class CobbleStateSourceSplit implements SourceSplit, Serializable {
         this.operatorId = operatorId;
         this.stateName = stateName;
         this.stateKind = stateKind;
-        this.startKeyGroup = startKeyGroup;
-        this.startKeyExclusive = copyOrNull(startKeyExclusive);
-        this.partialEntryKey = copyOrNull(partialEntryKey);
-        this.partialEmittedCount = partialEmittedCount;
+        this.resumeBucket = resumeBucket;
+        this.resumePhysicalKey = copyOrNull(resumePhysicalKey);
+        this.resumeIntraEntryOffset = resumeIntraEntryOffset;
     }
 
     static CobbleStateSourceSplit forRange(
@@ -105,40 +70,8 @@ final class CobbleStateSourceSplit implements SourceSplit, Serializable {
                 stateName,
                 stateKind,
                 -1,
-                null);
-    }
-
-    CobbleStateSourceSplit withStartAfter(int keyGroup, byte[] keyExclusive) {
-        return new CobbleStateSourceSplit(
-                splitId,
-                checkpointId,
-                totalKeyGroups,
-                keyGroupStart,
-                keyGroupEnd,
-                operatorId,
-                stateName,
-                stateKind,
-                keyGroup,
-                keyExclusive,
                 null,
                 0);
-    }
-
-    CobbleStateSourceSplit withPartialEntry(
-            int keyGroup, byte[] keyExclusive, byte[] partialEntryKey, int partialEmittedCount) {
-        return new CobbleStateSourceSplit(
-                splitId,
-                checkpointId,
-                totalKeyGroups,
-                keyGroupStart,
-                keyGroupEnd,
-                operatorId,
-                stateName,
-                stateKind,
-                keyGroup,
-                keyExclusive,
-                partialEntryKey,
-                partialEmittedCount);
     }
 
     @Override
@@ -150,9 +83,8 @@ final class CobbleStateSourceSplit implements SourceSplit, Serializable {
         return keyGroupStart + ":" + keyGroupEnd + ":" + totalKeyGroups;
     }
 
-    /** Serializer for checkpointing state source split metadata. */
     static final class Serializer implements SimpleVersionedSerializer<CobbleStateSourceSplit> {
-        private static final int VERSION = 1;
+        private static final int VERSION = 2;
 
         @Override
         public int getVersion() {
@@ -171,10 +103,9 @@ final class CobbleStateSourceSplit implements SourceSplit, Serializable {
             dataOut.writeUTF(nullToEmpty(split.operatorId));
             dataOut.writeUTF(nullToEmpty(split.stateName));
             dataOut.writeUTF(nullToEmpty(split.stateKind));
-            dataOut.writeInt(split.startKeyGroup);
-            writeBytes(dataOut, split.startKeyExclusive);
-            writeBytes(dataOut, split.partialEntryKey);
-            dataOut.writeInt(split.partialEmittedCount);
+            dataOut.writeInt(split.resumeBucket);
+            writeBytes(dataOut, split.resumePhysicalKey);
+            dataOut.writeInt(split.resumeIntraEntryOffset);
             dataOut.flush();
             return out.toByteArray();
         }
@@ -197,7 +128,6 @@ final class CobbleStateSourceSplit implements SourceSplit, Serializable {
                     emptyToNull(input.readUTF()),
                     input.readInt(),
                     readBytes(input),
-                    readBytes(input),
                     input.readInt());
         }
 
@@ -212,9 +142,7 @@ final class CobbleStateSourceSplit implements SourceSplit, Serializable {
 
         private static byte[] readBytes(DataInputStream input) throws IOException {
             int length = input.readInt();
-            if (length < 0) {
-                return null;
-            }
+            if (length < 0) return null;
             byte[] bytes = new byte[length];
             input.readFully(bytes);
             return bytes;
@@ -225,7 +153,7 @@ final class CobbleStateSourceSplit implements SourceSplit, Serializable {
         }
 
         private static String emptyToNull(String value) {
-            return value == null || value.isEmpty() ? null : value;
+            return value.isEmpty() ? null : value;
         }
     }
 

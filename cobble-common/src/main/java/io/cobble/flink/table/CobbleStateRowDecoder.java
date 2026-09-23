@@ -39,42 +39,47 @@ import java.util.List;
 import java.util.Map;
 
 /** Decodes Cobble state rows into the SQL physical row shape resolved at planning time. */
-final class CobbleStateRowDecoder {
+public final class CobbleStateRowDecoder {
 
-    static final String TIMER_NOT_IMPLEMENTED =
+    public static final String TIMER_NOT_IMPLEMENTED =
             "Cobble state source timer runtime is not implemented yet.";
+
+    /** True only for the backend's stable missing-column-family read failure. */
+    public static boolean isUnknownColumnFamily(RuntimeException error) {
+        String message = error.getMessage();
+        if (message == null) return false;
+        if (message.startsWith("IO error: ")) message = message.substring("IO error: ".length());
+        return message.equals("Unknown column family")
+                || message.startsWith("Unknown column family:")
+                || message.startsWith("Unknown column family ")
+                || message.startsWith("Unknown column family '");
+    }
 
     private static final byte LIST_DELIMITER = ',';
     private static final String VOID_NAMESPACE_SERIALIZER_CLASS =
             "org.apache.flink.runtime.state.VoidNamespaceSerializer";
 
-    private final StateSourceConfig config;
     private final StateInspectSchema schema;
     private final StateInspectSemanticSchema semanticSchema;
+    private final List<StateSourceField> outputFields;
+    private final String context;
     private final Map<StateSourceField.Group, GroupDecoder> groupDecoders =
             new EnumMap<>(StateSourceField.Group.class);
 
-    CobbleStateRowDecoder(
-            StateSourceConfig config, CobbleStateSourceRuntime.RuntimeSchema runtimeSchema)
+    public CobbleStateRowDecoder(
+            StateInspectSchema schema,
+            StateInspectSemanticSchema semanticSchema,
+            List<StateSourceField> outputFields,
+            String context)
             throws IOException {
-        this.config = config;
-        this.schema = runtimeSchema.schema;
-        this.semanticSchema = runtimeSchema.semanticSchema;
+        this.schema = schema;
+        this.semanticSchema = semanticSchema;
+        this.outputFields = new ArrayList<StateSourceField>(outputFields);
+        this.context = context;
         initializeGroupDecoders();
     }
 
-    List<RowData> decode(byte[] rowKey, byte[][] columns, String splitId, int keyGroup)
-            throws IOException {
-        return decode(rowKey, columns, splitId, keyGroup, 0);
-    }
-
-    /**
-     * Decodes a native state row, dropping the first {@code skipRows} decoded rows. Used to resume
-     * a partially-consumed LIST entry: on restore the reader re-reads the same entry and skips the
-     * rows that were already emitted before the checkpoint.
-     */
-    List<RowData> decode(
-            byte[] rowKey, byte[][] columns, String splitId, int keyGroup, int skipRows)
+    public List<RowData> decode(byte[] rowKey, byte[][] columns, String splitId, int keyGroup)
             throws IOException {
         if (schema.stateKind() == StateKind.TIMER) {
             throw new UnsupportedOperationException(TIMER_NOT_IMPLEMENTED);
@@ -126,26 +131,13 @@ final class CobbleStateRowDecoder {
                 default:
                     throw new IOException("Unsupported state kind: " + schema.stateKind());
             }
-            if (skipRows > 0) {
-                if (skipRows >= rows.size()) {
-                    rows.clear();
-                } else {
-                    rows = new ArrayList<>(rows.subList(skipRows, rows.size()));
-                }
-            }
             return rows;
         } catch (UnsupportedOperationException e) {
             throw e;
         } catch (Exception e) {
             throw new IOException(
-                    "Failed to decode Cobble state source row (checkpoint="
-                            + config.scanCheckpointId()
-                            + ", operator="
-                            + config.operatorId()
-                            + ", state="
-                            + config.stateName()
-                            + ", kind="
-                            + config.stateKind()
+                    "Failed to decode Cobble state source row ("
+                            + context
                             + ", split="
                             + splitId
                             + ", keyGroup="
@@ -238,9 +230,9 @@ final class CobbleStateRowDecoder {
             Object[] listElement,
             Object[] mapKey,
             Object[] mapValue) {
-        GenericRowData row = new GenericRowData(RowKind.INSERT, config.outputFields().size());
-        for (int index = 0; index < config.outputFields().size(); index++) {
-            StateSourceField field = config.outputFields().get(index);
+        GenericRowData row = new GenericRowData(RowKind.INSERT, outputFields.size());
+        for (int index = 0; index < outputFields.size(); index++) {
+            StateSourceField field = outputFields.get(index);
             row.setField(
                     index,
                     groupValues(

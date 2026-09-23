@@ -7,11 +7,17 @@ import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
-import io.cobble.ScanCursor;
-import io.cobble.ScanOptions;
+import io.cobble.Config;
 import io.cobble.flink.common.inspect.InspectSchemaRegistryLayout;
 import io.cobble.flink.state.CobbleOptions;
 import io.cobble.flink.state.CobbleStateBackend;
+import io.cobble.table.TableFormatBinding;
+import io.cobble.table.TablePathRequest;
+import io.cobble.table.TableReadCursor;
+import io.cobble.table.TableReadEntry;
+import io.cobble.table.TableReadRange;
+import io.cobble.table.TableReadSnapshot;
+import io.cobble.table.Value;
 
 import org.apache.flink.api.common.JobID;
 import org.apache.flink.api.common.JobStatus;
@@ -847,6 +853,44 @@ class CobbleStateLookupFunctionTest {
                     knownNamespace.toString(), hit.getString(1).toString(), "namespace mismatch");
             assertEquals(knownMapKey, hit.getInt(2), "map_key column mismatch");
             assertEquals(knownMapValue, hit.getInt(3), "map_value column mismatch");
+
+            Config tableConfig = CobbleStateSourceRuntime.tableReadConfig(lookupConfig);
+            Map<String, String> options = new LinkedHashMap<String, String>();
+            options.put(
+                    CobbleEmbeddedCheckpointReadPlanner.CHECKPOINT_ID_OPTION,
+                    Long.toString(discovered.f1));
+            options.put(CobbleEmbeddedCheckpointReadPlanner.OPERATOR_ID_OPTION, operatorId);
+            TableReadSnapshot fixedSnapshot =
+                    CobbleEmbeddedCheckpointReadPlanner.resolve(
+                                    tableConfig,
+                                    new TablePathRequest(
+                                            checkpointRootUri,
+                                            "namespaced-map-state",
+                                            null,
+                                            options))
+                            .orElseThrow(
+                                    () ->
+                                            new AssertionError(
+                                                    "expected namespaced state checkpoint snapshot"));
+            TableFormatBinding binding = new CobbleStateTableFormatPlugin().bind(fixedSnapshot);
+            int unownedKey = -1;
+            for (int candidate = 0; candidate < 10_000; candidate++) {
+                int bucket =
+                        binding.encodeKey(
+                                        Arrays.asList(
+                                                Value.int32(candidate),
+                                                Value.string(knownNamespace.toString()),
+                                                Value.int32(knownMapKey)))
+                                .bucket();
+                if (!snapshotOwnsBucket(fixedSnapshot, bucket)) {
+                    unownedKey = candidate;
+                    break;
+                }
+            }
+            assertTrue(unownedKey >= 0, "fixture must leave at least one key group unowned");
+            assertTrue(
+                    lookup.lookup(threeFieldRow(knownMapKey, unownedKey, knownNamespace)).isEmpty(),
+                    "a key routed outside selected state shards must be a fixed-snapshot miss");
         } finally {
             lookup.close();
         }
@@ -1170,51 +1214,16 @@ class CobbleStateLookupFunctionTest {
     }
 
     private static List<RowData> drainStateRows(StateSourceConfig config) throws Exception {
-        List<CobbleStateSourceSplit> splits =
-                CobbleStateSourceRuntime.createStateSourceSplits(config);
-        assertFalse(splits.isEmpty(), "expected at least one split");
-        CobbleStateSourceRuntime.ReaderHandle handle =
-                CobbleStateSourceRuntime.openReader(config, splits.get(0).checkpointId);
-        CobbleStateSourceRuntime.RuntimeSchema runtimeSchema =
-                CobbleStateSourceRuntime.loadRuntimeSchema(config);
-        CobbleStateRowDecoder decoder = new CobbleStateRowDecoder(config, runtimeSchema);
-        String columnFamily = runtimeSchema.schema.columnFamily();
         List<RowData> rows = new ArrayList<>();
-        try {
-            for (CobbleStateSourceSplit split : splits) {
-                for (int keyGroup = split.keyGroupStart;
-                        keyGroup <= split.keyGroupEnd;
-                        keyGroup++) {
-                    ScanOptions options =
-                            CobbleStateSourceRuntime.scanOptions(columnFamily, Integer.MAX_VALUE);
-                    ScanCursor cursor;
-                    try {
-                        cursor =
-                                handle.reader.scanWithOptions(
-                                        keyGroup,
-                                        CobbleStateSourceRuntime.emptyScanKey(),
-                                        CobbleStateSourceRuntime.maxScanKey(),
-                                        options);
-                    } catch (RuntimeException e) {
-                        if (e.getMessage() != null
-                                && e.getMessage().contains("Unknown column family")) {
-                            continue;
-                        }
-                        throw e;
-                    }
-                    try (ScanCursor scan = cursor) {
-                        ScanCursor.Entry entry = scan.nextEntry();
-                        while (entry != null) {
-                            rows.addAll(
-                                    decoder.decode(
-                                            entry.key, entry.columns, split.splitId(), keyGroup));
-                            entry = scan.nextEntry();
-                        }
-                    }
-                }
+        long checkpointId = CobbleStateSourceRuntime.resolveCheckpointId(config);
+        try (io.cobble.table.TableReadSession<RowData, RowData> session =
+                        CobbleStateTableReadProvider.forScan(config, checkpointId).open();
+                TableReadCursor<RowData> cursor =
+                        session.scan(new TableReadRange(0, Integer.MAX_VALUE), null)) {
+            TableReadEntry<RowData> entry;
+            while ((entry = cursor.next()) != null) {
+                rows.add(entry.value());
             }
-        } finally {
-            handle.close();
         }
         return rows;
     }
@@ -1451,6 +1460,15 @@ class CobbleStateLookupFunctionTest {
         row.setField(1, second);
         row.setField(2, third);
         return row;
+    }
+
+    private static boolean snapshotOwnsBucket(TableReadSnapshot snapshot, int bucket) {
+        for (TableReadSnapshot.ShardDescriptor shard : snapshot.shards()) {
+            for (io.cobble.ShardSnapshot.Range range : shard.snapshot().ranges) {
+                if (bucket >= range.start && bucket <= range.end) return true;
+            }
+        }
+        return false;
     }
 
     /** Minimal {@link LookupTableSource.LookupContext} exposing explicit physical key positions. */

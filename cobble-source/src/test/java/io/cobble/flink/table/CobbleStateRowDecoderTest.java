@@ -40,7 +40,7 @@ class CobbleStateRowDecoderTest {
                         VoidNamespaceSerializer.INSTANCE,
                         IntSerializer.INSTANCE);
         CobbleStateRowDecoder decoder =
-                new CobbleStateRowDecoder(
+                decoder(
                         config(
                                 "value",
                                 fields(
@@ -80,7 +80,7 @@ class CobbleStateRowDecoderTest {
                         VoidNamespaceSerializer.INSTANCE,
                         IntSerializer.INSTANCE);
         CobbleStateRowDecoder decoder =
-                new CobbleStateRowDecoder(
+                decoder(
                         config(
                                 "list",
                                 fields(
@@ -128,7 +128,7 @@ class CobbleStateRowDecoderTest {
                         IntSerializer.INSTANCE,
                         IntSerializer.INSTANCE);
         CobbleStateRowDecoder decoder =
-                new CobbleStateRowDecoder(
+                decoder(
                         config(
                                 "map",
                                 fields(
@@ -177,7 +177,7 @@ class CobbleStateRowDecoderTest {
                         StringSerializer.INSTANCE,
                         IntSerializer.INSTANCE);
         CobbleStateRowDecoder decoder =
-                new CobbleStateRowDecoder(
+                decoder(
                         config(
                                 "value",
                                 fields(
@@ -232,7 +232,7 @@ class CobbleStateRowDecoderTest {
         assertNotNull(schema.valueSerializer().snapshotBytes());
 
         CobbleStateRowDecoder decoder =
-                new CobbleStateRowDecoder(
+                decoder(
                         config(
                                 "value",
                                 fields(
@@ -273,9 +273,26 @@ class CobbleStateRowDecoderTest {
         assertEquals("hello", rows.get(0).getString(2).toString());
     }
 
-    private static CobbleStateSourceRuntime.RuntimeSchema runtimeSchema(
+    private static RuntimeSchema runtimeSchema(
             StateInspectSchema schema, StateInspectSemanticSchema semanticSchema) {
-        return new CobbleStateSourceRuntime.RuntimeSchema(schema, semanticSchema);
+        return new RuntimeSchema(schema, semanticSchema);
+    }
+
+    private static CobbleStateRowDecoder decoder(
+            StateSourceConfig config, RuntimeSchema runtimeSchema) throws Exception {
+        return new CobbleStateRowDecoder(
+                runtimeSchema.schema, runtimeSchema.semanticSchema, config.outputFields(), "test");
+    }
+
+    private static final class RuntimeSchema {
+        private final StateInspectSchema schema;
+        private final StateInspectSemanticSchema semanticSchema;
+
+        private RuntimeSchema(
+                StateInspectSchema schema, StateInspectSemanticSchema semanticSchema) {
+            this.schema = schema;
+            this.semanticSchema = semanticSchema;
+        }
     }
 
     private static StateSourceConfig config(String kind, List<StateSourceField> fields) {

@@ -116,8 +116,7 @@ public final class CobbleConnectorMetrics {
             this.nativeBytes = nativeBytes;
         }
 
-        public void nativeEntry(byte[] key, byte[][] columns) {
-            long bytes = nativeEntryBytes(key, columns);
+        public void nativeEntry(long bytes) {
             nativeEntries.inc();
             nativeBytes.inc(bytes);
             bytesIn.inc(bytes);
@@ -152,9 +151,9 @@ public final class CobbleConnectorMetrics {
             requests.inc();
         }
 
-        public void hit(byte[] key, byte[][] columns) {
+        public void hit(long bytesRead) {
             hits.inc();
-            bytes.inc(nativeEntryBytes(key, columns));
+            bytes.inc(bytesRead);
         }
 
         public void miss() {

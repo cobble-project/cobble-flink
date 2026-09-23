@@ -12,9 +12,11 @@ import java.util.ArrayList;
 import java.util.Collections;
 import java.util.Comparator;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 /** Enumerator that assigns stable raw scan splits and refreshes them for newer snapshots. */
 final class CobbleSourceEnumerator
@@ -42,7 +44,8 @@ final class CobbleSourceEnumerator
 
     private volatile long currentSnapshotId;
     private volatile long nextSnapshotId;
-    private boolean noMoreSplitsSignaled;
+    /** Readers that have received bounded completion for their current registration. */
+    private final Set<Integer> noMoreSplitsSignaledReaders = new HashSet<>();
 
     CobbleSourceEnumerator(
             CobbleTableScanConfig config,
@@ -118,6 +121,8 @@ final class CobbleSourceEnumerator
 
     @Override
     public void addReader(int subtaskId) {
+        // A recovered subtask reuses its numeric id but needs a fresh terminal notification.
+        noMoreSplitsSignaledReaders.remove(Integer.valueOf(subtaskId));
         assignAvailableSplits();
         signalNoMoreSplitsIfBounded();
     }
@@ -239,13 +244,14 @@ final class CobbleSourceEnumerator
     }
 
     private void signalNoMoreSplitsIfBounded() {
-        if (config.isStreamingLatest() || noMoreSplitsSignaled || !pendingSplitsById.isEmpty()) {
+        if (config.isStreamingLatest() || !pendingSplitsById.isEmpty()) {
             return;
         }
         for (Integer readerId : context.registeredReaders().keySet()) {
-            context.signalNoMoreSplits(readerId.intValue());
+            if (noMoreSplitsSignaledReaders.add(readerId)) {
+                context.signalNoMoreSplits(readerId.intValue());
+            }
         }
-        noMoreSplitsSignaled = true;
     }
 
     private int countActiveSplits(int readerId) {

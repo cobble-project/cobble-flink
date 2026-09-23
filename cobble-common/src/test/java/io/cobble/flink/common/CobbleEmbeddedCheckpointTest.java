@@ -98,7 +98,7 @@ class CobbleEmbeddedCheckpointTest {
         writeMetadata(checkpointThree, stateThree, new OperatorID(9L, 10L));
         writeMetadata(checkpointFour, 4L, stateFour, new OperatorID(11L, 12L));
         java.nio.file.Path manifest =
-                Files.createDirectories(root.resolve("shared/op/volume/snapshot"))
+                Files.createDirectories(checkpointThree.resolve("shared/op-0/volume/snapshot"))
                         .resolve("SNAPSHOT-3");
         Files.write(manifest, new byte[] {0});
 
@@ -141,6 +141,34 @@ class CobbleEmbeddedCheckpointTest {
                 CobbleEmbeddedCheckpoint.select(rootPath, "latest").checkpoint().checkpointId());
     }
 
+    @Test
+    void locatesShardManifestByRecordedReferenceRatherThanCheckpointId() throws Exception {
+        java.nio.file.Path checkpoint =
+                Files.createDirectories(tempDir.resolve("shard-reference").resolve("chk-1"));
+        java.nio.file.Path state = checkpoint.resolve("task-state");
+        writePayload(state, "db-0", 0, 3, 0L);
+        writeMetadata(checkpoint, 1L, state, new OperatorID(15L, 16L));
+
+        // The payload's shard snapshot is SNAPSHOT-0 while the enclosing checkpoint is chk-1.
+        java.nio.file.Path manifest =
+                Files.createDirectories(checkpoint.resolve("shared/op-0/volume/snapshot"))
+                        .resolve("SNAPSHOT-0");
+        Files.write(manifest, new byte[] {0});
+
+        assertEquals(
+                1L,
+                CobbleEmbeddedCheckpoint.locate(new Path(manifest.toUri()))
+                        .get(0)
+                        .checkpoint()
+                        .checkpointId());
+        assertEquals(
+                1L,
+                CobbleEmbeddedCheckpoint.locate(new Path(manifest.toString()))
+                        .get(0)
+                        .checkpoint()
+                        .checkpointId());
+    }
+
     private static void writePayload(java.nio.file.Path stateFile) throws Exception {
         writePayload(stateFile, "db-0", 0, 3);
     }
@@ -148,13 +176,23 @@ class CobbleEmbeddedCheckpointTest {
     private static void writePayload(
             java.nio.file.Path stateFile, String dbId, int rangeStart, int rangeEnd)
             throws Exception {
+        writePayload(stateFile, dbId, rangeStart, rangeEnd, 3L);
+    }
+
+    private static void writePayload(
+            java.nio.file.Path stateFile,
+            String dbId,
+            int rangeStart,
+            int rangeEnd,
+            long snapshotId)
+            throws Exception {
         ShardSnapshot shard = new ShardSnapshot();
         shard.dbId = dbId;
-        shard.snapshotId = 3L;
+        shard.snapshotId = snapshotId;
         shard.manifestPath =
                 stateFile
                         .getParent()
-                        .resolve("shared/op-0/volume/snapshot/SNAPSHOT-3")
+                        .resolve("shared/op-0/volume/snapshot/SNAPSHOT-" + snapshotId)
                         .toUri()
                         .toString();
         ShardSnapshot.Range range = new ShardSnapshot.Range();

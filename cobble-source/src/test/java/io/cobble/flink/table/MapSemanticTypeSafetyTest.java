@@ -112,9 +112,6 @@ class MapSemanticTypeSafetyTest {
                         nestedMapKey,
                         StateInspectType.scalar("INT"));
 
-        CobbleStateSourceRuntime.RuntimeSchema runtimeSchema =
-                new CobbleStateSourceRuntime.RuntimeSchema(schema, semantic);
-
         StateSourceConfig config =
                 new StateSourceConfig(
                         "file:///tmp/checkpoints",
@@ -136,7 +133,12 @@ class MapSemanticTypeSafetyTest {
         IllegalArgumentException ex =
                 assertThrows(
                         IllegalArgumentException.class,
-                        () -> new CobbleStateLookupKeyEncoder(config, runtimeSchema, new int[0]));
+                        () ->
+                                new CobbleStateLookupKeyEncoder(
+                                        schema,
+                                        semantic,
+                                        config.lookupKeyContract().requiredFields(),
+                                        new int[0]));
         Throwable cause = ex.getCause();
         assertTrue(cause != null, "expected a cause");
         String message = cause.getMessage();

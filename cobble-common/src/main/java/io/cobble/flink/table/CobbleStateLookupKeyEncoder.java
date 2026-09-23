@@ -44,8 +44,9 @@ final class CobbleStateLookupKeyEncoder {
             VoidNamespaceSerializer.class.getName();
     private static final byte MAP_SEPARATOR = 0x00;
 
-    private final StateSourceConfig config;
-    private final CobbleStateSourceRuntime.RuntimeSchema runtimeSchema;
+    private final StateInspectSchema schema;
+    private final StateInspectSemanticSchema semantic;
+    private final List<StateSourceField> requiredFields;
     private final int[] lookupKeyPositionsByRequiredField;
 
     private final GroupLookupEncoder stateKeyEncoder;
@@ -55,12 +56,14 @@ final class CobbleStateLookupKeyEncoder {
     private final boolean isMap;
 
     CobbleStateLookupKeyEncoder(
-            StateSourceConfig config,
-            CobbleStateSourceRuntime.RuntimeSchema runtimeSchema,
+            StateInspectSchema schema,
+            StateInspectSemanticSchema semantic,
+            List<StateSourceField> requiredFields,
             int[] lookupKeyPositionsByRequiredField) {
         this(
-                config,
-                runtimeSchema,
+                schema,
+                semantic,
+                requiredFields,
                 lookupKeyPositionsByRequiredField,
                 Thread.currentThread().getContextClassLoader() == null
                         ? CobbleStateLookupKeyEncoder.class.getClassLoader()
@@ -68,19 +71,19 @@ final class CobbleStateLookupKeyEncoder {
     }
 
     CobbleStateLookupKeyEncoder(
-            StateSourceConfig config,
-            CobbleStateSourceRuntime.RuntimeSchema runtimeSchema,
+            StateInspectSchema schema,
+            StateInspectSemanticSchema semantic,
+            List<StateSourceField> requiredFields,
             int[] lookupKeyPositionsByRequiredField,
             ClassLoader classLoader) {
-        this.config = config;
-        this.runtimeSchema = runtimeSchema;
+        this.schema = schema;
+        this.semantic = semantic;
+        this.requiredFields = new ArrayList<StateSourceField>(requiredFields);
         this.lookupKeyPositionsByRequiredField =
                 Arrays.copyOf(
                         lookupKeyPositionsByRequiredField,
                         lookupKeyPositionsByRequiredField.length);
 
-        StateInspectSchema schema = runtimeSchema.schema;
-        StateInspectSemanticSchema semantic = runtimeSchema.semanticSchema;
         this.isVoidNamespace = isVoidNamespace(schema.namespaceSerializer());
         this.isMap = schema.stateKind() == StateKind.MAP;
 
@@ -90,7 +93,7 @@ final class CobbleStateLookupKeyEncoder {
                             "state key",
                             semantic.stateKey(),
                             schema.keySerializer(),
-                            config,
+                            StateSourceField.Group.STATE_KEY,
                             classLoader);
             this.namespaceEncoder =
                     isVoidNamespace
@@ -99,7 +102,7 @@ final class CobbleStateLookupKeyEncoder {
                                     "namespace",
                                     semantic.namespace(),
                                     schema.namespaceSerializer(),
-                                    config,
+                                    StateSourceField.Group.NAMESPACE,
                                     classLoader);
             this.mapKeyEncoder =
                     isMap
@@ -107,7 +110,7 @@ final class CobbleStateLookupKeyEncoder {
                                     "map key",
                                     semantic.mapUserKey(),
                                     schema.mapUserKeySerializer(),
-                                    config,
+                                    StateSourceField.Group.MAP_KEY,
                                     classLoader)
                             : null;
         } catch (IOException e) {
@@ -120,7 +123,6 @@ final class CobbleStateLookupKeyEncoder {
         if (lookupKeyRow == null) {
             throw new IOException("Cobble state lookup key row must not be null.");
         }
-        List<StateSourceField> requiredFields = config.lookupKeyContract().requiredFields();
         if (lookupKeyPositionsByRequiredField.length != requiredFields.size()) {
             throw new IOException(
                     "Cobble state lookup encoder expects "
@@ -166,8 +168,7 @@ final class CobbleStateLookupKeyEncoder {
             }
             Object value = groupEncoder.readField(i, rowPosition, lookupKeyRow);
             if (value == null) {
-                StateSourceField field =
-                        config.lookupKeyContract().requiredFields().get(requiredFieldIndex);
+                StateSourceField field = requiredFields.get(requiredFieldIndex);
                 throw new IOException(
                         "Lookup key column '"
                                 + field.name()
@@ -181,7 +182,6 @@ final class CobbleStateLookupKeyEncoder {
     }
 
     private int[] positionsForGroup(StateSourceField.Group group) {
-        List<StateSourceField> requiredFields = config.lookupKeyContract().requiredFields();
         List<Integer> indexes = new ArrayList<>();
         for (int i = 0; i < requiredFields.size(); i++) {
             if (requiredFields.get(i).group() == group) {
@@ -209,7 +209,6 @@ final class CobbleStateLookupKeyEncoder {
         output.write(keyBytes);
         output.write(namespaceBytes);
 
-        StateInspectSchema schema = runtimeSchema.schema;
         if (isMap) {
             output.writeByte(MAP_SEPARATOR);
             byte[] mapKeyBytes = mapKeyEncoder.serializeObject(mapKeyObject);
@@ -302,10 +301,9 @@ final class CobbleStateLookupKeyEncoder {
                 String groupLabel,
                 StateInspectType type,
                 SerializerInspectSchema serializerSchema,
-                StateSourceConfig config,
+                StateSourceField.Group group,
                 ClassLoader classLoader)
                 throws IOException {
-            StateSourceField.Group group = groupForLabel(groupLabel, config);
             rejectClasslessStructuredLookupKey(groupLabel, type, serializerSchema);
             TypeSerializer<Object> serializer =
                     restoreSerializer(serializerSchema, groupLabel, classLoader);
@@ -484,20 +482,6 @@ final class CobbleStateLookupKeyEncoder {
         private static LogicalType parse(String logicalType) {
             return LogicalTypeParser.parse(
                     logicalType, CobbleStateLookupKeyEncoder.class.getClassLoader());
-        }
-
-        private static StateSourceField.Group groupForLabel(
-                String groupLabel, StateSourceConfig config) {
-            switch (groupLabel) {
-                case "state key":
-                    return StateSourceField.Group.STATE_KEY;
-                case "namespace":
-                    return StateSourceField.Group.NAMESPACE;
-                case "map key":
-                    return StateSourceField.Group.MAP_KEY;
-                default:
-                    throw new IllegalArgumentException("Unknown group label: " + groupLabel);
-            }
         }
     }
 }

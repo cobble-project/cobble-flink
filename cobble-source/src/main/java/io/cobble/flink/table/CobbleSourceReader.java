@@ -1,9 +1,12 @@
 package io.cobble.flink.table;
 
-import io.cobble.ScanCursor;
-import io.cobble.ScanOptions;
 import io.cobble.ScanSplit;
 import io.cobble.flink.common.CobbleConnectorMetrics;
+import io.cobble.table.TableReadCursor;
+import io.cobble.table.TableReadEntry;
+import io.cobble.table.TableReadProvider;
+import io.cobble.table.TableReadRange;
+import io.cobble.table.TableReadSession;
 
 import org.apache.flink.api.connector.source.ReaderOutput;
 import org.apache.flink.api.connector.source.SourceEvent;
@@ -35,29 +38,20 @@ final class CobbleSourceReader implements SourceReader<RowData, CobbleSourceSpli
     private final SourceReaderContext context;
     private final Map<String, SourceSplitState> ownedStatesBySplit = new HashMap<>();
     private final ArrayDeque<SourceSplitState> runnableStates = new ArrayDeque<>();
-    private final ScannedRowDecoder rowDecoder;
-    private final int[] projectedColumnIndexes;
     private final CobbleConnectorMetrics.SourceMetrics metrics;
     private CompletableFuture<Void> availability = new CompletableFuture<>();
     private SourceSplitState currentState;
-    private ScanOptions scanOptions;
     private boolean noMoreSplits;
     private boolean closed;
 
     CobbleSourceReader(CobbleTableScanConfig config, SourceReaderContext context) {
         this.config = config;
         this.context = context;
-        this.rowDecoder = config.createDecoder();
-        this.projectedColumnIndexes = config.projectedColumnIndexes();
         this.metrics = CobbleConnectorMetrics.source(context.metricGroup());
     }
 
     @Override
     public void start() {
-        this.scanOptions = ScanOptions.forColumns(projectedColumnIndexes);
-        if (config.columnFamily() != null) {
-            this.scanOptions.columnFamily(config.columnFamily());
-        }
         context.sendSplitRequest();
     }
 
@@ -69,11 +63,17 @@ final class CobbleSourceReader implements SourceReader<RowData, CobbleSourceSpli
             return noMoreSplits ? InputStatus.END_OF_INPUT : InputStatus.NOTHING_AVAILABLE;
         }
 
-        ScanCursor.Entry entry = state.nextEntry();
+        TableReadEntry<RowData> entry;
+        try {
+            entry = state.nextEntry();
+        } catch (Exception error) {
+            metrics.error();
+            throw error;
+        }
         if (entry != null) {
-            metrics.nativeEntry(entry.key, entry.columns);
+            if (entry.countsPhysicalEntry()) metrics.nativeEntry(entry.physicalBytes());
             try {
-                output.collect(rowDecoder.decode(entry.key, entry.columns));
+                output.collect(entry.value());
                 metrics.emittedRow();
             } catch (Exception e) {
                 metrics.error();
@@ -173,10 +173,6 @@ final class CobbleSourceReader implements SourceReader<RowData, CobbleSourceSpli
         for (SourceSplitState state : ownedStatesBySplit.values()) {
             state.closeRuntime();
         }
-        if (scanOptions != null) {
-            scanOptions.close();
-            scanOptions = null;
-        }
     }
 
     private SourceSplitState moveToRunnableState() {
@@ -274,7 +270,9 @@ final class CobbleSourceReader implements SourceReader<RowData, CobbleSourceSpli
         private byte[] wrapBoundaryKeyInclusive;
         private boolean enqueued;
         private int resolvedTotalBuckets;
-        private ScanCursor cursor;
+        private TableReadProvider<RowData, Void> provider;
+        private TableReadSession<RowData, Void> session;
+        private TableReadCursor<RowData> cursor;
         // ACTIVE checkpoint progress reuses the cursor-owned key bytes; Flink copies only when the
         // split snapshot is serialized.
         private int checkpointBucket;
@@ -334,12 +332,12 @@ final class CobbleSourceReader implements SourceReader<RowData, CobbleSourceSpli
             return scanState != CobbleSourceSplit.ScanState.IDLE;
         }
 
-        private ScanCursor.Entry nextEntry() throws Exception {
+        private TableReadEntry<RowData> nextEntry() throws Exception {
             while (hasWork()) {
                 ensureCursor();
-                ScanCursor.Entry entry = cursor.nextEntry();
+                TableReadEntry<RowData> entry = cursor.next();
                 if (entry != null) {
-                    advanceStartBoundary(entry);
+                    advanceStartBoundary(entry.position());
                     return entry;
                 }
                 if (scanState == CobbleSourceSplit.ScanState.WRAP_AFTER) {
@@ -383,11 +381,9 @@ final class CobbleSourceReader implements SourceReader<RowData, CobbleSourceSpli
                                     .after;
                 }
             }
-            cursor =
-                    scanSplit.openScannerWithOptions(
-                            CobbleSourceRuntime.createSourceScanConfig(
-                                    config, resolveTotalBuckets()),
-                            scanOptions);
+            provider = new CobbleSinkTableReadProvider(config, scanSplit, resolveTotalBuckets());
+            session = provider.open();
+            cursor = session.scan(new TableReadRange(0, Integer.MAX_VALUE), null);
         }
 
         private int resolveTotalBuckets() throws IOException {
@@ -418,6 +414,14 @@ final class CobbleSourceReader implements SourceReader<RowData, CobbleSourceSpli
                 cursor.close();
                 cursor = null;
             }
+            if (session != null) {
+                session.close();
+                session = null;
+            }
+            if (provider != null) {
+                provider.close();
+                provider = null;
+            }
         }
 
         private byte[] copy(byte[] bytes) {
@@ -445,9 +449,9 @@ final class CobbleSourceReader implements SourceReader<RowData, CobbleSourceSpli
             return wrapBoundaryBucket >= 0 && wrapBoundaryKeyInclusive != null;
         }
 
-        private void advanceStartBoundary(ScanCursor.Entry entry) {
-            checkpointBucket = entry.bucket;
-            checkpointKeyExclusive = entry.key;
+        private void advanceStartBoundary(io.cobble.table.TableReadPosition position) {
+            checkpointBucket = position.bucket();
+            checkpointKeyExclusive = position.physicalKey();
         }
 
         private int currentBoundaryBucket() {

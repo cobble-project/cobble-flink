@@ -149,7 +149,7 @@ final class CobbleCatalogDynamicTableSource implements ScanTableSource, LookupTa
                 id = Long.parseLong(snapshot);
             }
             TableReader reader = builder.globalSnapshot(id).open();
-            if (!reader.schema().equals(opened.table().schema())) {
+            if (!reader.tableSchema().equals(opened.table().schema())) {
                 reader.close();
                 throw new ValidationException(
                         "The selected snapshot does not contain the current catalog schema. Commit a snapshot from a writer using the updated schema before reading it.");

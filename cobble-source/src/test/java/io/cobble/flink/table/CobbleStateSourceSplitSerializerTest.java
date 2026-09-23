@@ -23,7 +23,8 @@ class CobbleStateSourceSplitSerializerTest {
                         "orders",
                         "value",
                         3,
-                        new byte[] {4, 5});
+                        new byte[] {4, 5},
+                        0);
 
         byte[] bytes = serializer.serialize(split);
         CobbleStateSourceSplit restored = serializer.deserialize(serializer.getVersion(), bytes);
@@ -36,11 +37,10 @@ class CobbleStateSourceSplitSerializerTest {
         assertEquals("operator-1", restored.operatorId);
         assertEquals("orders", restored.stateName);
         assertEquals("value", restored.stateKind);
-        assertEquals(3, restored.startKeyGroup);
+        assertEquals(3, restored.resumeBucket);
         org.junit.jupiter.api.Assertions.assertArrayEquals(
-                new byte[] {4, 5}, restored.startKeyExclusive);
-        org.junit.jupiter.api.Assertions.assertNull(restored.partialEntryKey);
-        assertEquals(0, restored.partialEmittedCount);
+                new byte[] {4, 5}, restored.resumePhysicalKey);
+        assertEquals(0, restored.resumeIntraEntryOffset);
     }
 
     @Test
@@ -58,7 +58,6 @@ class CobbleStateSourceSplitSerializerTest {
                         "list",
                         3,
                         new byte[] {4, 5},
-                        new byte[] {10, 20, 30},
                         2);
 
         byte[] bytes = serializer.serialize(split);
@@ -67,12 +66,10 @@ class CobbleStateSourceSplitSerializerTest {
         assertEquals("2:3:8", restored.splitId());
         assertEquals(7L, restored.checkpointId);
         assertEquals("list", restored.stateKind);
-        assertEquals(3, restored.startKeyGroup);
+        assertEquals(3, restored.resumeBucket);
         org.junit.jupiter.api.Assertions.assertArrayEquals(
-                new byte[] {4, 5}, restored.startKeyExclusive);
-        org.junit.jupiter.api.Assertions.assertArrayEquals(
-                new byte[] {10, 20, 30}, restored.partialEntryKey);
-        assertEquals(2, restored.partialEmittedCount);
+                new byte[] {4, 5}, restored.resumePhysicalKey);
+        assertEquals(2, restored.resumeIntraEntryOffset);
     }
 
     @Test

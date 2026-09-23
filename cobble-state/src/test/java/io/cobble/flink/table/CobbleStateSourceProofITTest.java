@@ -5,12 +5,13 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
-import io.cobble.ScanCursor;
-import io.cobble.ScanOptions;
 import io.cobble.flink.common.inspect.InspectSchemaRegistryLayout;
 import io.cobble.flink.state.CobbleCheckpointingITSupport;
 import io.cobble.flink.state.CobbleOptions;
 import io.cobble.flink.state.CobbleStateBackend;
+import io.cobble.table.TableReadCursor;
+import io.cobble.table.TableReadEntry;
+import io.cobble.table.TableReadRange;
 
 import org.apache.flink.api.common.JobID;
 import org.apache.flink.api.common.functions.RichMapFunction;
@@ -155,11 +156,12 @@ class CobbleStateSourceProofITTest {
         assertEquals(1L, firstMetrics.count("cobble.nativeEntriesReadTotal"));
         assertEquals(1L, firstMetrics.count("records"));
         assertTrue(firstMetrics.count("cobble.nativeBytesReadTotal") > 0L);
-        assertNotNull(partialSplit.partialEntryKey);
-        assertEquals(1, partialSplit.partialEmittedCount);
+        assertNotNull(partialSplit.resumePhysicalKey);
+        assertEquals(1, partialSplit.resumeIntraEntryOffset);
 
         CapturingSourceMetrics resumedMetrics = new CapturingSourceMetrics();
         CollectingOutput resumedOutput = new CollectingOutput();
+        CobbleStateSourceSplit secondPartialSplit;
         CobbleStateSourceReader resumedReader =
                 new CobbleStateSourceReader(
                         config, new TestingReaderContext(resumedMetrics.group()));
@@ -167,29 +169,43 @@ class CobbleStateSourceProofITTest {
             resumedReader.start();
             resumedReader.addSplits(java.util.Collections.singletonList(partialSplit));
             resumedReader.notifyNoMoreSplits();
-            for (int polls = 0; polls < 10_000; polls++) {
-                InputStatus status = resumedReader.pollNext(resumedOutput);
-                assertTrue(status != InputStatus.END_OF_INPUT || !resumedOutput.rows.isEmpty());
-                if (findSplit(resumedReader.snapshotState(2L), partialSplit.splitId).partialEntryKey
-                        == null) {
-                    break;
-                }
-                if (polls == 9_999) {
-                    throw new AssertionError("Timed out draining resumed ListState entry.");
-                }
-            }
+            pollUntilRows(resumedReader, resumedOutput, 1);
+            secondPartialSplit = findPartialSplit(resumedReader.snapshotState(2L));
         } finally {
             resumedReader.close();
         }
 
-        assertTrue(resumedOutput.rows.size() > 0, "expected the remaining ListState elements");
+        assertEquals(2, secondPartialSplit.resumeIntraEntryOffset);
+
+        CapturingSourceMetrics finalMetrics = new CapturingSourceMetrics();
+        CollectingOutput finalOutput = new CollectingOutput();
+        CobbleStateSourceReader finalReader =
+                new CobbleStateSourceReader(config, new TestingReaderContext(finalMetrics.group()));
+        try {
+            finalReader.start();
+            finalReader.addSplits(java.util.Collections.singletonList(secondPartialSplit));
+            finalReader.notifyNoMoreSplits();
+            // Consume only the remaining row of the same physical ListState entry. A full split
+            // drain would legitimately continue into later keys and count their native entries.
+            pollUntilRows(finalReader, finalOutput, 1);
+        } finally {
+            finalReader.close();
+        }
+
+        assertEquals(1, finalOutput.rows.size(), "expected one remaining ListState element");
         assertEquals(1L, resumedMetrics.count("cobble.nativeEntriesReadTotal"));
         assertEquals(resumedOutput.rows.size(), resumedMetrics.count("records"));
         assertTrue(resumedMetrics.count("cobble.nativeBytesReadTotal") > 0L);
-        for (RowData row : resumedOutput.rows) {
+        assertEquals(1L, finalMetrics.count("cobble.nativeEntriesReadTotal"));
+        assertEquals(finalOutput.rows.size(), finalMetrics.count("records"));
+        assertTrue(finalMetrics.count("cobble.nativeBytesReadTotal") > 0L);
+        for (RowData row : finalOutput.rows) {
             assertFalse(
                     sameRow(firstOutput.rows.get(0), row),
                     "resumed reader must not duplicate the already-emitted ListState row");
+            assertFalse(
+                    sameRow(resumedOutput.rows.get(0), row),
+                    "second restore must not duplicate the second ListState row");
         }
     }
 
@@ -301,53 +317,16 @@ class CobbleStateSourceProofITTest {
     }
 
     private static List<RowData> drainStateRows(StateSourceConfig config) throws Exception {
-        List<CobbleStateSourceSplit> splits =
-                CobbleStateSourceRuntime.createStateSourceSplits(config);
-        assertFalse(splits.isEmpty(), "expected at least one split");
-        CobbleStateSourceRuntime.ReaderHandle handle =
-                CobbleStateSourceRuntime.openReader(config, splits.get(0).checkpointId);
-        CobbleStateSourceRuntime.RuntimeSchema runtimeSchema =
-                CobbleStateSourceRuntime.loadRuntimeSchema(config);
-        CobbleStateRowDecoder decoder = new CobbleStateRowDecoder(config, runtimeSchema);
-        String columnFamily = runtimeSchema.schema.columnFamily();
         List<RowData> rows = new ArrayList<>();
-        try {
-            for (CobbleStateSourceSplit split : splits) {
-                for (int keyGroup = split.keyGroupStart;
-                        keyGroup <= split.keyGroupEnd;
-                        keyGroup++) {
-                    ScanOptions options =
-                            CobbleStateSourceRuntime.scanOptions(columnFamily, Integer.MAX_VALUE);
-                    ScanCursor cursor;
-                    try {
-                        cursor =
-                                handle.reader.scanWithOptions(
-                                        keyGroup,
-                                        CobbleStateSourceRuntime.emptyScanKey(),
-                                        CobbleStateSourceRuntime.maxScanKey(),
-                                        options);
-                    } catch (RuntimeException e) {
-                        // A shard may not carry this column family when it never wrote data for the
-                        // state; treat that key-group as empty.
-                        if (e.getMessage() != null
-                                && e.getMessage().contains("Unknown column family")) {
-                            continue;
-                        }
-                        throw e;
-                    }
-                    try (ScanCursor scan = cursor) {
-                        ScanCursor.Entry entry = scan.nextEntry();
-                        while (entry != null) {
-                            rows.addAll(
-                                    decoder.decode(
-                                            entry.key, entry.columns, split.splitId(), keyGroup));
-                            entry = scan.nextEntry();
-                        }
-                    }
-                }
+        long checkpointId = CobbleStateSourceRuntime.resolveCheckpointId(config);
+        try (io.cobble.table.TableReadSession<RowData, RowData> session =
+                        CobbleStateTableReadProvider.forScan(config, checkpointId).open();
+                TableReadCursor<RowData> cursor =
+                        session.scan(new TableReadRange(0, Integer.MAX_VALUE), null)) {
+            TableReadEntry<RowData> entry;
+            while ((entry = cursor.next()) != null) {
+                rows.add(entry.value());
             }
-        } finally {
-            handle.close();
         }
         return rows;
     }
@@ -425,7 +404,7 @@ class CobbleStateSourceProofITTest {
 
     private static CobbleStateSourceSplit findPartialSplit(List<CobbleStateSourceSplit> splits) {
         for (CobbleStateSourceSplit split : splits) {
-            if (split.partialEntryKey != null) {
+            if (split.resumePhysicalKey != null && split.resumeIntraEntryOffset > 0) {
                 return split;
             }
         }
@@ -644,6 +623,8 @@ class CobbleStateSourceProofITTest {
             Integer current = valueState.value();
             valueState.update(current == null ? value : current + value);
             listState.add(value);
+            listState.add(value + 10_000);
+            listState.add(value + 20_000);
             PROCESSED_RECORDS.incrementAndGet();
             return value;
         }

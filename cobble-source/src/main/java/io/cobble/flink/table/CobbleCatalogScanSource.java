@@ -2,8 +2,13 @@ package io.cobble.flink.table;
 
 import io.cobble.flink.catalog.CobbleCatalogTableReference;
 import io.cobble.flink.common.table.CobbleTableRowConverter;
+import io.cobble.table.NativeTableScanReadProvider;
+import io.cobble.table.TableReadCursor;
+import io.cobble.table.TableReadEntry;
+import io.cobble.table.TableReadProvider;
+import io.cobble.table.TableReadRange;
+import io.cobble.table.TableReadSession;
 import io.cobble.table.TableReader;
-import io.cobble.table.TableScanCursor;
 import io.cobble.table.TableScanSplit;
 import io.cobble.table.Value;
 
@@ -146,7 +151,9 @@ final class CobbleCatalogScanSource
         private final ArrayDeque<Split> pending = new ArrayDeque<>();
         private CompletableFuture<Void> available = new CompletableFuture<>();
         private Split current;
-        private TableScanCursor cursor;
+        private TableReadProvider<List<Value>, Void> provider;
+        private TableReadSession<List<Value>, Void> session;
+        private TableReadCursor<List<Value>> cursor;
         private long emitted;
         private boolean finished;
 
@@ -173,30 +180,33 @@ final class CobbleCatalogScanSource
                     if (available.isDone()) available = new CompletableFuture<>();
                     return InputStatus.NOTHING_AVAILABLE;
                 }
-                // Revalidate identity before opening durable plan data after failover/recreate.
+                // Revalidate identity before opening the durable fixed assignment after failover.
                 try (CobbleCatalogTableReference.Opened ignored = reference.openValidated()) {
-                    cursor = current.plan.openTypedScanner(reference.runtimeConfig(), 0);
+                    provider =
+                            new NativeTableScanReadProvider(
+                                    reference.runtimeConfig(), current.plan);
+                    session = provider.open();
+                    cursor = session.scan(new TableReadRange(0, Integer.MAX_VALUE), null);
                 }
                 emitted = 0;
                 // Native plans expose no seek token yet. Replaying a fixed immutable split
                 // preserves
                 // exact progress without deriving private physical key or manifest layouts.
                 while (emitted < current.emitted) {
-                    if (cursor.nextRow() == null)
+                    if (cursor.next() == null)
                         throw new IOException(
                                 "Catalog scan split ended before its checkpoint position.");
                     emitted++;
                 }
             }
-            List<Value> row = cursor.nextRow();
-            if (row != null) {
-                output.collect(converter.toRowData(row));
+            TableReadEntry<List<Value>> entry = cursor.next();
+            if (entry != null) {
+                output.collect(converter.toRowData(entry.value()));
                 emitted++;
                 context.metricGroup().getIOMetricGroup().getNumRecordsInCounter().inc();
                 return InputStatus.MORE_AVAILABLE;
             }
-            cursor.close();
-            cursor = null;
+            closeCursor();
             current = null;
             context.sendSplitRequest();
             if (!pending.isEmpty()) return InputStatus.MORE_AVAILABLE;
@@ -231,10 +241,16 @@ final class CobbleCatalogScanSource
 
         @Override
         public void close() {
-            if (cursor != null) {
-                cursor.close();
-                cursor = null;
-            }
+            closeCursor();
+        }
+
+        private void closeCursor() {
+            if (cursor != null) cursor.close();
+            cursor = null;
+            if (session != null) session.close();
+            session = null;
+            if (provider != null) provider.close();
+            provider = null;
         }
     }
 

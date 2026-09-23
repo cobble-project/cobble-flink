@@ -1,14 +1,12 @@
 package io.cobble.flink.table;
 
-import io.cobble.Config;
 import io.cobble.GlobalSnapshot;
-import io.cobble.ReadOptions;
-import io.cobble.Reader;
 import io.cobble.flink.common.CobbleConnectorMetrics;
 import io.cobble.flink.common.CobbleLoader;
 import io.cobble.flink.common.table.CobbleTableRowConverter;
-import io.cobble.table.BucketHash;
 import io.cobble.table.KeyCodec;
+import io.cobble.table.TableReadEntry;
+import io.cobble.table.TableReadSession;
 import io.cobble.table.Value;
 
 import org.apache.flink.table.data.RowData;
@@ -29,11 +27,8 @@ public final class CobbleLookupFunction extends LookupFunction {
 
     private final CobbleDynamicTableSource.SerializableConfig config;
     private final int[] lookupKeyPositions;
-    private transient RuntimeLookupKeyEncoder keyEncoder;
-    private transient CobbleRowDataDecoders.RuntimeRowDecoder rowDecoder;
-    private transient Reader reader;
-    private transient ReadOptions readOptions;
-    private transient int totalBuckets;
+    private transient CobbleSinkLookupReadProvider provider;
+    private transient TableReadSession<RowData, RowData> session;
     private transient CobbleConnectorMetrics.LookupMetrics metrics;
 
     CobbleLookupFunction(
@@ -44,8 +39,6 @@ public final class CobbleLookupFunction extends LookupFunction {
 
     @Override
     public void open(FunctionContext context) {
-        this.keyEncoder = new RuntimeLookupKeyEncoder(config.keyFields, lookupKeyPositions);
-        this.rowDecoder = new CobbleRowDataDecoders.RuntimeRowDecoder(config);
         this.metrics = lookupMetrics(context);
     }
 
@@ -57,43 +50,37 @@ public final class CobbleLookupFunction extends LookupFunction {
                 metrics.miss();
                 return Collections.emptyList();
             }
-            if (config.isStreamingLatest()) {
-                reader.refresh();
-                totalBuckets = reader.currentGlobalSnapshot().totalBuckets;
-            }
-            byte[] encodedKey = keyEncoder.encode(keyRow);
-            int bucket = hashFixedBucket(encodedKey, totalBuckets);
-            byte[][] columns = reader.getWithOptions(bucket, encodedKey, readOptions);
-            if (columns == null) {
+            if (config.isStreamingLatest()) provider.refresh();
+            Collection<TableReadEntry<RowData>> rows = session.lookup(keyRow);
+            if (rows.isEmpty()) {
                 metrics.miss();
                 return Collections.emptyList();
             }
-            RowData decoded = rowDecoder.decode(encodedKey, columns);
-            metrics.hit(encodedKey, columns);
-            return Collections.singletonList(decoded);
+            TableReadEntry<RowData> row = rows.iterator().next();
+            metrics.hit(row.physicalBytes());
+            return Collections.singletonList(row.value());
         } catch (IOException e) {
             metrics.error();
             throw e;
         } catch (RuntimeException e) {
             metrics.error();
             throw e;
+        } catch (Exception e) {
+            metrics.error();
+            throw new IOException("Cobble lookup failed.", e);
         }
     }
 
     @Override
     public void close() {
-        if (readOptions != null) {
-            readOptions.close();
-            readOptions = null;
-        }
-        if (reader != null) {
-            reader.close();
-            reader = null;
-        }
+        if (session != null) session.close();
+        session = null;
+        if (provider != null) provider.close();
+        provider = null;
     }
 
     private boolean ensureReaderLoaded() throws IOException {
-        if (reader != null) {
+        if (session != null) {
             return true;
         }
         CobbleLoader.ensureCobbleLoaded();
@@ -101,37 +88,30 @@ public final class CobbleLookupFunction extends LookupFunction {
         if (initialSnapshot == null) {
             return false;
         }
-        this.totalBuckets = initialSnapshot.totalBuckets;
-        Config readerConfig = CobbleSourceRuntime.createLookupReaderConfig(config, totalBuckets);
-        Reader openedReader =
-                config.isStreamingLatest()
-                        ? Reader.openCurrent(readerConfig)
-                        : Reader.open(readerConfig, initialSnapshot.id);
+        CobbleSinkLookupReadProvider openedProvider =
+                new CobbleSinkLookupReadProvider(config, initialSnapshot, lookupKeyPositions);
         try {
-            int[] columns = config.projectedColumnIndexes();
-            this.readOptions =
-                    ReadOptions.forColumnsInFamily(CobbleTableRowConverter.TABLE_NAME, columns);
-            this.reader = openedReader;
-        } catch (RuntimeException | LinkageError e) {
-            openedReader.close();
+            this.session = openedProvider.open();
+            this.provider = openedProvider;
+        } catch (Exception e) {
+            openedProvider.close();
+            throw new IOException("Failed to open Cobble lookup read provider.", e);
+        } catch (LinkageError e) {
+            openedProvider.close();
             throw e;
         }
         return true;
-    }
-
-    private static int hashFixedBucket(byte[] encodedKey, int totalBuckets) {
-        return new BucketHash(totalBuckets).bucket(encodedKey);
     }
 
     private static CobbleConnectorMetrics.LookupMetrics lookupMetrics(FunctionContext context) {
         return CobbleConnectorMetrics.lookup(context == null ? null : context.getMetricGroup());
     }
 
-    private static final class RuntimeLookupKeyEncoder {
+    static final class RuntimeLookupKeyEncoder {
         private final List<RuntimeLookupFieldEncoder> encoders;
         private final List<io.cobble.table.LogicalType> keyTypes;
 
-        private RuntimeLookupKeyEncoder(
+        RuntimeLookupKeyEncoder(
                 List<CobbleDynamicTableSource.SerializableField> keyFields,
                 int[] lookupKeyPositions) {
             this.encoders = new ArrayList<>(keyFields.size());
@@ -148,7 +128,7 @@ public final class CobbleLookupFunction extends LookupFunction {
             }
         }
 
-        private byte[] encode(RowData row) {
+        byte[] encode(RowData row) {
             List<Value> values = new ArrayList<Value>(encoders.size());
             for (RuntimeLookupFieldEncoder encoder : encoders) {
                 values.add(encoder.encodeRequired(row));
