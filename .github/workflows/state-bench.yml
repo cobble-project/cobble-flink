@@ -64,7 +64,7 @@ jobs:
             ${{ runner.os }}-state-bench-cargo-git-
 
       - name: Build and install local cobble-java
-        run: ./scripts/install-local-cobble-java.sh cobble/cobble-java/java
+        run: ./scripts/install-local-cobble-java.sh cobble/cobble-binding/cobble-java/java
 
       - name: Build benchmark jar
         run: ./mvnw --batch-mode --no-transfer-progress -pl :cobble-flink-state-bench -am -DskipTests clean package
