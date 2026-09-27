@@ -240,6 +240,35 @@ class CobbleFlinkMonitorHttpIT {
             assertEquals(200, sinkScan.get().statusCode());
             assertEquals(200, rawScan.get().statusCode());
 
+            JsonObject emptyRawPrefix =
+                    json(
+                            post(
+                                            http,
+                                            base.resolve("/api/v1/sessions/" + rawId + "/scan"),
+                                            "{\"target_id\":\""
+                                                    + rawTarget
+                                                    + "\",\"limit\":1,\"prefix_b64\":\"\"}")
+                                    .body());
+            assertEquals(1, emptyRawPrefix.getAsJsonArray("rows").size());
+            JsonObject explicitRawTable =
+                    json(
+                            post(
+                                            http,
+                                            base.resolve("/api/v1/sessions/" + sinkId + "/scan"),
+                                            "{\"target_id\":\""
+                                                    + sinkTarget
+                                                    + "\",\"limit\":1,\"prefix_b64\":\"\"}")
+                                    .body());
+            assertEquals(1, explicitRawTable.getAsJsonArray("rows").size());
+            assertTrue(
+                    explicitRawTable
+                                    .getAsJsonArray("rows")
+                                    .get(0)
+                                    .getAsJsonObject()
+                                    .getAsJsonArray("columns_b64")
+                                    .size()
+                            > 0);
+
             HttpResponse<String> capped =
                     post(
                             http,

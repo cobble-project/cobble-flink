@@ -27,7 +27,17 @@ import io.cobble.flink.inspect.ScanFilter;
 import io.cobble.flink.inspect.ScanRequest;
 import io.cobble.flink.inspect.StateKey;
 import io.cobble.flink.inspect.TypedLookupKey;
+import io.cobble.table.KeyCodec;
+import io.cobble.table.LogicalType;
+import io.cobble.table.TableKey;
+import io.cobble.table.TableKeyBuilder;
+import io.cobble.table.TableProjection;
+import io.cobble.table.TableReader;
+import io.cobble.table.TableScanCursor;
+import io.cobble.table.Value;
 
+import java.io.IOException;
+import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
@@ -43,6 +53,7 @@ import java.util.Set;
 /** Default pinned SDK session. All native and temporary resources are owned by this object. */
 final class InspectSessionImpl implements InspectSession {
     private static final byte[] EMPTY_KEY = new byte[0];
+    private static final int[] EMPTY_COLUMNS = new int[0];
     private static final byte[] MAX_KEY = maxKey();
 
     private final InspectCatalog catalog;
@@ -53,6 +64,7 @@ final class InspectSessionImpl implements InspectSession {
     private final List<InspectTarget> internalTargets;
     private final List<io.cobble.flink.inspect.InspectTarget> targets;
     private final int totalBuckets;
+    private final TableReader tableReader;
     private boolean closed;
 
     InspectSessionImpl(
@@ -87,8 +99,17 @@ final class InspectSessionImpl implements InspectSession {
                     tableSchema == null
                             ? StateInspectTargetBuilder.build(snapshot, stateSchema)
                             : Collections.singletonList(InspectTarget.table("table", tableSchema));
+            tableReader =
+                    tableSchema == null
+                            ? null
+                            : TableReader.open(
+                                    CobbleReaderConfigs.dataSource(
+                                            totalBuckets, sourceRoot, storageOptions),
+                                    resolvedTargets.get(0).columnFamily,
+                                    snapshot.id);
         } else {
             resolvedTargets = StateInspectTargetBuilder.build(snapshot, stateSchema);
+            tableReader = null;
         }
         this.internalTargets =
                 Collections.unmodifiableList(new ArrayList<InspectTarget>(resolvedTargets));
@@ -129,6 +150,9 @@ final class InspectSessionImpl implements InspectSession {
         ensureOpen();
         validateScan(request);
         InspectTarget target = target(request.targetId());
+        if (target.tableSchema != null && request.prefix() == null) {
+            return scanTable(request, target);
+        }
         int limit = request.limit();
         int[] columns = target.allowsColumns ? request.columns() : null;
         validateColumns(request.columns(), target);
@@ -208,8 +232,17 @@ final class InspectSessionImpl implements InspectSession {
         int[] columns = target.allowsColumns ? request.columns() : null;
         validateColumns(request.columns(), target);
         List<InspectRow> rows = new ArrayList<>(request.keys().size());
-        try (ReadOptions options = readOptions(target.columnFamily, columns)) {
+        boolean typedTableLookup =
+                target.tableSchema != null
+                        && request.keys().stream().anyMatch(key -> key != null && key.typed());
+        try (ReadOptions options = readOptions(target.columnFamily, columns);
+                TableProjection projection =
+                        typedTableLookup ? tableProjection(target, columns) : null) {
             for (LookupKey key : request.keys()) {
+                if (target.tableSchema != null && key != null && key.typed()) {
+                    rows.add(lookupTable(target, key, columns, projection));
+                    continue;
+                }
                 ResolvedLookup resolved = resolveLookup(target, key);
                 if (resolved.bucket < 0 || resolved.bucket >= totalBuckets) {
                     throw invalid("Bucket must be between 0 and " + (totalBuckets - 1));
@@ -239,8 +272,233 @@ final class InspectSessionImpl implements InspectSession {
     public void close() {
         if (!closed) {
             closed = true;
-            readerSession.close();
+            try {
+                if (tableReader != null) {
+                    tableReader.close();
+                }
+            } finally {
+                readerSession.close();
+            }
         }
+    }
+
+    private InspectPage scanTable(ScanRequest request, InspectTarget target) {
+        int[] columns = request.columns();
+        validateColumns(columns, target);
+        ScanFilter filter = request.filter();
+        byte[] leadingPrefix = EMPTY_KEY;
+        TableKey filterStart = null;
+        String lastField = null;
+        String lastPrefix = null;
+        if (filter != null) {
+            validateFilterShape(filter);
+            if (filter.sinkKeyFields().isEmpty() || filter.stateKey() != null) {
+                throw invalid("Sink key filters require a sink target");
+            }
+            List<String> values =
+                    TypedInputs.table(filter.sinkKeyFields(), target.tableSchema.keyFields, false);
+            try {
+                leadingPrefix =
+                        TableInspectDecoder.encodeKeyPrefix(
+                                target, values.subList(0, values.size() - 1));
+                if (values.size() == target.tableSchema.keyFields.size()
+                        && target.tableSchema.keyFields.get(values.size() - 1).type().kind()
+                                == LogicalType.Kind.STRING) {
+                    filterStart = tableKey(TableInspectDecoder.parseKeyValues(target, values));
+                }
+            } catch (IOException error) {
+                throw invalid("Failed to encode sink scan filter: " + message(error));
+            }
+            lastField = filter.sinkKeyFields().get(filter.sinkKeyFields().size() - 1).name();
+            lastPrefix = values.get(values.size() - 1);
+        }
+        Integer selectedBucket = request.bucket();
+        String identity = scanIdentity(request, new ScanPlan(EMPTY_KEY, selectedBucket, null));
+        CursorPosition position = CursorPosition.parse(request.pageToken(), identity);
+        if (position != null
+                && selectedBucket != null
+                && position.bucket != selectedBucket.intValue()) {
+            throw invalid("Page token does not belong to the requested bucket");
+        }
+        int firstBucket =
+                position != null
+                        ? position.bucket
+                        : selectedBucket == null ? 0 : selectedBucket.intValue();
+        int lastBucket = selectedBucket == null ? totalBuckets - 1 : selectedBucket.intValue();
+        if (firstBucket < 0 || lastBucket >= totalBuckets || firstBucket > lastBucket) {
+            throw invalid("Bucket must be between 0 and " + (totalBuckets - 1));
+        }
+        List<InspectRow> rows = new ArrayList<>();
+        boolean hasMore = false;
+        List<LogicalType> keyTypes =
+                TableInspectDecoder.keyTypes(
+                        target.tableSchema, target.tableSchema.keyFields.size());
+        try (TableProjection projection = tableProjection(target, columns)) {
+            for (int bucket = firstBucket; bucket <= lastBucket && !hasMore; bucket++) {
+                TableKey start =
+                        position != null && bucket == position.bucket
+                                ? tableKeyFromBytes(target, position.key, bucket)
+                                : filterStart != null && filterStart.bucket() == bucket
+                                        ? filterStart
+                                        : null;
+                try (TableScanCursor cursor = projection.scanBounds(bucket, start, null)) {
+                    List<Value> projected;
+                    while ((projected = cursor.nextRow()) != null) {
+                        List<Value> keyValues =
+                                projected.subList(0, target.tableSchema.keyFields.size());
+                        byte[] encoded = KeyCodec.encode(keyTypes, keyValues);
+                        if (position != null
+                                && bucket == position.bucket
+                                && Arrays.equals(encoded, position.key)) {
+                            continue;
+                        }
+                        if (!startsWith(encoded, leadingPrefix)) {
+                            continue;
+                        }
+                        if (lastField != null
+                                && !sinkKeyStartsWith(
+                                        TableInspectDecoder.projected(
+                                                target.tableSchema,
+                                                keyValues,
+                                                Collections.<Value>emptyList(),
+                                                EMPTY_COLUMNS),
+                                        lastField,
+                                        lastPrefix)) {
+                            continue;
+                        }
+                        rows.add(projectedTableRow(target, bucket, encoded, projected, columns));
+                        if (rows.size() > request.limit()) {
+                            rows.remove(rows.size() - 1);
+                            hasMore = true;
+                            break;
+                        }
+                    }
+                } catch (RuntimeException error) {
+                    throw unreadable("Failed to scan Cobble Table bucket " + bucket, error);
+                }
+            }
+        }
+        PageToken next =
+                hasMore && !rows.isEmpty()
+                        ? CursorPosition.encode(
+                                identity,
+                                rows.get(rows.size() - 1).bucket(),
+                                rows.get(rows.size() - 1).key().value())
+                        : null;
+        return new InspectPage(rows, next);
+    }
+
+    private InspectRow lookupTable(
+            InspectTarget target, LookupKey lookup, int[] columns, TableProjection projection) {
+        TypedLookupKey typed = lookup.typedKey();
+        if (typed.kind() != TypedLookupKey.Kind.SINK) {
+            throw invalid("A sink target requires a typed sink key");
+        }
+        List<String> input =
+                TypedInputs.table(typed.sinkKeyFields(), target.tableSchema.keyFields, true);
+        try {
+            List<Value> keyValues = TableInspectDecoder.parseKeyValues(target, input);
+            TableKey key = tableKey(keyValues);
+            byte[] encoded =
+                    KeyCodec.encode(
+                            TableInspectDecoder.keyTypes(target.tableSchema, keyValues.size()),
+                            keyValues);
+            List<Value> projected = projection.get(key);
+            return projected == null
+                    ? new InspectRow(
+                            key.bucket(),
+                            new RawBytes(encoded),
+                            Collections.<RawBytes>emptyList(),
+                            false,
+                            null,
+                            null,
+                            null,
+                            Collections.<DecodedValue>emptyList(),
+                            Collections.<String, DecodedValue>emptyMap(),
+                            Collections.<DecodeIssue>emptyList())
+                    : projectedTableRow(target, key.bucket(), encoded, projected, columns);
+        } catch (IOException error) {
+            throw invalid("Failed to encode sink lookup key: " + message(error));
+        } catch (RuntimeException error) {
+            throw unreadable("Failed to look up Cobble Table key", error);
+        }
+    }
+
+    private InspectRow projectedTableRow(
+            InspectTarget target, int bucket, byte[] encoded, List<Value> values, int[] columns) {
+        int keyCount = target.tableSchema.keyFields.size();
+        TableInspectDecoder.DecodedRow decoded =
+                TableInspectDecoder.projected(
+                        target.tableSchema,
+                        values.subList(0, keyCount),
+                        values.subList(keyCount, values.size()),
+                        columns);
+        return new InspectRow(
+                bucket,
+                new RawBytes(encoded),
+                Collections.<RawBytes>emptyList(),
+                true,
+                null,
+                PublicInspectModels.sinkRow(decoded.decodedKey),
+                null,
+                PublicInspectModels.sinkFields(decoded.decodedColumns),
+                Collections.<String, DecodedValue>emptyMap(),
+                Collections.<DecodeIssue>emptyList());
+    }
+
+    private TableProjection tableProjection(InspectTarget target, int[] columns) {
+        List<String> names = new ArrayList<>();
+        for (TableInspectSchema.Field field : target.tableSchema.keyFields) {
+            names.add(field.name());
+        }
+        if (columns == null) {
+            for (TableInspectSchema.Field field : target.tableSchema.valueFields) {
+                names.add(field.name());
+            }
+        } else {
+            for (int column : columns) {
+                names.add(target.tableSchema.valueFields.get(column).name());
+            }
+        }
+        return tableReader.projectByNames(names);
+    }
+
+    private TableKey tableKeyFromBytes(InspectTarget target, byte[] encoded, int bucket) {
+        final TableKey key;
+        try {
+            List<Value> values =
+                    KeyCodec.decode(
+                            TableInspectDecoder.keyTypes(
+                                    target.tableSchema, target.tableSchema.keyFields.size()),
+                            ByteBuffer.wrap(encoded));
+            key = tableKey(values);
+        } catch (RuntimeException error) {
+            throw invalid("Invalid Cobble Table page token key: " + message(error));
+        }
+        if (key.bucket() != bucket) {
+            throw invalid("Page token key does not belong to its bucket");
+        }
+        return key;
+    }
+
+    private TableKey tableKey(List<Value> values) {
+        TableKeyBuilder builder = tableReader.keyBuilder();
+        for (Value value : values) {
+            builder.push(value);
+        }
+        return builder.build();
+    }
+
+    private static boolean startsWith(byte[] key, byte[] prefix) {
+        if (key.length < prefix.length) {
+            return false;
+        }
+        for (int index = 0; index < prefix.length; index++) {
+            if (key[index] != prefix[index]) {
+                return false;
+            }
+        }
+        return true;
     }
 
     private InspectRow row(
@@ -338,28 +596,7 @@ final class InspectSessionImpl implements InspectSession {
         }
         validateFilterShape(filter);
         if (!filter.sinkKeyFields().isEmpty()) {
-            if (target.tableSchema == null || filter.stateKey() != null) {
-                throw invalid("Sink key filters require a sink target");
-            }
-            List<String> values =
-                    TypedInputs.table(filter.sinkKeyFields(), target.tableSchema.keyFields, false);
-            try {
-                List<String> encodedPrefixValues =
-                        values.subList(0, Math.max(0, values.size() - 1));
-                String lastField =
-                        filter.sinkKeyFields().get(filter.sinkKeyFields().size() - 1).name();
-                String lastPrefix = values.get(values.size() - 1);
-                return new ScanPlan(
-                        TableInspectDecoder.encodeKeyPrefix(target, encodedPrefixValues),
-                        request.bucket(),
-                        (key, columns) ->
-                                sinkKeyStartsWith(
-                                        TableInspectDecoder.decode(target, key, columns, null),
-                                        lastField,
-                                        lastPrefix));
-            } catch (java.io.IOException error) {
-                throw invalid("Failed to encode sink scan filter: " + message(error));
-            }
+            throw invalid("Sink key filters require a sink target");
         }
         if (filter.stateKey() == null || target.schema == null || target.semanticSchema == null) {
             throw invalid("State filters require a schema-aware state target");
@@ -502,20 +739,6 @@ final class InspectSessionImpl implements InspectSession {
             return new ResolvedLookup(lookup.bucket(), lookup.key().value());
         }
         TypedLookupKey typed = lookup.typedKey();
-        if (target.tableSchema != null) {
-            if (typed.kind() != TypedLookupKey.Kind.SINK) {
-                throw invalid("A sink target requires a typed sink key");
-            }
-            List<String> values =
-                    TypedInputs.table(typed.sinkKeyFields(), target.tableSchema.keyFields, true);
-            try {
-                byte[] key = TableInspectDecoder.encodeKeyPrefix(target, values);
-                return new ResolvedLookup(
-                        TableInspectDecoder.bucket(target, key, totalBuckets), key);
-            } catch (java.io.IOException error) {
-                throw invalid("Failed to encode sink lookup key: " + message(error));
-            }
-        }
         if (target.schema == null || target.semanticSchema == null) {
             throw invalid("Typed lookup requires schema metadata");
         }

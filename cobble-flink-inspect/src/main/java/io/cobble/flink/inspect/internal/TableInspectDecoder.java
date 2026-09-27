@@ -1,7 +1,6 @@
 package io.cobble.flink.inspect.internal;
 
 import io.cobble.flink.common.table.CobbleTableRowConverter;
-import io.cobble.table.BucketHash;
 import io.cobble.table.KeyCodec;
 import io.cobble.table.ListType;
 import io.cobble.table.LogicalType;
@@ -35,11 +34,16 @@ final class TableInspectDecoder {
         if (values == null || values.isEmpty()) {
             return new byte[0];
         }
+        return KeyCodec.encode(keyTypes(schema, values.size()), parseKeyValues(target, values));
+    }
+
+    static List<Value> parseKeyValues(InspectTarget target, List<String> values)
+            throws IOException {
+        TableInspectSchema schema = requireSchema(target);
         if (values.size() > schema.keyFields.size()) {
             throw new IOException(
                     "Too many table key values (expected at most " + schema.keyFields.size() + ")");
         }
-        List<LogicalType> types = new ArrayList<LogicalType>(values.size());
         List<Value> encoded = new ArrayList<Value>(values.size());
         for (int index = 0; index < values.size(); index++) {
             TableInspectSchema.Field field = schema.keyFields.get(index);
@@ -48,7 +52,6 @@ final class TableInspectDecoder {
                         LogicalTypeParser.parse(
                                 field.logicalType(), TableInspectDecoder.class.getClassLoader());
                 Object parsed = InspectFieldInputParser.parse(flinkType, values.get(index));
-                types.add(field.type());
                 encoded.add(CobbleTableRowConverter.toValue(flinkType, parsed));
             } catch (Exception error) {
                 throw new IOException(
@@ -61,12 +64,39 @@ final class TableInspectDecoder {
                         error);
             }
         }
-        return KeyCodec.encode(types, encoded);
+        return encoded;
     }
 
-    static int bucket(InspectTarget target, byte[] key, int totalBuckets) throws IOException {
-        requireSchema(target);
-        return new BucketHash(totalBuckets).bucket(key);
+    static List<LogicalType> keyTypes(TableInspectSchema schema, int count) {
+        List<LogicalType> types = new ArrayList<LogicalType>(count);
+        for (int index = 0; index < count; index++) {
+            types.add(schema.keyFields.get(index).type());
+        }
+        return types;
+    }
+
+    static DecodedRow projected(
+            TableInspectSchema schema,
+            List<Value> keyValues,
+            List<Value> valueFields,
+            int[] columns) {
+        List<Map<String, Object>> keys = new ArrayList<Map<String, Object>>(keyValues.size());
+        for (int index = 0; index < keyValues.size(); index++) {
+            TableInspectSchema.Field field = schema.keyFields.get(index);
+            keys.add(fieldToJson(field, null, render(field.type(), keyValues.get(index)), null));
+        }
+        List<Map<String, Object>> values = new ArrayList<Map<String, Object>>(valueFields.size());
+        for (int index = 0; index < valueFields.size(); index++) {
+            int column = columns == null ? index : columns[index];
+            TableInspectSchema.Field field = schema.valueFields.get(column);
+            values.add(
+                    fieldToJson(
+                            field,
+                            Integer.valueOf(field.valueColumnIndex),
+                            render(field.type(), valueFields.get(index)),
+                            null));
+        }
+        return new DecodedRow(keys, values, null);
     }
 
     static DecodedRow decode(InspectTarget target, byte[] key, byte[][] columns, int[] projection) {

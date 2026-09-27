@@ -2,12 +2,16 @@ package io.cobble.flink.inspect.internal;
 
 import io.cobble.Config;
 import io.cobble.GlobalSnapshot;
-import io.cobble.ReadOnlyDb;
 import io.cobble.ShardSnapshot;
+import io.cobble.SnapshotTools;
 import io.cobble.flink.common.CobbleConnectorStorageOptions;
 import io.cobble.flink.common.CobbleMetadataFileIO;
 import io.cobble.flink.common.table.CobbleTableRowConverter;
-import io.cobble.table.ReadOnlyTable;
+import io.cobble.table.TableReader;
+
+import com.google.gson.JsonElement;
+import com.google.gson.JsonObject;
+import com.google.gson.JsonParser;
 
 import java.io.IOException;
 import java.util.List;
@@ -29,17 +33,45 @@ final class CobbleTableInspectSchemaResolver {
                 || snapshot.shardSnapshots.isEmpty()) {
             throw new InspectInputException("Cobble Table snapshot has no shards");
         }
-        // Raw databases have no connector Table column family. Do not try to open them as tables.
+        // A raw database may also call its column family "data". Only persisted Table metadata
+        // establishes that this family has the native Table layout.
         if (snapshot.columnFamilyIds == null
                 || !snapshot.columnFamilyIds.containsKey(CobbleTableRowConverter.TABLE_NAME)) {
             return null;
         }
-        ShardSnapshot shard = snapshot.shardSnapshots.get(0);
         int totalBuckets = snapshot.totalBuckets > 0 ? snapshot.totalBuckets : 1;
         Config config = CobbleReaderConfigs.dataSource(totalBuckets, sourceRoot, storageOptions);
-        try (ReadOnlyDb db = ReadOnlyDb.open(config, shard.snapshotId, shard.dbId);
-                ReadOnlyTable table = ReadOnlyTable.open(db, CobbleTableRowConverter.TABLE_NAME)) {
-            return new TableInspectSchema(table.schema());
+        ShardSnapshot shard = snapshot.shardSnapshots.get(0);
+        if (shard.columnFamilies == null || shard.columnFamilies.isEmpty()) {
+            shard = SnapshotTools.loadShardSnapshot(config, shard.dbId, shard.manifestPath);
+        }
+        ShardSnapshot.SnapshotColumnFamily family =
+                shard.columnFamilies == null
+                        ? null
+                        : shard.columnFamilies.get(CobbleTableRowConverter.TABLE_NAME);
+        if (family == null || family.options == null || family.options.metadata == null) {
+            return null;
+        }
+        JsonElement metadata;
+        try {
+            metadata = JsonParser.parseString(family.options.metadata);
+        } catch (RuntimeException error) {
+            return null;
+        }
+        if (!metadata.isJsonObject()) {
+            return null;
+        }
+        JsonObject object = metadata.getAsJsonObject();
+        JsonElement format = object.get("format");
+        if (format == null
+                || !format.isJsonPrimitive()
+                || !format.getAsJsonPrimitive().isString()
+                || !"cobble-table".equals(format.getAsString())) {
+            return null;
+        }
+        try (TableReader table =
+                TableReader.open(config, CobbleTableRowConverter.TABLE_NAME, snapshot.id)) {
+            return new TableInspectSchema(table.tableSchema());
         } catch (RuntimeException error) {
             throw new InspectInputException(
                     "Failed to open native Cobble Table metadata: " + message(error));

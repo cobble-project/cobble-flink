@@ -54,6 +54,20 @@ class CobbleTableInspectSchemaResolverTest {
     }
 
     @Test
+    void rawDataColumnFamilyIsNotMisidentifiedAsTable() {
+        GlobalSnapshot snapshot = new GlobalSnapshot();
+        snapshot.totalBuckets = 1;
+        ShardSnapshot shard = new ShardSnapshot();
+        shard.columnFamilies.put("data", new ShardSnapshot.SnapshotColumnFamily());
+        snapshot.shardSnapshots = Collections.singletonList(shard);
+        snapshot.columnFamilyIds = Collections.singletonMap("data", 0);
+
+        assertNull(
+                CobbleTableInspectSchemaResolver.resolve(
+                        tempDir.toString(), snapshot, CobbleConnectorStorageOptions.empty()));
+    }
+
+    @Test
     void rejectsRecognizedLegacySinkFormat() throws Exception {
         Path root = tempDir.resolve("legacy");
         Path event = root.resolve("inspect-schema/events/CSNK-1-deadbeef");

@@ -97,7 +97,9 @@ final class InspectHttpJson {
         RawBytes prefix =
                 body.has("prefix_b64")
                         ? new RawBytes(
-                                decodeBase64(requiredString(body, "prefix_b64"), "prefix_b64"))
+                                decodeBase64(
+                                        strictString(body.get("prefix_b64"), "prefix_b64"),
+                                        "prefix_b64"))
                         : null;
         int[] columns = optionalIntArray(body, "columns");
         ScanFilter filter = body.has("filter") ? scanFilter(object(body, "filter")) : null;

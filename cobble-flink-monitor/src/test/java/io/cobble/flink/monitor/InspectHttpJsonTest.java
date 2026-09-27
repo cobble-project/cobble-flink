@@ -44,6 +44,27 @@ class InspectHttpJsonTest {
     }
 
     @Test
+    void emptyRawPrefixIsValidButNonStringPrefixIsRejected() {
+        assertEquals(
+                0,
+                InspectHttpJson.scanRequest(
+                                json("{\"target_id\":\"raw\",\"prefix_b64\":\"\"}"),
+                                "session",
+                                10,
+                                100)
+                        .prefix()
+                        .value()
+                        .length);
+        assertInvalid(
+                () ->
+                        InspectHttpJson.scanRequest(
+                                json("{\"target_id\":\"raw\",\"prefix_b64\":12}"),
+                                "session",
+                                10,
+                                100));
+    }
+
+    @Test
     void booleanTransportFieldsRequireJsonBoolean() {
         JsonObject body =
                 json(

@@ -17,6 +17,9 @@ import io.cobble.flink.inspect.ScanFilter;
 import io.cobble.flink.inspect.ScanRequest;
 import io.cobble.flink.inspect.TypedLookupKey;
 import io.cobble.flink.inspect.TypedValue;
+import io.cobble.table.DataField;
+import io.cobble.table.LogicalTypes;
+import io.cobble.table.TableSchema;
 import io.cobble.table.Value;
 
 import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
@@ -142,6 +145,125 @@ class InspectTypedSinkIT {
             }
             assertEquals(rows.size(), sqlRows.size());
             assertTrue(sqlRows.contains("us:target-1"));
+        }
+    }
+
+    @Test
+    void projectedTableScanAndLookupPreserveFieldOrderAndMisses() throws Exception {
+        Path table = tempDir.resolve("projected-table");
+        TableSchema schema =
+                new TableSchema(
+                        Arrays.asList(
+                                new DataField(0L, "id", LogicalTypes.string().notNull()),
+                                new DataField(1L, "first", LogicalTypes.string()),
+                                new DataField(2L, "second", LogicalTypes.string())),
+                        Collections.singletonList(0L),
+                        Collections.singletonList(0L));
+        CobbleTableInspectTestData.write(
+                table,
+                1,
+                12L,
+                schema,
+                Arrays.asList(
+                        Arrays.asList(Value.string("a"), Value.string("A1"), Value.string("A2")),
+                        Arrays.asList(Value.string("b"), Value.string("B1"), Value.string("B2"))));
+
+        try (CobbleInspectClient client = CobbleInspectClient.builder().totalBuckets(1).build();
+                InspectSession session = client.openDataSource(table.toString())) {
+            InspectPage first =
+                    session.scan(new ScanRequest("sink", 1, null, null, null, new int[] {1, 0}));
+            assertEquals(1, first.rows().size());
+            assertEquals(
+                    "second", first.rows().get(0).decodedColumns().get(0).fields().get(0).name());
+            assertEquals(
+                    "first", first.rows().get(0).decodedColumns().get(1).fields().get(0).name());
+            InspectPage second =
+                    session.scan(
+                            new ScanRequest(
+                                    "sink",
+                                    1,
+                                    first.nextPageToken(),
+                                    null,
+                                    null,
+                                    new int[] {1, 0}));
+            assertEquals(1, second.rows().size());
+            assertEquals(null, second.nextPageToken());
+            assertFalse(
+                    first.rows()
+                            .get(0)
+                            .decodedKey()
+                            .fields()
+                            .get(0)
+                            .value()
+                            .scalar()
+                            .equals(
+                                    second.rows()
+                                            .get(0)
+                                            .decodedKey()
+                                            .fields()
+                                            .get(0)
+                                            .value()
+                                            .scalar()));
+
+            LookupResult lookup =
+                    session.lookup(
+                            new LookupRequest(
+                                    "sink",
+                                    Arrays.asList(
+                                            LookupKey.typed(
+                                                    TypedLookupKey.sink(
+                                                            Collections.singletonList(
+                                                                    field("id", "a")))),
+                                            LookupKey.typed(
+                                                    TypedLookupKey.sink(
+                                                            Collections.singletonList(
+                                                                    field("id", "missing"))))),
+                                    new int[] {1}));
+            assertTrue(lookup.rows().get(0).found());
+            assertEquals(
+                    "A2",
+                    lookup.rows().get(0).decodedColumns().get(0).fields().get(0).value().scalar());
+            assertEquals(1, lookup.rows().get(0).decodedColumns().size());
+            assertFalse(lookup.rows().get(1).found());
+            assertEquals(0, lookup.rows().get(1).decodedColumns().size());
+        }
+    }
+
+    @Test
+    void numericTextPrefixDoesNotSkipEarlierEncodedKeys() throws Exception {
+        Path table = tempDir.resolve("numeric-keys");
+        TableSchema schema =
+                new TableSchema(
+                        Arrays.asList(
+                                new DataField(0L, "id", LogicalTypes.int64().notNull()),
+                                new DataField(1L, "payload", LogicalTypes.string())),
+                        Collections.singletonList(0L),
+                        Collections.singletonList(0L));
+        CobbleTableInspectTestData.write(
+                table,
+                1,
+                13L,
+                schema,
+                Arrays.asList(
+                        Arrays.asList(Value.int64(-10L), Value.string("ten")),
+                        Arrays.asList(Value.int64(-1L), Value.string("one")),
+                        Arrays.asList(Value.int64(2L), Value.string("two"))));
+        try (CobbleInspectClient client = CobbleInspectClient.builder().totalBuckets(1).build();
+                InspectSession session = client.openDataSource(table.toString())) {
+            InspectPage result =
+                    session.scan(
+                            new ScanRequest(
+                                    "sink",
+                                    10,
+                                    null,
+                                    null,
+                                    null,
+                                    null,
+                                    ScanFilter.sink(
+                                            Collections.singletonList(
+                                                    new FieldValue(
+                                                            "id", TypedValue.integer(-1L))))));
+            assertEquals(2, result.rows().size());
         }
     }
 

@@ -1300,7 +1300,8 @@ function rawCopyActions(rawKeyB64, rawValue) {
   if (rawKeyB64 != null) {
     actions.push({ action: 'copy-text', label: 'Copy raw key', value: rawKeyB64 })
   }
-  if (rawValue !== undefined && rawValue !== null) {
+  if (rawValue !== undefined && rawValue !== null &&
+      !(Array.isArray(rawValue) && rawValue.length === 0)) {
     actions.push({ action: 'copy-text', label: 'Copy raw value', value: rawCopyValue(rawValue) })
   }
   return actions
