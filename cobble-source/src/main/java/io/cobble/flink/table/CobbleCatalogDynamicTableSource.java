@@ -17,8 +17,10 @@ import org.apache.flink.table.connector.source.DynamicTableSource;
 import org.apache.flink.table.connector.source.LookupTableSource;
 import org.apache.flink.table.connector.source.ScanTableSource;
 import org.apache.flink.table.connector.source.SourceProvider;
+import org.apache.flink.table.connector.source.abilities.SupportsProjectionPushDown;
 import org.apache.flink.table.connector.source.lookup.LookupFunctionProvider;
 import org.apache.flink.table.factories.DynamicTableSourceFactory;
+import org.apache.flink.table.types.DataType;
 import org.apache.flink.table.types.logical.RowType;
 
 import java.util.ArrayList;
@@ -29,21 +31,25 @@ import java.util.Map;
 import java.util.Set;
 
 /** Catalog-aware readers use native table identities and schema transforms. */
-final class CobbleCatalogDynamicTableSource implements ScanTableSource, LookupTableSource {
+final class CobbleCatalogDynamicTableSource
+        implements ScanTableSource, LookupTableSource, SupportsProjectionPushDown {
     final CobbleCatalogTableReference reference;
     final RowType rowType;
     final String snapshot;
     final int[] primaryPositions;
+    private int[] outputProjection;
 
     private CobbleCatalogDynamicTableSource(
             CobbleCatalogTableReference reference,
             RowType rowType,
             String snapshot,
-            int[] primaryPositions) {
+            int[] primaryPositions,
+            int[] outputProjection) {
         this.reference = reference;
         this.rowType = rowType;
         this.snapshot = snapshot;
-        this.primaryPositions = primaryPositions;
+        this.primaryPositions = primaryPositions.clone();
+        this.outputProjection = outputProjection.clone();
     }
 
     static CobbleCatalogDynamicTableSource create(DynamicTableSourceFactory.Context context) {
@@ -129,7 +135,8 @@ final class CobbleCatalogDynamicTableSource implements ScanTableSource, LookupTa
                     reference,
                     rowType,
                     snapshot,
-                    positions.stream().mapToInt(Integer::intValue).toArray());
+                    positions.stream().mapToInt(Integer::intValue).toArray(),
+                    SourceProjection.all(rowType.getFieldCount()));
         }
     }
 
@@ -165,7 +172,8 @@ final class CobbleCatalogDynamicTableSource implements ScanTableSource, LookupTa
 
     @Override
     public ScanRuntimeProvider getScanRuntimeProvider(ScanContext context) {
-        return SourceProvider.of(new CobbleCatalogScanSource(reference, rowType, snapshot));
+        return SourceProvider.of(
+                new CobbleCatalogScanSource(reference, rowType, snapshot, outputProjection));
     }
 
     @Override
@@ -184,7 +192,10 @@ final class CobbleCatalogDynamicTableSource implements ScanTableSource, LookupTa
         for (int required = 0; required < primaryPositions.length; required++) {
             mapping[required] = -1;
             for (int supplied = 0; supplied < keys.length; supplied++) {
-                if (keys[supplied][0] == primaryPositions[required]) mapping[required] = supplied;
+                if (SourceProjection.originalIndex(outputProjection, keys[supplied][0])
+                        == primaryPositions[required]) {
+                    mapping[required] = supplied;
+                }
             }
             if (mapping[required] < 0)
                 throw new ValidationException(
@@ -192,13 +203,23 @@ final class CobbleCatalogDynamicTableSource implements ScanTableSource, LookupTa
         }
         return LookupFunctionProvider.of(
                 new CobbleCatalogLookupFunction(
-                        reference, rowType, snapshot, primaryPositions, mapping));
+                        reference, rowType, snapshot, primaryPositions, mapping, outputProjection));
     }
 
     @Override
     public DynamicTableSource copy() {
         return new CobbleCatalogDynamicTableSource(
-                reference, rowType, snapshot, primaryPositions.clone());
+                reference, rowType, snapshot, primaryPositions, outputProjection);
+    }
+
+    @Override
+    public boolean supportsNestedProjection() {
+        return false;
+    }
+
+    @Override
+    public void applyProjection(int[][] projectedFields, DataType producedDataType) {
+        outputProjection = SourceProjection.indexes(projectedFields, rowType.getFieldCount());
     }
 
     @Override

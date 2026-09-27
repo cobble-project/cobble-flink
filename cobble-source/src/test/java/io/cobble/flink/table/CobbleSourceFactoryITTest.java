@@ -22,6 +22,7 @@ import org.apache.flink.api.common.typeutils.base.IntSerializer;
 import org.apache.flink.formats.avro.typeutils.AvroSerializer;
 import org.apache.flink.runtime.state.VoidNamespaceSerializer;
 import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
+import org.apache.flink.table.api.DataTypes;
 import org.apache.flink.table.api.bridge.java.StreamTableEnvironment;
 import org.apache.flink.table.connector.source.DynamicTableSource;
 import org.apache.flink.table.connector.source.LookupTableSource;
@@ -43,6 +44,74 @@ import java.util.List;
  * the (unimplemented) scan runtime is requested.
  */
 class CobbleSourceFactoryITTest {
+
+    @Test
+    void projectedSourceCopiesKeepIndependentLookupMappings() {
+        List<StateSourceField> stateFields =
+                Arrays.asList(
+                        new StateSourceField("key", "INT", StateSourceField.Group.STATE_KEY, 0),
+                        new StateSourceField("map_key", "INT", StateSourceField.Group.MAP_KEY, 0),
+                        new StateSourceField(
+                                "map_value", "INT", StateSourceField.Group.MAP_VALUE, 0));
+        CobbleStateDynamicTableSource state =
+                new CobbleStateDynamicTableSource(
+                        stateConfigWithContract(
+                                "orders",
+                                "map",
+                                stateFields,
+                                stateFields.subList(0, 2),
+                                new int[] {0, 1}),
+                        "state");
+        CobbleStateDynamicTableSource stateCopy = (CobbleStateDynamicTableSource) state.copy();
+        state.applyProjection(
+                new int[][] {{2}, {0}, {1}},
+                DataTypes.ROW(
+                        DataTypes.FIELD("map_value", DataTypes.INT()),
+                        DataTypes.FIELD("key", DataTypes.INT()),
+                        DataTypes.FIELD("map_key", DataTypes.INT())));
+        assertDoesNotThrow(
+                () -> state.getLookupRuntimeProvider(lookupContext(new int[] {1}, new int[] {2})));
+        assertDoesNotThrow(
+                () ->
+                        stateCopy.getLookupRuntimeProvider(
+                                lookupContext(new int[] {0}, new int[] {1})));
+        assertThrows(
+                Exception.class,
+                () ->
+                        stateCopy.getLookupRuntimeProvider(
+                                lookupContext(new int[] {1}, new int[] {2})));
+
+        CobbleDynamicTableSource table =
+                new CobbleDynamicTableSource(
+                        new CobbleDynamicTableSource.SerializableConfig(
+                                "file:///unused",
+                                1,
+                                "latest",
+                                "batch",
+                                1L,
+                                0L,
+                                Collections.singletonList(
+                                        new CobbleDynamicTableSource.SerializableField(
+                                                "id", "BIGINT", 0, -1)),
+                                Arrays.asList(
+                                        new CobbleDynamicTableSource.SerializableField(
+                                                "name", "VARCHAR(2147483647)", 1, 0),
+                                        new CobbleDynamicTableSource.SerializableField(
+                                                "score", "INT", 2, 1))),
+                        "table");
+        CobbleDynamicTableSource tableCopy = (CobbleDynamicTableSource) table.copy();
+        table.applyProjection(
+                new int[][] {{2}, {0}, {1}},
+                DataTypes.ROW(
+                        DataTypes.FIELD("score", DataTypes.INT()),
+                        DataTypes.FIELD("id", DataTypes.BIGINT()),
+                        DataTypes.FIELD("name", DataTypes.STRING())));
+        assertDoesNotThrow(() -> table.getLookupRuntimeProvider(lookupContext(new int[] {1})));
+        assertDoesNotThrow(() -> tableCopy.getLookupRuntimeProvider(lookupContext(new int[] {0})));
+        assertThrows(
+                Exception.class,
+                () -> tableCopy.getLookupRuntimeProvider(lookupContext(new int[] {1})));
+    }
 
     @TempDir private Path tempDir;
 
@@ -732,7 +801,8 @@ class CobbleSourceFactoryITTest {
         String chain = messageChain(error);
         assertTrue(
                 chain.contains("missing a lookup key for column 'key'")
-                        || chain.contains("not part of the PRIMARY KEY"),
+                        || chain.contains("not part of the PRIMARY KEY")
+                        || chain.contains("outside the projected source schema"),
                 "expected missing-key or unrelated-key message but got: " + chain);
     }
 
@@ -1045,7 +1115,8 @@ class CobbleSourceFactoryITTest {
         String chain = messageChain(error);
         assertTrue(
                 chain.contains("missing a lookup key for column 'map_key'")
-                        || chain.contains("not part of the PRIMARY KEY"),
+                        || chain.contains("not part of the PRIMARY KEY")
+                        || chain.contains("outside the projected source schema"),
                 "expected missing-key or unrelated-key message but got: " + chain);
     }
 

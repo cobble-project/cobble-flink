@@ -6,7 +6,9 @@ import org.apache.flink.table.connector.source.DynamicTableSource;
 import org.apache.flink.table.connector.source.LookupTableSource;
 import org.apache.flink.table.connector.source.ScanTableSource;
 import org.apache.flink.table.connector.source.SourceProvider;
+import org.apache.flink.table.connector.source.abilities.SupportsProjectionPushDown;
 import org.apache.flink.table.connector.source.lookup.LookupFunctionProvider;
+import org.apache.flink.table.types.DataType;
 
 import java.util.HashMap;
 import java.util.HashSet;
@@ -23,7 +25,8 @@ import java.util.Set;
  * CobbleStateLookupFunction}; list/timer and classless structured key serializers are rejected with
  * a clear message.
  */
-final class CobbleStateDynamicTableSource implements ScanTableSource, LookupTableSource {
+final class CobbleStateDynamicTableSource
+        implements ScanTableSource, LookupTableSource, SupportsProjectionPushDown {
 
     private static final String STREAMING_NOT_SUPPORTED =
             "Cobble state source currently supports only scan.mode='batch'.";
@@ -32,7 +35,7 @@ final class CobbleStateDynamicTableSource implements ScanTableSource, LookupTabl
     private static final String TIMER_LOOKUP_UNSUPPORTED =
             "Cobble state source timer lookup is not supported.";
 
-    private final StateSourceConfig config;
+    private StateSourceConfig config;
     private final String summary;
 
     CobbleStateDynamicTableSource(StateSourceConfig config, String summary) {
@@ -98,6 +101,7 @@ final class CobbleStateDynamicTableSource implements ScanTableSource, LookupTabl
     private int[] resolveLookupKeyPositions(
             LookupContext context, StateSourceLookupKeyContract contract) {
         int[][] keys = context.getKeys();
+        int[] outputProjection = config.outputProjection();
         int[] requiredPositions = contract.requiredPhysicalPositions();
         List<StateSourceField> requiredFields = contract.requiredFields();
 
@@ -122,7 +126,7 @@ final class CobbleStateDynamicTableSource implements ScanTableSource, LookupTabl
                                 + config.stateName()
                                 + "' supports only top-level PRIMARY KEY columns.");
             }
-            int physicalPos = lookupKey[0];
+            int physicalPos = SourceProjection.originalIndex(outputProjection, lookupKey[0]);
             if (!plannerPhysicalPositions.add(physicalPos)) {
                 throw new ValidationException(
                         "Cobble state source lookup for state '"
@@ -136,7 +140,8 @@ final class CobbleStateDynamicTableSource implements ScanTableSource, LookupTabl
         // Build a lookup from physical position → planner key index for fast reverse lookup.
         Map<Integer, Integer> plannerIndexByPhysicalPos = new HashMap<>();
         for (int i = 0; i < keys.length; i++) {
-            plannerIndexByPhysicalPos.put(keys[i][0], i);
+            plannerIndexByPhysicalPos.put(
+                    SourceProjection.originalIndex(outputProjection, keys[i][0]), i);
         }
 
         // For each required field, find the matching planner key by physical position.
@@ -163,7 +168,7 @@ final class CobbleStateDynamicTableSource implements ScanTableSource, LookupTabl
 
         // Check for extra/unrelated planner keys targeting columns not in the required set.
         for (int i = 0; i < keys.length; i++) {
-            int physicalPos = keys[i][0];
+            int physicalPos = SourceProjection.originalIndex(outputProjection, keys[i][0]);
             if (!requiredPosSet.contains(physicalPos)) {
                 throw new ValidationException(
                         "Cobble state source lookup for state '"
@@ -182,6 +187,18 @@ final class CobbleStateDynamicTableSource implements ScanTableSource, LookupTabl
     @Override
     public DynamicTableSource copy() {
         return new CobbleStateDynamicTableSource(config, summary);
+    }
+
+    @Override
+    public boolean supportsNestedProjection() {
+        return false;
+    }
+
+    @Override
+    public void applyProjection(int[][] projectedFields, DataType producedDataType) {
+        config =
+                config.withProjection(
+                        SourceProjection.indexes(projectedFields, config.outputFields().size()));
     }
 
     @Override

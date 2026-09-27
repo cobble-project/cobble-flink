@@ -55,6 +55,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Duration;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.Comparator;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -90,6 +91,8 @@ class CobbleStateSourceSqlITTest {
                         false));
         assertEquals(
                 expectedSums(), rowSet(tableEnv, "SELECT `key`, `value` FROM state_values_latest"));
+        assertEquals(
+                expectedValues(), rowList(tableEnv, "SELECT `value` FROM state_values_latest"));
 
         tableEnv.executeSql(
                 stateDdl(
@@ -112,7 +115,12 @@ class CobbleStateSourceSqlITTest {
                         "list",
                         "latest",
                         true));
+        assertTrue(tableEnv.explainSql("SELECT `key` FROM state_list").contains("fields=[key]"));
         assertEquals(expectedListRows(), rowSet(tableEnv, "SELECT `key`, `value` FROM state_list"));
+        assertEquals(expectedListKeys(), rowList(tableEnv, "SELECT `key` FROM state_list"));
+        assertEquals(
+                expectedLiteralRows(PARALLELISM * VALUES_PER_KEY),
+                rowList(tableEnv, "SELECT 1 FROM state_list"));
 
         tableEnv.executeSql(
                 stateDdl(
@@ -126,6 +134,13 @@ class CobbleStateSourceSqlITTest {
         assertEquals(
                 expectedMapRows(),
                 rowSet(tableEnv, "SELECT `key`, map_key, map_value FROM state_map"));
+        assertEquals(expectedMapValues(), rowList(tableEnv, "SELECT map_value FROM state_map"));
+        assertEquals(
+                expectedReorderedMapRows(),
+                rowList(tableEnv, "SELECT map_value, `key`, map_key, map_value FROM state_map"));
+        assertEquals(
+                expectedLiteralRows(PARALLELISM * (VALUES_PER_KEY + 1)),
+                rowList(tableEnv, "SELECT 1 FROM state_map"));
 
         tableEnv.executeSql(
                 stateDdl(
@@ -167,6 +182,9 @@ class CobbleStateSourceSqlITTest {
                 rowSet(
                         tableEnv,
                         "SELECT `key`, namespace, `value` FROM state_namespaced_values_latest"));
+        assertEquals(
+                expectedNamespaces(),
+                rowList(tableEnv, "SELECT namespace FROM state_namespaced_values_latest"));
 
         tableEnv.executeSql(
                 stateDdl(
@@ -319,6 +337,16 @@ class CobbleStateSourceSqlITTest {
         return encoded;
     }
 
+    private static List<String> rowList(StreamTableEnvironment tableEnv, String query)
+            throws Exception {
+        List<String> encoded = new ArrayList<>();
+        for (Row row : collectRows(tableEnv, query, Duration.ofSeconds(60))) {
+            encoded.add(encode(row));
+        }
+        encoded.sort(String::compareTo);
+        return encoded;
+    }
+
     private static List<Row> collectRows(
             StreamTableEnvironment tableEnv, String query, Duration timeout) throws Exception {
         TableResult result = tableEnv.executeSql(query);
@@ -359,6 +387,69 @@ class CobbleStateSourceSqlITTest {
         for (int key = 0; key < PARALLELISM; key++) {
             rows.add(key + "|" + expectedSum(key));
         }
+        return rows;
+    }
+
+    private static List<String> expectedValues() {
+        List<String> rows = new ArrayList<>();
+        for (int key = 0; key < PARALLELISM; key++) {
+            rows.add(Integer.toString(expectedSum(key)));
+        }
+        Collections.sort(rows);
+        return rows;
+    }
+
+    private static List<String> expectedLiteralRows(int rowCount) {
+        List<String> rows = new ArrayList<>();
+        for (int count = 0; count < rowCount; count++) {
+            rows.add("1");
+        }
+        return rows;
+    }
+
+    private static List<String> expectedListKeys() {
+        List<String> rows = new ArrayList<>();
+        for (int key = 0; key < PARALLELISM; key++) {
+            for (int offset = 0; offset < VALUES_PER_KEY; offset++) {
+                rows.add(Integer.toString(key));
+            }
+        }
+        rows.sort(String::compareTo);
+        return rows;
+    }
+
+    private static List<String> expectedMapValues() {
+        List<String> rows = new ArrayList<>();
+        for (int key = 0; key < PARALLELISM; key++) {
+            rows.add("null");
+            for (int offset = 0; offset < VALUES_PER_KEY; offset++) {
+                rows.add("m" + (key + offset * PARALLELISM));
+            }
+        }
+        rows.sort(String::compareTo);
+        return rows;
+    }
+
+    private static List<String> expectedReorderedMapRows() {
+        List<String> rows = new ArrayList<>();
+        for (int key = 0; key < PARALLELISM; key++) {
+            rows.add("null|" + key + "|" + nullMapKey(key) + "|null");
+            for (int offset = 0; offset < VALUES_PER_KEY; offset++) {
+                int value = key + offset * PARALLELISM;
+                rows.add("m" + value + "|" + key + "|" + value + "|m" + value);
+            }
+        }
+        Collections.sort(rows);
+        return rows;
+    }
+
+    private static List<String> expectedNamespaces() {
+        List<String> rows = new ArrayList<>();
+        for (int key = 0; key < PARALLELISM; key++) {
+            rows.add("ns-a");
+            rows.add("ns-b");
+        }
+        Collections.sort(rows);
         return rows;
     }
 

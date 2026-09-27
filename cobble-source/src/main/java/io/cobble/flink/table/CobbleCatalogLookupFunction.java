@@ -2,7 +2,9 @@ package io.cobble.flink.table;
 
 import io.cobble.flink.catalog.CobbleCatalogTableReference;
 import io.cobble.flink.common.table.CobbleTableRowConverter;
-import io.cobble.table.TableReadEntry;
+import io.cobble.table.TableKeyBuilder;
+import io.cobble.table.TableProjection;
+import io.cobble.table.TableReader;
 import io.cobble.table.Value;
 
 import org.apache.flink.table.data.RowData;
@@ -23,7 +25,9 @@ public final class CobbleCatalogLookupFunction extends LookupFunction {
     private final String snapshot;
     private final int[] primaryPositions;
     private final int[] mapping;
-    private transient io.cobble.table.TableReader reader;
+    private final int[] outputProjection;
+    private transient TableReader reader;
+    private transient TableProjection projection;
     private transient CobbleTableRowConverter converter;
     private transient RowData.FieldGetter[] keyGetters;
 
@@ -32,44 +36,64 @@ public final class CobbleCatalogLookupFunction extends LookupFunction {
             RowType rowType,
             String snapshot,
             int[] primaryPositions,
-            int[] mapping) {
+            int[] mapping,
+            int[] outputProjection) {
         this.reference = reference;
         this.rowType = rowType;
         this.snapshot = snapshot;
         this.primaryPositions = primaryPositions.clone();
         this.mapping = mapping.clone();
+        this.outputProjection = outputProjection.clone();
     }
 
     @Override
     public void open(FunctionContext context) {
-        converter = new CobbleTableRowConverter(rowType);
+        converter =
+                new CobbleTableRowConverter(SourceProjection.rowType(rowType, outputProjection));
         keyGetters = new RowData.FieldGetter[mapping.length];
         for (int i = 0; i < mapping.length; i++) {
             keyGetters[i] =
                     RowData.createFieldGetter(rowType.getTypeAt(primaryPositions[i]), mapping[i]);
         }
-        reader = CobbleCatalogDynamicTableSource.openReader(reference, snapshot);
+        TableReader opened = CobbleCatalogDynamicTableSource.openReader(reference, snapshot);
+        if (opened == null) return;
+        try {
+            List<String> selectedNames = new ArrayList<>(Math.max(1, outputProjection.length));
+            if (outputProjection.length == 0) {
+                selectedNames.add(rowType.getFieldNames().get(primaryPositions[0]));
+            } else {
+                for (int index : outputProjection) {
+                    selectedNames.add(rowType.getFieldNames().get(index));
+                }
+            }
+            projection = opened.projectByNames(selectedNames);
+            reader = opened;
+        } catch (RuntimeException | Error error) {
+            opened.close();
+            throw error;
+        }
     }
 
     @Override
     public Collection<RowData> lookup(RowData arguments) throws IOException {
         try {
-            if (reader == null) return Collections.emptyList();
-            List<Value> key = new ArrayList<>(mapping.length);
+            if (projection == null) return Collections.emptyList();
+            TableKeyBuilder key = reader.keyBuilder();
             for (int i = 0; i < mapping.length; i++) {
                 Object value = keyGetters[i].getFieldOrNull(arguments);
                 if (value == null) return Collections.emptyList();
-                key.add(
+                key.push(
                         CobbleTableRowConverter.toValue(
                                 rowType.getTypeAt(primaryPositions[i]), value));
             }
-            Collection<TableReadEntry<List<Value>>> rows = reader.lookup(key);
-            return rows.isEmpty()
+            List<Value> values = projection.get(key.build());
+            return values == null
                     ? Collections.emptyList()
                     : Collections.singletonList(
-                            converter.toRowData(rows.iterator().next().value()));
-        } catch (RuntimeException error) {
-            throw new IOException("Cobble catalog lookup failed.", error);
+                            converter.toRowData(
+                                    outputProjection.length == 0
+                                            ? Collections.emptyList()
+                                            : values));
         } catch (Exception error) {
             throw new IOException("Cobble catalog lookup failed.", error);
         }
@@ -77,7 +101,12 @@ public final class CobbleCatalogLookupFunction extends LookupFunction {
 
     @Override
     public void close() {
-        if (reader != null) reader.close();
-        reader = null;
+        try {
+            if (projection != null) projection.close();
+        } finally {
+            projection = null;
+            if (reader != null) reader.close();
+            reader = null;
+        }
     }
 }

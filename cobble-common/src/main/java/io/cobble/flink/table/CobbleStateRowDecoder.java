@@ -35,8 +35,10 @@ import java.io.PushbackInputStream;
 import java.nio.ByteBuffer;
 import java.util.ArrayList;
 import java.util.EnumMap;
+import java.util.EnumSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 /** Decodes Cobble state rows into the SQL physical row shape resolved at planning time. */
 public final class CobbleStateRowDecoder {
@@ -62,6 +64,7 @@ public final class CobbleStateRowDecoder {
     private final StateInspectSchema schema;
     private final StateInspectSemanticSchema semanticSchema;
     private final List<StateSourceField> outputFields;
+    private final Set<StateSourceField.Group> selectedGroups;
     private final String context;
     private final Map<StateSourceField.Group, GroupDecoder> groupDecoders =
             new EnumMap<>(StateSourceField.Group.class);
@@ -75,6 +78,8 @@ public final class CobbleStateRowDecoder {
         this.schema = schema;
         this.semanticSchema = semanticSchema;
         this.outputFields = new ArrayList<StateSourceField>(outputFields);
+        this.selectedGroups = EnumSet.noneOf(StateSourceField.Group.class);
+        for (StateSourceField field : outputFields) selectedGroups.add(field.group());
         this.context = context;
         initializeGroupDecoders();
     }
@@ -85,15 +90,24 @@ public final class CobbleStateRowDecoder {
             throw new UnsupportedOperationException(TIMER_NOT_IMPLEMENTED);
         }
         try {
-            KeySlices slices =
-                    schema.stateKind() == StateKind.MAP
-                            ? splitMapKey(rowKey)
-                            : splitKeyAndNamespace(rowKey);
-            Object[] stateKey = decodeGroup(StateSourceField.Group.STATE_KEY, slices.key);
+            KeySlices slices = null;
+            if (selected(StateSourceField.Group.STATE_KEY)
+                    || selected(StateSourceField.Group.NAMESPACE)
+                    || selected(StateSourceField.Group.MAP_KEY)) {
+                slices =
+                        schema.stateKind() == StateKind.MAP
+                                ? splitMapKey(rowKey)
+                                : splitKeyAndNamespace(rowKey);
+            }
+            Object[] stateKey =
+                    selected(StateSourceField.Group.STATE_KEY)
+                            ? decodeGroup(StateSourceField.Group.STATE_KEY, slices.key)
+                            : null;
             Object[] namespace =
-                    isVoidNamespace(schema.namespaceSerializer())
-                            ? null
-                            : decodeGroup(StateSourceField.Group.NAMESPACE, slices.namespace);
+                    selected(StateSourceField.Group.NAMESPACE)
+                                    && !isVoidNamespace(schema.namespaceSerializer())
+                            ? decodeGroup(StateSourceField.Group.NAMESPACE, slices.namespace)
+                            : null;
 
             List<RowData> rows = new ArrayList<>();
             switch (schema.stateKind()) {
@@ -104,13 +118,20 @@ public final class CobbleStateRowDecoder {
                             buildRow(
                                     stateKey,
                                     namespace,
-                                    decodeGroup(StateSourceField.Group.VALUE, firstColumn(columns)),
+                                    selected(StateSourceField.Group.VALUE)
+                                            ? decodeGroup(
+                                                    StateSourceField.Group.VALUE,
+                                                    firstColumn(columns))
+                                            : null,
                                     null,
                                     null,
                                     null));
                     break;
                 case LIST:
-                    for (Object[] listElement : decodeListElements(firstColumn(columns))) {
+                    for (Object[] listElement :
+                            decodeListElements(
+                                    firstColumn(columns),
+                                    selected(StateSourceField.Group.LIST_ELEMENT))) {
                         rows.add(buildRow(stateKey, namespace, null, listElement, null, null));
                     }
                     break;
@@ -125,8 +146,13 @@ public final class CobbleStateRowDecoder {
                                     namespace,
                                     null,
                                     null,
-                                    decodeGroup(StateSourceField.Group.MAP_KEY, slices.mapKey),
-                                    decodeMapValue(mapValueColumn)));
+                                    selected(StateSourceField.Group.MAP_KEY)
+                                            ? decodeGroup(
+                                                    StateSourceField.Group.MAP_KEY, slices.mapKey)
+                                            : null,
+                                    selected(StateSourceField.Group.MAP_VALUE)
+                                            ? decodeMapValue(mapValueColumn)
+                                            : null));
                     break;
                 default:
                     throw new IOException("Unsupported state kind: " + schema.stateKind());
@@ -149,11 +175,14 @@ public final class CobbleStateRowDecoder {
     }
 
     private void initializeGroupDecoders() throws IOException {
-        addGroup(
-                StateSourceField.Group.STATE_KEY,
-                semanticSchema.stateKey(),
-                schema.keySerializer());
-        if (!isVoidNamespace(schema.namespaceSerializer())) {
+        if (selected(StateSourceField.Group.STATE_KEY)) {
+            addGroup(
+                    StateSourceField.Group.STATE_KEY,
+                    semanticSchema.stateKey(),
+                    schema.keySerializer());
+        }
+        if (selected(StateSourceField.Group.NAMESPACE)
+                && !isVoidNamespace(schema.namespaceSerializer())) {
             addGroup(
                     StateSourceField.Group.NAMESPACE,
                     semanticSchema.namespace(),
@@ -163,10 +192,12 @@ public final class CobbleStateRowDecoder {
             case VALUE:
             case REDUCING:
             case AGGREGATING:
-                addGroup(
-                        StateSourceField.Group.VALUE,
-                        semanticSchema.value(),
-                        schema.valueSerializer());
+                if (selected(StateSourceField.Group.VALUE)) {
+                    addGroup(
+                            StateSourceField.Group.VALUE,
+                            semanticSchema.value(),
+                            schema.valueSerializer());
+                }
                 break;
             case LIST:
                 addGroup(
@@ -175,14 +206,18 @@ public final class CobbleStateRowDecoder {
                         schema.listElementSerializer());
                 break;
             case MAP:
-                addGroup(
-                        StateSourceField.Group.MAP_KEY,
-                        semanticSchema.mapUserKey(),
-                        schema.mapUserKeySerializer());
-                addGroup(
-                        StateSourceField.Group.MAP_VALUE,
-                        semanticSchema.mapUserValue(),
-                        schema.mapUserValueSerializer());
+                if (selected(StateSourceField.Group.MAP_KEY)) {
+                    addGroup(
+                            StateSourceField.Group.MAP_KEY,
+                            semanticSchema.mapUserKey(),
+                            schema.mapUserKeySerializer());
+                }
+                if (selected(StateSourceField.Group.MAP_VALUE)) {
+                    addGroup(
+                            StateSourceField.Group.MAP_VALUE,
+                            semanticSchema.mapUserValue(),
+                            schema.mapUserValueSerializer());
+                }
                 break;
             case TIMER:
                 break;
@@ -194,7 +229,7 @@ public final class CobbleStateRowDecoder {
     private void addGroup(
             StateSourceField.Group group, StateInspectType type, SerializerInspectSchema serializer)
             throws IOException {
-        groupDecoders.put(group, new GroupDecoder(group, type, serializer));
+        groupDecoders.put(group, new GroupDecoder(group, type, serializer, outputFields));
     }
 
     private Object[] decodeGroup(StateSourceField.Group group, byte[] bytes) throws IOException {
@@ -205,9 +240,14 @@ public final class CobbleStateRowDecoder {
         return decoder.decode(bytes);
     }
 
-    private List<Object[]> decodeListElements(byte[] bytes) throws IOException {
+    private boolean selected(StateSourceField.Group group) {
+        return selectedGroups.contains(group);
+    }
+
+    private List<Object[]> decodeListElements(byte[] bytes, boolean materialize)
+            throws IOException {
         GroupDecoder decoder = groupDecoders.get(StateSourceField.Group.LIST_ELEMENT);
-        return decoder.decodeListElements(bytes);
+        return decoder.decodeListElements(bytes, materialize);
     }
 
     private Object[] decodeMapValue(byte[] mapValueColumn) throws IOException {
@@ -438,11 +478,13 @@ public final class CobbleStateRowDecoder {
         private TypeSerializer<Object> serializer;
         private final List<DataStructureConverter<Object, Object>> converters;
         private final List<LogicalType> logicalTypes;
+        private final boolean[] selectedIndexes;
 
         private GroupDecoder(
                 StateSourceField.Group group,
                 StateInspectType type,
-                SerializerInspectSchema serializerSchema)
+                SerializerInspectSchema serializerSchema,
+                List<StateSourceField> outputFields)
                 throws IOException {
             this.group = group;
             this.type = type;
@@ -452,11 +494,18 @@ public final class CobbleStateRowDecoder {
             this.preferClassless =
                     ClasslessValueDecoder.shouldPreferClasslessSemanticDecode(descriptor);
             this.logicalTypes = flattenedLogicalTypes(type);
+            this.selectedIndexes = new boolean[logicalTypes.size()];
+            for (StateSourceField field : outputFields) {
+                if (field.group() == group) selectedIndexes[field.groupFieldIndex()] = true;
+            }
             this.converters = new ArrayList<>(logicalTypes.size());
-            for (LogicalType logicalType : logicalTypes) {
+            for (int index = 0; index < logicalTypes.size(); index++) {
                 this.converters.add(
-                        DataStructureConverters.getConverter(
-                                TypeConversions.fromLogicalToDataType(logicalType)));
+                        selectedIndexes[index]
+                                ? DataStructureConverters.getConverter(
+                                        TypeConversions.fromLogicalToDataType(
+                                                logicalTypes.get(index)))
+                                : null);
             }
         }
 
@@ -477,21 +526,21 @@ public final class CobbleStateRowDecoder {
             }
         }
 
-        private List<Object[]> decodeListElements(byte[] bytes) throws IOException {
+        private List<Object[]> decodeListElements(byte[] bytes, boolean materialize)
+                throws IOException {
             List<Object[]> rows = new ArrayList<>();
             if (bytes == null) {
                 return rows;
             }
             if (!preferClassless) {
-                return decodeListElementsWithSerializer(bytes);
+                return decodeListElementsWithSerializer(bytes, materialize);
             }
             try {
                 ClasslessValueDecoder.DecodeCursor cursor =
                         new ClasslessValueDecoder.DecodeCursor(bytes);
                 while (cursor.remaining() > 0) {
-                    rows.add(
-                            decodeObject(
-                                    ClasslessValueDecoder.decodeFromCursor(descriptor, cursor)));
+                    Object value = ClasslessValueDecoder.decodeFromCursor(descriptor, cursor);
+                    rows.add(materialize ? decodeObject(value) : null);
                     if (cursor.remaining() > 0) {
                         int delimiter = cursor.input().readUnsignedByte();
                         if (delimiter != LIST_DELIMITER) {
@@ -506,7 +555,7 @@ public final class CobbleStateRowDecoder {
                 if (descriptor.capability() == DescriptorCapability.FULLY_CLASSLESS) {
                     throw classlessFailure("classless list element decode", classlessFailure);
                 }
-                return decodeListElementsWithLiveFallback(bytes, classlessFailure);
+                return decodeListElementsWithLiveFallback(bytes, classlessFailure, materialize);
             }
         }
 
@@ -533,9 +582,10 @@ public final class CobbleStateRowDecoder {
         }
 
         private List<Object[]> decodeListElementsWithLiveFallback(
-                byte[] bytes, IOException classlessFailure) throws IOException {
+                byte[] bytes, IOException classlessFailure, boolean materialize)
+                throws IOException {
             try {
-                return decodeListElementsWithSerializer(bytes);
+                return decodeListElementsWithSerializer(bytes, materialize);
             } catch (Exception | LinkageError fallbackFailure) {
                 throw new IOException(
                         "Classless list element decode failed ("
@@ -546,7 +596,8 @@ public final class CobbleStateRowDecoder {
             }
         }
 
-        private List<Object[]> decodeListElementsWithSerializer(byte[] bytes) throws IOException {
+        private List<Object[]> decodeListElementsWithSerializer(byte[] bytes, boolean materialize)
+                throws IOException {
             List<Object[]> rows = new ArrayList<>();
             PushbackInputStream input = new PushbackInputStream(new ByteArrayInputStream(bytes), 1);
             DataInputViewStreamWrapper inputView = new DataInputViewStreamWrapper(input);
@@ -556,7 +607,8 @@ public final class CobbleStateRowDecoder {
                     return rows;
                 }
                 input.unread(first);
-                rows.add(decodeObject(serializer().deserialize(inputView)));
+                Object value = serializer().deserialize(inputView);
+                rows.add(materialize ? decodeObject(value) : null);
                 int delimiter = input.read();
                 if (delimiter < 0) {
                     return rows;
@@ -608,6 +660,7 @@ public final class CobbleStateRowDecoder {
                     return output;
                 }
                 for (int index = 0; index < type.fields().size(); index++) {
+                    if (!selectedIndexes[index]) continue;
                     StateInspectField field = type.fields().get(index);
                     if (!pojo.fields().containsKey(field.name())) {
                         throw new IOException(
@@ -623,6 +676,7 @@ public final class CobbleStateRowDecoder {
             if (value instanceof IndexedRecord) {
                 IndexedRecord record = (IndexedRecord) value;
                 for (int index = 0; index < type.fields().size(); index++) {
+                    if (!selectedIndexes[index]) continue;
                     output[index] = toInternal(index, record.get(index));
                 }
                 return output;
@@ -633,6 +687,7 @@ public final class CobbleStateRowDecoder {
             }
             RowData row = (RowData) value;
             for (int index = 0; index < type.fields().size(); index++) {
+                if (!selectedIndexes[index]) continue;
                 Object field =
                         RowData.createFieldGetter(logicalTypes.get(index), index)
                                 .getFieldOrNull(row);
@@ -652,13 +707,14 @@ public final class CobbleStateRowDecoder {
             }
             Tuple tuple = (Tuple) value;
             for (int index = 0; index < type.fields().size(); index++) {
+                if (!selectedIndexes[index]) continue;
                 output[index] = toInternal(index, tuple.getField(index));
             }
             return output;
         }
 
         private Object toInternal(int index, Object value) throws IOException {
-            if (value == null) {
+            if (!selectedIndexes[index] || value == null) {
                 return null;
             }
             try {

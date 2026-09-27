@@ -21,6 +21,7 @@ import org.apache.flink.table.api.DataTypes;
 import org.apache.flink.table.api.EnvironmentSettings;
 import org.apache.flink.table.api.TableEnvironment;
 import org.apache.flink.table.catalog.ObjectPath;
+import org.apache.flink.table.data.GenericRowData;
 import org.apache.flink.table.data.RowData;
 import org.apache.flink.table.types.logical.RowType;
 import org.apache.flink.types.Row;
@@ -33,6 +34,7 @@ import java.lang.reflect.Proxy;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Collection;
 import java.util.Collections;
 import java.util.List;
 
@@ -97,13 +99,19 @@ class CobbleCatalogSourceITTest {
                                         DataTypes.FIELD("id", DataTypes.INT().notNull()),
                                         DataTypes.FIELD("v", DataTypes.STRING()))
                                 .getLogicalType();
-        CobbleCatalogScanSource source = new CobbleCatalogScanSource(reference, rowType, "latest");
+        CobbleCatalogScanSource source =
+                new CobbleCatalogScanSource(reference, rowType, "latest", new int[] {0});
         CobbleCatalogScanSource.Split split;
         try (io.cobble.table.TableReader nativeReader =
                 CobbleCatalogDynamicTableSource.openReader(reference, "latest")) {
             split =
                     new CobbleCatalogScanSource.Split(
-                            "0", nativeReader.scanPlan().splits().get(0), 0);
+                            "0",
+                            nativeReader
+                                    .scanPlan()
+                                    .project(Collections.singletonList("id"))
+                                    .forSplit(nativeReader.scanPlan().splits().get(0)),
+                            0);
         }
         SourceReaderContext context =
                 (SourceReaderContext)
@@ -152,8 +160,15 @@ class CobbleCatalogSourceITTest {
         TableEnvironment tables = createCatalog(directory);
         assertEquals(Collections.emptyList(), collect(tables, "SELECT * FROM items"));
         write(directory);
+        assertTrue(tables.explainSql("SELECT v FROM items").contains("fields=[v]"));
         assertEquals(
                 Arrays.asList("+I[1, one]", "+I[2, two]"), collect(tables, "SELECT * FROM items"));
+        assertEquals(Arrays.asList("+I[one]", "+I[two]"), collect(tables, "SELECT v FROM items"));
+        assertEquals(Arrays.asList("+I[1]", "+I[2]"), collect(tables, "SELECT id FROM items"));
+        assertEquals(
+                Arrays.asList("+I[one, 1, one]", "+I[two, 2, two]"),
+                collect(tables, "SELECT v, id, v FROM items"));
+        assertEquals(Arrays.asList("+I[1]", "+I[1]"), collect(tables, "SELECT 1 FROM items"));
         tables.executeSql("ALTER TABLE items RENAME TO renamed_items");
         assertEquals(
                 Arrays.asList("+I[1, one]", "+I[2, two]"),
@@ -170,6 +185,87 @@ class CobbleCatalogSourceITTest {
                 "SELECT p.id, d.v FROM probe AS p LEFT JOIN items FOR SYSTEM_TIME AS OF p.pt AS d ON p.id = d.id";
         assertTrue(tables.explainSql(sql).contains("LookupJoin"));
         assertEquals(Arrays.asList("+I[1, one]", "+I[99, null]"), collect(tables, sql));
+    }
+
+    @Test
+    void catalogLookupProjectsNativeValuesAndPreservesMissingRows(@TempDir Path directory)
+            throws Exception {
+        TableEnvironment tables = createCatalog(directory);
+        tables.executeSql(
+                "CREATE TABLE details (id INT, name STRING, score BIGINT, secret STRING, "
+                        + "PRIMARY KEY (id) NOT ENFORCED)");
+        tables.executeSql(
+                        "INSERT INTO details VALUES "
+                                + "(1, 'one', 10, 'unused-one'), "
+                                + "(2, 'two', 20, 'unused-two')")
+                .await();
+        tables.executeSql(
+                "CREATE TEMPORARY VIEW detail_probe AS "
+                        + "SELECT id, PROCTIME() AS pt FROM (VALUES (1), (99)) AS ids(id)");
+        String sql =
+                "SELECT p.id, d.score FROM detail_probe AS p "
+                        + "LEFT JOIN details FOR SYSTEM_TIME AS OF p.pt AS d ON p.id = d.id";
+        assertTrue(tables.explainSql(sql).contains("LookupJoin"));
+        assertEquals(Arrays.asList("+I[1, 10]", "+I[99, null]"), collect(tables, sql));
+
+        CobbleCatalogTableReference reference =
+                CobbleCatalogTableReference.fromOptions(
+                        tables.getCatalog("native_catalog")
+                                .get()
+                                .getTable(new ObjectPath("default", "details"))
+                                .getOptions(),
+                        "default",
+                        "details");
+        RowType rowType =
+                (RowType)
+                        DataTypes.ROW(
+                                        DataTypes.FIELD("id", DataTypes.INT().notNull()),
+                                        DataTypes.FIELD("name", DataTypes.STRING()),
+                                        DataTypes.FIELD("score", DataTypes.BIGINT()),
+                                        DataTypes.FIELD("secret", DataTypes.STRING()))
+                                .getLogicalType();
+
+        CobbleCatalogLookupFunction scoreOnly =
+                new CobbleCatalogLookupFunction(
+                        reference, rowType, "latest", new int[] {0}, new int[] {0}, new int[] {2});
+        scoreOnly.open(null);
+        try {
+            Collection<RowData> found = scoreOnly.lookup(GenericRowData.of(1));
+            assertEquals(1, found.size());
+            assertEquals(1, found.iterator().next().getArity());
+            assertEquals(10L, found.iterator().next().getLong(0));
+            assertTrue(scoreOnly.lookup(GenericRowData.of(99)).isEmpty());
+        } finally {
+            scoreOnly.close();
+        }
+
+        CobbleCatalogLookupFunction reordered =
+                new CobbleCatalogLookupFunction(
+                        reference,
+                        rowType,
+                        "latest",
+                        new int[] {0},
+                        new int[] {0},
+                        new int[] {2, 1});
+        reordered.open(null);
+        try {
+            RowData row = reordered.lookup(GenericRowData.of(2)).iterator().next();
+            assertEquals(20L, row.getLong(0));
+            assertEquals("two", row.getString(1).toString());
+        } finally {
+            reordered.close();
+        }
+
+        CobbleCatalogLookupFunction existence =
+                new CobbleCatalogLookupFunction(
+                        reference, rowType, "latest", new int[] {0}, new int[] {0}, new int[0]);
+        existence.open(null);
+        try {
+            assertEquals(0, existence.lookup(GenericRowData.of(1)).iterator().next().getArity());
+            assertTrue(existence.lookup(GenericRowData.of(99)).isEmpty());
+        } finally {
+            existence.close();
+        }
     }
 
     @Test

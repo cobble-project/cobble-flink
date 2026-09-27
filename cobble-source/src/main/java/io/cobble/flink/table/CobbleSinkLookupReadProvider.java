@@ -7,7 +7,6 @@ import io.cobble.Reader;
 import io.cobble.flink.common.CobbleConnectorMetrics;
 import io.cobble.flink.common.table.CobbleTableRowConverter;
 import io.cobble.table.BucketHash;
-import io.cobble.table.DataField;
 import io.cobble.table.TableReadCapabilities;
 import io.cobble.table.TableReadCursor;
 import io.cobble.table.TableReadEntry;
@@ -18,12 +17,9 @@ import io.cobble.table.TableReadSchema;
 import io.cobble.table.TableReadSession;
 
 import org.apache.flink.table.data.RowData;
-import org.apache.flink.table.types.logical.utils.LogicalTypeParser;
 
-import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Collections;
-import java.util.List;
 
 /** Owns native sink-table lookup I/O, decoding, and bucket routing. */
 final class CobbleSinkLookupReadProvider implements TableReadProvider<RowData, RowData> {
@@ -100,21 +96,7 @@ final class CobbleSinkLookupReadProvider implements TableReadProvider<RowData, R
 
         @Override
         public TableReadSchema schema() {
-            List<DataField> fields = new ArrayList<DataField>();
-            for (int index = 0; index < config.physicalFields().size(); index++) {
-                CobbleDynamicTableSource.SerializableField field =
-                        config.physicalFields().get(index);
-                fields.add(
-                        new DataField(
-                                index,
-                                field.name,
-                                CobbleTableRowConverter.toCobbleType(
-                                        LogicalTypeParser.parse(
-                                                field.logicalType,
-                                                CobbleSinkLookupReadProvider.class
-                                                        .getClassLoader()))));
-            }
-            return new TableReadSchema(fields);
+            return CobbleSinkTableReadProvider.schemaFor(config);
         }
 
         @Override

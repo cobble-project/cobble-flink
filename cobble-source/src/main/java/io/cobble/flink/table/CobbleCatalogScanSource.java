@@ -2,13 +2,13 @@ package io.cobble.flink.table;
 
 import io.cobble.flink.catalog.CobbleCatalogTableReference;
 import io.cobble.flink.common.table.CobbleTableRowConverter;
-import io.cobble.table.NativeTableScanReadProvider;
 import io.cobble.table.TableReadCursor;
 import io.cobble.table.TableReadEntry;
 import io.cobble.table.TableReadProvider;
 import io.cobble.table.TableReadRange;
 import io.cobble.table.TableReadSession;
 import io.cobble.table.TableReader;
+import io.cobble.table.TableScanPlan;
 import io.cobble.table.TableScanSplit;
 import io.cobble.table.Value;
 
@@ -41,12 +41,17 @@ final class CobbleCatalogScanSource
     private final CobbleCatalogTableReference reference;
     private final RowType rowType;
     private final String snapshot;
+    private final int[] outputProjection;
 
     CobbleCatalogScanSource(
-            CobbleCatalogTableReference reference, RowType rowType, String snapshot) {
+            CobbleCatalogTableReference reference,
+            RowType rowType,
+            String snapshot,
+            int[] outputProjection) {
         this.reference = reference;
         this.rowType = rowType;
         this.snapshot = snapshot;
+        this.outputProjection = outputProjection.clone();
     }
 
     @Override
@@ -56,7 +61,7 @@ final class CobbleCatalogScanSource
 
     @Override
     public SourceReader<RowData, Split> createReader(SourceReaderContext context) {
-        return new Reader(reference, rowType, context);
+        return new Reader(reference, SourceProjection.rowType(rowType, outputProjection), context);
     }
 
     @Override
@@ -65,8 +70,15 @@ final class CobbleCatalogScanSource
         List<Split> splits = new ArrayList<>();
         try (TableReader reader = CobbleCatalogDynamicTableSource.openReader(reference, snapshot)) {
             if (reader != null) {
-                for (TableScanSplit nativeSplit : reader.scanPlan().splits()) {
-                    splits.add(new Split(Integer.toString(splits.size()), nativeSplit, 0));
+                List<String> selected = new ArrayList<>(outputProjection.length);
+                for (int index : outputProjection) selected.add(rowType.getFieldNames().get(index));
+                TableScanPlan plan = reader.scanPlan().project(selected);
+                for (TableScanSplit nativeSplit : plan.splits()) {
+                    splits.add(
+                            new Split(
+                                    Integer.toString(splits.size()),
+                                    plan.forSplit(nativeSplit),
+                                    0));
                 }
             }
         }
@@ -92,10 +104,10 @@ final class CobbleCatalogScanSource
     static final class Split implements SourceSplit, Serializable {
         private static final long serialVersionUID = 1L;
         final String id;
-        final TableScanSplit plan;
+        final TableScanPlan plan;
         final long emitted;
 
-        Split(String id, TableScanSplit plan, long emitted) {
+        Split(String id, TableScanPlan plan, long emitted) {
             this.id = id;
             this.plan = plan;
             this.emitted = emitted;
@@ -151,8 +163,8 @@ final class CobbleCatalogScanSource
         private final ArrayDeque<Split> pending = new ArrayDeque<>();
         private CompletableFuture<Void> available = new CompletableFuture<>();
         private Split current;
-        private TableReadProvider<List<Value>, Void> provider;
-        private TableReadSession<List<Value>, Void> session;
+        private TableReadProvider<List<Value>, ?> provider;
+        private TableReadSession<List<Value>, ?> session;
         private TableReadCursor<List<Value>> cursor;
         private long emitted;
         private boolean finished;
@@ -183,8 +195,8 @@ final class CobbleCatalogScanSource
                 // Revalidate identity before opening the durable fixed assignment after failover.
                 try (CobbleCatalogTableReference.Opened ignored = reference.openValidated()) {
                     provider =
-                            new NativeTableScanReadProvider(
-                                    reference.runtimeConfig(), current.plan);
+                            current.plan.open(
+                                    reference.runtimeConfig(), current.plan.splits().get(0));
                     session = provider.open();
                     cursor = session.scan(new TableReadRange(0, Integer.MAX_VALUE), null);
                 }

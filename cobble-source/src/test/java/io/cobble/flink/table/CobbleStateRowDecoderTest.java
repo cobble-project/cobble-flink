@@ -30,6 +30,55 @@ import java.util.List;
 class CobbleStateRowDecoderTest {
 
     @Test
+    void projectionSkipsUnselectedValueAndKeyDecoding() throws Exception {
+        StateInspectSchema schema =
+                StateInspectSchema.forValue(
+                        "orders",
+                        "cf",
+                        false,
+                        IntSerializer.INSTANCE,
+                        VoidNamespaceSerializer.INSTANCE,
+                        IntSerializer.INSTANCE);
+        RuntimeSchema runtime =
+                runtimeSchema(
+                        schema,
+                        StateInspectSemanticSchema.forValue(
+                                StateInspectType.scalar("INT"),
+                                StateInspectType.unknown(),
+                                StateInspectType.scalar("INT")));
+        StateSourceConfig config =
+                config(
+                        "value",
+                        fields(
+                                "key",
+                                "INT",
+                                StateSourceField.Group.STATE_KEY,
+                                "value",
+                                "INT",
+                                StateSourceField.Group.VALUE));
+
+        CobbleStateRowDecoder keyOnly = decoder(config.withProjection(new int[] {0}), runtime);
+        List<RowData> keys =
+                keyOnly.decode(
+                        concat(serialize(IntSerializer.INSTANCE, 12), namespaceBytes()),
+                        new byte[][] {{0x7f}},
+                        "0:0:1",
+                        0);
+        assertEquals(1, keys.size());
+        assertEquals(12, keys.get(0).getInt(0));
+
+        CobbleStateRowDecoder valueOnly = decoder(config.withProjection(new int[] {1}), runtime);
+        List<RowData> values =
+                valueOnly.decode(
+                        new byte[] {0x7f},
+                        new byte[][] {serialize(IntSerializer.INSTANCE, 34)},
+                        "0:0:1",
+                        0);
+        assertEquals(1, values.size());
+        assertEquals(34, values.get(0).getInt(0));
+    }
+
+    @Test
     void decodesValueStateScalarKeyAndValue() throws Exception {
         StateInspectSchema schema =
                 StateInspectSchema.forValue(
@@ -281,7 +330,10 @@ class CobbleStateRowDecoderTest {
     private static CobbleStateRowDecoder decoder(
             StateSourceConfig config, RuntimeSchema runtimeSchema) throws Exception {
         return new CobbleStateRowDecoder(
-                runtimeSchema.schema, runtimeSchema.semanticSchema, config.outputFields(), "test");
+                runtimeSchema.schema,
+                runtimeSchema.semanticSchema,
+                config.projectedFields(),
+                "test");
     }
 
     private static final class RuntimeSchema {

@@ -54,11 +54,32 @@ class CobbleSqlConnectorE2eITTest {
                         + " 'scan.checkpoint-id' = 'latest',"
                         + " 'scan.mode' = 'batch'"
                         + ")");
-
+        assertTrue(
+                readerTableEnv
+                        .explainSql("SELECT name FROM cobble_source")
+                        .contains("fields=[name]"));
         assertEquals(
                 Arrays.asList("1,name-1,10", "2,name-2,20", "7,name-7,70", "8,name-8,80"),
                 collectRows(
                         readerTableEnv.executeSql("SELECT id, name, score FROM cobble_source")));
+        assertEquals(
+                Arrays.asList("name-1", "name-2", "name-7", "name-8"),
+                collectRows(readerTableEnv.executeSql("SELECT name FROM cobble_source")));
+        assertEquals(
+                Arrays.asList("1", "2", "7", "8"),
+                collectRows(readerTableEnv.executeSql("SELECT id FROM cobble_source")));
+        assertEquals(
+                Arrays.asList("10,1", "20,2", "70,7", "80,8"),
+                collectRows(readerTableEnv.executeSql("SELECT score, id FROM cobble_source")));
+        assertEquals(
+                Arrays.asList("10,name-1", "20,name-2", "70,name-7", "80,name-8"),
+                collectRows(readerTableEnv.executeSql("SELECT score, name FROM cobble_source")));
+        assertEquals(
+                Arrays.asList("1,1", "2,2", "7,7", "8,8"),
+                collectRows(readerTableEnv.executeSql("SELECT id, id FROM cobble_source")));
+        assertEquals(
+                Arrays.asList("1", "1", "1", "1"),
+                collectRows(readerTableEnv.executeSql("SELECT 1 FROM cobble_source")));
     }
 
     @Test

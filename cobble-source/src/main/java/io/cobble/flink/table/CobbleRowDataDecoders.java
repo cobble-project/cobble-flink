@@ -1,7 +1,6 @@
 package io.cobble.flink.table;
 
 import io.cobble.flink.common.table.CobbleTableRowConverter;
-import io.cobble.table.DataField;
 import io.cobble.table.KeyCodec;
 import io.cobble.table.LogicalType;
 import io.cobble.table.TableSchema;
@@ -25,61 +24,69 @@ final class CobbleRowDataDecoders {
     static final class RuntimeRowDecoder implements ScannedRowDecoder {
         private final CobbleTableRowConverter converter;
         private final List<LogicalType> keyTypes;
-        private final List<Integer> keyPositions;
-        private final List<LogicalType> valueTypes;
-        private final List<Integer> valuePositions;
-        private final int fieldCount;
+        private final Map<Integer, Integer> keyOrdinals;
+        private final List<CobbleDynamicTableSource.SerializableField> outputFields;
+        private final List<LogicalType> outputTypes;
+        private final boolean[] outputKeys;
+        private final boolean decodeKey;
+        private final int selectedValues;
 
         RuntimeRowDecoder(CobbleDynamicTableSource.SerializableConfig config) {
             TableSchema schema = config.tableSchema();
-            this.converter = new CobbleTableRowConverter(config.rowType());
-            this.fieldCount = schema.fields().size();
+            this.converter = new CobbleTableRowConverter(config.projectedRowType());
+            this.outputFields = config.projectedFields();
+            this.outputTypes = new ArrayList<>(outputFields.size());
+            this.outputKeys = new boolean[outputFields.size()];
+            boolean selectedKey = false;
+            int valueCount = 0;
+            for (int index = 0; index < outputFields.size(); index++) {
+                CobbleDynamicTableSource.SerializableField field = outputFields.get(index);
+                outputTypes.add(schema.fields().get(field.rowIndex).logicalType());
+                outputKeys[index] = config.isKeyField(field);
+                selectedKey |= outputKeys[index];
+                if (!outputKeys[index]) valueCount++;
+            }
+            this.decodeKey = selectedKey;
+            this.selectedValues = valueCount;
             Map<Long, Integer> positionsById = new HashMap<Long, Integer>();
             for (int i = 0; i < schema.fields().size(); i++) {
                 positionsById.put(Long.valueOf(schema.fields().get(i).id()), Integer.valueOf(i));
             }
             this.keyTypes = new ArrayList<LogicalType>(schema.primaryKey().size());
-            this.keyPositions = new ArrayList<Integer>(schema.primaryKey().size());
+            this.keyOrdinals = new HashMap<>();
             for (Long fieldId : schema.primaryKey()) {
                 int position = positionsById.get(fieldId).intValue();
-                keyPositions.add(Integer.valueOf(position));
+                keyOrdinals.put(position, keyTypes.size());
                 keyTypes.add(schema.fields().get(position).logicalType());
-            }
-            this.valueTypes = new ArrayList<LogicalType>();
-            this.valuePositions = new ArrayList<Integer>();
-            for (int i = 0; i < schema.fields().size(); i++) {
-                DataField field = schema.fields().get(i);
-                if (!schema.primaryKey().contains(Long.valueOf(field.id()))) {
-                    valuePositions.add(Integer.valueOf(i));
-                    valueTypes.add(field.logicalType());
-                }
             }
         }
 
         @Override
         public RowData decode(byte[] key, byte[][] columns) throws IOException {
             try {
-                List<Value> row = new ArrayList<Value>(fieldCount);
-                for (int i = 0; i < fieldCount; i++) {
-                    row.add(Value.nullValue());
-                }
-                List<Value> decodedKey = KeyCodec.decode(keyTypes, ByteBuffer.wrap(key));
-                for (int i = 0; i < decodedKey.size(); i++) {
-                    row.set(keyPositions.get(i).intValue(), decodedKey.get(i));
-                }
-                if (columns.length < valueTypes.size()) {
+                List<Value> decodedKey =
+                        decodeKey ? KeyCodec.decode(keyTypes, ByteBuffer.wrap(key)) : null;
+                if (columns.length < selectedValues) {
                     throw new IllegalArgumentException(
                             "Cobble table row is missing one or more value columns");
                 }
-                for (int i = 0; i < valueTypes.size(); i++) {
-                    byte[] column = columns[i];
-                    if (column == null) {
-                        throw new IllegalArgumentException(
-                                "Cobble table row is missing value column " + i);
+                List<Value> row = new ArrayList<>(outputFields.size());
+                int valueIndex = 0;
+                for (int i = 0; i < outputFields.size(); i++) {
+                    CobbleDynamicTableSource.SerializableField field = outputFields.get(i);
+                    if (outputKeys[i]) {
+                        row.add(decodedKey.get(keyOrdinals.get(field.rowIndex)));
+                    } else {
+                        byte[] column = columns[valueIndex++];
+                        if (column == null) {
+                            throw new IllegalArgumentException(
+                                    "Cobble table row is missing value column "
+                                            + field.structuredColumnIndex);
+                        }
+                        row.add(
+                                ValueCodec.decodeOwned(
+                                        outputTypes.get(i), ByteBuffer.wrap(column)));
                     }
-                    row.set(
-                            valuePositions.get(i).intValue(),
-                            ValueCodec.decodeOwned(valueTypes.get(i), ByteBuffer.wrap(column)));
                 }
                 return converter.toRowData(row);
             } catch (IllegalArgumentException e) {

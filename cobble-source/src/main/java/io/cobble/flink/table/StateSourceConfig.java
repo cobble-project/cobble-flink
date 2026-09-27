@@ -51,6 +51,7 @@ final class StateSourceConfig implements Serializable {
     private final int bucketCount;
     private final long sourceBlockCacheMemoryBytes;
     private final List<StateSourceField> outputFields;
+    private final int[] outputProjection;
     private final StateSourceLookupKeyContract lookupKeyContract;
 
     /** Detection-only placeholder: layout is known, schema is not yet resolved. */
@@ -66,6 +67,7 @@ final class StateSourceConfig implements Serializable {
         this.bucketCount = -1;
         this.sourceBlockCacheMemoryBytes = 0L;
         this.outputFields = Collections.emptyList();
+        this.outputProjection = new int[0];
         this.lookupKeyContract = StateSourceLookupKeyContract.absent();
     }
 
@@ -111,6 +113,36 @@ final class StateSourceConfig implements Serializable {
             long sourceBlockCacheMemoryBytes,
             List<StateSourceField> outputFields,
             StateSourceLookupKeyContract lookupKeyContract) {
+        this(
+                pathUri,
+                layout,
+                operatorId,
+                stateName,
+                stateKind,
+                scanCheckpointId,
+                scanMode,
+                schemaCheckpointId,
+                bucketCount,
+                sourceBlockCacheMemoryBytes,
+                outputFields,
+                lookupKeyContract,
+                SourceProjection.all(outputFields.size()));
+    }
+
+    private StateSourceConfig(
+            String pathUri,
+            Layout layout,
+            String operatorId,
+            String stateName,
+            String stateKind,
+            String scanCheckpointId,
+            String scanMode,
+            long schemaCheckpointId,
+            int bucketCount,
+            long sourceBlockCacheMemoryBytes,
+            List<StateSourceField> outputFields,
+            StateSourceLookupKeyContract lookupKeyContract,
+            int[] outputProjection) {
         this.pathUri = pathUri;
         this.layout = layout;
         this.operatorId = operatorId;
@@ -122,6 +154,7 @@ final class StateSourceConfig implements Serializable {
         this.bucketCount = bucketCount;
         this.sourceBlockCacheMemoryBytes = sourceBlockCacheMemoryBytes;
         this.outputFields = Collections.unmodifiableList(new ArrayList<>(outputFields));
+        this.outputProjection = outputProjection.clone();
         this.lookupKeyContract =
                 lookupKeyContract == null
                         ? StateSourceLookupKeyContract.absent()
@@ -172,6 +205,33 @@ final class StateSourceConfig implements Serializable {
 
     List<StateSourceField> outputFields() {
         return outputFields;
+    }
+
+    List<StateSourceField> projectedFields() {
+        List<StateSourceField> fields = new ArrayList<>(outputProjection.length);
+        for (int index : outputProjection) fields.add(outputFields.get(index));
+        return fields;
+    }
+
+    int[] outputProjection() {
+        return outputProjection.clone();
+    }
+
+    StateSourceConfig withProjection(int[] projection) {
+        return new StateSourceConfig(
+                pathUri,
+                layout,
+                operatorId,
+                stateName,
+                stateKind,
+                scanCheckpointId,
+                scanMode,
+                schemaCheckpointId,
+                bucketCount,
+                sourceBlockCacheMemoryBytes,
+                outputFields,
+                lookupKeyContract,
+                projection);
     }
 
     /** The exact-key lookup contract derived from the DDL primary key (absent when no PK). */

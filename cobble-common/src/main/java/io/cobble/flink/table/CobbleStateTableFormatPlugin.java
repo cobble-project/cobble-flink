@@ -32,6 +32,16 @@ import java.util.Optional;
 /** Reads snapshot-described Flink keyed state through Cobble's Java table format SPI. */
 public final class CobbleStateTableFormatPlugin implements TableFormatPlugin {
 
+    private final List<StateSourceField> selectedFields;
+
+    public CobbleStateTableFormatPlugin() {
+        this.selectedFields = null;
+    }
+
+    public CobbleStateTableFormatPlugin(List<StateSourceField> selectedFields) {
+        this.selectedFields = new ArrayList<>(selectedFields);
+    }
+
     @Override
     public String formatId() {
         return CobbleStateReadFormatMetadata.FORMAT_ID;
@@ -62,7 +72,11 @@ public final class CobbleStateTableFormatPlugin implements TableFormatPlugin {
         }
         if (expected == null) throw new IOException("State snapshot has no readable shards");
         return new StateBinding(
-                snapshot.columnFamily(), global.totalBuckets, expected, shardBindings);
+                snapshot.columnFamily(),
+                global.totalBuckets,
+                expected,
+                shardBindings,
+                selectedFields);
     }
 
     @Override
@@ -121,7 +135,7 @@ public final class CobbleStateTableFormatPlugin implements TableFormatPlugin {
                                 names.get(i),
                                 CobbleTableRowConverter.toCobbleType(rowType.getTypeAt(i))));
             }
-            return new Layout(schema, semantic, fields, rowType, new TableReadSchema(readFields));
+            return new Layout(schema, semantic, fields, new TableReadSchema(readFields));
         } catch (IllegalArgumentException error) {
             throw new IOException(
                     "Cannot derive readable columns for state '" + columnFamily + "'", error);
@@ -132,26 +146,23 @@ public final class CobbleStateTableFormatPlugin implements TableFormatPlugin {
         private final StateInspectSchema schema;
         private final StateInspectSemanticSchema semantic;
         private final List<StateSourceField> fields;
-        private final RowType rowType;
         private final TableReadSchema readSchema;
 
         private Layout(
                 StateInspectSchema schema,
                 StateInspectSemanticSchema semantic,
                 List<StateSourceField> fields,
-                RowType rowType,
                 TableReadSchema readSchema) {
             this.schema = schema;
             this.semantic = semantic;
             this.fields = fields;
-            this.rowType = rowType;
             this.readSchema = readSchema;
         }
     }
 
     /** Session-private Flink serializer binding over the generic physical reader. */
     private static final class StateBinding implements TableFormatBinding {
-        private final Layout layout;
+        private final TableReadSchema outputSchema;
         private final int totalBuckets;
         private final List<StateSourceField> lookupFields;
         private final List<DataField> keyFields;
@@ -165,9 +176,13 @@ public final class CobbleStateTableFormatPlugin implements TableFormatPlugin {
                 String columnFamily,
                 int totalBuckets,
                 Layout layout,
-                List<ShardBinding> shardBindings)
+                List<ShardBinding> shardBindings,
+                List<StateSourceField> selectedFields)
                 throws IOException {
-            this.layout = layout;
+            List<StateSourceField> outputFields =
+                    selectedFields == null ? layout.fields : selectedFields;
+            RowType outputRowType = rowType(outputFields);
+            this.outputSchema = readSchema(outputFields, outputRowType);
             this.totalBuckets = totalBuckets;
             this.lookupFields = lookupFields(layout);
             this.capabilities = new TableReadCapabilities(true, !lookupFields.isEmpty(), true);
@@ -175,7 +190,7 @@ public final class CobbleStateTableFormatPlugin implements TableFormatPlugin {
             this.shardBindings =
                     Collections.unmodifiableList(new ArrayList<ShardBinding>(shardBindings));
             for (ShardBinding shard : this.shardBindings) {
-                shard.initializeDecoder(columnFamily);
+                shard.initializeDecoder(columnFamily, outputFields, outputRowType);
             }
             this.bucketBindings = bucketBindings(totalBuckets, this.shardBindings);
             this.lookupRoutingBinding = this.shardBindings.get(0);
@@ -184,7 +199,7 @@ public final class CobbleStateTableFormatPlugin implements TableFormatPlugin {
 
         @Override
         public TableReadSchema schema() {
-            return layout.readSchema;
+            return outputSchema;
         }
 
         @Override
@@ -315,11 +330,13 @@ public final class CobbleStateTableFormatPlugin implements TableFormatPlugin {
             return false;
         }
 
-        private void initializeDecoder(String columnFamily) throws IOException {
+        private void initializeDecoder(
+                String columnFamily, List<StateSourceField> outputFields, RowType outputRowType)
+                throws IOException {
             decoder =
                     new CobbleStateRowDecoder(
-                            layout.schema, layout.semantic, layout.fields, "state=" + columnFamily);
-            rowConverter = new CobbleTableRowConverter(layout.rowType);
+                            layout.schema, layout.semantic, outputFields, "state=" + columnFamily);
+            rowConverter = new CobbleTableRowConverter(outputRowType);
         }
 
         private synchronized CobbleStateLookupKeyEncoder.EncodedStateLookupKey encode(
@@ -331,7 +348,7 @@ public final class CobbleStateTableFormatPlugin implements TableFormatPlugin {
                 lookupEncoder =
                         new CobbleStateLookupKeyEncoder(
                                 layout.schema, layout.semantic, lookupFields, positions);
-                lookupConverter = new CobbleTableRowConverter(keyRowType(lookupFields));
+                lookupConverter = new CobbleTableRowConverter(rowType(lookupFields));
             }
             return lookupEncoder.encode(lookupConverter.toRowData(values), totalBuckets);
         }
@@ -368,7 +385,7 @@ public final class CobbleStateTableFormatPlugin implements TableFormatPlugin {
         return Collections.unmodifiableList(result);
     }
 
-    private static RowType keyRowType(List<StateSourceField> fields) {
+    private static RowType rowType(List<StateSourceField> fields) {
         List<String> names = new ArrayList<String>(fields.size());
         List<String> types = new ArrayList<String>(fields.size());
         for (StateSourceField field : fields) {
@@ -376,5 +393,17 @@ public final class CobbleStateTableFormatPlugin implements TableFormatPlugin {
             types.add(field.logicalType());
         }
         return CobbleTableRowConverter.parseRowType(names, types);
+    }
+
+    private static TableReadSchema readSchema(List<StateSourceField> fields, RowType rowType) {
+        List<DataField> result = new ArrayList<>(fields.size());
+        for (int index = 0; index < fields.size(); index++) {
+            result.add(
+                    new DataField(
+                            index,
+                            fields.get(index).name(),
+                            CobbleTableRowConverter.toCobbleType(rowType.getTypeAt(index))));
+        }
+        return new TableReadSchema(result);
     }
 }

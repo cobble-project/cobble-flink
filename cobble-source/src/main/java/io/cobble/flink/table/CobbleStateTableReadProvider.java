@@ -65,7 +65,8 @@ final class CobbleStateTableReadProvider implements TableReadProvider<RowData, R
                 TableReader.open(
                         config,
                         fixedSnapshot(config, sourceConfig, checkpointId),
-                        (TableFormatPlugin) new CobbleStateTableFormatPlugin())) {
+                        (TableFormatPlugin)
+                                new CobbleStateTableFormatPlugin(sourceConfig.projectedFields()))) {
             TableScanPlan plan = reader.scanPlan();
             if (plan.snapshotId() != checkpointId) {
                 throw new IOException(
@@ -125,7 +126,9 @@ final class CobbleStateTableReadProvider implements TableReadProvider<RowData, R
                     TableReader.open(
                             config,
                             fixedSnapshot(config, sourceConfig, checkpointId),
-                            (TableFormatPlugin) new CobbleStateTableFormatPlugin());
+                            (TableFormatPlugin)
+                                    new CobbleStateTableFormatPlugin(
+                                            sourceConfig.projectedFields()));
             return new Session(reader);
         } catch (Exception error) {
             if (reader != null) reader.close();
@@ -176,8 +179,9 @@ final class CobbleStateTableReadProvider implements TableReadProvider<RowData, R
             List<String> names = new ArrayList<String>();
             List<String> types = new ArrayList<String>();
             List<DataField> fields = new ArrayList<DataField>();
-            for (int index = 0; index < sourceConfig.outputFields().size(); index++) {
-                StateSourceField field = sourceConfig.outputFields().get(index);
+            List<StateSourceField> projectedFields = sourceConfig.projectedFields();
+            for (int index = 0; index < projectedFields.size(); index++) {
+                StateSourceField field = projectedFields.get(index);
                 names.add(field.name());
                 types.add(field.logicalType());
                 fields.add(

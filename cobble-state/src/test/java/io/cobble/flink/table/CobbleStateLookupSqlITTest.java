@@ -53,9 +53,15 @@ import org.apache.flink.streaming.api.functions.source.RichParallelSourceFunctio
 import org.apache.flink.streaming.api.operators.AbstractStreamOperator;
 import org.apache.flink.streaming.api.operators.OneInputStreamOperator;
 import org.apache.flink.streaming.runtime.streamrecord.StreamRecord;
+import org.apache.flink.table.api.DataTypes;
 import org.apache.flink.table.api.Schema;
 import org.apache.flink.table.api.TableResult;
 import org.apache.flink.table.api.bridge.java.StreamTableEnvironment;
+import org.apache.flink.table.connector.source.LookupTableSource;
+import org.apache.flink.table.connector.source.lookup.LookupFunctionProvider;
+import org.apache.flink.table.data.GenericRowData;
+import org.apache.flink.table.data.RowData;
+import org.apache.flink.table.functions.LookupFunction;
 import org.apache.flink.test.util.MiniClusterWithClientResource;
 import org.apache.flink.types.Row;
 import org.apache.flink.types.RowKind;
@@ -63,6 +69,7 @@ import org.apache.flink.util.CloseableIterator;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
+import java.lang.reflect.Proxy;
 import java.net.URI;
 import java.nio.file.DirectoryStream;
 import java.nio.file.Files;
@@ -70,6 +77,7 @@ import java.nio.file.Path;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Collection;
 import java.util.Collections;
 import java.util.Comparator;
 import java.util.List;
@@ -318,6 +326,65 @@ class CobbleStateLookupSqlITTest {
         assertEquals(
                 Arrays.asList("0,0,0", "0,999,null", "1,1,10", "2,2,20", "3,3,30"),
                 collectRows(tableEnv, query));
+    }
+
+    @Test
+    void projectedMapLookupRemapsKeysAndReturnsProjectedOrder() throws Exception {
+        CheckpointInfo checkpoint = runStatefulJob();
+        List<StateSourceField> fields =
+                Arrays.asList(
+                        new StateSourceField("key", "INT", StateSourceField.Group.STATE_KEY, 0),
+                        new StateSourceField("map_key", "INT", StateSourceField.Group.MAP_KEY, 0),
+                        new StateSourceField(
+                                "map_value", "INT", StateSourceField.Group.MAP_VALUE, 0));
+        StateSourceConfig config =
+                new StateSourceConfig(
+                        checkpoint.rootUri,
+                        StateSourceConfig.Layout.CHECKPOINT_ROOT,
+                        checkpoint.operatorId,
+                        "map-state",
+                        "map",
+                        Long.toString(checkpoint.checkpointId),
+                        "batch",
+                        checkpoint.checkpointId,
+                        -1,
+                        0L,
+                        fields,
+                        StateSourceLookupKeyContract.present(
+                                fields.subList(0, 2), new int[] {0, 1}));
+        CobbleStateDynamicTableSource source = new CobbleStateDynamicTableSource(config, "map");
+        source.applyProjection(
+                new int[][] {{2}, {0}, {1}},
+                DataTypes.ROW(
+                        DataTypes.FIELD("map_value", DataTypes.INT()),
+                        DataTypes.FIELD("key", DataTypes.INT()),
+                        DataTypes.FIELD("map_key", DataTypes.INT())));
+        LookupTableSource.LookupContext context =
+                (LookupTableSource.LookupContext)
+                        Proxy.newProxyInstance(
+                                getClass().getClassLoader(),
+                                new Class<?>[] {LookupTableSource.LookupContext.class},
+                                (proxy, method, args) -> {
+                                    if (method.getName().equals("getKeys")) {
+                                        return new int[][] {{2}, {1}};
+                                    }
+                                    throw new UnsupportedOperationException(method.getName());
+                                });
+        LookupFunction lookup =
+                ((LookupFunctionProvider) source.getLookupRuntimeProvider(context))
+                        .createLookupFunction();
+        lookup.open(null);
+        try {
+            Collection<RowData> rows = lookup.lookup(GenericRowData.of(5, 1));
+            assertEquals(1, rows.size());
+            RowData row = rows.iterator().next();
+            assertEquals(3, row.getArity());
+            assertEquals(50, row.getInt(0));
+            assertEquals(1, row.getInt(1));
+            assertEquals(5, row.getInt(2));
+        } finally {
+            lookup.close();
+        }
     }
 
     @Test

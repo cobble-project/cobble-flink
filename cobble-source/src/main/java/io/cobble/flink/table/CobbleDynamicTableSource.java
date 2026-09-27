@@ -11,7 +11,9 @@ import org.apache.flink.table.connector.source.DynamicTableSource;
 import org.apache.flink.table.connector.source.LookupTableSource;
 import org.apache.flink.table.connector.source.ScanTableSource;
 import org.apache.flink.table.connector.source.SourceProvider;
+import org.apache.flink.table.connector.source.abilities.SupportsProjectionPushDown;
 import org.apache.flink.table.connector.source.lookup.LookupFunctionProvider;
+import org.apache.flink.table.types.DataType;
 
 import java.io.Serializable;
 import java.util.ArrayList;
@@ -20,9 +22,10 @@ import java.util.Comparator;
 import java.util.List;
 
 /** Flink SQL source that reads rows from committed Cobble Tables. */
-final class CobbleDynamicTableSource implements ScanTableSource, LookupTableSource {
+final class CobbleDynamicTableSource
+        implements ScanTableSource, LookupTableSource, SupportsProjectionPushDown {
 
-    private final SerializableConfig config;
+    private SerializableConfig config;
     private final String summary;
 
     CobbleDynamicTableSource(SerializableConfig config, String summary) {
@@ -52,6 +55,18 @@ final class CobbleDynamicTableSource implements ScanTableSource, LookupTableSour
     }
 
     @Override
+    public boolean supportsNestedProjection() {
+        return false;
+    }
+
+    @Override
+    public void applyProjection(int[][] projectedFields, DataType producedDataType) {
+        config =
+                config.withProjection(
+                        SourceProjection.indexes(projectedFields, config.totalFieldCount()));
+    }
+
+    @Override
     public String asSummaryString() {
         return "CobbleTableSource{" + summary + "}";
     }
@@ -73,7 +88,8 @@ final class CobbleDynamicTableSource implements ScanTableSource, LookupTableSour
                     throw new ValidationException(
                             "Cobble lookup join supports only top-level PRIMARY KEY columns.");
                 }
-                if (lookupKey[0] == keyField.rowIndex) {
+                if (SourceProjection.originalIndex(config.outputProjection, lookupKey[0])
+                        == keyField.rowIndex) {
                     positionsByPrimaryKey[keyFieldIndex] = lookupPosition;
                     break;
                 }
@@ -99,6 +115,7 @@ final class CobbleDynamicTableSource implements ScanTableSource, LookupTableSour
         final long sourceBlockCacheMemoryBytes;
         final List<SerializableField> keyFields;
         final List<SerializableField> valueFields;
+        final int[] outputProjection;
 
         SerializableConfig(
                 String pathUri,
@@ -131,6 +148,30 @@ final class CobbleDynamicTableSource implements ScanTableSource, LookupTableSour
                 List<SerializableField> keyFields,
                 List<SerializableField> valueFields,
                 CobbleConnectorStorageOptions storageOptions) {
+            this(
+                    pathUri,
+                    bucketCount,
+                    scanCheckpointId,
+                    scanMode,
+                    pollIntervalMillis,
+                    sourceBlockCacheMemoryBytes,
+                    keyFields,
+                    valueFields,
+                    storageOptions,
+                    SourceProjection.all(keyFields.size() + valueFields.size()));
+        }
+
+        private SerializableConfig(
+                String pathUri,
+                int bucketCount,
+                String scanCheckpointId,
+                String scanMode,
+                long pollIntervalMillis,
+                long sourceBlockCacheMemoryBytes,
+                List<SerializableField> keyFields,
+                List<SerializableField> valueFields,
+                CobbleConnectorStorageOptions storageOptions,
+                int[] outputProjection) {
             this.pathUri = pathUri;
             this.storageOptions = storageOptions;
             this.bucketCount = bucketCount;
@@ -140,6 +181,7 @@ final class CobbleDynamicTableSource implements ScanTableSource, LookupTableSour
             this.sourceBlockCacheMemoryBytes = sourceBlockCacheMemoryBytes;
             this.keyFields = Collections.unmodifiableList(new ArrayList<>(keyFields));
             this.valueFields = Collections.unmodifiableList(new ArrayList<>(valueFields));
+            this.outputProjection = outputProjection.clone();
         }
 
         SerializableConfig copy() {
@@ -152,7 +194,22 @@ final class CobbleDynamicTableSource implements ScanTableSource, LookupTableSour
                     sourceBlockCacheMemoryBytes,
                     keyFields,
                     valueFields,
-                    storageOptions);
+                    storageOptions,
+                    outputProjection);
+        }
+
+        SerializableConfig withProjection(int[] projection) {
+            return new SerializableConfig(
+                    pathUri,
+                    bucketCount,
+                    scanCheckpointId,
+                    scanMode,
+                    pollIntervalMillis,
+                    sourceBlockCacheMemoryBytes,
+                    keyFields,
+                    valueFields,
+                    storageOptions,
+                    projection);
         }
 
         @Override
@@ -207,10 +264,16 @@ final class CobbleDynamicTableSource implements ScanTableSource, LookupTableSour
 
         @Override
         public int[] projectedColumnIndexes() {
-            int[] indexes = new int[valueFields.size()];
-            for (int i = 0; i < valueFields.size(); i++) {
-                indexes[i] = valueFields.get(i).structuredColumnIndex;
+            List<Integer> selected = new ArrayList<>();
+            for (SerializableField field : projectedFields()) {
+                if (!isKeyField(field)) {
+                    selected.add(field.structuredColumnIndex);
+                }
             }
+            // The native scanner requires at least one physical column even for key-only rows.
+            if (selected.isEmpty()) selected.add(0);
+            int[] indexes = new int[selected.size()];
+            for (int i = 0; i < selected.size(); i++) indexes[i] = selected.get(i);
             return indexes;
         }
 
@@ -247,6 +310,24 @@ final class CobbleDynamicTableSource implements ScanTableSource, LookupTableSour
                 types.add(field.logicalType);
             }
             return CobbleTableRowConverter.parseRowType(names, types);
+        }
+
+        org.apache.flink.table.types.logical.RowType projectedRowType() {
+            return SourceProjection.rowType(rowType(), outputProjection);
+        }
+
+        List<SerializableField> projectedFields() {
+            List<SerializableField> full = physicalFields();
+            List<SerializableField> selected = new ArrayList<>(outputProjection.length);
+            for (int index : outputProjection) selected.add(full.get(index));
+            return selected;
+        }
+
+        boolean isKeyField(SerializableField field) {
+            for (SerializableField keyField : keyFields) {
+                if (keyField.rowIndex == field.rowIndex) return true;
+            }
+            return false;
         }
 
         TableSchema tableSchema() {

@@ -116,12 +116,12 @@ final class CobbleSinkTableReadProvider implements TableReadProvider<RowData, Vo
         }
     }
 
-    private static TableReadSchema schemaFor(CobbleTableScanConfig config) {
+    static TableReadSchema schemaFor(CobbleTableScanConfig config) {
         List<DataField> fields = new ArrayList<DataField>();
         if (config instanceof CobbleDynamicTableSource.SerializableConfig) {
             int index = 0;
             for (CobbleDynamicTableSource.SerializableField field :
-                    ((CobbleDynamicTableSource.SerializableConfig) config).physicalFields()) {
+                    ((CobbleDynamicTableSource.SerializableConfig) config).projectedFields()) {
                 fields.add(
                         new DataField(
                                 index++,
