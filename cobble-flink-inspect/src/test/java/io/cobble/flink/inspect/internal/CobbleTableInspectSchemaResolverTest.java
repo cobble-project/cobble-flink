@@ -1,10 +1,12 @@
 package io.cobble.flink.inspect.internal;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import io.cobble.GlobalSnapshot;
+import io.cobble.ShardSnapshot;
 import io.cobble.flink.common.CobbleConnectorStorageOptions;
 import io.cobble.table.Value;
 
@@ -37,6 +39,18 @@ class CobbleTableInspectSchemaResolverTest {
 
         assertEquals("id", schema.keyFields.get(0).name());
         assertEquals("payload", schema.valueFields.get(0).name());
+    }
+
+    @Test
+    void rawSnapshotDoesNotRequireTableSchema() {
+        GlobalSnapshot snapshot = new GlobalSnapshot();
+        snapshot.totalBuckets = 1;
+        snapshot.shardSnapshots = Collections.singletonList(new ShardSnapshot());
+        snapshot.columnFamilyIds = Collections.singletonMap("default", 0);
+
+        assertNull(
+                CobbleTableInspectSchemaResolver.resolve(
+                        tempDir.toString(), snapshot, CobbleConnectorStorageOptions.empty()));
     }
 
     @Test

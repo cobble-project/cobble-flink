@@ -83,7 +83,10 @@ final class InspectSessionImpl implements InspectSession {
         if ("data_source".equals(sourceKind)) {
             TableInspectSchema tableSchema =
                     CobbleTableInspectSchemaResolver.resolve(sourceRoot, snapshot, storageOptions);
-            resolvedTargets = Collections.singletonList(InspectTarget.table("table", tableSchema));
+            resolvedTargets =
+                    tableSchema == null
+                            ? StateInspectTargetBuilder.build(snapshot, stateSchema)
+                            : Collections.singletonList(InspectTarget.table("table", tableSchema));
         } else {
             resolvedTargets = StateInspectTargetBuilder.build(snapshot, stateSchema);
         }

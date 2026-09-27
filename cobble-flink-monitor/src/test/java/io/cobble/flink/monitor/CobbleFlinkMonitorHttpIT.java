@@ -45,6 +45,7 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
 import java.io.DataOutputStream;
+import java.io.IOException;
 import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
@@ -52,6 +53,7 @@ import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.Paths;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.LinkedHashMap;
@@ -59,6 +61,7 @@ import java.util.List;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.stream.Collectors;
+import java.util.stream.Stream;
 
 class CobbleFlinkMonitorHttpIT {
     @TempDir private Path tempDir;
@@ -67,7 +70,7 @@ class CobbleFlinkMonitorHttpIT {
     void realServerSupportsIndependentSessionsScanTypedAndRawLookupAndErrors() throws Exception {
         Path sink = tempDir.resolve("sink");
         Path raw = tempDir.resolve("raw");
-        writeNativeTable(sink, 7L);
+        long sinkSnapshotId = writeNativeTable(sink, 7L);
         writeRawTable(raw, 11L, bytes("alpha"), bytes("omega"));
 
         ServerConfig config = new ServerConfig();
@@ -117,7 +120,7 @@ class CobbleFlinkMonitorHttpIT {
                                     .body());
             assertTrue(discovered.get("available").getAsBoolean());
             assertEquals(
-                    7L,
+                    sinkSnapshotId,
                     discovered
                             .getAsJsonArray("checkpoints")
                             .get(0)
@@ -146,7 +149,7 @@ class CobbleFlinkMonitorHttpIT {
                             .getAsString();
             assertNotEquals(sinkId, rawId);
             assertTrue(sinkId.length() >= 22);
-            assertEquals(7L, sinkSession.get("checkpoint_id").getAsLong());
+            assertEquals(sinkSnapshotId, sinkSession.get("checkpoint_id").getAsLong());
             assertEquals(11L, rawSession.get("checkpoint_id").getAsLong());
 
             writeRawTable(raw, 12L, bytes("beta"), bytes("zeta"));
@@ -218,7 +221,7 @@ class CobbleFlinkMonitorHttpIT {
                             .getAsJsonObject("source_sql")
                             .get("ddl")
                             .getAsString();
-            assertTrue(ddl.contains("'scan.checkpoint-id' = '7'"));
+            assertTrue(ddl.contains("'scan.checkpoint-id' = '" + sinkSnapshotId + "'"));
 
             CompletableFuture<HttpResponse<String>> sinkScan =
                     CompletableFuture.supplyAsync(
@@ -402,6 +405,7 @@ class CobbleFlinkMonitorHttpIT {
                 assertFalse(discoveredOperator.get("global_snapshot_available").getAsBoolean());
                 assertTrue(discoveredOperator.get("embedded_metadata_available").getAsBoolean());
 
+                List<Path> existingWorkspaces = embeddedWorkspaces();
                 HttpResponse<String> created =
                         post(
                                 http,
@@ -418,19 +422,8 @@ class CobbleFlinkMonitorHttpIT {
                                 .getAsJsonObject()
                                 .get("id")
                                 .getAsString();
-                String temporaryPrefix =
-                        "cobble-flink-embedded-checkpoint-3-" + operatorId.toHexString();
-                List<Path> temporaryDirectories;
-                try (java.util.stream.Stream<Path> paths =
-                        Files.list(java.nio.file.Paths.get(System.getProperty("java.io.tmpdir")))) {
-                    temporaryDirectories =
-                            paths.filter(
-                                            path ->
-                                                    path.getFileName()
-                                                            .toString()
-                                                            .startsWith(temporaryPrefix))
-                                    .collect(Collectors.toList());
-                }
+                List<Path> temporaryDirectories = embeddedWorkspaces();
+                temporaryDirectories.removeAll(existingWorkspaces);
                 assertFalse(temporaryDirectories.isEmpty());
 
                 JsonObject overview =
@@ -531,7 +524,19 @@ class CobbleFlinkMonitorHttpIT {
         }
     }
 
-    private void writeNativeTable(Path root, long checkpointId) throws Exception {
+    private static List<Path> embeddedWorkspaces() throws IOException {
+        try (Stream<Path> paths = Files.list(Paths.get(System.getProperty("java.io.tmpdir")))) {
+            return paths.filter(Files::isDirectory)
+                    .filter(
+                            path ->
+                                    path.getFileName()
+                                            .toString()
+                                            .startsWith("cobble-embedded-read-3-"))
+                    .collect(Collectors.toList());
+        }
+    }
+
+    private long writeNativeTable(Path root, long commitId) throws Exception {
         Config config = config(root, true);
         config.walEnabled = false;
         config.snapshotOnlyTrack = true;
@@ -551,8 +556,7 @@ class CobbleFlinkMonitorHttpIT {
             shard = db.startAsyncSnapshot().future().get();
         }
         try (TableSnapshotCommitter committer = TableSnapshotCommitter.open(config, 1, 4)) {
-            assertTrue(
-                    committer.commitBatch(checkpointId, Collections.singletonList(shard)) != null);
+            return committer.commitBatch(commitId, Collections.singletonList(shard)).id;
         }
     }
 

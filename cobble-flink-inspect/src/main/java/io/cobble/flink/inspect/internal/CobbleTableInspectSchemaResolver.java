@@ -29,6 +29,11 @@ final class CobbleTableInspectSchemaResolver {
                 || snapshot.shardSnapshots.isEmpty()) {
             throw new InspectInputException("Cobble Table snapshot has no shards");
         }
+        // Raw databases have no connector Table column family. Do not try to open them as tables.
+        if (snapshot.columnFamilyIds == null
+                || !snapshot.columnFamilyIds.containsKey(CobbleTableRowConverter.TABLE_NAME)) {
+            return null;
+        }
         ShardSnapshot shard = snapshot.shardSnapshots.get(0);
         int totalBuckets = snapshot.totalBuckets > 0 ? snapshot.totalBuckets : 1;
         Config config = CobbleReaderConfigs.dataSource(totalBuckets, sourceRoot, storageOptions);
