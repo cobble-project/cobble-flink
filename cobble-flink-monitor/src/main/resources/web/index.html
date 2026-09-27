@@ -64,10 +64,20 @@
               Target
               <select id="inspect-target"></select>
             </label>
-            <label id="columns-control">
-              Columns
-              <input id="columns" placeholder="0 or 0,1" />
-            </label>
+            <div id="columns-control" class="columns-control hidden">
+              <span class="control-label">Columns</span>
+              <button id="columns-trigger" class="columns-trigger" type="button" aria-haspopup="dialog" aria-expanded="false" aria-controls="columns-popover"><span id="columns-summary">All columns</span></button>
+              <div id="columns-popover" class="columns-popover hidden" role="dialog" aria-label="Select columns">
+                <label class="columns-option columns-all"><input id="columns-all" type="checkbox" checked /><span>All columns</span></label>
+                <div id="columns-options" class="columns-options"></div>
+                <form id="columns-add-form" class="columns-add-form hidden">
+                  <label for="columns-add-input">Column number</label>
+                  <div class="columns-add-row"><input id="columns-add-input" type="number" min="0" max="2147483647" step="1" inputmode="numeric" /><button type="submit" title="Add column" aria-label="Add column">+</button></div>
+                </form>
+                <div id="columns-error" class="columns-error hidden" role="alert"></div>
+                <button id="columns-apply" class="primary-button columns-apply" type="button">Apply</button>
+              </div>
+            </div>
             <div id="state-field-table-control" class="field-table-control hidden">
               <label for="state-field-table">
                 <span>Field table</span>
@@ -168,6 +178,6 @@
         </section>
       </main>
     </div>
-    <script src="/app.js?v=17"></script>
+    <script src="/app.js?v=18"></script>
   </body>
 </html>

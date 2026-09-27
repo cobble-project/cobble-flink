@@ -33,6 +33,9 @@ const state = {
   semanticKeyValues: {},
   semanticKeyInvalidIndexes: new Map(),
   stateFieldTableEnabled: true,
+  columnSelections: Object.create(null),
+  observedRawColumns: Object.create(null),
+  columnDraft: null,
 }
 
 const MAX_VALUE_DISPLAY_LENGTH = 300
@@ -78,10 +81,12 @@ function clearError(source = 'global') {
 }
 
 function setLoading(loading) {
+  if (loading) closeColumnPicker()
   $('refresh-button').disabled = loading
   $('open-new-path-button').disabled = loading
   $('new-source-path').disabled = loading
   $('operator-select').disabled = loading
+  $('inspect-target').disabled = loading
   $('inspect-button').disabled = loading
   $('lookup-button').disabled = loading
   $('clear-lookup-button').disabled = loading || state.trackedLookups.length === 0
@@ -89,6 +94,7 @@ function setLoading(loading) {
   $('namespace').disabled = loading
   $('map-key').disabled = loading
   $('state-field-table').disabled = loading
+  $('columns-trigger').disabled = loading
   $('key-group-auto').disabled = loading
   document.querySelectorAll('[data-sink-key-input]').forEach((element) => {
     element.disabled = loading
@@ -241,6 +247,7 @@ function renderInspectTargets() {
     targets.length === 0 || (targets.length <= 1 && active?.kind === 'sink'),
   )
   $('columns-control').classList.toggle('hidden', !active?.allows_columns)
+  renderColumnPicker()
   renderStateFilterControls()
 }
 
@@ -516,6 +523,9 @@ async function replaceSession(checkpointId, operatorId, source, discovered = nul
   const previousId = state.sessionId
   state.sessionId = replacement.session_id
   state.selectedLatest = checkpointId === 'latest'
+  state.columnSelections = Object.create(null)
+  state.observedRawColumns = Object.create(null)
+  closeColumnPicker()
   applySession(replacement, catalog, replacementOverview)
   resetScanState()
   if (!options.preserveTrackedLookups) clearTrackedLookups()
@@ -653,17 +663,127 @@ function activeTargetId() {
   return activeTarget()?.id || ''
 }
 
-function activeColumns() {
-  return activeTarget()?.allows_columns ? $('columns').value.trim() : ''
+function columnSelection(target = activeTarget()) {
+  if (!target?.allows_columns) return null
+  const selected = state.columnSelections[target.id]
+  return selected === undefined ? null : [...selected]
 }
 
-function parseColumns(value) {
-  if (!value) return null
-  const columns = String(value).split(',').map((item) => Number(item.trim()))
-  if (columns.some((item) => !Number.isInteger(item) || item < 0)) {
-    throw new Error('Columns must be comma-separated non-negative integers.')
+function projectionKey(columns) {
+  return columns === null ? '*' : JSON.stringify(columns)
+}
+
+function columnOptions(target) {
+  if (isSinkTarget(target)) {
+    return (target.value_fields || []).map((field) => ({
+      index: field.structured_column_index,
+      name: field.name,
+      type: field.logical_type,
+    }))
   }
-  return columns
+  return (state.observedRawColumns[target?.id] || []).map((index) => ({
+    index,
+    name: `Column ${index}`,
+    type: null,
+  }))
+}
+
+function columnSummary(target, selected) {
+  if (selected === null) return 'All columns'
+  if (selected.length === 1) {
+    return columnOptions(target).find((option) => option.index === selected[0])?.name
+      || `Column ${selected[0]}`
+  }
+  return `${selected.length} columns`
+}
+
+function renderColumnPicker() {
+  const target = activeTarget()
+  if (!target?.allows_columns) {
+    closeColumnPicker()
+    return
+  }
+  $('columns-summary').textContent = columnSummary(target, columnSelection(target))
+  if ($('columns-popover').classList.contains('hidden')) return
+  const draft = state.columnDraft
+  $('columns-all').checked = draft === null
+  $('columns-options').innerHTML = columnOptions(target).map((option) => `
+    <label class="columns-option">
+      <input type="checkbox" data-column-index="${option.index}" ${draft === null || draft.includes(option.index) ? 'checked' : ''} ${draft === null ? 'disabled' : ''} />
+      <span>${escapeHtml(option.name)}${option.type ? `<small>${escapeHtml(option.type)}</small>` : ''}</span>
+    </label>
+  `).join('')
+  $('columns-add-form').classList.toggle('hidden', isSinkTarget(target))
+  const empty = draft !== null && draft.length === 0
+  $('columns-apply').disabled = empty
+  $('columns-error').textContent = empty ? 'Select a column or All.' : ''
+  $('columns-error').classList.toggle('hidden', !empty)
+}
+
+function openColumnPicker() {
+  if (!activeTarget()?.allows_columns) return
+  state.columnDraft = columnSelection()
+  $('columns-popover').classList.remove('hidden')
+  $('columns-trigger').setAttribute('aria-expanded', 'true')
+  renderColumnPicker()
+  $('columns-all').focus()
+}
+
+function closeColumnPicker() {
+  state.columnDraft = null
+  $('columns-popover').classList.add('hidden')
+  $('columns-trigger').setAttribute('aria-expanded', 'false')
+  $('columns-add-input').value = ''
+}
+
+function applyColumnPicker() {
+  const target = activeTarget()
+  const selected = state.columnDraft
+  if (!target?.allows_columns || (selected !== null && selected.length === 0)) return
+  if (selected === null) delete state.columnSelections[target.id]
+  else state.columnSelections[target.id] = [...selected]
+  closeColumnPicker()
+  renderColumnPicker()
+  invalidatePagination()
+  switchInspectMode('scan')
+  return runScan()
+}
+
+function parseRawColumnNumber(value) {
+  const text = String(value).trim()
+  if (!/^(0|[1-9][0-9]*)$/.test(text) || Number(text) > 2147483647) {
+    throw new Error('Enter a non-negative whole column number.')
+  }
+  return Number(text)
+}
+
+function addRawColumn(value) {
+  const index = parseRawColumnNumber(value)
+  const target = activeTarget()
+  if (!target?.allows_columns || isSinkTarget(target)) return
+  const observed = state.observedRawColumns[target.id] || []
+  if (!observed.includes(index)) {
+    state.observedRawColumns[target.id] = [...observed, index].sort((a, b) => a - b)
+  }
+  state.columnDraft = state.columnDraft === null
+    ? [index]
+    : state.columnDraft.includes(index) ? state.columnDraft : [...state.columnDraft, index]
+  $('columns-add-input').value = ''
+  renderColumnPicker()
+}
+
+function observeRawColumns(target, rows, selected) {
+  if (!target?.allows_columns || isSinkTarget(target)) return
+  const found = new Set(state.observedRawColumns[target.id] || [])
+  for (const row of rows) {
+    if (selected === null) {
+      for (let index = 0; index < row.columns.length; index++) found.add(index)
+    } else {
+      for (const index of selected) found.add(index)
+    }
+  }
+  state.observedRawColumns[target.id] = [...found].sort((a, b) => a - b)
+  renderColumnPicker()
 }
 
 function typedGroupFields(target, groupId, values) {
@@ -755,7 +875,7 @@ function activeScanContext() {
   return {
     targetId: target?.id || '',
     targetLabel: !target ? '' : target.kind === 'sink' ? 'sink' : `${target.name} (${target.kind})`,
-    columns: activeColumns(),
+    columns: columnSelection(target),
     allowsColumns: Boolean(target?.allows_columns),
     targetKind: target?.kind || null,
     stateKind: target?.state_kind || null,
@@ -783,16 +903,17 @@ async function runScan(direction = 'reset') {
   applyPageMove(direction)
   setLoading(true)
   try {
+    let scanContext
     const response = await withSessionRecovery(() => {
       const target = activeTarget()
+      scanContext = activeScanContext()
       const body = {
         target_id: activeTargetId(),
         limit: Number($('limit').value || 50),
       }
       const bucket = $('bucket').value.trim()
       if (bucket && bucket.toLowerCase() !== 'all') body.bucket = Number(bucket)
-      const columns = parseColumns(activeColumns())
-      if (columns) body.columns = columns
+      if (scanContext.columns !== null) body.columns = scanContext.columns
       if (state.currentPageCursor) body.page_token = state.currentPageCursor
 
       if (isSemanticStateKeyFilterTarget(target)) {
@@ -829,7 +950,7 @@ async function runScan(direction = 'reset') {
       scan: { items, next_page_token: response.next_page_token },
       inspect_target: target,
     }
-    const scanContext = activeScanContext()
+    observeRawColumns(target, items, scanContext.columns)
     state.nextPageCursor = response.next_page_token || null
     state.scanHasResult = true
     state.lastScanData = data
@@ -864,8 +985,7 @@ async function runLookup() {
           key_b64: item.keyB64,
         })),
       }
-      const columns = parseColumns(group.columns)
-      if (columns) body.columns = columns
+      if (group.columns !== null) body.columns = group.columns
       const response = await withSessionRecovery(() =>
         post(`/api/v1/sessions/${state.sessionId}/lookup`, body))
       ;(response.rows || []).forEach((wire, index) => {
@@ -938,8 +1058,7 @@ function scheduleInspectAutoRefresh() {
 function refreshTargetControls() {
   renderInspectTargets()
   renderBucketRange()
-  resetScanState()
-  setLoading(false)
+  invalidatePagination()
 }
 
 function trackScanItem(trackId) {
@@ -959,7 +1078,7 @@ function trackScanItem(trackId) {
     keyUtf8: item.key_utf8,
     targetId: context.targetId,
     targetLabel: context.targetLabel,
-    columns: context.columns,
+    columns: context.columns === null ? null : [...context.columns],
     allowsColumns: context.allowsColumns,
     targetKind: context.targetKind,
     stateKind: context.stateKind,
@@ -981,7 +1100,7 @@ function trackScanItem(trackId) {
 }
 
 function trackIdentity(bucket, keyB64, targetId, columns) {
-  return `${targetId || ''}|${columns || ''}|${bucket}|${keyB64}`
+  return `${targetId || ''}|${projectionKey(columns)}|${bucket}|${keyB64}`
 }
 
 function scanItems() {
@@ -991,7 +1110,7 @@ function scanItems() {
 function groupedTrackedLookups() {
   const groupsById = new Map()
   for (const item of state.trackedLookups) {
-    const groupId = `${item.targetId}|${item.columns || ''}`
+    const groupId = `${item.targetId}|${projectionKey(item.columns)}`
     if (!groupsById.has(groupId)) {
       groupsById.set(groupId, {
         targetId: item.targetId,
@@ -1023,9 +1142,9 @@ function clearTrackedLookups() {
 function renderTrackedValue(item) {
   if (item.value == null) return `<span class="pill">missing</span>${renderDecodeError(item.decodeError, item.decodeIssues)}`
   if (isSinkTarget(trackedTarget(item))) {
-    return renderSinkColumns(item.value, item.decodedColumns, item.decodeError, item.decodeIssues)
+    return renderSinkColumns(item.value, item.decodedColumns, item.decodeError, item.decodeIssues, item.columns)
   }
-  if (item.allowsColumns) return renderColumns(item.value)
+  if (item.allowsColumns) return renderColumns(item.value, item.columns)
   return renderStateValue(
     item.value,
     item.decodedValue,
@@ -1202,7 +1321,7 @@ function renderScanResult(data, context = activeScanContext()) {
       row.innerHTML = `
         <td>${item.bucket}</td>
         <td>${renderKey(item.key_b64, item.key_utf8, item.decoded_key, target)}</td>
-        <td>${sink ? renderSinkColumns(item.columns, item.decoded_columns, item.decode_error, item.decode_issues) : renderStateValue(item.value, item.decoded_value, item.decode_error, target, `scan:${trackId}:value`, item.decode_issues)}</td>
+        <td>${sink ? renderSinkColumns(item.columns, item.decoded_columns, item.decode_error, item.decode_issues, context.columns) : renderStateValue(item.value, item.decoded_value, item.decode_error, target, `scan:${trackId}:value`, item.decode_issues)}</td>
         <td>${renderActionMenu(scanRowActions(item, target, context, trackId))}</td>
       `
     }
@@ -1444,18 +1563,19 @@ function renderStateValue(value, decodedValue, decodeError, target = null, displ
   return `${renderValue(value)}${renderDecodeError(decodeError, decodeIssues)}`
 }
 
-function renderColumns(columns = []) {
+function renderColumns(columns = [], selected = null) {
   return columns.map((column, index) => {
-    if (!column) return `<div><strong>${index}</strong>: null</div>`
-    return `<div><strong>${index}</strong>: ${renderCode(column.b64)}${renderUtf8Pill(column.utf8)}</div>`
+    const physicalIndex = selected === null ? index : selected[index]
+    if (!column) return `<div><strong>${physicalIndex}</strong>: null</div>`
+    return `<div><strong>${physicalIndex}</strong>: ${renderCode(column.b64)}${renderUtf8Pill(column.utf8)}</div>`
   }).join('')
 }
 
-function renderSinkColumns(columns = [], decodedColumns = null, decodeError = null, decodeIssues = null) {
+function renderSinkColumns(columns = [], decodedColumns = null, decodeError = null, decodeIssues = null, selected = null) {
   if (Array.isArray(decodedColumns) && decodedColumns.length > 0) {
     return `${renderSinkFields(decodedColumns)}${renderDecodeError(decodeError, decodeIssues)}`
   }
-  return `${renderColumns(columns)}${renderDecodeError(decodeError, decodeIssues)}`
+  return `${renderColumns(columns, selected)}${renderDecodeError(decodeError, decodeIssues)}`
 }
 
 function isSemanticStateTableTarget(target) {
@@ -1757,26 +1877,10 @@ function sinkTableLayout(target, context = {}) {
 }
 
 function projectedSinkValueFields(valueFields, columns) {
-  const projected = parseColumnProjection(columns)
-  if (projected.length === 0) return valueFields
-  return projected.map((index) => valueFields[index]).filter(Boolean)
-}
-
-function parseColumnProjection(columns) {
-  const projected = []
-  const seen = new Set()
-  String(columns || '')
-    .split(',')
-    .map((part) => part.trim())
-    .filter(Boolean)
-    .forEach((part) => {
-      const value = Number(part)
-      if (Number.isInteger(value) && value >= 0 && !seen.has(value)) {
-        projected.push(value)
-        seen.add(value)
-      }
-    })
-  return projected
+  if (columns == null) return valueFields
+  return columns.map((index) => valueFields.find(
+    (field) => field.structured_column_index === index,
+  )).filter(Boolean)
 }
 
 function renderSinkScanHeader(layout) {
@@ -2356,7 +2460,50 @@ document.querySelectorAll('.nav-button').forEach((button) => {
 $('refresh-button').addEventListener('click', refresh)
 $('open-new-path-button').addEventListener('click', openNewPath)
 $('operator-select').addEventListener('change', switchOperator)
-$('inspect-target').addEventListener('change', refreshTargetControls)
+$('inspect-target').addEventListener('change', () => {
+  closeColumnPicker()
+  refreshTargetControls()
+})
+$('columns-trigger').addEventListener('click', (event) => {
+  event.stopPropagation()
+  if ($('columns-popover').classList.contains('hidden')) openColumnPicker()
+  else closeColumnPicker()
+})
+$('columns-popover').addEventListener('click', (event) => event.stopPropagation())
+$('columns-all').addEventListener('change', () => {
+  state.columnDraft = $('columns-all').checked ? null : []
+  renderColumnPicker()
+})
+$('columns-options').addEventListener('change', (event) => {
+  const input = event.target.closest('input[data-column-index]')
+  if (!input || state.columnDraft === null) return
+  const index = Number(input.dataset.columnIndex)
+  state.columnDraft = input.checked
+    ? [...state.columnDraft, index]
+    : state.columnDraft.filter((column) => column !== index)
+  renderColumnPicker()
+  $('columns-options').querySelector(`input[data-column-index="${index}"]`)?.focus()
+})
+$('columns-add-form').addEventListener('submit', (event) => {
+  event.preventDefault()
+  try {
+    addRawColumn($('columns-add-input').value)
+  } catch (error) {
+    $('columns-error').textContent = error.message
+    $('columns-error').classList.remove('hidden')
+    $('columns-add-input').focus()
+  }
+})
+$('columns-apply').addEventListener('click', applyColumnPicker)
+document.addEventListener('click', (event) => {
+  if (!$('columns-control').contains(event.target)) closeColumnPicker()
+})
+document.addEventListener('keydown', (event) => {
+  if (event.key === 'Escape' && !$('columns-popover').classList.contains('hidden')) {
+    closeColumnPicker()
+    $('columns-trigger').focus()
+  }
+})
 $('sink-key-help-button').addEventListener('click', toggleSinkKeyHelp)
 $('key-group-auto-help-button').addEventListener('click', toggleKeyGroupAutoHelp)
 $('inspect-button').addEventListener('click', () => runInspect())
@@ -2387,7 +2534,7 @@ window.addEventListener('scroll', closeRowActionPopover, true)
 $('new-source-path').addEventListener('keydown', (event) => {
   if (event.key === 'Enter') openNewPath()
 })
-;['bucket', 'prefix', 'state-key', 'namespace', 'map-key', 'limit', 'columns', 'inspect-target'].forEach((id) => {
+;['bucket', 'prefix', 'state-key', 'namespace', 'map-key', 'limit'].forEach((id) => {
   $(id).addEventListener('change', invalidatePagination)
 })
 

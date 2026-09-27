@@ -13,6 +13,7 @@ import io.cobble.flink.inspect.InspectRow;
 import io.cobble.flink.inspect.InspectSelection;
 import io.cobble.flink.inspect.InspectSession;
 import io.cobble.flink.inspect.InspectTarget;
+import io.cobble.flink.inspect.InspectTargetKind;
 import io.cobble.flink.inspect.LookupKey;
 import io.cobble.flink.inspect.LookupRequest;
 import io.cobble.flink.inspect.LookupResult;
@@ -264,7 +265,16 @@ final class InspectHttpJson {
         }
         output.add("semantic_parts", semantic);
         output.add("key_fields", semanticFields(target.sinkKeyFields()));
-        output.add("value_fields", semanticFields(target.sinkValueFields()));
+        JsonArray valueFields = semanticFields(target.sinkValueFields());
+        if (target.kind() == InspectTargetKind.SINK) {
+            for (int index = 0; index < valueFields.size(); index++) {
+                valueFields
+                        .get(index)
+                        .getAsJsonObject()
+                        .addProperty("structured_column_index", index);
+            }
+        }
+        output.add("value_fields", valueFields);
         return output;
     }
 

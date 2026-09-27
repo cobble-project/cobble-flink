@@ -147,6 +147,16 @@ class CobbleFlinkMonitorHttpIT {
                             .getAsJsonObject()
                             .get("id")
                             .getAsString();
+            JsonObject valueField =
+                    sinkSession
+                            .getAsJsonArray("targets")
+                            .get(0)
+                            .getAsJsonObject()
+                            .getAsJsonArray("value_fields")
+                            .get(0)
+                            .getAsJsonObject();
+            assertEquals("payload", valueField.get("name").getAsString());
+            assertEquals(0, valueField.get("structured_column_index").getAsInt());
             assertNotEquals(sinkId, rawId);
             assertTrue(sinkId.length() >= 22);
             assertEquals(sinkSnapshotId, sinkSession.get("checkpoint_id").getAsLong());
