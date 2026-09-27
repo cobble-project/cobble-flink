@@ -262,31 +262,6 @@ final class CobbleDynamicTableSource
             return Math.max(1, valueFields.size());
         }
 
-        @Override
-        public int[] projectedColumnIndexes() {
-            List<Integer> selected = new ArrayList<>();
-            for (SerializableField field : projectedFields()) {
-                if (!isKeyField(field)) {
-                    selected.add(field.structuredColumnIndex);
-                }
-            }
-            // The native scanner requires at least one physical column even for key-only rows.
-            if (selected.isEmpty()) selected.add(0);
-            int[] indexes = new int[selected.size()];
-            for (int i = 0; i < selected.size(); i++) indexes[i] = selected.get(i);
-            return indexes;
-        }
-
-        @Override
-        public ScannedRowDecoder createDecoder() {
-            return new CobbleRowDataDecoders.RuntimeRowDecoder(this);
-        }
-
-        @Override
-        public String columnFamily() {
-            return CobbleTableRowConverter.TABLE_NAME;
-        }
-
         List<SerializableField> physicalFields() {
             List<SerializableField> fields = new ArrayList<SerializableField>();
             fields.addAll(keyFields);
@@ -321,13 +296,6 @@ final class CobbleDynamicTableSource
             List<SerializableField> selected = new ArrayList<>(outputProjection.length);
             for (int index : outputProjection) selected.add(full.get(index));
             return selected;
-        }
-
-        boolean isKeyField(SerializableField field) {
-            for (SerializableField keyField : keyFields) {
-                if (keyField.rowIndex == field.rowIndex) return true;
-            }
-            return false;
         }
 
         TableSchema tableSchema() {

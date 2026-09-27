@@ -7,6 +7,10 @@ import io.cobble.ScanPlan;
 import io.cobble.ScanSplit;
 import io.cobble.ShardSnapshot;
 import io.cobble.flink.common.CobbleLoader;
+import io.cobble.flink.common.table.CobbleTableRowConverter;
+import io.cobble.table.TableReader;
+import io.cobble.table.TableScanPlan;
+import io.cobble.table.TableScanSplit;
 
 import java.io.IOException;
 import java.util.ArrayList;
@@ -57,13 +61,28 @@ final class CobbleSourceRuntime {
         int bucketCount = validateSnapshot(config, snapshot);
         boolean[] coveredBuckets = new boolean[bucketCount];
         List<CobbleSourceSplit> splits = new ArrayList<>();
-        for (ScanSplit plannedSplit : ScanPlan.fromGlobalSnapshot(snapshot).splits()) {
-            if (plannedSplit == null
-                    || plannedSplit.shard == null
-                    || plannedSplit.shard.ranges == null) {
-                continue;
+        List<ShardSnapshot.Range> plannedRanges = new ArrayList<>();
+        if (config instanceof CobbleDynamicTableSource.SerializableConfig) {
+            try (TableReader reader =
+                    TableReader.open(
+                            createSourceScanConfig(config, bucketCount),
+                            CobbleTableRowConverter.TABLE_NAME,
+                            snapshot.id)) {
+                for (TableScanSplit plannedSplit : reader.scanPlan().splits()) {
+                    plannedRanges.add(extractSplitRange(plannedSplit));
+                }
             }
-            ShardSnapshot.Range splitRange = extractSplitRange(plannedSplit);
+        } else {
+            for (ScanSplit plannedSplit : ScanPlan.fromGlobalSnapshot(snapshot).splits()) {
+                if (plannedSplit == null
+                        || plannedSplit.shard == null
+                        || plannedSplit.shard.ranges == null) {
+                    continue;
+                }
+                plannedRanges.add(extractSplitRange(plannedSplit));
+            }
+        }
+        for (ShardSnapshot.Range splitRange : plannedRanges) {
             markCoveredBuckets(splitRange, bucketCount, coveredBuckets, snapshot.id);
             splits.add(
                     CobbleSourceSplit.forSnapshot(
@@ -71,6 +90,14 @@ final class CobbleSourceRuntime {
         }
         ensureCompleteBucketCoverage(coveredBuckets, snapshot.id);
         return splits;
+    }
+
+    private static ShardSnapshot.Range extractSplitRange(TableScanSplit split) throws IOException {
+        List<ShardSnapshot.Range> ranges = split.shardSnapshot().ranges;
+        if (ranges.size() != 1 || ranges.get(0) == null) {
+            throw new IOException("Cobble source expects each typed scan split to have one range.");
+        }
+        return ranges.get(0);
     }
 
     static ScanSplit resolveSourceSplit(CobbleTableScanConfig config, CobbleSourceSplit split)
@@ -121,6 +148,40 @@ final class CobbleSourceRuntime {
                             + '.');
         }
         return matchedSplit;
+    }
+
+    static TableScanPlan resolveTypedSourcePlan(
+            CobbleDynamicTableSource.SerializableConfig config, CobbleSourceSplit split)
+            throws IOException {
+        GlobalSnapshot snapshot = loadSnapshotById(config, split.snapshotId);
+        if (snapshot.totalBuckets != split.totalBuckets) {
+            throw new IOException("Cobble source split bucket count differs from its snapshot.");
+        }
+        Config readerConfig = createSourceScanConfig(config, snapshot.totalBuckets);
+        TableScanPlan plan;
+        try (TableReader reader =
+                TableReader.open(readerConfig, CobbleTableRowConverter.TABLE_NAME, snapshot.id)) {
+            List<String> names = new ArrayList<>();
+            for (CobbleDynamicTableSource.SerializableField field : config.projectedFields()) {
+                names.add(field.name);
+            }
+            plan = reader.scanPlan().project(names);
+        }
+        TableScanSplit matched = null;
+        for (TableScanSplit candidate : plan.splits()) {
+            ShardSnapshot.Range range = extractSplitRange(candidate);
+            if (range.start != split.rangeStartBucket || range.end != split.rangeEndBucket)
+                continue;
+            if (matched != null) {
+                throw new IOException(
+                        "Cobble source split resolved to multiple typed scan splits.");
+            }
+            matched = candidate;
+        }
+        if (matched == null) {
+            throw new IOException("Cobble source split is missing from its typed table plan.");
+        }
+        return plan.forSplit(matched);
     }
 
     private static void ensureCompleteBucketCoverage(boolean[] coveredBuckets, long snapshotId)

@@ -24,7 +24,7 @@ class CobbleSourceRuntimeTest {
         GlobalSnapshot snapshot = baseSnapshot();
 
         List<CobbleSourceSplit> splits =
-                CobbleSourceRuntime.createSourceSplits(baseConfig(4), snapshot);
+                CobbleSourceRuntime.createSourceSplits(rawConfig(4), snapshot);
 
         assertEquals(2, splits.size());
         assertEquals("0:1:4", splits.get(0).splitId());
@@ -43,7 +43,7 @@ class CobbleSourceRuntimeTest {
         GlobalSnapshot snapshot = baseSnapshot();
 
         List<CobbleSourceSplit> splits =
-                CobbleSourceRuntime.createSourceSplits(baseConfig(-1), snapshot);
+                CobbleSourceRuntime.createSourceSplits(rawConfig(-1), snapshot);
 
         assertEquals(2, splits.size());
         assertEquals("0:1:4", splits.get(0).splitId());
@@ -116,6 +116,16 @@ class CobbleSourceRuntimeTest {
                 256L * 1024L * 1024L,
                 Collections.emptyList(),
                 Collections.emptyList());
+    }
+
+    private static RawSourceConfig rawConfig(int bucketCount) {
+        return new RawSourceConfig(
+                "file:///tmp/cobble-source-runtime",
+                bucketCount,
+                "1",
+                "batch",
+                1000L,
+                new int[] {0});
     }
 
     private static GlobalSnapshot baseSnapshot() {

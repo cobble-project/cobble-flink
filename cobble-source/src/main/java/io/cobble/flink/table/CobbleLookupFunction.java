@@ -4,7 +4,7 @@ import io.cobble.GlobalSnapshot;
 import io.cobble.flink.common.CobbleConnectorMetrics;
 import io.cobble.flink.common.CobbleLoader;
 import io.cobble.flink.common.table.CobbleTableRowConverter;
-import io.cobble.table.KeyCodec;
+import io.cobble.table.TableKeyBuilder;
 import io.cobble.table.TableReadEntry;
 import io.cobble.table.TableReadSession;
 import io.cobble.table.Value;
@@ -107,42 +107,37 @@ public final class CobbleLookupFunction extends LookupFunction {
         return CobbleConnectorMetrics.lookup(context == null ? null : context.getMetricGroup());
     }
 
-    static final class RuntimeLookupKeyEncoder {
-        private final List<RuntimeLookupFieldEncoder> encoders;
-        private final List<io.cobble.table.LogicalType> keyTypes;
+    static final class RuntimeLookupKeyConverter {
+        private final List<RuntimeLookupFieldConverter> fields;
 
-        RuntimeLookupKeyEncoder(
+        RuntimeLookupKeyConverter(
                 List<CobbleDynamicTableSource.SerializableField> keyFields,
                 int[] lookupKeyPositions) {
-            this.encoders = new ArrayList<>(keyFields.size());
-            this.keyTypes = new ArrayList<io.cobble.table.LogicalType>(keyFields.size());
+            this.fields = new ArrayList<>(keyFields.size());
             for (int i = 0; i < keyFields.size(); i++) {
                 LogicalType type =
                         LogicalTypeParser.parse(
                                 keyFields.get(i).logicalType,
                                 CobbleLookupFunction.class.getClassLoader());
-                this.encoders.add(
-                        new RuntimeLookupFieldEncoder(
+                this.fields.add(
+                        new RuntimeLookupFieldConverter(
                                 keyFields.get(i), lookupKeyPositions[i], type));
-                this.keyTypes.add(CobbleTableRowConverter.toCobbleType(type.copy(false)));
             }
         }
 
-        byte[] encode(RowData row) {
-            List<Value> values = new ArrayList<Value>(encoders.size());
-            for (RuntimeLookupFieldEncoder encoder : encoders) {
-                values.add(encoder.encodeRequired(row));
+        void pushInto(RowData row, TableKeyBuilder builder) {
+            for (RuntimeLookupFieldConverter field : fields) {
+                builder.push(field.convertRequired(row));
             }
-            return KeyCodec.encode(keyTypes, values);
         }
     }
 
-    private static final class RuntimeLookupFieldEncoder {
+    private static final class RuntimeLookupFieldConverter {
         private final String name;
         private final LogicalType logicalType;
         private final RowData.FieldGetter fieldGetter;
 
-        private RuntimeLookupFieldEncoder(
+        private RuntimeLookupFieldConverter(
                 CobbleDynamicTableSource.SerializableField field,
                 int lookupKeyPosition,
                 LogicalType logicalType) {
@@ -151,7 +146,7 @@ public final class CobbleLookupFunction extends LookupFunction {
             this.fieldGetter = RowData.createFieldGetter(logicalType, lookupKeyPosition);
         }
 
-        private Value encodeRequired(RowData row) {
+        private Value convertRequired(RowData row) {
             Object value = fieldGetter.getFieldOrNull(row);
             if (value == null) {
                 throw new IllegalArgumentException(

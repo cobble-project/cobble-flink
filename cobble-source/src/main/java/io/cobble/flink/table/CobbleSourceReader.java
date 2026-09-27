@@ -7,6 +7,7 @@ import io.cobble.table.TableReadEntry;
 import io.cobble.table.TableReadProvider;
 import io.cobble.table.TableReadRange;
 import io.cobble.table.TableReadSession;
+import io.cobble.table.TableScanPlan;
 
 import org.apache.flink.api.connector.source.ReaderOutput;
 import org.apache.flink.api.connector.source.SourceEvent;
@@ -263,6 +264,7 @@ final class CobbleSourceReader implements SourceReader<RowData, CobbleSourceSpli
         private final boolean streamingOwned;
         private long snapshotId;
         private ScanSplit scanSplit;
+        private TableScanPlan typedPlan;
         private int startBucket;
         private byte[] startKeyExclusive;
         private CobbleSourceSplit.ScanState scanState;
@@ -295,6 +297,7 @@ final class CobbleSourceReader implements SourceReader<RowData, CobbleSourceSpli
         private void restoreFromSplit(CobbleSourceSplit split) {
             this.snapshotId = split.snapshotId;
             this.scanSplit = null;
+            this.typedPlan = null;
             this.startBucket = split.startBucket;
             this.startKeyExclusive = copy(split.startKeyExclusive);
             this.scanState = split.scanState;
@@ -317,6 +320,7 @@ final class CobbleSourceReader implements SourceReader<RowData, CobbleSourceSpli
             }
             this.snapshotId = replacement.snapshotId;
             this.scanSplit = null;
+            this.typedPlan = null;
             if (scanState == CobbleSourceSplit.ScanState.IDLE || !hasStartBoundary()) {
                 this.scanState = CobbleSourceSplit.ScanState.ACTIVE;
                 clearStartBoundary();
@@ -343,6 +347,7 @@ final class CobbleSourceReader implements SourceReader<RowData, CobbleSourceSpli
                 if (scanState == CobbleSourceSplit.ScanState.WRAP_AFTER) {
                     closeRuntime();
                     scanSplit = null;
+                    typedPlan = null;
                     clearResumeBoundary();
                     scanState = CobbleSourceSplit.ScanState.WRAP_BEFORE;
                     continue;
@@ -358,6 +363,56 @@ final class CobbleSourceReader implements SourceReader<RowData, CobbleSourceSpli
             if (cursor != null) {
                 return;
             }
+            if (config instanceof CobbleDynamicTableSource.SerializableConfig) {
+                ensureTypedPlan();
+                provider =
+                        new CobbleTypedTableReadProvider(
+                                (CobbleDynamicTableSource.SerializableConfig) config,
+                                typedPlan,
+                                CobbleSourceRuntime.createSourceScanConfig(
+                                        config, resolveTotalBuckets()));
+            } else {
+                ensureRawSplit();
+                provider =
+                        new CobbleRawTableReadProvider(
+                                (RawSourceConfig) config, scanSplit, resolveTotalBuckets());
+            }
+            session = provider.open();
+            cursor = session.scan(new TableReadRange(0, Integer.MAX_VALUE), null);
+        }
+
+        private void ensureTypedPlan() throws IOException {
+            if (typedPlan == null) {
+                typedPlan =
+                        CobbleSourceRuntime.resolveTypedSourcePlan(
+                                (CobbleDynamicTableSource.SerializableConfig) config, toSplit());
+                if (scanState == CobbleSourceSplit.ScanState.WRAP_AFTER
+                        || scanState == CobbleSourceSplit.ScanState.WRAP_BEFORE) {
+                    if (!hasWrapBoundary()) {
+                        throw new IOException("Cobble source wrap scan is missing its boundary.");
+                    }
+                    TableScanPlan.Partition partition =
+                            typedPlan.partitionAfter(
+                                    typedPlan.splits().get(0),
+                                    wrapBoundaryBucket,
+                                    wrapBoundaryKeyInclusive);
+                    typedPlan =
+                            scanState == CobbleSourceSplit.ScanState.WRAP_BEFORE
+                                    ? partition.before
+                                    : partition.after;
+                }
+                if (hasStartBoundary()) {
+                    typedPlan =
+                            typedPlan.partitionAfter(
+                                            typedPlan.splits().get(0),
+                                            currentBoundaryBucket(),
+                                            currentBoundaryKeyExclusive())
+                                    .after;
+                }
+            }
+        }
+
+        private void ensureRawSplit() throws IOException {
             if (scanSplit == null) {
                 ScanSplit resolved = CobbleSourceRuntime.resolveSourceSplit(config, toSplit());
                 if (scanState == CobbleSourceSplit.ScanState.WRAP_AFTER
@@ -381,9 +436,6 @@ final class CobbleSourceReader implements SourceReader<RowData, CobbleSourceSpli
                                     .after;
                 }
             }
-            provider = new CobbleSinkTableReadProvider(config, scanSplit, resolveTotalBuckets());
-            session = provider.open();
-            cursor = session.scan(new TableReadRange(0, Integer.MAX_VALUE), null);
         }
 
         private int resolveTotalBuckets() throws IOException {

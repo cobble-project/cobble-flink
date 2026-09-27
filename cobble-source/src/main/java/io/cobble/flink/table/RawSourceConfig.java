@@ -120,13 +120,7 @@ final class RawSourceConfig implements CobbleTableScanConfig {
         return max + 1;
     }
 
-    @Override
     public int[] projectedColumnIndexes() {
         return Arrays.copyOf(selectedColumns, selectedColumns.length);
-    }
-
-    @Override
-    public ScannedRowDecoder createDecoder() {
-        return new CobbleRawRowDecoder(selectedColumns.length);
     }
 }

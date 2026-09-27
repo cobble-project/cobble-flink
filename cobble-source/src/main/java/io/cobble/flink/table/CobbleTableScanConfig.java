@@ -14,16 +14,8 @@ import java.io.Serializable;
  * CobbleSourceEnumerator}, and {@link CobbleSourceReader} can depend on a single type rather than
  * each concrete config.
  *
- * <p>Two column-related concerns are deliberately separated:
- *
- * <ul>
- *   <li>{@link #scanColumnCount()} — the DB-open column-family width (the writer's structured value
- *       column count). This is passed to {@code Config.numColumns(...)} so the read view matches
- *       the writer. It is <em>not</em> a per-scan projection.
- *   <li>{@link #projectedColumnIndexes()} — the per-scan projection, passed to {@code
- *       ScanOptions.forColumns(...)}. For the raw source this may be a non-contiguous subset (e.g.
- *       {@code [0, 2]}), while {@link #scanColumnCount()} is {@code max(indexes)+1} (e.g. 3).
- * </ul>
+ * <p>{@link #scanColumnCount()} describes the stored column-family width, not a read projection.
+ * Typed Table scans use TableScanPlan projection; raw scans select physical columns separately.
  */
 interface CobbleTableScanConfig extends Serializable {
 
@@ -47,18 +39,4 @@ interface CobbleTableScanConfig extends Serializable {
 
     /** DB-open column-family width; passed to {@code Config.numColumns(...)}. */
     int scanColumnCount();
-
-    /** Per-scan column projection indexes; passed to {@code ScanOptions.forColumns(...)}. */
-    int[] projectedColumnIndexes();
-
-    default String columnFamily() {
-        return null;
-    }
-
-    /**
-     * Creates the reader-side row decoder. Called on the TaskManager side in {@link
-     * CobbleSource#createReader}, never on the JobManager side, so decoders that hold
-     * non-serializable Flink {@code TypeSerializer} objects are safe.
-     */
-    ScannedRowDecoder createDecoder();
 }

@@ -76,6 +76,38 @@ class CobbleLookupFunctionITTest {
     }
 
     @Test
+    void projectedLookupRefreshesOnlyForStreamingSnapshot() throws Exception {
+        Path tablePath = tempDir.resolve("projected-lookup-refresh");
+        long firstSnapshot =
+                writeDimensionRows(tablePath, Arrays.asList("2,name-2,20", "7,name-7,70"));
+        CobbleLookupFunction streaming =
+                new CobbleLookupFunction(
+                        buildLookupConfig(tablePath, "latest", "streaming")
+                                .withProjection(new int[] {2, 0}),
+                        new int[] {0});
+        CobbleLookupFunction fixed =
+                new CobbleLookupFunction(
+                        buildLookupConfig(tablePath, Long.toString(firstSnapshot), "batch")
+                                .withProjection(new int[] {2, 0}),
+                        new int[] {0});
+        streaming.open(new FunctionContext(null));
+        fixed.open(new FunctionContext(null));
+        try {
+            assertProjectedScoreAndId(streaming, 20, 2L);
+            assertProjectedScoreAndId(fixed, 20, 2L);
+            assertTrue(streaming.lookup(GenericRowData.of(99L)).isEmpty());
+
+            writeDimensionRows(tablePath, Arrays.asList("2,name-2-updated,200", "7,name-7,70"));
+
+            assertProjectedScoreAndId(streaming, 200, 2L);
+            assertProjectedScoreAndId(fixed, 20, 2L);
+        } finally {
+            streaming.close();
+            fixed.close();
+        }
+    }
+
+    @Test
     void snapshotIdLookupStaysPinnedToConfiguredSnapshot() throws Exception {
         Path tablePath = tempDir.resolve("snapshot-id");
         long snapshotId =
@@ -289,6 +321,16 @@ class CobbleLookupFunctionITTest {
         }
         GenericRowData row = (GenericRowData) result.iterator().next();
         return row.getField(1) + "," + row.getField(2);
+    }
+
+    private static void assertProjectedScoreAndId(CobbleLookupFunction lookup, int score, long id)
+            throws Exception {
+        Collection<RowData> result = lookup.lookup(GenericRowData.of(id));
+        assertEquals(1, result.size());
+        RowData row = result.iterator().next();
+        assertEquals(2, row.getArity());
+        assertEquals(score, row.getInt(0));
+        assertEquals(id, row.getLong(1));
     }
 
     private void awaitJobCompletion(TableResult result) throws Exception {

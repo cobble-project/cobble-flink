@@ -2,11 +2,10 @@ package io.cobble.flink.table;
 
 import io.cobble.Config;
 import io.cobble.GlobalSnapshot;
-import io.cobble.ReadOptions;
-import io.cobble.Reader;
-import io.cobble.flink.common.CobbleConnectorMetrics;
 import io.cobble.flink.common.table.CobbleTableRowConverter;
-import io.cobble.table.BucketHash;
+import io.cobble.table.DataField;
+import io.cobble.table.TableKeyBuilder;
+import io.cobble.table.TableProjection;
 import io.cobble.table.TableReadCapabilities;
 import io.cobble.table.TableReadCursor;
 import io.cobble.table.TableReadEntry;
@@ -15,25 +14,28 @@ import io.cobble.table.TableReadProvider;
 import io.cobble.table.TableReadRange;
 import io.cobble.table.TableReadSchema;
 import io.cobble.table.TableReadSession;
+import io.cobble.table.TableReader;
+import io.cobble.table.Value;
 
 import org.apache.flink.table.data.RowData;
 
+import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Collections;
+import java.util.List;
 
-/** Owns native sink-table lookup I/O, decoding, and bucket routing. */
+/** Owns a reusable typed Table reader and projection for full-primary-key lookup. */
 final class CobbleSinkLookupReadProvider implements TableReadProvider<RowData, RowData> {
-
     private static final TableReadCapabilities CAPABILITIES =
             new TableReadCapabilities(false, true, false);
 
     private final CobbleDynamicTableSource.SerializableConfig config;
     private final GlobalSnapshot initialSnapshot;
-    private final CobbleLookupFunction.RuntimeLookupKeyEncoder keyEncoder;
-    private Reader reader;
-    private ReadOptions readOptions;
-    private ScannedRowDecoder decoder;
-    private int totalBuckets;
+    private final CobbleLookupFunction.RuntimeLookupKeyConverter keyConverter;
+    private final CobbleTableRowConverter converter;
+    private final List<String> selectedNames;
+    private TableReader reader;
+    private TableProjection projection;
     private boolean opened;
 
     CobbleSinkLookupReadProvider(
@@ -42,9 +44,16 @@ final class CobbleSinkLookupReadProvider implements TableReadProvider<RowData, R
             int[] lookupKeyPositions) {
         this.config = config;
         this.initialSnapshot = initialSnapshot;
-        this.keyEncoder =
-                new CobbleLookupFunction.RuntimeLookupKeyEncoder(
+        this.keyConverter =
+                new CobbleLookupFunction.RuntimeLookupKeyConverter(
                         config.keyFields, lookupKeyPositions);
+        this.converter = new CobbleTableRowConverter(config.projectedRowType());
+        List<String> names = new ArrayList<>();
+        for (CobbleDynamicTableSource.SerializableField field : config.projectedFields()) {
+            names.add(field.name);
+        }
+        if (names.isEmpty()) names.add(config.keyFields.get(0).name);
+        this.selectedNames = Collections.unmodifiableList(names);
     }
 
     @Override
@@ -53,50 +62,58 @@ final class CobbleSinkLookupReadProvider implements TableReadProvider<RowData, R
     }
 
     @Override
-    public synchronized TableReadSession<RowData, RowData> open() throws Exception {
-        if (opened)
-            throw new IllegalStateException("sink lookup provider already has an open session");
+    public synchronized TableReadSession<RowData, RowData> open() {
+        if (opened) throw new IllegalStateException("sink lookup provider already opened");
         opened = true;
-        totalBuckets = initialSnapshot.totalBuckets;
-        decoder = config.createDecoder();
-        Config readerConfig = CobbleSourceRuntime.createLookupReaderConfig(config, totalBuckets);
-        Reader openedReader =
+        Config readerConfig =
+                CobbleSourceRuntime.createLookupReaderConfig(config, initialSnapshot.totalBuckets);
+        TableReader openedReader =
                 config.isStreamingLatest()
-                        ? Reader.openCurrent(readerConfig)
-                        : Reader.open(readerConfig, initialSnapshot.id);
+                        ? TableReader.openCurrent(readerConfig, CobbleTableRowConverter.TABLE_NAME)
+                        : TableReader.open(
+                                readerConfig,
+                                CobbleTableRowConverter.TABLE_NAME,
+                                initialSnapshot.id);
         try {
-            readOptions =
-                    ReadOptions.forColumnsInFamily(
-                            CobbleTableRowConverter.TABLE_NAME, config.projectedColumnIndexes());
+            projection = openedReader.projectByNames(selectedNames);
             reader = openedReader;
             return new Session();
-        } catch (RuntimeException error) {
+        } catch (RuntimeException | Error error) {
             openedReader.close();
             throw error;
         }
     }
 
     synchronized void refresh() {
-        if (reader != null && config.isStreamingLatest()) {
-            reader.refresh();
-            totalBuckets = reader.currentGlobalSnapshot().totalBuckets;
-        }
+        if (reader == null || !config.isStreamingLatest() || !reader.refresh()) return;
+        TableProjection next = reader.projectByNames(selectedNames);
+        TableProjection previous = projection;
+        projection = next;
+        previous.close();
     }
 
     @Override
     public synchronized void close() {
-        if (readOptions != null) readOptions.close();
-        readOptions = null;
-        if (reader != null) reader.close();
-        reader = null;
+        try {
+            if (projection != null) projection.close();
+        } finally {
+            projection = null;
+            if (reader != null) reader.close();
+            reader = null;
+        }
     }
 
     private final class Session implements TableReadSession<RowData, RowData> {
         private boolean closed;
 
         @Override
+        public List<DataField> keyFields() {
+            return reader.keyFields();
+        }
+
+        @Override
         public TableReadSchema schema() {
-            return CobbleSinkTableReadProvider.schemaFor(config);
+            return CobbleTypedTableReadProvider.schemaFor(config);
         }
 
         @Override
@@ -110,18 +127,23 @@ final class CobbleSinkLookupReadProvider implements TableReadProvider<RowData, R
         }
 
         @Override
-        public Collection<TableReadEntry<RowData>> lookup(RowData key) throws Exception {
-            if (closed) throw new IllegalStateException("sink lookup session is closed");
-            byte[] encoded = keyEncoder.encode(key);
-            int bucket = new BucketHash(totalBuckets).bucket(encoded);
-            byte[][] columns = reader.getWithOptions(bucket, encoded, readOptions);
-            if (columns == null) return Collections.emptyList();
-            return Collections.singletonList(
-                    new TableReadEntry<RowData>(
-                            new TableReadPosition(bucket, encoded, 1),
-                            decoder.decode(encoded, columns),
-                            CobbleConnectorMetrics.nativeEntryBytes(encoded, columns),
-                            true));
+        public Collection<TableReadEntry<RowData>> lookup(RowData key) {
+            synchronized (CobbleSinkLookupReadProvider.this) {
+                if (closed) throw new IllegalStateException("sink lookup session is closed");
+                TableKeyBuilder builder = reader.keyBuilder();
+                keyConverter.pushInto(key, builder);
+                TableReadEntry<List<Value>> found = projection.getEntry(builder.build());
+                if (found == null) return Collections.emptyList();
+                return Collections.singletonList(
+                        new TableReadEntry<RowData>(
+                                found.position(),
+                                converter.toRowData(
+                                        config.outputProjection.length == 0
+                                                ? Collections.emptyList()
+                                                : found.value()),
+                                found.physicalBytes(),
+                                found.countsPhysicalEntry()));
+            }
         }
 
         @Override

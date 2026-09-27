@@ -22,7 +22,7 @@ import java.io.IOException;
  * verbatim and the column bytes are emitted verbatim, preserving nulls and arbitrary binary
  * content.
  */
-final class CobbleRawRowDecoder implements ScannedRowDecoder {
+final class CobbleRawRowDecoder {
 
     private final int projectedColumnCount;
 
@@ -30,7 +30,6 @@ final class CobbleRawRowDecoder implements ScannedRowDecoder {
         this.projectedColumnCount = projectedColumnCount;
     }
 
-    @Override
     public RowData decode(byte[] key, byte[][] columns) throws IOException {
         GenericRowData row = new GenericRowData(RowKind.INSERT, 2);
         row.setField(0, key);
