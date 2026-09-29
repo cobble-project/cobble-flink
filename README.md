@@ -238,13 +238,13 @@ CREATE TABLE source_tbl (
 );
 ```
 
-Lookup join example:
+Lookup join example (`orders.pt` is a processing-time attribute):
 
 ```sql
-SELECT o.order_id, o.id, d.name, d.score
+SELECT o.order_id, o.phase, o.id, d.v
 FROM orders AS o
 LEFT JOIN source_tbl FOR SYSTEM_TIME AS OF o.pt AS d
-ON o.id = d.id;
+ON o.phase = d.phase AND o.id = d.id;
 ```
 
 For reading Cobble state backend checkpoints, use:
