@@ -22,7 +22,9 @@ import io.cobble.table.LogicalTypes;
 import io.cobble.table.TableSchema;
 import io.cobble.table.Value;
 
+import org.apache.flink.api.common.typeinfo.Types;
 import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
+import org.apache.flink.table.api.Schema;
 import org.apache.flink.table.api.bridge.java.StreamTableEnvironment;
 import org.apache.flink.types.Row;
 import org.apache.flink.util.CloseableIterator;
@@ -34,6 +36,7 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
+import java.util.stream.Collectors;
 
 class InspectTypedSinkIT {
     @TempDir private Path tempDir;
@@ -137,14 +140,50 @@ class InspectTypedSinkIT {
             tables.executeSql(ddl);
             List<String> sqlRows = new ArrayList<String>();
             try (CloseableIterator<Row> results =
-                    tables.executeSql("SELECT region, id FROM " + tableName).collect()) {
+                    tables.executeSql("SELECT region, id, payload FROM " + tableName).collect()) {
                 while (results.hasNext()) {
                     Row row = results.next();
-                    sqlRows.add(row.getFieldAs(0) + ":" + row.getFieldAs(1));
+                    sqlRows.add(
+                            row.getFieldAs(0) + ":" + row.getFieldAs(1) + ":" + row.getFieldAs(2));
                 }
             }
             assertEquals(rows.size(), sqlRows.size());
-            assertTrue(sqlRows.contains("us:target-1"));
+            assertTrue(sqlRows.contains("us:target-1:one"));
+            assertTrue(sqlRows.contains("us:target-2:two"));
+
+            tables.createTemporaryView(
+                    "table_probes",
+                    tables.fromDataStream(
+                            environment.fromCollection(
+                                    Arrays.asList(
+                                            Row.of("us", "target-1"),
+                                            Row.of("us", "target-2"),
+                                            Row.of("us", "absent")),
+                                    Types.ROW_NAMED(
+                                            new String[] {"probe_region", "probe_id"},
+                                            Types.STRING,
+                                            Types.STRING)),
+                            Schema.newBuilder()
+                                    .column("probe_region", "STRING")
+                                    .column("probe_id", "STRING")
+                                    .columnByExpression("pt", "PROCTIME()")
+                                    .build()));
+            String lookupSql =
+                    "SELECT p.probe_id, d.payload FROM table_probes p LEFT JOIN "
+                            + tableName
+                            + " FOR SYSTEM_TIME AS OF p.pt d "
+                            + "ON p.probe_region = d.region AND p.probe_id = d.id";
+            assertTrue(tables.explainSql(lookupSql).contains("LookupJoin"));
+            List<String> lookupRows = new ArrayList<>();
+            try (CloseableIterator<Row> results = tables.executeSql(lookupSql).collect()) {
+                while (results.hasNext()) {
+                    Row row = results.next();
+                    lookupRows.add(row.getFieldAs(0) + ":" + row.getFieldAs(1));
+                }
+            }
+            assertEquals(
+                    Arrays.asList("absent:null", "target-1:one", "target-2:two"),
+                    lookupRows.stream().sorted().collect(Collectors.toList()));
         }
     }
 

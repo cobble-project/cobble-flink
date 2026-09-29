@@ -16,11 +16,13 @@ import org.apache.flink.runtime.checkpoint.OperatorSubtaskState;
 import org.apache.flink.runtime.checkpoint.metadata.CheckpointMetadata;
 import org.apache.flink.runtime.state.IncrementalRemoteKeyedStateHandle;
 import org.apache.flink.runtime.state.KeyedStateHandle;
+import org.apache.flink.runtime.state.StreamStateHandle;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.io.DataInputStream;
 import java.io.IOException;
+import java.lang.reflect.Method;
 import java.net.URI;
 import java.nio.file.Paths;
 import java.util.ArrayList;
@@ -40,6 +42,7 @@ public final class CobbleEmbeddedCheckpoint {
     private static final String SNAPSHOT_PREFIX = "SNAPSHOT-";
     private static final int MAX_SHARD_ANCESTORS = 8;
     private static final int MAX_CHECKPOINT_CHILD_DEPTH = 3;
+    private static final Method META_STATE_HANDLE_ACCESSOR = resolveMetaStateHandleAccessor();
 
     private final long checkpointId;
     private final Map<String, OperatorSnapshot> operators;
@@ -349,11 +352,12 @@ public final class CobbleEmbeddedCheckpoint {
             }
             IncrementalRemoteKeyedStateHandle incremental =
                     (IncrementalRemoteKeyedStateHandle) handle;
-            if (incremental.getMetaStateHandle() == null) {
+            StreamStateHandle metadataHandle = metaStateHandle(incremental);
+            if (metadataHandle == null) {
                 continue;
             }
             CobbleSnapshotMetadataPayload payload;
-            try (FSDataInputStream input = incremental.getMetaStateHandle().openInputStream()) {
+            try (FSDataInputStream input = metadataHandle.openInputStream()) {
                 payload =
                         CobbleSnapshotMetadataCodec.readIfPresent(
                                 new DataInputViewStreamWrapper(input));
@@ -367,6 +371,32 @@ public final class CobbleEmbeddedCheckpoint {
             if (!payload.schemaStore().isEmpty()) {
                 stores.add(payload.schemaStore());
             }
+        }
+    }
+
+    /**
+     * Flink 1.19 renamed this accessor when introducing AbstractIncrementalStateHandle. Resolve
+     * against the runtime Flink classes so this shared module also works on 1.17/1.18 and 2.x;
+     * caching the method avoids repeating reflection lookup for every shard.
+     */
+    private static Method resolveMetaStateHandleAccessor() {
+        for (String name : new String[] {"getMetaDataStateHandle", "getMetaStateHandle"}) {
+            try {
+                return IncrementalRemoteKeyedStateHandle.class.getMethod(name);
+            } catch (NoSuchMethodException ignored) {
+                // Try the legacy name when running on Flink before 1.19.
+            }
+        }
+        throw new IllegalStateException(
+                "Flink IncrementalRemoteKeyedStateHandle has no metadata handle accessor");
+    }
+
+    private static StreamStateHandle metaStateHandle(IncrementalRemoteKeyedStateHandle handle)
+            throws IOException {
+        try {
+            return (StreamStateHandle) META_STATE_HANDLE_ACCESSOR.invoke(handle);
+        } catch (ReflectiveOperationException error) {
+            throw new IOException("Failed to read Flink incremental metadata handle", error);
         }
     }
 
