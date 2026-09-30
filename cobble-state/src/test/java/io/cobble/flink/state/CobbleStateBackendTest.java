@@ -121,6 +121,7 @@ import org.junit.jupiter.api.io.TempDir;
 import java.io.File;
 import java.io.IOException;
 import java.io.UncheckedIOException;
+import java.lang.reflect.Field;
 import java.lang.reflect.Proxy;
 import java.nio.ByteBuffer;
 import java.nio.file.Files;
@@ -4224,7 +4225,7 @@ class CobbleStateBackendTest {
     }
 
     @Test
-    void mapStateIteratorDrainsBeforeBackendCloseAndEntriesStayImmutable(@TempDir Path tempDir)
+    void mapStateIteratorCanBeAbandonedAndEntriesStayImmutable(@TempDir Path tempDir)
             throws Exception {
         try (TestBackendContext context =
                 createBackendContext(tempDir, false, null, MemorySize.ofMebiBytes(1))) {
@@ -4245,13 +4246,307 @@ class CobbleStateBackendTest {
             Map.Entry<String, String> entry = it.next();
             assertThrows(UnsupportedOperationException.class, () -> entry.setValue("v2"));
             assertThrows(UnsupportedOperationException.class, () -> entry.setValue(null));
-            // Drain to exhaustion so the iterator's underlying cursor closes; leaving it open
-            // would deadlock the surrounding Db.close() in the test-context teardown.
-            while (it.hasNext()) {
-                it.next();
-            }
+            context.close();
             assertFalse(it.hasNext());
+            assertThrows(NoSuchElementException.class, it::next);
         }
+    }
+
+    @Test
+    void mapStateClosesAbandonedIteratorsForAllProjections(@TempDir Path tempDir) throws Exception {
+        try (TestBackendContext context =
+                createBackendContext(tempDir, false, null, MemorySize.ofMebiBytes(1))) {
+            CobbleKeyedStateBackend<Integer> backend = context.cobbleBackend;
+            backend.setCurrentKey(1);
+            MapState<String, String> state = mapState(backend, "abandoned-map", "ns");
+            state.put("a", "va");
+            state.put("b", "vb");
+            state.put("c", "vc");
+            List<Iterator<?>> iterators =
+                    Arrays.asList(
+                            state.entries().iterator(),
+                            state.keys().iterator(),
+                            state.values().iterator(),
+                            state.iterator(),
+                            state.entries().iterator());
+            for (int i = 0; i < iterators.size() - 1; i++) {
+                assertTrue(iterators.get(i).hasNext());
+                iterators.get(i).next();
+                assertTrue(iterators.get(i).hasNext());
+            }
+            context.close();
+            for (Iterator<?> iterator : iterators) {
+                assertFalse(iterator.hasNext());
+                assertThrows(NoSuchElementException.class, iterator::next);
+            }
+            assertThrows(IllegalStateException.class, state::iterator);
+        }
+    }
+
+    @Test
+    void mapStateUntracksExhaustedAndFailedIterators(@TempDir Path tempDir) throws Exception {
+        try (TestBackendContext context =
+                createBackendContext(tempDir, false, null, MemorySize.ofMebiBytes(1))) {
+            CobbleKeyedStateBackend<Integer> backend = context.cobbleBackend;
+            backend.setCurrentKey(1);
+            CobbleMapState<Integer, String, String, String> state =
+                    (CobbleMapState<Integer, String, String, String>)
+                            backend.getPartitionedState(
+                                    "ns",
+                                    StringSerializer.INSTANCE,
+                                    new MapStateDescriptor<>(
+                                            "iterator-registry",
+                                            StringSerializer.INSTANCE,
+                                            StringSerializer.INSTANCE));
+            state.put("a", "va");
+            Field field = CobbleMapState.class.getDeclaredField("activeIterators");
+            field.setAccessible(true);
+            Set<?> active = (Set<?>) field.get(state);
+            Iterator<?> abandoned = state.iterator();
+            assertEquals(1, active.size());
+            for (int i = 0; i < 10; i++) {
+                Iterator<?> exhausted = state.iterator();
+                assertEquals(2, active.size());
+                while (exhausted.hasNext()) {
+                    exhausted.next();
+                }
+                assertEquals(1, active.size());
+            }
+            state.closeCursors();
+            assertTrue(active.isEmpty());
+            assertFalse(abandoned.hasNext());
+
+            CobbleMapState<Integer, String, String, String> failing =
+                    (CobbleMapState<Integer, String, String, String>)
+                            backend.getPartitionedState(
+                                    "ns",
+                                    StringSerializer.INSTANCE,
+                                    new MapStateDescriptor<>(
+                                            "iterator-decode-error",
+                                            new FailOnDeserializeStringSerializer(),
+                                            StringSerializer.INSTANCE));
+            failing.put("a", "va");
+            Iterator<?> failed = failing.iterator();
+            Set<?> failedActive = (Set<?>) field.get(failing);
+            assertEquals(1, failedActive.size());
+            assertThrows(IllegalStateException.class, failed::hasNext);
+            assertTrue(failedActive.isEmpty());
+            assertFalse(failed.hasNext());
+        }
+    }
+
+    @Test
+    void mapStateSameScopeKeepsCursorAndKeySwitchesReleaseAbandonedCursors(@TempDir Path tempDir)
+            throws Exception {
+        try (TestBackendContext context =
+                createBackendContext(tempDir, false, null, MemorySize.ofMebiBytes(1))) {
+            CobbleKeyedStateBackend<Integer> backend = context.cobbleBackend;
+            backend.setCurrentKey(1);
+            MapState<String, String> state = mapState(backend, "pause-map", "ns");
+            state.put("a", "va");
+            Iterator<?> iterator = state.iterator();
+            Field cursorField = iterator.getClass().getDeclaredField("cursor");
+            cursorField.setAccessible(true);
+            Object cursor = cursorField.get(iterator);
+            backend.setCurrentKey(1);
+            ((InternalKvState<?, String, ?>) state).setCurrentNamespace("ns");
+            assertSame(cursor, cursorField.get(iterator));
+            for (int key = 2; key <= 101; key++) {
+                backend.setCurrentKey(key);
+                assertTrue(activeMapIterators(state).isEmpty());
+                state.put("a", "v" + key);
+                Iterator<?> abandoned = state.iterator();
+                assertTrue(abandoned.hasNext());
+                assertEquals(1, activeMapIterators(state).size());
+            }
+            backend.setCurrentKey(102);
+            assertTrue(activeMapIterators(state).isEmpty());
+            Field statesField =
+                    CobbleKeyedStateBackend.class.getDeclaredField("statesWithOpenCursors");
+            statesField.setAccessible(true);
+            assertTrue(((Set<?>) statesField.get(backend)).isEmpty());
+        }
+    }
+
+    @Test
+    void mapStateAllProjectionsResumeCapturedKeyAfterPrefetch(@TempDir Path tempDir)
+            throws Exception {
+        try (TestBackendContext context =
+                createBackendContext(tempDir, false, null, MemorySize.ofMebiBytes(1))) {
+            CobbleKeyedStateBackend<Integer> backend = context.cobbleBackend;
+            backend.setCurrentKey(1);
+            MapState<String, String> state = mapState(backend, "resume-map", "ns");
+            state.put("a", "va");
+            state.put("b", "vb");
+            state.put("c", "vc");
+            Iterator<Map.Entry<String, String>> entries = state.entries().iterator();
+            Iterator<String> keys = state.keys().iterator();
+            Iterator<String> values = state.values().iterator();
+            Iterator<Map.Entry<String, String>> untouched = state.iterator();
+            assertEquals("a", entries.next().getKey());
+            assertEquals("a", keys.next());
+            assertEquals("va", values.next());
+            assertTrue(entries.hasNext());
+            assertTrue(keys.hasNext());
+            assertTrue(values.hasNext());
+            backend.setCurrentKey(2);
+            state.put("different", "other-key");
+            assertTrue(activeMapIterators(state).isEmpty());
+            assertEquals("b", entries.next().getKey());
+            assertEquals("b", keys.next());
+            assertEquals("vb", values.next());
+            assertEquals("a", untouched.next().getKey());
+            assertEquals(Integer.valueOf(2), backend.getCurrentKey());
+            assertEquals(4, activeMapIterators(state).size());
+            backend.setCurrentKey(2);
+            assertTrue(activeMapIterators(state).isEmpty());
+            assertEquals("c", entries.next().getKey());
+            assertFalse(entries.hasNext());
+        }
+    }
+
+    @Test
+    void mapStatePrefetchWithoutNextDoesNotAdvanceResumePosition(@TempDir Path tempDir)
+            throws Exception {
+        try (TestBackendContext context =
+                createBackendContext(tempDir, false, null, MemorySize.ofMebiBytes(1))) {
+            CobbleKeyedStateBackend<Integer> backend = context.cobbleBackend;
+            backend.setCurrentKey(1);
+            MapState<String, String> state = mapState(backend, "resume-first", "ns");
+            state.put("a", "va");
+            state.put("b", "vb");
+            Iterator<String> iterator = state.keys().iterator();
+            assertTrue(iterator.hasNext());
+            backend.setCurrentKey(2);
+            assertEquals("a", iterator.next());
+            assertEquals("b", iterator.next());
+            assertFalse(iterator.hasNext());
+        }
+    }
+
+    @Test
+    void mapStateResumeDoesNotSkipSuccessorOfDeletedLastKey(@TempDir Path tempDir)
+            throws Exception {
+        try (TestBackendContext context =
+                createBackendContext(tempDir, false, null, MemorySize.ofMebiBytes(1))) {
+            CobbleKeyedStateBackend<Integer> backend = context.cobbleBackend;
+            backend.setCurrentKey(1);
+            MapState<String, String> state = mapState(backend, "resume-deleted", "ns");
+            state.put("a", "va");
+            state.put("b", "vb");
+            state.put("c", "vc");
+            Iterator<String> iterator = state.keys().iterator();
+            assertEquals("a", iterator.next());
+            backend.setCurrentKey(2);
+            backend.setCurrentKey(1);
+            state.remove("a");
+            backend.setCurrentKey(2);
+            assertEquals("b", iterator.next());
+            assertEquals("c", iterator.next());
+            assertFalse(iterator.hasNext());
+        }
+    }
+
+    @Test
+    void mapStateResumeAcrossNativeBatchBoundaryUsesLastReturnedKey(@TempDir Path tempDir)
+            throws Exception {
+        try (TestBackendContext context =
+                createBackendContext(tempDir, false, null, MemorySize.ofMebiBytes(1))) {
+            CobbleKeyedStateBackend<Integer> backend = context.cobbleBackend;
+            backend.setCurrentKey(1);
+            MapState<String, String> state = mapState(backend, "resume-batches", "ns");
+            for (int i = 0; i < 130; i++) {
+                state.put(String.format("k%03d", i), "v" + i);
+            }
+            Iterator<String> iterator = state.keys().iterator();
+            for (int i = 0; i < 64; i++) {
+                assertEquals(String.format("k%03d", i), iterator.next());
+            }
+            assertTrue(iterator.hasNext());
+            backend.setCurrentKey(2);
+            for (int i = 64; i < 130; i++) {
+                assertEquals(String.format("k%03d", i), iterator.next());
+            }
+            assertFalse(iterator.hasNext());
+            assertTrue(activeMapIterators(state).isEmpty());
+        }
+    }
+
+    @Test
+    void mapStateNamespaceSwitchResumesOriginalScopeAndPausedIteratorCannotReopenAfterClose(
+            @TempDir Path tempDir) throws Exception {
+        try (TestBackendContext context =
+                createBackendContext(tempDir, false, null, MemorySize.ofMebiBytes(1))) {
+            CobbleKeyedStateBackend<Integer> backend = context.cobbleBackend;
+            backend.setCurrentKey(1);
+            MapState<String, String> state = mapState(backend, "resume-namespace", "old");
+            state.put("a", "va");
+            state.put("b", "vb");
+            Iterator<String> iterator = state.keys().iterator();
+            assertEquals("a", iterator.next());
+            assertTrue(iterator.hasNext());
+            ((InternalKvState<?, String, ?>) state).setCurrentNamespace("new");
+            state.put("other", "other-namespace");
+            assertTrue(activeMapIterators(state).isEmpty());
+            assertEquals("b", iterator.next());
+            ((InternalKvState<?, String, ?>) state).setCurrentNamespace("new");
+            assertTrue(activeMapIterators(state).isEmpty());
+            context.close();
+            assertFalse(iterator.hasNext());
+            assertThrows(NoSuchElementException.class, iterator::next);
+        }
+    }
+
+    @Test
+    void mapStateMutableNamespaceScopeIsCapturedByValue(@TempDir Path tempDir) throws Exception {
+        try (TestBackendContext context =
+                createBackendContext(tempDir, false, null, MemorySize.ofMebiBytes(1))) {
+            CobbleKeyedStateBackend<Integer> backend = context.cobbleBackend;
+            backend.setCurrentKey(1);
+            byte[] namespace = {1};
+            MapState<String, String> state =
+                    backend.getPartitionedState(
+                            namespace,
+                            BytePrimitiveArraySerializer.INSTANCE,
+                            new MapStateDescriptor<>(
+                                    "mutable-namespace", String.class, String.class));
+            state.put("a", "va");
+            state.put("b", "vb");
+            Iterator<String> iterator = state.keys().iterator();
+            assertEquals("a", iterator.next());
+            namespace[0] = 2;
+            ((InternalKvState<?, byte[], ?>) state).setCurrentNamespace(namespace);
+            assertTrue(activeMapIterators(state).isEmpty());
+            assertEquals("b", iterator.next());
+            assertFalse(iterator.hasNext());
+        }
+    }
+
+    @Test
+    void mapStateNullNamespaceResumesAfterSelection(@TempDir Path tempDir) throws Exception {
+        try (TestBackendContext context =
+                createBackendContext(tempDir, false, null, MemorySize.ofMebiBytes(1))) {
+            CobbleKeyedStateBackend<Integer> backend = context.cobbleBackend;
+            backend.setCurrentKey(1);
+            MapState<String, String> state = mapState(backend, "null-namespace-resume", "initial");
+            ((InternalKvState<?, String, ?>) state).setCurrentNamespace(null);
+            state.put("a", "va");
+            state.put("b", "vb");
+            Iterator<String> iterator = state.keys().iterator();
+            assertEquals("a", iterator.next());
+            ((InternalKvState<?, String, ?>) state).setCurrentNamespace("new");
+            assertTrue(activeMapIterators(state).isEmpty());
+            assertEquals("b", iterator.next());
+            ((InternalKvState<?, String, ?>) state).setCurrentNamespace(null);
+            assertEquals(1, activeMapIterators(state).size());
+            assertFalse(iterator.hasNext());
+        }
+    }
+
+    private static Set<?> activeMapIterators(MapState<?, ?> state) throws Exception {
+        Field field = CobbleMapState.class.getDeclaredField("activeIterators");
+        field.setAccessible(true);
+        return (Set<?>) field.get(state);
     }
 
     @Test

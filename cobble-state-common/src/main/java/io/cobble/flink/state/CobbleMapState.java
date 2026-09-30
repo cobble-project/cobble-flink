@@ -16,6 +16,7 @@ import org.apache.flink.api.common.typeutils.TypeSerializer;
 import org.apache.flink.api.common.typeutils.base.MapSerializer;
 import org.apache.flink.api.java.tuple.Tuple2;
 import org.apache.flink.core.memory.DataInputViewStreamWrapper;
+import org.apache.flink.core.memory.DataOutputSerializer;
 import org.apache.flink.queryablestate.client.state.serialization.KvStateSerializer;
 import org.apache.flink.runtime.state.internal.InternalMapState;
 import org.apache.flink.util.Preconditions;
@@ -27,10 +28,12 @@ import java.util.AbstractMap;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
+import java.util.HashSet;
 import java.util.Iterator;
 import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.NoSuchElementException;
+import java.util.Set;
 
 /** Cobble-backed {@link org.apache.flink.api.common.state.MapState}. */
 final class CobbleMapState<K, N, UK, UV> extends AbstractCobbleState<K, N, Map<UK, UV>>
@@ -53,6 +56,9 @@ final class CobbleMapState<K, N, UK, UV> extends AbstractCobbleState<K, N, Map<U
     private final ScanOptions emptyCheckScanOptions;
     private final ScanOptions emptyCheckFastScanOptions;
     private final ScanOptions mapIterationScanOptions;
+    // State access and backend disposal are confined to the Flink task thread.
+    private final Set<StreamingMapIterator<?>> activeIterators = new HashSet<>();
+    private boolean iterationClosed;
     // Fixed user-key length from serializer.getLength(); -1 means variable.
     private final int userKeyFixedLength;
     // Whether map row-key trailer persists key length / namespace length.
@@ -283,17 +289,18 @@ final class CobbleMapState<K, N, UK, UV> extends AbstractCobbleState<K, N, Map<U
 
     private <T> Iterator<T> streamRows(
             K key, int bucket, N namespace, MapRowDecoder<T> rowDecoder) throws IOException {
-        byte[] keyNamespacePrefix = mapKeyNamespacePrefix(key, namespace);
-        DirectScanBounds directScanBounds = prepareDirectScanBounds(keyNamespacePrefix);
-        DirectScanCursor cursor =
-                scanDirectRowsWithOptions(
-                        bucket,
-                        directScanBounds.startKeyBuffer,
-                        directScanBounds.startKeyLength,
-                        directScanBounds.endKeyBuffer,
-                        directScanBounds.endKeyLength,
-                        mapIterationScanOptions);
-        return new StreamingMapIterator<>(cursor, keyNamespacePrefix, rowDecoder);
+        Preconditions.checkState(!iterationClosed, "Cobble map state is closed.");
+        DataOutputSerializer scope = new DataOutputSerializer(128);
+        keySerializer.serialize(key, scope);
+        byte[] serializedKey = scope.getCopyOfBuffer();
+        if (namespace != null) {
+            namespaceSerializer.serialize(namespace, scope);
+        }
+        byte[] keyNamespacePrefix = scope.getCopyOfBuffer();
+        StreamingMapIterator<T> iterator =
+                new StreamingMapIterator<>(bucket, serializedKey, keyNamespacePrefix, rowDecoder);
+        iterator.openCursor();
+        return iterator;
     }
 
     private Iterable<Map.Entry<UK, UV>> streamingEntriesIterable(K key, int bucket, N namespace) {
@@ -424,17 +431,72 @@ final class CobbleMapState<K, N, UK, UV> extends AbstractCobbleState<K, N, Map<U
     }
 
     @Override
+    void pauseCursorsForKey(byte[] selectedKey) {
+        for (StreamingMapIterator<?> iterator : new ArrayList<>(activeIterators)) {
+            if (!Arrays.equals(iterator.serializedKey, selectedKey)) {
+                iterator.pause();
+            }
+        }
+    }
+
+    @Override
+    void beforeNamespaceSelection(N namespace) {
+        if (activeIterators.isEmpty()) {
+            return;
+        }
+        DataOutputSerializer output = new DataOutputSerializer(128);
+        try {
+            if (namespace != null) {
+                namespaceSerializer.serialize(namespace, output);
+            }
+        } catch (IOException e) {
+            throw new IllegalStateException("Failed to serialize selected Cobble namespace.", e);
+        }
+        byte[] selectedNamespace = output.getCopyOfBuffer();
+        for (StreamingMapIterator<?> iterator : new ArrayList<>(activeIterators)) {
+            if (!Arrays.equals(iterator.serializedNamespace, selectedNamespace)) {
+                iterator.pause();
+            }
+        }
+    }
+
+    @Override
+    void closeCursors() {
+        iterationClosed = true;
+        ArrayList<StreamingMapIterator<?>> iterators = new ArrayList<>(activeIterators);
+        RuntimeException error = null;
+        for (StreamingMapIterator<?> iterator : iterators) {
+            try {
+                iterator.finish();
+            } catch (RuntimeException e) {
+                if (error == null) {
+                    error = e;
+                } else {
+                    error.addSuppressed(e);
+                }
+            }
+        }
+        if (error != null) {
+            throw error;
+        }
+    }
+
+    @Override
     public void close() {
         try {
-            mapIterationScanOptions.close();
+            closeCursors();
         } finally {
             try {
-                emptyCheckFastScanOptions.close();
+                mapIterationScanOptions.close();
             } finally {
                 try {
-                    emptyCheckScanOptions.close();
+                    emptyCheckFastScanOptions.close();
                 } finally {
-                    super.close();
+                    try {
+                        emptyCheckScanOptions.close();
+                    } finally {
+                        super.close();
+                    }
                 }
             }
         }
@@ -776,7 +838,10 @@ final class CobbleMapState<K, N, UK, UV> extends AbstractCobbleState<K, N, Map<U
 
     /** Shared cursor lifecycle and batch traversal for all MapState streaming projections. */
     private final class StreamingMapIterator<T> implements Iterator<T> {
-        private final DirectScanCursor cursor;
+        private DirectScanCursor cursor;
+        private final int bucket;
+        private final byte[] serializedKey;
+        private final byte[] serializedNamespace;
         private final byte[] keyNamespacePrefix;
         private final MapRowDecoder<T> rowDecoder;
 
@@ -785,19 +850,53 @@ final class CobbleMapState<K, N, UK, UV> extends AbstractCobbleState<K, N, Map<U
         private T nextItem;
         private boolean hasNextItem;
         private boolean finished;
-        private boolean cursorClosed;
+        private ByteBuffer nextRowKey;
+        private ByteBuffer lastReturnedKey;
+        private byte[] resumeKey;
+        private boolean skipResumeKey;
 
         private StreamingMapIterator(
-                DirectScanCursor cursor,
+                int bucket,
+                byte[] serializedKey,
                 byte[] keyNamespacePrefix,
                 MapRowDecoder<T> rowDecoder) {
-            this.cursor = cursor;
+            this.bucket = bucket;
+            this.serializedKey = serializedKey;
+            this.serializedNamespace =
+                    Arrays.copyOfRange(keyNamespacePrefix, serializedKey.length, keyNamespacePrefix.length);
             this.keyNamespacePrefix = keyNamespacePrefix;
             this.rowDecoder = rowDecoder;
         }
 
+        private void openCursor() {
+            Preconditions.checkState(!iterationClosed, "Cobble map state is closed.");
+            DirectScanBounds bounds = prepareDirectScanBounds(keyNamespacePrefix);
+            int startLength = bounds.startKeyLength;
+            if (resumeKey != null) {
+                directScanStartBuffer = ensureCapacity(directScanStartBuffer, resumeKey.length);
+                directScanStartBuffer.clear();
+                directScanStartBuffer.put(resumeKey);
+                startLength = resumeKey.length;
+            }
+            cursor =
+                    scanDirectRowsWithOptions(
+                            bucket,
+                            directScanStartBuffer,
+                            startLength,
+                            bounds.endKeyBuffer,
+                            bounds.endKeyLength,
+                            mapIterationScanOptions);
+            skipResumeKey = resumeKey != null;
+            activeIterators.add(this);
+            backend.registerOpenCursorState(CobbleMapState.this);
+        }
+
         @Override
         public boolean hasNext() {
+            if (iterationClosed) {
+                finish();
+                return false;
+            }
             if (hasNextItem) {
                 return true;
             }
@@ -814,6 +913,9 @@ final class CobbleMapState<K, N, UK, UV> extends AbstractCobbleState<K, N, Map<U
                 throw new NoSuchElementException("No more map entries.");
             }
             T result = nextItem;
+            lastReturnedKey = nextRowKey;
+            resumeKey = null;
+            nextRowKey = null;
             nextItem = null;
             hasNextItem = false;
             return result;
@@ -822,7 +924,12 @@ final class CobbleMapState<K, N, UK, UV> extends AbstractCobbleState<K, N, Map<U
         private void fetchNextItem() {
             while (!finished) {
                 try {
+                    if (cursor == null) {
+                        openCursor();
+                    }
                     if (currentBatch == null || currentBatchIndex >= currentBatch.size()) {
+                        // The next native batch overwrites the borrowed key's direct buffer.
+                        saveResumeKey();
                         currentBatch = cursor.nextBatch(MAP_ITERATION_BATCH_ROWS);
                         currentBatchIndex = 0;
                     }
@@ -832,11 +939,18 @@ final class CobbleMapState<K, N, UK, UV> extends AbstractCobbleState<K, N, Map<U
                     }
                     DirectScanRow row = currentBatch.get(currentBatchIndex++);
                     ByteBuffer rowKey = row.getKey();
+                    if (skipResumeKey) {
+                        skipResumeKey = false;
+                        if (rowKey.equals(ByteBuffer.wrap(resumeKey))) {
+                            continue;
+                        }
+                    }
                     if (!startsWithMapKeyNamespacePrefix(rowKey, keyNamespacePrefix)) {
                         finish();
                         return;
                     }
                     nextItem = rowDecoder.decode(row, rowKey, keyNamespacePrefix.length);
+                    nextRowKey = rowKey;
                     hasNextItem = true;
                     return;
                 } catch (IOException e) {
@@ -851,18 +965,48 @@ final class CobbleMapState<K, N, UK, UV> extends AbstractCobbleState<K, N, Map<U
             }
         }
 
+        private void saveResumeKey() {
+            if (lastReturnedKey != null) {
+                ByteBuffer key = lastReturnedKey.duplicate();
+                resumeKey = new byte[key.remaining()];
+                key.get(resumeKey);
+                lastReturnedKey = null;
+            }
+        }
+
+        private void pause() {
+            // Keep only a logical position; the original scope can reopen after selection changes.
+            saveResumeKey();
+            releaseCursor();
+        }
+
         private void finish() {
             if (finished) {
                 return;
             }
             finished = true;
+            resumeKey = null;
+            lastReturnedKey = null;
+            releaseCursor();
+        }
+
+        private void releaseCursor() {
             currentBatch = null;
             currentBatchIndex = 0;
             nextItem = null;
             hasNextItem = false;
-            if (!cursorClosed) {
-                cursorClosed = true;
-                cursor.close();
+            nextRowKey = null;
+            if (cursor != null) {
+                DirectScanCursor closing = cursor;
+                cursor = null;
+                try {
+                    closing.close();
+                } finally {
+                    activeIterators.remove(this);
+                    if (activeIterators.isEmpty()) {
+                        backend.unregisterOpenCursorState(CobbleMapState.this);
+                    }
+                }
             }
         }
     }

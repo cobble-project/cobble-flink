@@ -116,6 +116,7 @@ abstract class AbstractCobbleState<K, N, V> implements InternalKvState<K, N, V>,
 
     @Override
     public final void setCurrentNamespace(N namespace) {
+        beforeNamespaceSelection(namespace);
         this.currentNamespace = namespace;
         this.currentNamespaceSet = true;
     }
@@ -219,6 +220,13 @@ abstract class AbstractCobbleState<K, N, V> implements InternalKvState<K, N, V>,
                 columnFamily);
         return currentNamespace;
     }
+
+    /** Releases state-owned scan cursors before the database waits for active readers. */
+    void closeCursors() {}
+
+    void pauseCursorsForKey(byte[] selectedKey) {}
+
+    void beforeNamespaceSelection(N namespace) {}
 
     @Override
     public void close() {

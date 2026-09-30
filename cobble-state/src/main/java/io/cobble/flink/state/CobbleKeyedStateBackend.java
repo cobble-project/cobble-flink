@@ -26,6 +26,7 @@ import org.apache.flink.api.common.typeutils.base.ListSerializer;
 import org.apache.flink.api.common.typeutils.base.MapSerializer;
 import org.apache.flink.api.java.tuple.Tuple2;
 import org.apache.flink.core.fs.CloseableRegistry;
+import org.apache.flink.core.memory.DataOutputSerializer;
 import org.apache.flink.runtime.checkpoint.CheckpointOptions;
 import org.apache.flink.runtime.checkpoint.SnapshotType;
 import org.apache.flink.runtime.query.TaskKvStateRegistry;
@@ -60,9 +61,11 @@ import java.io.UncheckedIOException;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.RunnableFuture;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.stream.Stream;
@@ -94,6 +97,7 @@ final class CobbleKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
     private final PriorityQueueSetFactory priorityQueueFactory;
     private final HeapPriorityQueuesManager heapPriorityQueuesManager;
     private final List<AbstractCobbleState<?, ?, ?>> stateResources;
+    private final Set<AbstractCobbleState<?, ?, ?>> statesWithOpenCursors = new HashSet<>();
     private final CobbleSnapshotStrategy snapshotStrategy;
     private final AtomicBoolean resourcesClosed;
     private final boolean manualTtlTimeProviderForTests;
@@ -160,6 +164,8 @@ final class CobbleKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
                                 keyContext.getNumberOfKeyGroups())
                         : null;
         this.stateResources = new ArrayList<>();
+        // A stable listener also covers setCurrentKeyAndKeyGroup where supported by Flink.
+        registerKeySelectionListener(this::pauseStateCursorsForKey);
         this.snapshotStrategy =
                 new CobbleSnapshotStrategy(
                         cobbleDb,
@@ -848,6 +854,16 @@ final class CobbleKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
         }
 
         try {
+            closeStateCursors();
+        } catch (IOException e) {
+            if (error == null) {
+                error = e;
+            } else {
+                error.addSuppressed(e);
+            }
+        }
+
+        try {
             cobbleDb.close();
         } catch (RuntimeException e) {
             IOException dbError = new IOException("Failed to close Cobble DB.", e);
@@ -1014,6 +1030,55 @@ final class CobbleKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
             default:
                 throw new IllegalArgumentException(
                         "Unknown Cobble priority queue state type: " + priorityQueueStateType);
+        }
+    }
+
+    void registerOpenCursorState(AbstractCobbleState<?, ?, ?> state) {
+        statesWithOpenCursors.add(state);
+    }
+
+    void unregisterOpenCursorState(AbstractCobbleState<?, ?, ?> state) {
+        statesWithOpenCursors.remove(state);
+    }
+
+    private void pauseStateCursorsForKey(K key) {
+        if (statesWithOpenCursors.isEmpty()) {
+            return;
+        }
+        DataOutputSerializer output = new DataOutputSerializer(128);
+        try {
+            keySerializer.serialize(key, output);
+        } catch (IOException e) {
+            throw new IllegalStateException("Failed to serialize selected Cobble key.", e);
+        }
+        byte[] selectedKey = output.getCopyOfBuffer();
+        for (AbstractCobbleState<?, ?, ?> state : new ArrayList<>(statesWithOpenCursors)) {
+            state.pauseCursorsForKey(selectedKey);
+        }
+    }
+
+    /** Releases abandoned state iterators before the shared DB waits for active readers. */
+    private void closeStateCursors() throws IOException {
+        IOException error = null;
+        for (AbstractCobbleState<?, ?, ?> stateResource : stateResources) {
+            try {
+                stateResource.closeCursors();
+            } catch (RuntimeException e) {
+                IOException closeError =
+                        new IOException(
+                                "Failed to close Cobble state cursors for '"
+                                        + stateResource.columnFamily
+                                        + "'.",
+                                e);
+                if (error == null) {
+                    error = closeError;
+                } else {
+                    error.addSuppressed(closeError);
+                }
+            }
+        }
+        if (error != null) {
+            throw error;
         }
     }
 
