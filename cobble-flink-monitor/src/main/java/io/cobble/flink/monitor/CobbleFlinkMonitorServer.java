@@ -309,7 +309,7 @@ public final class CobbleFlinkMonitorServer {
                 String id = registry.add(session);
                 try {
                     try (InspectSessionRegistry.Lease lease = registry.acquire(id)) {
-                        sendJson(exchange, 201, sessionJson(id, lease.session()));
+                        sendJson(exchange, 201, InspectHttpJson.session(id, lease.session()));
                     }
                 } catch (IOException | RuntimeException error) {
                     try {
@@ -359,7 +359,7 @@ public final class CobbleFlinkMonitorServer {
             try (InspectSessionRegistry.Lease lease = registry.acquire(id)) {
                 InspectSession session = lease.session();
                 if ("GET".equals(method) && operation.isEmpty()) {
-                    sendJson(exchange, 200, sessionJson(id, session));
+                    sendJson(exchange, 200, InspectHttpJson.session(id, session));
                     return;
                 }
                 if ("GET".equals(method) && "overview".equals(operation)) {
@@ -385,12 +385,6 @@ public final class CobbleFlinkMonitorServer {
                 }
             }
             throw new RouteException(404, "Session operation not found");
-        }
-
-        private JsonObject sessionJson(String id, InspectSession session) {
-            JsonObject output = InspectHttpJson.session(id, session);
-            output.addProperty("total_buckets", config.totalBuckets);
-            return output;
         }
 
         private void serveStatic(HttpExchange exchange, String method, String path)

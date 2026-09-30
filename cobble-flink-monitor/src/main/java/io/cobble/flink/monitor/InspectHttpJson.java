@@ -12,6 +12,7 @@ import io.cobble.flink.inspect.InspectPage;
 import io.cobble.flink.inspect.InspectRow;
 import io.cobble.flink.inspect.InspectSelection;
 import io.cobble.flink.inspect.InspectSession;
+import io.cobble.flink.inspect.InspectSessionInfo;
 import io.cobble.flink.inspect.InspectTarget;
 import io.cobble.flink.inspect.InspectTargetKind;
 import io.cobble.flink.inspect.LookupKey;
@@ -162,14 +163,16 @@ final class InspectHttpJson {
     }
 
     static JsonObject session(String sessionId, InspectSession session) {
+        InspectSessionInfo info = session.info();
         JsonObject output = new JsonObject();
         output.addProperty("session_id", sessionId);
         output.addProperty("source_kind", session.catalog().sourceKind());
         output.addProperty("root_directory", session.catalog().rootDirectory());
-        output.addProperty("source", session.info().selection().sourcePath());
-        output.addProperty("checkpoint_id", session.info().selection().checkpointId());
-        addNullable(output, "operator_id", session.info().selection().operatorId());
-        output.addProperty("pinned", !session.info().selection().latest());
+        output.addProperty("source", info.selection().sourcePath());
+        output.addProperty("checkpoint_id", info.selection().checkpointId());
+        addNullable(output, "operator_id", info.selection().operatorId());
+        output.addProperty("pinned", !info.selection().latest());
+        output.addProperty("total_buckets", info.totalBuckets());
         JsonArray targets = new JsonArray();
         for (InspectTarget target : session.targets()) {
             targets.add(target(target));

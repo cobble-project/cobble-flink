@@ -129,7 +129,7 @@ final class InspectSessionImpl implements InspectSession {
     @Override
     public InspectSessionInfo info() {
         ensureOpen();
-        return new InspectSessionInfo(selection, true);
+        return new InspectSessionInfo(selection, true, totalBuckets);
     }
 
     @Override

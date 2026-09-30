@@ -67,6 +67,55 @@ class CobbleFlinkMonitorHttpIT {
     @TempDir private Path tempDir;
 
     @Test
+    void sessionResponsesUsePinnedTableBucketCount() throws Exception {
+        Path table = tempDir.resolve("two-bucket-table");
+        writeNativeTable(table, 19L, 2);
+        ServerConfig config = new ServerConfig();
+        config.port = 0;
+        try (CobbleFlinkMonitorServer.RunningServer server =
+                CobbleFlinkMonitorServer.start(config)) {
+            URI base = URI.create("http://127.0.0.1:" + server.address().getPort());
+            HttpClient http = HttpClient.newHttpClient();
+            JsonObject created = createSession(http, base, table);
+            assertEquals(2, created.get("total_buckets").getAsInt());
+            JsonObject reloaded =
+                    json(
+                            get(
+                                            http,
+                                            base.resolve(
+                                                    "/api/v1/sessions/"
+                                                            + created.get("session_id")
+                                                                    .getAsString()))
+                                    .body());
+            assertEquals(2, reloaded.get("total_buckets").getAsInt());
+        }
+    }
+
+    @Test
+    void sessionResponsesUsePinnedStateBucketCounts() throws Exception {
+        ServerConfig config = new ServerConfig();
+        config.port = 0;
+        try (CobbleFlinkMonitorServer.RunningServer server =
+                CobbleFlinkMonitorServer.start(config)) {
+            URI base = URI.create("http://127.0.0.1:" + server.address().getPort());
+            HttpClient http = HttpClient.newHttpClient();
+            for (int totalBuckets : new int[] {13, 128}) {
+                try (EmbeddedCheckpoint fixture =
+                        writeEmbeddedCheckpoint(new OperatorID(totalBuckets, 19L), totalBuckets)) {
+                    JsonObject created = createSession(http, base, fixture.directory);
+                    assertEquals(totalBuckets, created.get("total_buckets").getAsInt());
+                    String id = created.get("session_id").getAsString();
+                    JsonObject reloaded =
+                            json(get(http, base.resolve("/api/v1/sessions/" + id)).body());
+                    assertEquals(totalBuckets, reloaded.get("total_buckets").getAsInt());
+                    assertEquals(
+                            204, delete(http, base.resolve("/api/v1/sessions/" + id)).statusCode());
+                }
+            }
+        }
+    }
+
+    @Test
     void realServerSupportsIndependentSessionsScanTypedAndRawLookupAndErrors() throws Exception {
         Path sink = tempDir.resolve("sink");
         Path raw = tempDir.resolve("raw");
@@ -576,7 +625,11 @@ class CobbleFlinkMonitorHttpIT {
     }
 
     private long writeNativeTable(Path root, long commitId) throws Exception {
-        Config config = config(root, true);
+        return writeNativeTable(root, commitId, 1);
+    }
+
+    private long writeNativeTable(Path root, long commitId, int totalBuckets) throws Exception {
+        Config config = config(root, true, totalBuckets);
         config.walEnabled = false;
         config.snapshotOnlyTrack = true;
         config.snapshotDisableIncrementalBaseLink = true;
@@ -588,22 +641,28 @@ class CobbleFlinkMonitorHttpIT {
                         Collections.singletonList(0L),
                         Collections.singletonList(0L));
         ShardSnapshot shard;
-        try (io.cobble.Db db = io.cobble.Db.open(config, 0, 0);
+        try (io.cobble.Db db = io.cobble.Db.open(config, 0, totalBuckets - 1);
                 Table nativeTable = Table.create(db, CobbleTableRowConverter.TABLE_NAME, schema)) {
             nativeTable.put(Arrays.asList(Value.string("target"), Value.string("one")));
             nativeTable.put(Arrays.asList(Value.string("other"), Value.string("two")));
             shard = db.startAsyncSnapshot().future().get();
         }
-        try (TableSnapshotCommitter committer = TableSnapshotCommitter.open(config, 1, 4)) {
+        try (TableSnapshotCommitter committer =
+                TableSnapshotCommitter.open(config, totalBuckets, 4)) {
             return committer.commitBatch(commitId, Collections.singletonList(shard)).id;
         }
     }
 
     private EmbeddedCheckpoint writeEmbeddedCheckpoint(OperatorID operatorId) throws Exception {
-        Path directory = Files.createDirectory(tempDir.resolve("chk-3"));
+        return writeEmbeddedCheckpoint(operatorId, 1);
+    }
+
+    private EmbeddedCheckpoint writeEmbeddedCheckpoint(OperatorID operatorId, int totalBuckets)
+            throws Exception {
+        Path directory = Files.createDirectory(tempDir.resolve("chk-3-" + totalBuckets));
         Path volume = Files.createDirectory(directory.resolve("volume"));
-        Config nativeConfig = config(volume, true);
-        Db db = Db.open(nativeConfig, 0, 0);
+        Config nativeConfig = config(volume, true, totalBuckets);
+        Db db = Db.open(nativeConfig, 0, totalBuckets - 1);
         DataOutputSerializer key = new DataOutputSerializer(8);
         IntSerializer.INSTANCE.serialize(7, key);
         VoidNamespaceSerializer.INSTANCE.serialize(VoidNamespace.INSTANCE, key);
@@ -642,14 +701,14 @@ class CobbleFlinkMonitorHttpIT {
         IncrementalRemoteKeyedStateHandle handle =
                 new IncrementalRemoteKeyedStateHandle(
                         UUID.randomUUID(),
-                        new KeyGroupRange(0, 0),
+                        new KeyGroupRange(0, totalBuckets - 1),
                         3L,
                         Collections.emptyList(),
                         Collections.emptyList(),
                         new FileStateHandle(
                                 new org.apache.flink.core.fs.Path(taskState.toUri()),
                                 Files.size(taskState)));
-        OperatorState operator = new OperatorState(operatorId, 1, 1);
+        OperatorState operator = new OperatorState(operatorId, 1, totalBuckets);
         operator.putState(
                 0,
                 OperatorSubtaskState.builder()
@@ -667,7 +726,11 @@ class CobbleFlinkMonitorHttpIT {
     }
 
     private Config config(Path table, boolean data) {
-        Config config = new Config().numColumns(1).totalBuckets(1);
+        return config(table, data, 1);
+    }
+
+    private Config config(Path table, boolean data, int totalBuckets) {
+        Config config = new Config().numColumns(1).totalBuckets(totalBuckets);
         config.governanceMode = Config.GovernanceMode.NOOP;
         config.logConsole = false;
         config.logPath = tempDir.resolve(data ? "writer.log" : "coordinator.log").toString();

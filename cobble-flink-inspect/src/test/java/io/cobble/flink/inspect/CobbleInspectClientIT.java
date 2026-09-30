@@ -27,12 +27,12 @@ class CobbleInspectClientIT {
         byte[] secondKey = bytes("omega");
         long snapshotId = writeTable(table, totalBuckets, 11L, firstKey, secondKey);
 
-        try (CobbleInspectClient client =
-                        CobbleInspectClient.builder().totalBuckets(totalBuckets).build();
+        try (CobbleInspectClient client = CobbleInspectClient.builder().build();
                 InspectSession session = client.openDataSource(table.toString())) {
             InspectCatalog catalog = session.catalog();
             assertEquals("data_source", catalog.sourceKind());
             assertEquals(snapshotId, session.info().selection().checkpointId());
+            assertEquals(totalBuckets, session.info().totalBuckets());
             assertFalse(session.info().selection().latest());
             assertEquals(1, session.targets().size());
             assertEquals(InspectTargetKind.SINK, session.targets().get(0).kind());
