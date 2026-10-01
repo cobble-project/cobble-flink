@@ -41,9 +41,11 @@ import org.apache.flink.runtime.state.KeyedStateHandle;
 import org.apache.flink.runtime.state.VoidNamespace;
 import org.apache.flink.runtime.state.VoidNamespaceSerializer;
 import org.apache.flink.runtime.state.filesystem.FileStateHandle;
+import org.apache.flink.runtime.util.EnvironmentInformation;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
+import java.io.DataInputStream;
 import java.io.DataOutputStream;
 import java.io.IOException;
 import java.net.URI;
@@ -465,6 +467,16 @@ class CobbleFlinkMonitorHttpIT {
             throws Exception {
         OperatorID operatorId = new OperatorID(17L, 19L);
         try (EmbeddedCheckpoint fixture = writeEmbeddedCheckpoint(operatorId)) {
+            int expectedFormat = Integer.getInteger("monitor.metadata.version", 4);
+            try (DataInputStream metadataInput =
+                    new DataInputStream(
+                            Files.newInputStream(fixture.directory.resolve("_metadata")))) {
+                assertEquals(1231054637, metadataInput.readInt());
+                assertEquals(expectedFormat, metadataInput.readInt());
+            }
+            assertEquals(
+                    System.getProperty("monitor.flink.version"),
+                    EnvironmentInformation.getVersion());
             ServerConfig config = new ServerConfig();
             config.port = 0;
             config.totalBuckets = 1;
@@ -708,7 +720,7 @@ class CobbleFlinkMonitorHttpIT {
                         new FileStateHandle(
                                 new org.apache.flink.core.fs.Path(taskState.toUri()),
                                 Files.size(taskState)));
-        OperatorState operator = new OperatorState(operatorId, 1, totalBuckets);
+        OperatorState operator = FlinkTestSupport.operatorState(operatorId, 1, totalBuckets);
         operator.putState(
                 0,
                 OperatorSubtaskState.builder()
@@ -720,7 +732,8 @@ class CobbleFlinkMonitorHttpIT {
             Checkpoints.storeCheckpointMetadata(
                     new CheckpointMetadata(
                             3L, Collections.singletonList(operator), Collections.emptyList()),
-                    output);
+                    output,
+                    FlinkTestSupport.metadataSerializer());
         }
         return new EmbeddedCheckpoint(directory, db);
     }

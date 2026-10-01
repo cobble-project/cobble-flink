@@ -500,11 +500,12 @@ class CrossVersionPojoProtocolValidation {
         if (registeredSubclasses != null) {
             for (Class<?> subclass : registeredSubclasses) {
                 if (subclass != null) {
-                    config.registerPojoType(subclass);
+                    FlinkTestSupport.registerPojoType(config, subclass);
                 }
             }
         }
-        TypeSerializer<?> pojoSerializer = TypeInformation.of(pojoClass).createSerializer(config);
+        TypeSerializer<?> pojoSerializer =
+                FlinkTestSupport.createSerializer(TypeInformation.of(pojoClass), config);
         SerializerInspectSchema schema = SerializerInspectSchema.fromSerializer(pojoSerializer);
         InspectDecoderDescriptor descriptor = schema.decoderDescriptor();
         assertNotNull(descriptor);

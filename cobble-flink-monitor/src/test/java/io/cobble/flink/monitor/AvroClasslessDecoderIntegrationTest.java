@@ -902,11 +902,11 @@ class AvroClasslessDecoderIntegrationTest {
         @SuppressWarnings("unchecked")
         TypeSerializer<org.apache.flink.api.java.tuple.Tuple2<Integer, String>> tupleSerializer =
                 (TypeSerializer<org.apache.flink.api.java.tuple.Tuple2<Integer, String>>)
-                        new org.apache.flink.api.java.typeutils.TupleTypeInfo(
+                        FlinkTestSupport.createSerializer(
+                                new org.apache.flink.api.java.typeutils.TupleTypeInfo(
                                         org.apache.flink.api.common.typeinfo.Types.INT,
-                                        org.apache.flink.api.common.typeinfo.Types.STRING)
-                                .createSerializer(
-                                        new org.apache.flink.api.common.ExecutionConfig());
+                                        org.apache.flink.api.common.typeinfo.Types.STRING),
+                                new org.apache.flink.api.common.ExecutionConfig());
 
         StateInspectSchema schema =
                 StateInspectSchema.forValue(

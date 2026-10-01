@@ -42,6 +42,7 @@ if [[ -n "${JAVA_HOME:-}" ]]; then
 fi
 
 cd "${PROJECT_ROOT}"
+# Keep the driver on 1.17; the test loads each producer version in an isolated classloader.
 ./mvnw --batch-mode --no-transfer-progress \
   -pl cobble-flink-monitor -am \
   -Dtest=CrossVersionPojoProtocolValidation \

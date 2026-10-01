@@ -87,9 +87,9 @@ class DecodeIssueTest {
         // and the live fallback also fails because deserialize() cannot instantiate the subclass.
         // The fallback cannot instantiate the blocked subclass, which is a classpath failure.
         ExecutionConfig config = new ExecutionConfig();
-        config.registerPojoType(PojoSubclassA.class);
+        FlinkTestSupport.registerPojoType(config, PojoSubclassA.class);
         TypeSerializer<PojoBase> pojoSerializer =
-                TypeInformation.of(PojoBase.class).createSerializer(config);
+                FlinkTestSupport.createSerializer(TypeInformation.of(PojoBase.class), config);
 
         PojoSubclassB polluter = new PojoSubclassB();
         polluter.id = 0;
@@ -148,7 +148,8 @@ class DecodeIssueTest {
     void malformedBytesWhenPojoBytesTruncated() throws Exception {
         // A FULLY_CLASSLESS POJO ValueState with truncated bytes -> MALFORMED_BYTES.
         TypeSerializer<SimplePojo> pojoSerializer =
-                TypeInformation.of(SimplePojo.class).createSerializer(new ExecutionConfig());
+                FlinkTestSupport.createSerializer(
+                        TypeInformation.of(SimplePojo.class), new ExecutionConfig());
         StateInspectSchema schema =
                 StateInspectSchema.forValue(
                         "pojo-trunc",
@@ -186,7 +187,8 @@ class DecodeIssueTest {
     void malformedBytesWhenTrailingBytesAfterPojo() throws Exception {
         // A FULLY_CLASSLESS POJO ValueState with trailing bytes after the datum.
         TypeSerializer<SimplePojo> pojoSerializer =
-                TypeInformation.of(SimplePojo.class).createSerializer(new ExecutionConfig());
+                FlinkTestSupport.createSerializer(
+                        TypeInformation.of(SimplePojo.class), new ExecutionConfig());
         StateInspectSchema schema =
                 StateInspectSchema.forValue(
                         "pojo-trail",
@@ -230,9 +232,9 @@ class DecodeIssueTest {
         // When the subclass class IS available, the classless path fails (flag 0x04) but the
         // live fallback succeeds. No issue should be recorded.
         ExecutionConfig config = new ExecutionConfig();
-        config.registerPojoType(PojoSubclassA.class);
+        FlinkTestSupport.registerPojoType(config, PojoSubclassA.class);
         TypeSerializer<PojoBase> pojoSerializer =
-                TypeInformation.of(PojoBase.class).createSerializer(config);
+                FlinkTestSupport.createSerializer(TypeInformation.of(PojoBase.class), config);
 
         PojoSubclassB polluter = new PojoSubclassB();
         polluter.id = 0;
@@ -276,9 +278,9 @@ class DecodeIssueTest {
     @Test
     void partiallyClasslessFallbackMalformedBytesTakesPrecedence() throws Exception {
         ExecutionConfig config = new ExecutionConfig();
-        config.registerPojoType(PojoSubclassA.class);
+        FlinkTestSupport.registerPojoType(config, PojoSubclassA.class);
         TypeSerializer<PojoBase> pojoSerializer =
-                TypeInformation.of(PojoBase.class).createSerializer(config);
+                FlinkTestSupport.createSerializer(TypeInformation.of(PojoBase.class), config);
 
         PojoSubclassB polluter = new PojoSubclassB();
         serialize(pojoSerializer, polluter);
@@ -325,7 +327,8 @@ class DecodeIssueTest {
         // When a FULLY_CLASSLESS POJO value fails semantic decoding, the recorded "value" issue
         // skips the legacy decode for that same part, leaving exactly one issue.
         TypeSerializer<SimplePojo> pojoSerializer =
-                TypeInformation.of(SimplePojo.class).createSerializer(new ExecutionConfig());
+                FlinkTestSupport.createSerializer(
+                        TypeInformation.of(SimplePojo.class), new ExecutionConfig());
         StateInspectSchema schema =
                 StateInspectSchema.forValue(
                         "pojo-dup",
@@ -362,7 +365,8 @@ class DecodeIssueTest {
         // finding fails. The timestamp should still be in decoded_parts, and a "state_key" issue
         // should be recorded.
         TypeSerializer<SimplePojo> pojoSerializer =
-                TypeInformation.of(SimplePojo.class).createSerializer(new ExecutionConfig());
+                FlinkTestSupport.createSerializer(
+                        TypeInformation.of(SimplePojo.class), new ExecutionConfig());
         StateInspectSchema schema =
                 StateInspectSchema.forTimer(
                         "timer-pojo",
@@ -1056,9 +1060,13 @@ class DecodeIssueTest {
             return new LinkageOnDeserializeSerializer();
         }
 
-        @Override
         public TypeSerializerSchemaCompatibility<String> resolveSchemaCompatibility(
                 TypeSerializer<String> newSerializer) {
+            return TypeSerializerSchemaCompatibility.compatibleAsIs();
+        }
+
+        public TypeSerializerSchemaCompatibility<String> resolveSchemaCompatibility(
+                TypeSerializerSnapshot<String> oldSerializerSnapshot) {
             return TypeSerializerSchemaCompatibility.compatibleAsIs();
         }
     }

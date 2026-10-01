@@ -36,6 +36,24 @@ The other three parts are separate artifacts that can be used as job-side Maven 
 ArtifactIds stay the same across Flink versions. Choose the artifactId from
 the section you are using, then choose the `<version>` from the table.
 
+## Development Monitor Versions
+
+The matrix above remains the published `0.4.0-1` release matrix. The current
+`0.6.0` development tree builds the following standalone monitor variants;
+these new variants are not yet published releases:
+
+| Checkpoint producer line | Bundled Flink runtime | Build module | Development monitor version |
+| --- | --- | --- | --- |
+| 1.17 | 1.17.2 | `cobble-flink-monitor` | `0.6.0-1-flink-1.17-SNAPSHOT` |
+| 1.19 | 1.19.3 | `cobble-flink-monitor-flink-1.19` | `0.6.0-1-flink-1.19-SNAPSHOT` |
+| 2.0 | 2.0.2 | `cobble-flink-monitor-flink-2.0` | `0.6.0-1-flink-2.0-SNAPSHOT` |
+| 2.1 | 2.1.1 | `cobble-flink-monitor-flink-2.1` | `0.6.0-1-flink-2.1-SNAPSHOT` |
+
+All use artifactId `cobble-flink-monitor` and the same source code and web UI.
+Match the monitor to the checkpoint producer line; the 1.17 runtime cannot
+read all newer `_metadata` formats. Flink 2.2 and later are outside this
+development monitor matrix. See [Web Monitor](../web-monitor/) for building.
+
 Make sure the version matches:
 
 - the Cobble version you want to use

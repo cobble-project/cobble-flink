@@ -388,8 +388,9 @@ class StateInspectDecoderTest {
         TypeSerializer<Tuple2<RowData, Boolean>> intervalEntrySerializer =
                 (TypeSerializer<Tuple2<RowData, Boolean>>)
                         (TypeSerializer<?>)
-                                new TupleTypeInfo<>(recordType, Types.BOOLEAN)
-                                        .createSerializer(new ExecutionConfig());
+                                FlinkTestSupport.createSerializer(
+                                        new TupleTypeInfo<>(recordType, Types.BOOLEAN),
+                                        new ExecutionConfig());
         ListSerializer<Tuple2<RowData, Boolean>> intervalEntriesSerializer =
                 new ListSerializer<>(intervalEntrySerializer);
         StateInspectSchema schema =
@@ -493,8 +494,9 @@ class StateInspectDecoderTest {
         TypeSerializer<Tuple2<RowData, Integer>> tupleSerializer =
                 (TypeSerializer<Tuple2<RowData, Integer>>)
                         (TypeSerializer<?>)
-                                new TupleTypeInfo<>(recordType, Types.INT)
-                                        .createSerializer(new ExecutionConfig());
+                                FlinkTestSupport.createSerializer(
+                                        new TupleTypeInfo<>(recordType, Types.INT),
+                                        new ExecutionConfig());
         StateInspectSchema schema =
                 StateInspectSchema.forMap(
                         "left-records",
@@ -1159,8 +1161,9 @@ class StateInspectDecoderTest {
         // POJO value: the PojoSerializer is non-portable, so serializedSerializerBytes is the
         // fallback. Since the POJO class is on the test classpath, restore succeeds.
         TypeSerializer<DecodedPojo> pojoSerializer =
-                org.apache.flink.api.common.typeinfo.TypeInformation.of(DecodedPojo.class)
-                        .createSerializer(new ExecutionConfig());
+                FlinkTestSupport.createSerializer(
+                        org.apache.flink.api.common.typeinfo.TypeInformation.of(DecodedPojo.class),
+                        new ExecutionConfig());
         StateInspectSchema schema =
                 StateInspectSchema.forValue(
                         "pojo-value",
@@ -1206,10 +1209,11 @@ class StateInspectDecoderTest {
     @Test
     void decodesTupleValueAsSemanticTuple() throws Exception {
         TypeSerializer<Tuple2<Integer, String>> tupleSerializer =
-                TupleTypeInfo.of(
+                FlinkTestSupport.createSerializer(
+                        TupleTypeInfo.of(
                                 new org.apache.flink.api.common.typeinfo.TypeHint<
-                                        Tuple2<Integer, String>>() {})
-                        .createSerializer(new ExecutionConfig());
+                                        Tuple2<Integer, String>>() {}),
+                        new ExecutionConfig());
         StateInspectSchema schema =
                 StateInspectSchema.forValue(
                         "tuple-value",
@@ -1402,8 +1406,9 @@ class StateInspectDecoderTest {
     @Test
     void decodesMapWithPojoValueAsSemanticMap() throws Exception {
         TypeSerializer<DecodedPojo> pojoSerializer =
-                org.apache.flink.api.common.typeinfo.TypeInformation.of(DecodedPojo.class)
-                        .createSerializer(new ExecutionConfig());
+                FlinkTestSupport.createSerializer(
+                        org.apache.flink.api.common.typeinfo.TypeInformation.of(DecodedPojo.class),
+                        new ExecutionConfig());
         org.apache.flink.api.common.typeutils.base.MapSerializer<String, DecodedPojo>
                 mapSerializer =
                         new org.apache.flink.api.common.typeutils.base.MapSerializer<>(
@@ -1509,8 +1514,9 @@ class StateInspectDecoderTest {
     @Test
     void decodesNestedPojoValueAsRecursiveRow() throws Exception {
         TypeSerializer<NestedPojo> pojoSerializer =
-                org.apache.flink.api.common.typeinfo.TypeInformation.of(NestedPojo.class)
-                        .createSerializer(new ExecutionConfig());
+                FlinkTestSupport.createSerializer(
+                        org.apache.flink.api.common.typeinfo.TypeInformation.of(NestedPojo.class),
+                        new ExecutionConfig());
         StateInspectSchema schema =
                 StateInspectSchema.forValue(
                         "nested-pojo-value",

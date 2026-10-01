@@ -24,8 +24,8 @@ jobs:
       MAVEN_GPG_PRIVATE_KEY: ${{ secrets.MAVEN_GPG_PRIVATE_KEY }}
       MAVEN_GPG_PASSPHRASE: ${{ secrets.MAVEN_GPG_PASSPHRASE }}
       RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.release_tag || github.event.release.tag_name }}
-      RELEASE_MODULES: .,cobble-common,cobble-catalog,cobble-state,cobble-state-flink-1.19,cobble-state-flink-2.0,cobble-state-flink-2.1,cobble-sink,cobble-sink-flink-2.0,cobble-source,cobble-dist,cobble-dist-flink-1.19,cobble-dist-flink-2.0,cobble-dist-flink-2.1,cobble-flink-inspect,cobble-flink-monitor
-      CORE_RELEASE_MODULES: .,cobble-common,cobble-catalog,cobble-state,cobble-state-flink-1.19,cobble-state-flink-2.0,cobble-state-flink-2.1,cobble-sink,cobble-sink-flink-2.0,cobble-source,cobble-flink-inspect
+      RELEASE_MODULES: .,cobble-common,cobble-catalog,cobble-state,cobble-state-flink-1.19,cobble-state-flink-2.0,cobble-state-flink-2.1,cobble-sink,cobble-sink-flink-2.0,cobble-source,cobble-dist,cobble-dist-flink-1.19,cobble-dist-flink-2.0,cobble-dist-flink-2.1,cobble-flink-inspect,cobble-flink-monitor-build,cobble-flink-monitor,cobble-flink-monitor-flink-1.19,cobble-flink-monitor-flink-2.0,cobble-flink-monitor-flink-2.1
+      CORE_RELEASE_MODULES: .,cobble-common,cobble-catalog,cobble-state,cobble-state-flink-1.19,cobble-state-flink-2.0,cobble-state-flink-2.1,cobble-sink,cobble-sink-flink-2.0,cobble-source,cobble-flink-inspect,cobble-flink-monitor-build
 
     steps:
       - name: Checkout
@@ -169,6 +169,9 @@ jobs:
             "cobble-dist-flink-2.0/target/cobble-flink-dist-${RELEASE_BASE}-flink-2.0.jar"
             "cobble-dist-flink-2.1/target/cobble-flink-dist-${RELEASE_BASE}-flink-2.1.jar"
             "cobble-flink-monitor/target/cobble-flink-monitor-${RELEASE_BASE}-flink-1.17.jar"
+            "cobble-flink-monitor-flink-1.19/target/cobble-flink-monitor-${RELEASE_BASE}-flink-1.19.jar"
+            "cobble-flink-monitor-flink-2.0/target/cobble-flink-monitor-${RELEASE_BASE}-flink-2.0.jar"
+            "cobble-flink-monitor-flink-2.1/target/cobble-flink-monitor-${RELEASE_BASE}-flink-2.1.jar"
           )
 
           for artifact in "${artifacts[@]}"; do
@@ -211,4 +214,7 @@ jobs:
           publish_batch "dist-flink-1.19" "cobble-dist-flink-1.19"
           publish_batch "dist-flink-2.0" "cobble-dist-flink-2.0"
           publish_batch "dist-flink-2.1" "cobble-dist-flink-2.1"
-          publish_batch "monitor" "cobble-flink-monitor"
+          publish_batch "monitor-flink-1.17" "cobble-flink-monitor"
+          publish_batch "monitor-flink-1.19" "cobble-flink-monitor-flink-1.19"
+          publish_batch "monitor-flink-2.0" "cobble-flink-monitor-flink-2.0"
+          publish_batch "monitor-flink-2.1" "cobble-flink-monitor-flink-2.1"

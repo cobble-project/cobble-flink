@@ -72,7 +72,8 @@ class StateInspectDecoderNoPojoClassTest {
     @Test
     void valueStatePojoDecodesWithoutPojoClass() throws Exception {
         TypeSerializer<SimplePojo> pojoSerializer =
-                TypeInformation.of(SimplePojo.class).createSerializer(new ExecutionConfig());
+                FlinkTestSupport.createSerializer(
+                        TypeInformation.of(SimplePojo.class), new ExecutionConfig());
         StateInspectSchema schema =
                 StateInspectSchema.forValue(
                         "pojo-no-class",
@@ -113,7 +114,8 @@ class StateInspectDecoderNoPojoClassTest {
     @Test
     void listStatePojoDecodesWithoutPojoClass() throws Exception {
         TypeSerializer<SimplePojo> pojoSerializer =
-                TypeInformation.of(SimplePojo.class).createSerializer(new ExecutionConfig());
+                FlinkTestSupport.createSerializer(
+                        TypeInformation.of(SimplePojo.class), new ExecutionConfig());
         StateInspectSchema schema =
                 StateInspectSchema.forList(
                         "pojo-list-no-class",
@@ -153,7 +155,8 @@ class StateInspectDecoderNoPojoClassTest {
     @Test
     void mapStatePojoKeyAndValueDecodeWithoutPojoClass() throws Exception {
         TypeSerializer<SimplePojo> pojoSerializer =
-                TypeInformation.of(SimplePojo.class).createSerializer(new ExecutionConfig());
+                FlinkTestSupport.createSerializer(
+                        TypeInformation.of(SimplePojo.class), new ExecutionConfig());
         StateInspectSchema schema =
                 StateInspectSchema.forMap(
                         "pojo-map-no-class",
@@ -201,7 +204,8 @@ class StateInspectDecoderNoPojoClassTest {
     @Test
     void nestedPojoDecodesWithoutPojoClass() throws Exception {
         TypeSerializer<PojoWithNested> pojoSerializer =
-                TypeInformation.of(PojoWithNested.class).createSerializer(new ExecutionConfig());
+                FlinkTestSupport.createSerializer(
+                        TypeInformation.of(PojoWithNested.class), new ExecutionConfig());
         StateInspectSchema schema =
                 StateInspectSchema.forValue(
                         "pojo-nested-no-class",
@@ -250,9 +254,9 @@ class StateInspectDecoderNoPojoClassTest {
     @Test
     void registeredSubclassDecodesWithoutPojoClass() throws Exception {
         ExecutionConfig config = new ExecutionConfig();
-        config.registerPojoType(PojoSubclassA.class);
+        FlinkTestSupport.registerPojoType(config, PojoSubclassA.class);
         TypeSerializer<PojoBase> pojoSerializer =
-                TypeInformation.of(PojoBase.class).createSerializer(config);
+                FlinkTestSupport.createSerializer(TypeInformation.of(PojoBase.class), config);
         StateInspectSchema schema =
                 StateInspectSchema.forValue(
                         "pojo-subclass-no-class",

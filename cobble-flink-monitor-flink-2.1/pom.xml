@@ -10,10 +10,11 @@
         <relativePath>../cobble-flink-monitor-build/pom.xml</relativePath>
     </parent>
     <artifactId>cobble-flink-monitor</artifactId>
-    <version>${cobble.flink.version.1.17}</version>
-    <name>cobble-flink-monitor (Flink 1.17)</name>
+    <version>${cobble.flink.version.2.1}</version>
+    <name>cobble-flink-monitor (Flink 2.1)</name>
     <properties>
-        <flink.version>1.17.2</flink.version>
+        <flink.version>2.1.1</flink.version>
+        <monitor.metadata.version>6</monitor.metadata.version>
     </properties>
     <build>
         <plugins>

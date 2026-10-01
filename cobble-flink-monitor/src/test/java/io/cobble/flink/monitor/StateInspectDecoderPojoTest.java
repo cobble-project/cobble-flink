@@ -82,7 +82,8 @@ class StateInspectDecoderPojoTest {
     @Test
     void valueStatePojoDecodesAsSemanticRow() throws Exception {
         TypeSerializer<SimplePojo> pojoSerializer =
-                TypeInformation.of(SimplePojo.class).createSerializer(new ExecutionConfig());
+                FlinkTestSupport.createSerializer(
+                        TypeInformation.of(SimplePojo.class), new ExecutionConfig());
         StateInspectSchema schema =
                 StateInspectSchema.forValue(
                         "pojo-val",
@@ -120,7 +121,8 @@ class StateInspectDecoderPojoTest {
     @Test
     void valueStatePojoStateKeyDecodesAsSemanticRow() throws Exception {
         TypeSerializer<SimplePojo> keySerializer =
-                TypeInformation.of(SimplePojo.class).createSerializer(new ExecutionConfig());
+                FlinkTestSupport.createSerializer(
+                        TypeInformation.of(SimplePojo.class), new ExecutionConfig());
         StateInspectSchema schema =
                 StateInspectSchema.forValue(
                         "pojo-key",
@@ -157,7 +159,8 @@ class StateInspectDecoderPojoTest {
     @Test
     void listStatePojoElementsDecode() throws Exception {
         TypeSerializer<SimplePojo> pojoSerializer =
-                TypeInformation.of(SimplePojo.class).createSerializer(new ExecutionConfig());
+                FlinkTestSupport.createSerializer(
+                        TypeInformation.of(SimplePojo.class), new ExecutionConfig());
         StateInspectSchema schema =
                 StateInspectSchema.forList(
                         "pojo-list",
@@ -207,9 +210,9 @@ class StateInspectDecoderPojoTest {
         // the restored live PojoSerializer. With the subclass class available, the fallback
         // succeeds and the elements are rendered as ROWs with the base fields (id, name).
         ExecutionConfig config = new ExecutionConfig();
-        config.registerPojoType(PojoSubclassA.class);
+        FlinkTestSupport.registerPojoType(config, PojoSubclassA.class);
         TypeSerializer<PojoBase> pojoSerializer =
-                TypeInformation.of(PojoBase.class).createSerializer(config);
+                FlinkTestSupport.createSerializer(TypeInformation.of(PojoBase.class), config);
 
         // Write a non-registered subclass instance to pollute the snapshot.
         PojoSubclassB polluter = new PojoSubclassB();
@@ -289,9 +292,9 @@ class StateInspectDecoderPojoTest {
         // The classless path fails (flag 0x04), and the live serializer fallback also fails
         // because it cannot resolve the subclass class. The error should reference "value".
         ExecutionConfig config = new ExecutionConfig();
-        config.registerPojoType(PojoSubclassA.class);
+        FlinkTestSupport.registerPojoType(config, PojoSubclassA.class);
         TypeSerializer<PojoBase> pojoSerializer =
-                TypeInformation.of(PojoBase.class).createSerializer(config);
+                FlinkTestSupport.createSerializer(TypeInformation.of(PojoBase.class), config);
 
         // Write a non-registered subclass instance to pollute the snapshot.
         PojoSubclassB polluter = new PojoSubclassB();
@@ -345,7 +348,8 @@ class StateInspectDecoderPojoTest {
     @Test
     void mapStatePojoKeyAndValueDecode() throws Exception {
         TypeSerializer<SimplePojo> pojoSerializer =
-                TypeInformation.of(SimplePojo.class).createSerializer(new ExecutionConfig());
+                FlinkTestSupport.createSerializer(
+                        TypeInformation.of(SimplePojo.class), new ExecutionConfig());
         StateInspectSchema schema =
                 StateInspectSchema.forMap(
                         "pojo-map",
@@ -391,7 +395,8 @@ class StateInspectDecoderPojoTest {
     @Test
     void nestedPojoRendersAsNestedSemanticRow() throws Exception {
         TypeSerializer<PojoWithNested> pojoSerializer =
-                TypeInformation.of(PojoWithNested.class).createSerializer(new ExecutionConfig());
+                FlinkTestSupport.createSerializer(
+                        TypeInformation.of(PojoWithNested.class), new ExecutionConfig());
         StateInspectSchema schema =
                 StateInspectSchema.forValue(
                         "pojo-nested",
@@ -439,9 +444,9 @@ class StateInspectDecoderPojoTest {
     @Test
     void registeredSubclassDecodesThroughStateInspectDecoder() throws Exception {
         ExecutionConfig config = new ExecutionConfig();
-        config.registerPojoType(PojoSubclassA.class);
+        FlinkTestSupport.registerPojoType(config, PojoSubclassA.class);
         TypeSerializer<PojoBase> pojoSerializer =
-                TypeInformation.of(PojoBase.class).createSerializer(config);
+                FlinkTestSupport.createSerializer(TypeInformation.of(PojoBase.class), config);
         StateInspectSchema schema =
                 StateInspectSchema.forValue(
                         "pojo-subclass",

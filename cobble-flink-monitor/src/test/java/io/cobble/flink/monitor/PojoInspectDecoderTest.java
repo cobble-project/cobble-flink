@@ -106,7 +106,8 @@ class PojoInspectDecoderTest {
     @Test
     void basePojoDecodesFields() throws Exception {
         TypeSerializer<SimplePojo> serializer =
-                TypeInformation.of(SimplePojo.class).createSerializer(new ExecutionConfig());
+                FlinkTestSupport.createSerializer(
+                        TypeInformation.of(SimplePojo.class), new ExecutionConfig());
         SerializerInspectSchema schema = SerializerInspectSchema.fromSerializer(serializer);
         InspectDecoderDescriptor descriptor = schema.decoderDescriptor();
 
@@ -134,7 +135,8 @@ class PojoInspectDecoderTest {
     @Test
     void nullPojoReturnsNullValue() throws Exception {
         TypeSerializer<SimplePojo> serializer =
-                TypeInformation.of(SimplePojo.class).createSerializer(new ExecutionConfig());
+                FlinkTestSupport.createSerializer(
+                        TypeInformation.of(SimplePojo.class), new ExecutionConfig());
         InspectDecoderDescriptor descriptor =
                 SerializerInspectSchema.fromSerializer(serializer).decoderDescriptor();
 
@@ -150,7 +152,8 @@ class PojoInspectDecoderTest {
     @Test
     void nullFieldIsPreservedAsNull() throws Exception {
         TypeSerializer<SimplePojo> serializer =
-                TypeInformation.of(SimplePojo.class).createSerializer(new ExecutionConfig());
+                FlinkTestSupport.createSerializer(
+                        TypeInformation.of(SimplePojo.class), new ExecutionConfig());
         InspectDecoderDescriptor descriptor =
                 SerializerInspectSchema.fromSerializer(serializer).decoderDescriptor();
 
@@ -168,7 +171,8 @@ class PojoInspectDecoderTest {
     @Test
     void nestedPojoDecodesAsClasslessPojoValue() throws Exception {
         TypeSerializer<PojoWithNested> serializer =
-                TypeInformation.of(PojoWithNested.class).createSerializer(new ExecutionConfig());
+                FlinkTestSupport.createSerializer(
+                        TypeInformation.of(PojoWithNested.class), new ExecutionConfig());
         InspectDecoderDescriptor descriptor =
                 SerializerInspectSchema.fromSerializer(serializer).decoderDescriptor();
 
@@ -194,7 +198,8 @@ class PojoInspectDecoderTest {
     @Test
     void pojoWithTupleFieldDecodesViaPortableSnapshot() throws Exception {
         TypeSerializer<PojoWithTuple> serializer =
-                TypeInformation.of(PojoWithTuple.class).createSerializer(new ExecutionConfig());
+                FlinkTestSupport.createSerializer(
+                        TypeInformation.of(PojoWithTuple.class), new ExecutionConfig());
         InspectDecoderDescriptor descriptor =
                 SerializerInspectSchema.fromSerializer(serializer).decoderDescriptor();
 
@@ -225,7 +230,8 @@ class PojoInspectDecoderTest {
     @Test
     void pojoWithListFieldIsPartiallyClassless() throws Exception {
         TypeSerializer<PojoWithList> serializer =
-                TypeInformation.of(PojoWithList.class).createSerializer(new ExecutionConfig());
+                FlinkTestSupport.createSerializer(
+                        TypeInformation.of(PojoWithList.class), new ExecutionConfig());
         InspectDecoderDescriptor descriptor =
                 SerializerInspectSchema.fromSerializer(serializer).decoderDescriptor();
 
@@ -257,10 +263,10 @@ class PojoInspectDecoderTest {
     @Test
     void registeredSubclassesDecodeWithTagDispatch() throws Exception {
         ExecutionConfig config = new ExecutionConfig();
-        config.registerPojoType(PojoSubclassA.class);
-        config.registerPojoType(PojoSubclassB.class);
+        FlinkTestSupport.registerPojoType(config, PojoSubclassA.class);
+        FlinkTestSupport.registerPojoType(config, PojoSubclassB.class);
         TypeSerializer<PojoBase> serializer =
-                TypeInformation.of(PojoBase.class).createSerializer(config);
+                FlinkTestSupport.createSerializer(TypeInformation.of(PojoBase.class), config);
         InspectDecoderDescriptor descriptor =
                 SerializerInspectSchema.fromSerializer(serializer).decoderDescriptor();
 
@@ -307,7 +313,8 @@ class PojoInspectDecoderTest {
     @Test
     void malformedFlagZeroRejected() throws Exception {
         TypeSerializer<SimplePojo> serializer =
-                TypeInformation.of(SimplePojo.class).createSerializer(new ExecutionConfig());
+                FlinkTestSupport.createSerializer(
+                        TypeInformation.of(SimplePojo.class), new ExecutionConfig());
         InspectDecoderDescriptor descriptor =
                 SerializerInspectSchema.fromSerializer(serializer).decoderDescriptor();
 
@@ -321,7 +328,8 @@ class PojoInspectDecoderTest {
     @Test
     void malformedFlagCombinationRejected() throws Exception {
         TypeSerializer<SimplePojo> serializer =
-                TypeInformation.of(SimplePojo.class).createSerializer(new ExecutionConfig());
+                FlinkTestSupport.createSerializer(
+                        TypeInformation.of(SimplePojo.class), new ExecutionConfig());
         InspectDecoderDescriptor descriptor =
                 SerializerInspectSchema.fromSerializer(serializer).decoderDescriptor();
 
@@ -336,7 +344,8 @@ class PojoInspectDecoderTest {
     @Test
     void malformedFlagFFRejected() throws Exception {
         TypeSerializer<SimplePojo> serializer =
-                TypeInformation.of(SimplePojo.class).createSerializer(new ExecutionConfig());
+                FlinkTestSupport.createSerializer(
+                        TypeInformation.of(SimplePojo.class), new ExecutionConfig());
         InspectDecoderDescriptor descriptor =
                 SerializerInspectSchema.fromSerializer(serializer).decoderDescriptor();
 
@@ -350,7 +359,8 @@ class PojoInspectDecoderTest {
     @Test
     void isSubclassFlagRejected() throws Exception {
         TypeSerializer<SimplePojo> serializer =
-                TypeInformation.of(SimplePojo.class).createSerializer(new ExecutionConfig());
+                FlinkTestSupport.createSerializer(
+                        TypeInformation.of(SimplePojo.class), new ExecutionConfig());
         InspectDecoderDescriptor descriptor =
                 SerializerInspectSchema.fromSerializer(serializer).decoderDescriptor();
 
@@ -367,9 +377,9 @@ class PojoInspectDecoderTest {
     @Test
     void invalidTagRejected() throws Exception {
         ExecutionConfig config = new ExecutionConfig();
-        config.registerPojoType(PojoSubclassA.class);
+        FlinkTestSupport.registerPojoType(config, PojoSubclassA.class);
         TypeSerializer<PojoBase> serializer =
-                TypeInformation.of(PojoBase.class).createSerializer(config);
+                FlinkTestSupport.createSerializer(TypeInformation.of(PojoBase.class), config);
         InspectDecoderDescriptor descriptor =
                 SerializerInspectSchema.fromSerializer(serializer).decoderDescriptor();
 
@@ -385,7 +395,8 @@ class PojoInspectDecoderTest {
     @Test
     void trailingBytesRejected() throws Exception {
         TypeSerializer<SimplePojo> serializer =
-                TypeInformation.of(SimplePojo.class).createSerializer(new ExecutionConfig());
+                FlinkTestSupport.createSerializer(
+                        TypeInformation.of(SimplePojo.class), new ExecutionConfig());
         InspectDecoderDescriptor descriptor =
                 SerializerInspectSchema.fromSerializer(serializer).decoderDescriptor();
 
@@ -406,7 +417,8 @@ class PojoInspectDecoderTest {
     @Test
     void truncatedPayloadRejected() throws Exception {
         TypeSerializer<SimplePojo> serializer =
-                TypeInformation.of(SimplePojo.class).createSerializer(new ExecutionConfig());
+                FlinkTestSupport.createSerializer(
+                        TypeInformation.of(SimplePojo.class), new ExecutionConfig());
         InspectDecoderDescriptor descriptor =
                 SerializerInspectSchema.fromSerializer(serializer).decoderDescriptor();
 
