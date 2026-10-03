@@ -123,6 +123,7 @@ import java.io.IOException;
 import java.io.UncheckedIOException;
 import java.lang.reflect.Field;
 import java.lang.reflect.Proxy;
+import java.net.URI;
 import java.nio.ByteBuffer;
 import java.nio.file.Files;
 import java.nio.file.NoSuchFileException;
@@ -3360,6 +3361,64 @@ class CobbleStateBackendTest {
             Exception exception = assertThrows(Exception.class, snapshotFuture::get);
             assertFalse(backend.hasTrackedSnapshot(44L));
             assertTrue(hasCause(exception, CancelledError.class));
+        }
+    }
+
+    @Test
+    void abortedCheckpointPreservesCompletedSnapshotSchemaAndRestore(@TempDir Path tempDir)
+            throws Exception {
+        KeyedStateHandle completed;
+        Path schemaFile;
+        ValueStateDescriptor<String> descriptor =
+                new ValueStateDescriptor<>("retained-abort-state", StringSerializer.INSTANCE);
+        String checkpointDirectory = tempDir.resolve("checkpoints").toUri().toString();
+        try (TestBackendContext context =
+                createBackendContext(tempDir.resolve("writer"), false, checkpointDirectory)) {
+            CobbleKeyedStateBackend<Integer> backend = context.cobbleBackend;
+            backend.setCurrentKey(10);
+            ValueState<String> state =
+                    backend.getPartitionedState(
+                            "retained-abort-ns", StringSerializer.INSTANCE, descriptor);
+            state.update("checkpoint-one");
+            completed = runCheckpointSnapshot(backend, 440L);
+            backend.notifyCheckpointComplete(440L);
+            ShardSnapshot shard = readSnapshotMetadata(completed).shardSnapshot();
+            schemaFile =
+                    Path.of(URI.create(shard.manifestPath))
+                            .getParent()
+                            .getParent()
+                            .resolve("schema/schema-" + shard.schemaId);
+            assertTrue(Files.exists(schemaFile));
+
+            state.update("uncommitted");
+            RunnableFuture<SnapshotResult<KeyedStateHandle>> pending =
+                    backend.snapshot(
+                            441L,
+                            System.currentTimeMillis(),
+                            new MemCheckpointStreamFactory(1024 * 1024),
+                            CheckpointOptions.forCheckpointWithDefaultLocation());
+            assertNotNull(backend.snapshotIdForCheckpoint(441L));
+            backend.notifyCheckpointAborted(441L);
+            backend.notifyCheckpointAborted(441L);
+            pending.cancel(true);
+            assertFalse(backend.hasTrackedSnapshot(441L));
+        }
+        // Closing the writer drains native snapshot work, including cancellation cleanup.
+        assertTrue(Files.exists(schemaFile));
+        try (TestBackendContext restored =
+                createBackendContext(
+                        tempDir.resolve("restored"),
+                        false,
+                        checkpointDirectory,
+                        null,
+                        TtlTimeProvider.DEFAULT,
+                        false,
+                        Collections.singletonList(completed))) {
+            restored.cobbleBackend.setCurrentKey(10);
+            ValueState<String> state =
+                    restored.cobbleBackend.getPartitionedState(
+                            "retained-abort-ns", StringSerializer.INSTANCE, descriptor);
+            assertEquals("checkpoint-one", state.value());
         }
     }
 
