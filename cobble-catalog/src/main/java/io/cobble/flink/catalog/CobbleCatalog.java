@@ -300,7 +300,7 @@ public final class CobbleCatalog implements Catalog {
         options.put(OPTION_SCHEMA_ID, Long.toString(table.catalogSchemaId()));
         options.put(OPTION_BUCKETS, Integer.toString(buckets));
         options.putAll(storageOptions.asTableOptions());
-        return org.apache.flink.table.catalog.CatalogTable.of(
+        return new CobbleCatalogTable(
                 CobbleCatalogTypes.toFlink(table.schema()),
                 "Cobble catalog table",
                 Collections.<String>emptyList(),
