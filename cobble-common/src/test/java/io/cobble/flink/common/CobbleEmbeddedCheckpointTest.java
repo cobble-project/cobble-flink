@@ -49,6 +49,9 @@ class CobbleEmbeddedCheckpointTest {
         assertEquals(3L, first.checkpointId());
         assertEquals(first.checkpointId(), second.checkpointId());
         assertEquals(1, second.operator(operatorId.toHexString()).shards().size());
+        assertEquals(
+                Collections.singletonList("s3://bucket/old"),
+                second.operator(operatorId.toHexString()).volumeDirectories());
         assertTrue(Files.exists(savepoint.resolve("_metadata")));
         assertTrue(Files.exists(stateFile));
     }
@@ -206,7 +209,12 @@ class CobbleEmbeddedCheckpointTest {
                                 StandardOpenOption.CREATE_NEW,
                                 StandardOpenOption.WRITE))) {
             CobbleSnapshotMetadataCodec.write(
-                    new CobbleSnapshotMetadataPayload(shard, false, Collections.emptyList(), null),
+                    new CobbleSnapshotMetadataPayload(
+                            Collections.singletonList("s3://bucket/old"),
+                            shard,
+                            false,
+                            Collections.emptyList(),
+                            null),
                     new DataOutputViewStreamWrapper(output));
         }
     }

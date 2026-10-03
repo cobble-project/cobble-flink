@@ -28,13 +28,18 @@ final class CobbleSnapshotMetadata {
     }
 
     static CobbleSnapshotMetadata fromShardSnapshot(
+            List<String> volumeDirectories,
             ShardSnapshot shardSnapshot,
             boolean containsCobbleTimers,
             List<CobbleStateDescriptor> stateDescriptors,
             StateInspectSchemaStore schemaStore) {
         return new CobbleSnapshotMetadata(
                 new CobbleSnapshotMetadataPayload(
-                        shardSnapshot, containsCobbleTimers, stateDescriptors, schemaStore));
+                        volumeDirectories,
+                        shardSnapshot,
+                        containsCobbleTimers,
+                        stateDescriptors,
+                        schemaStore));
     }
 
     static CobbleSnapshotMetadata read(DataInputView input) throws IOException {
@@ -64,5 +69,9 @@ final class CobbleSnapshotMetadata {
 
     StateInspectSchemaStore schemaStore() {
         return payload.schemaStore();
+    }
+
+    List<String> volumeDirectories() {
+        return payload.volumeDirectories();
     }
 }

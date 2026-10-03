@@ -157,7 +157,8 @@ final class CobbleAsyncKeyedStateBackend<K> implements AsyncKeyedStateBackend<K>
                         () -> !stateDescriptors.isEmpty() || hasCobblePriorityQueues(),
                         this::hasCobblePriorityQueues,
                         this::stateDescriptorSnapshot,
-                        this::buildSchemaStore);
+                        this::buildSchemaStore,
+                        cobbleConfig);
         this.resourcesClosed = new AtomicBoolean(false);
     }
 

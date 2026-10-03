@@ -315,11 +315,20 @@ public final class CobbleEmbeddedCheckpoint {
             Map<String, ShardSnapshot> shards = new LinkedHashMap<>();
             List<CobbleStateDescriptor> stateDescriptors = new ArrayList<>();
             List<StateInspectSchemaStore> stores = new ArrayList<>();
+            List<String> volumeDirectories = new ArrayList<>();
             for (OperatorSubtaskState subtaskState : operatorState.getStates()) {
                 collectCobbleHandles(
-                        subtaskState.getManagedKeyedState(), shards, stateDescriptors, stores);
+                        subtaskState.getManagedKeyedState(),
+                        shards,
+                        stateDescriptors,
+                        stores,
+                        volumeDirectories);
                 collectCobbleHandles(
-                        subtaskState.getRawKeyedState(), shards, stateDescriptors, stores);
+                        subtaskState.getRawKeyedState(),
+                        shards,
+                        stateDescriptors,
+                        stores,
+                        volumeDirectories);
             }
             if (!shards.isEmpty()) {
                 String operatorId = operatorState.getOperatorID().toHexString();
@@ -330,7 +339,8 @@ public final class CobbleEmbeddedCheckpoint {
                                 operatorState.getMaxParallelism(),
                                 new ArrayList<>(shards.values()),
                                 mergeStateDescriptors(stateDescriptors),
-                                mergeSchemaStores(stores)));
+                                mergeSchemaStores(stores),
+                                volumeDirectories));
             }
         }
         if (operators.isEmpty()) {
@@ -344,7 +354,8 @@ public final class CobbleEmbeddedCheckpoint {
             Collection<KeyedStateHandle> handles,
             Map<String, ShardSnapshot> shards,
             List<CobbleStateDescriptor> stateDescriptors,
-            List<StateInspectSchemaStore> stores)
+            List<StateInspectSchemaStore> stores,
+            List<String> volumeDirectories)
             throws IOException {
         for (KeyedStateHandle handle : handles) {
             if (!(handle instanceof IncrementalRemoteKeyedStateHandle)) {
@@ -368,6 +379,7 @@ public final class CobbleEmbeddedCheckpoint {
             ShardSnapshot shard = payload.shardSnapshot();
             shards.putIfAbsent(shard.dbId + ':' + shard.snapshotId, shard);
             stateDescriptors.addAll(payload.stateDescriptors());
+            volumeDirectories.addAll(payload.volumeDirectories());
             if (!payload.schemaStore().isEmpty()) {
                 stores.add(payload.schemaStore());
             }
@@ -549,18 +561,21 @@ public final class CobbleEmbeddedCheckpoint {
         private final List<ShardSnapshot> shards;
         private final List<CobbleStateDescriptor> stateDescriptors;
         private final StateInspectSchemaStore schemaStore;
+        private final List<String> volumeDirectories;
 
         private OperatorSnapshot(
                 String operatorId,
                 int maxParallelism,
                 List<ShardSnapshot> shards,
                 List<CobbleStateDescriptor> stateDescriptors,
-                StateInspectSchemaStore schemaStore) {
+                StateInspectSchemaStore schemaStore,
+                List<String> volumeDirectories) {
             this.operatorId = operatorId;
             this.maxParallelism = maxParallelism;
             this.shards = Collections.unmodifiableList(new ArrayList<>(shards));
             this.stateDescriptors = stateDescriptors;
             this.schemaStore = schemaStore;
+            this.volumeDirectories = CobbleSnapshotVolumeRoots.unique(volumeDirectories);
         }
 
         public String operatorId() {
@@ -581,6 +596,10 @@ public final class CobbleEmbeddedCheckpoint {
 
         public StateInspectSchemaStore schemaStore() {
             return schemaStore;
+        }
+
+        public List<String> volumeDirectories() {
+            return volumeDirectories;
         }
     }
 }

@@ -1,11 +1,14 @@
 package io.cobble.flink.inspect.internal;
 
 import io.cobble.flink.common.CobbleEmbeddedCheckpoint;
+import io.cobble.flink.common.CobbleSnapshotVolumeRoots;
 
 import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.stream.Collectors;
+import java.util.stream.Stream;
 
 public final class OperatorEntry {
     public final String operatorId;
@@ -73,7 +76,7 @@ public final class OperatorEntry {
     public static OperatorEntry embeddedCheckpoint(
             CobbleEmbeddedCheckpoint.OperatorSnapshot snapshot) {
         return new OperatorEntry(
-                snapshot.operatorId(), null, null, Collections.emptyList(), false, snapshot);
+                snapshot.operatorId(), null, null, snapshot.volumeDirectories(), false, snapshot);
     }
 
     public OperatorEntry withEmbeddedCheckpoint(
@@ -89,7 +92,11 @@ public final class OperatorEntry {
                 operatorId,
                 manifestCopyPath,
                 operatorSnapshotDirectory,
-                readerVolumeDirectories,
+                CobbleSnapshotVolumeRoots.unique(
+                        Stream.concat(
+                                        readerVolumeDirectories.stream(),
+                                        snapshot.volumeDirectories().stream())
+                                .collect(Collectors.toList())),
                 globalSnapshotLayout,
                 snapshot);
     }

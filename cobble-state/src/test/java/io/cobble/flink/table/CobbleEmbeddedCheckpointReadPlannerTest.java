@@ -38,6 +38,25 @@ class CobbleEmbeddedCheckpointReadPlannerTest {
     @TempDir java.nio.file.Path tempDir;
 
     @Test
+    void keepsInheritedVolumesInTheConfigUsedByThePhysicalReader() throws Exception {
+        java.nio.file.Path checkpoint = tempDir.resolve("with-old-root").resolve("chk-1");
+        writeCheckpoint(checkpoint, 1L, new OperatorID(13L, 14L));
+        Config config = new Config().addVolume(checkpoint.toString()).numColumns(1).totalBuckets(4);
+        assertTrue(
+                CobbleEmbeddedCheckpointReadPlanner.resolve(
+                                config, request(checkpoint, Collections.emptyMap()))
+                        .isPresent());
+        assertTrue(
+                config.volumes.stream()
+                        .anyMatch(
+                                volume ->
+                                        volume.baseDir.endsWith("/old-volume")
+                                                && volume.kinds.equals(
+                                                        Collections.singletonList(
+                                                                Config.VolumeUsageKind.READONLY))));
+    }
+
+    @Test
     void preservesNativeRootWhenItAlsoContainsCheckpointChildren() throws Exception {
         java.nio.file.Path root = Files.createDirectory(tempDir.resolve("native-root"));
         Config config = new Config().addVolume(root.toString()).numColumns(1).totalBuckets(1);
@@ -157,9 +176,19 @@ class CobbleEmbeddedCheckpointReadPlannerTest {
         range.start = 0;
         range.end = 3;
         shard.ranges.add(range);
+        ShardSnapshot.SnapshotColumnFamily family = new ShardSnapshot.SnapshotColumnFamily();
+        family.numColumns = 1;
+        family.options.metadata = "{\"format\":\"flink-state\"}";
+        shard.columnFamilies.put("state", family);
         try (DataOutputStream output = new DataOutputStream(Files.newOutputStream(payload))) {
             CobbleSnapshotMetadataCodec.write(
-                    new CobbleSnapshotMetadataPayload(shard, false, Collections.emptyList(), null),
+                    new CobbleSnapshotMetadataPayload(
+                            Collections.singletonList(
+                                    payload.getParent().resolve("old-volume").toUri().toString()),
+                            shard,
+                            false,
+                            Collections.emptyList(),
+                            null),
                     new DataOutputViewStreamWrapper(output));
         }
     }

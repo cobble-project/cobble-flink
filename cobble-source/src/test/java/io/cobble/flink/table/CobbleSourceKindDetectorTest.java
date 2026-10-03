@@ -363,7 +363,11 @@ class CobbleSourceKindDetectorTest {
         try (DataOutputStream output = new DataOutputStream(Files.newOutputStream(state))) {
             CobbleSnapshotMetadataCodec.write(
                     new CobbleSnapshotMetadataPayload(
-                            shard, false, Collections.emptyList(), StateInspectSchemaStore.empty()),
+                            Collections.emptyList(),
+                            shard,
+                            false,
+                            Collections.emptyList(),
+                            StateInspectSchemaStore.empty()),
                     new DataOutputViewStreamWrapper(output));
         }
         OperatorState operator = new OperatorState(new OperatorID(1L, 2L), 1, 4);

@@ -749,6 +749,7 @@ class CobbleFlinkMonitorHttpIT {
         try (DataOutputStream output = new DataOutputStream(Files.newOutputStream(taskState))) {
             CobbleSnapshotMetadataCodec.write(
                     new CobbleSnapshotMetadataPayload(
+                            Collections.emptyList(),
                             shard,
                             false,
                             Collections.emptyList(),

@@ -5,6 +5,7 @@ import io.cobble.GlobalSnapshot;
 import io.cobble.ShardSnapshot;
 import io.cobble.SnapshotTools;
 import io.cobble.flink.common.CobbleEmbeddedCheckpoint;
+import io.cobble.flink.common.CobbleSnapshotVolumeRoots;
 import io.cobble.flink.common.CobbleStateReadFormatMetadata;
 import io.cobble.table.TablePathRequest;
 import io.cobble.table.TableReadSnapshot;
@@ -73,6 +74,8 @@ final class CobbleEmbeddedCheckpointReadPlanner {
                                 location.checkpoint().checkpointId(),
                                 operator.maxParallelism(),
                                 shards);
+        // The caller reuses this config when opening the fixed physical reader.
+        CobbleSnapshotVolumeRoots.addReadonlyVolumes(config, operator.volumeDirectories());
         TableReadSnapshot snapshot =
                 TableReadSnapshot.forGlobal(config, fixed, request.tableName());
         if (!CobbleStateReadFormatMetadata.FORMAT_ID.equals(snapshot.formatId())) {

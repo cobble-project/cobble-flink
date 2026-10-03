@@ -58,6 +58,9 @@ class CobbleEmbeddedCheckpointInspectTest {
                             CobbleConnectorStorageOptions.empty());
             CheckpointEntry checkpoint = catalog.checkpoints.get(0);
             OperatorEntry operator = checkpoint.findOperator(operatorId.toHexString());
+            assertTrue(
+                    operator.readerVolumeDirectories.stream()
+                            .anyMatch(root -> root.endsWith("/old-volume")));
 
             SchemaResolveResult schema = MonitorInspectSchemaResolver.resolve(checkpoint, operator);
             assertEquals("checkpoint", catalog.sourceKind);
@@ -312,6 +315,10 @@ class CobbleEmbeddedCheckpointInspectTest {
         try (DataOutputStream output = new DataOutputStream(Files.newOutputStream(state))) {
             CobbleSnapshotMetadataCodec.write(
                     new CobbleSnapshotMetadataPayload(
+                            Collections.singletonList(
+                                    Files.createDirectories(tempDir.resolve("old-volume"))
+                                            .toUri()
+                                            .toString()),
                             shard,
                             false,
                             Collections.emptyList(),

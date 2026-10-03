@@ -1,6 +1,9 @@
 package io.cobble.flink.state;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+
+import io.cobble.flink.common.CobbleEmbeddedCheckpoint;
 
 import org.apache.flink.api.common.JobID;
 import org.apache.flink.api.common.functions.RichFlatMapFunction;
@@ -45,6 +48,111 @@ class CobbleRescaleCheckpointManuallyITTest {
     @Test
     void restoresKeyedStateCorrectlyAfterScaleIn(@TempDir Path tempDir) throws Exception {
         runRescaleTest(tempDir, 4, 3);
+    }
+
+    @Test
+    void restoresScaleOutCheckpointAfterChangingCheckpointRoot(@TempDir Path tempDir)
+            throws Exception {
+        MiniClusterWithClientResource cluster =
+                CobbleCheckpointingITSupport.createCluster(new Configuration());
+        cluster.before();
+        try {
+            String initialCheckpoint =
+                    runJobAndGetCheckpoint(
+                            cluster,
+                            tempDir.resolve("local-state-initial"),
+                            tempDir.resolve("checkpoints-old"),
+                            2,
+                            INITIAL_NUMBER_OF_ELEMENTS,
+                            INITIAL_NUMBER_OF_ELEMENTS,
+                            null);
+            int scaledElements = INITIAL_NUMBER_OF_ELEMENTS + RESTORED_NUMBER_OF_ELEMENTS;
+            String scaledCheckpoint =
+                    runJobAndGetCheckpoint(
+                            cluster,
+                            tempDir.resolve("local-state-scaled"),
+                            tempDir.resolve("checkpoints-new"),
+                            3,
+                            RESTORED_NUMBER_OF_ELEMENTS,
+                            scaledElements,
+                            initialCheckpoint);
+            assertCollectedState(3, scaledElements);
+            assertCheckpointRetainsOldRoot(scaledCheckpoint, tempDir);
+            int restoredElements = scaledElements + RESTORED_NUMBER_OF_ELEMENTS;
+            String restoredCheckpoint =
+                    runJobAndGetCheckpoint(
+                            cluster,
+                            tempDir.resolve("local-state-restored-again"),
+                            tempDir.resolve("checkpoints-new"),
+                            3,
+                            RESTORED_NUMBER_OF_ELEMENTS,
+                            restoredElements,
+                            scaledCheckpoint);
+            assertCollectedState(3, restoredElements);
+            assertCheckpointRetainsOldRoot(restoredCheckpoint, tempDir);
+            restoreAndAssert(
+                    cluster,
+                    tempDir,
+                    restoredCheckpoint,
+                    3,
+                    restoredElements + RESTORED_NUMBER_OF_ELEMENTS);
+        } finally {
+            cluster.after();
+        }
+    }
+
+    private void assertCheckpointRetainsOldRoot(String checkpoint, Path tempDir) throws Exception {
+        CobbleEmbeddedCheckpoint metadata =
+                CobbleEmbeddedCheckpoint.read(
+                        new org.apache.flink.core.fs.Path(checkpoint, "_metadata"));
+        String oldRoot = tempDir.resolve("checkpoints-old").toUri().toString();
+        for (CobbleEmbeddedCheckpoint.OperatorSnapshot operator : metadata.operators().values()) {
+            assertTrue(
+                    operator.volumeDirectories().stream()
+                            .anyMatch(root -> root.startsWith(oldRoot)));
+            assertTrue(
+                    operator.volumeDirectories().stream()
+                            .noneMatch(root -> root.contains("local-state")));
+        }
+    }
+
+    private String runJobAndGetCheckpoint(
+            MiniClusterWithClientResource cluster,
+            Path localStateDirectory,
+            Path checkpointDirectory,
+            int parallelism,
+            int numberOfElementsPerKey,
+            int expectedElementsPerKey,
+            String restorePath)
+            throws Exception {
+        DefiniteKeySource.reset();
+        CollectingSink.clear();
+        JobGraph jobGraph =
+                createJobGraph(
+                        localStateDirectory,
+                        checkpointDirectory,
+                        parallelism,
+                        numberOfElementsPerKey,
+                        expectedElementsPerKey,
+                        true,
+                        Long.MAX_VALUE);
+        if (restorePath != null) {
+            jobGraph.setSavepointRestoreSettings(
+                    SavepointRestoreSettings.forPath(restorePath, false, RestoreMode.CLAIM));
+        }
+        JobID jobId = jobGraph.getJobID();
+        CobbleCheckpointingITSupport.submitJobAndWaitForRunning(cluster, jobGraph);
+        CobbleCheckpointingITSupport.waitForJobCondition(
+                cluster.getMiniCluster(),
+                jobId,
+                () -> DefiniteKeySource.finishedSubtasks() == parallelism,
+                Duration.ofSeconds(30),
+                "all source subtasks to finish emitting");
+        String checkpointPath =
+                CobbleCheckpointingITSupport.triggerCheckpointAndWait(
+                        cluster.getMiniCluster(), jobId);
+        CobbleCheckpointingITSupport.cancelJobAndWait(cluster, jobId);
+        return checkpointPath;
     }
 
     private void runRescaleTest(Path tempDir, int initialParallelism, int restoredParallelism)
@@ -127,9 +235,17 @@ class CobbleRescaleCheckpointManuallyITTest {
                 SavepointRestoreSettings.forPath(checkpointPath, false, RestoreMode.CLAIM));
 
         cluster.getMiniCluster().submitJob(restoredJobGraph).get(30, TimeUnit.SECONDS);
+        cluster.getClusterClient()
+                .requestJobResult(restoredJobGraph.getJobID())
+                .get(180, TimeUnit.SECONDS)
+                .toJobExecutionResult(getClass().getClassLoader());
         CobbleCheckpointingITSupport.waitForJobFinished(
                 cluster, restoredJobGraph.getJobID(), Duration.ofSeconds(180));
 
+        assertCollectedState(restoredParallelism, expectedElementsPerKey);
+    }
+
+    private void assertCollectedState(int restoredParallelism, int expectedElementsPerKey) {
         Set<Tuple2<Integer, Integer>> expected = new HashSet<>();
         for (int key = 0; key < NUMBER_OF_KEYS; key++) {
             int keyGroup =
@@ -152,6 +268,24 @@ class CobbleRescaleCheckpointManuallyITTest {
             int numberOfElementsPerKey,
             int expectedElementsPerKey,
             boolean waitForCancellationAfterEmission) {
+        return createJobGraph(
+                localStateDirectory,
+                checkpointDirectory,
+                parallelism,
+                numberOfElementsPerKey,
+                expectedElementsPerKey,
+                waitForCancellationAfterEmission,
+                100L);
+    }
+
+    private JobGraph createJobGraph(
+            Path localStateDirectory,
+            Path checkpointDirectory,
+            int parallelism,
+            int numberOfElementsPerKey,
+            int expectedElementsPerKey,
+            boolean waitForCancellationAfterEmission,
+            long checkpointInterval) {
         Configuration configuration =
                 CobbleCheckpointingITSupport.createJobConfiguration(localStateDirectory);
         configuration.set(
@@ -161,7 +295,7 @@ class CobbleRescaleCheckpointManuallyITTest {
                 StreamExecutionEnvironment.getExecutionEnvironment(configuration);
         env.setParallelism(parallelism);
         env.getConfig().setMaxParallelism(MAX_PARALLELISM);
-        env.enableCheckpointing(100L);
+        env.enableCheckpointing(checkpointInterval);
         env.getCheckpointConfig()
                 .setExternalizedCheckpointCleanup(
                         CheckpointConfig.ExternalizedCheckpointCleanup.RETAIN_ON_CANCELLATION);

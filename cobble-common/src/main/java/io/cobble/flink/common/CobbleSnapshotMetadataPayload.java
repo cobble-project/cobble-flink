@@ -15,8 +15,10 @@ public final class CobbleSnapshotMetadataPayload {
     private final boolean containsCobbleTimers;
     private final List<CobbleStateDescriptor> stateDescriptors;
     private final StateInspectSchemaStore schemaStore;
+    private final List<String> volumeDirectories;
 
     public CobbleSnapshotMetadataPayload(
+            List<String> volumeDirectories,
             ShardSnapshot shardSnapshot,
             boolean containsCobbleTimers,
             List<CobbleStateDescriptor> stateDescriptors,
@@ -28,6 +30,7 @@ public final class CobbleSnapshotMetadataPayload {
                         new ArrayList<>(
                                 Objects.requireNonNull(stateDescriptors, "stateDescriptors")));
         this.schemaStore = schemaStore == null ? StateInspectSchemaStore.empty() : schemaStore;
+        this.volumeDirectories = CobbleSnapshotVolumeRoots.unique(volumeDirectories);
     }
 
     public ShardSnapshot shardSnapshot() {
@@ -44,5 +47,9 @@ public final class CobbleSnapshotMetadataPayload {
 
     public StateInspectSchemaStore schemaStore() {
         return schemaStore;
+    }
+
+    public List<String> volumeDirectories() {
+        return volumeDirectories;
     }
 }

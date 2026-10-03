@@ -173,7 +173,8 @@ final class CobbleKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
                         () -> !stateTypes.isEmpty() || hasCobblePriorityQueues(),
                         this::hasCobblePriorityQueues,
                         this::stateDescriptorSnapshot,
-                        this::buildSchemaStore);
+                        this::buildSchemaStore,
+                        cobbleConfig);
         this.resourcesClosed = new AtomicBoolean(false);
         this.manualTtlTimeProviderForTests = manualTtlTimeProviderForTests;
         this.canonicalMetadata = new CobbleCanonicalSavepointMetadata();

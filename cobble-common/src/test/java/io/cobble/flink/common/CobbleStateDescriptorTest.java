@@ -67,7 +67,11 @@ class CobbleStateDescriptorTest {
                         CobbleStateDescriptor.forTimer("timer", "__cobble_timer__timer"));
         CobbleSnapshotMetadataPayload payload =
                 new CobbleSnapshotMetadataPayload(
-                        shard(), false, descriptors, StateInspectSchemaStore.empty());
+                        Arrays.asList("s3://bucket/old-root", "s3://bucket/new-root"),
+                        shard(),
+                        false,
+                        descriptors,
+                        StateInspectSchemaStore.empty());
         DataOutputSerializer output = new DataOutputSerializer(256);
 
         CobbleSnapshotMetadataCodec.write(payload, output);
@@ -76,6 +80,7 @@ class CobbleStateDescriptorTest {
                         new DataInputDeserializer(output.getCopyOfBuffer()));
 
         assertEquals(descriptors, restored.stateDescriptors());
+        assertEquals(payload.volumeDirectories(), restored.volumeDirectories());
         assertEquals(Collections.emptyMap(), restored.shardSnapshot().columnFamilyIds);
     }
 
@@ -84,7 +89,11 @@ class CobbleStateDescriptorTest {
         ShardSnapshot shard = directShard();
         CobbleSnapshotMetadataPayload payload =
                 new CobbleSnapshotMetadataPayload(
-                        shard, false, Collections.emptyList(), StateInspectSchemaStore.empty());
+                        Collections.emptyList(),
+                        shard,
+                        false,
+                        Collections.emptyList(),
+                        StateInspectSchemaStore.empty());
         DataOutputSerializer output = new DataOutputSerializer(256);
 
         CobbleSnapshotMetadataCodec.write(payload, output);

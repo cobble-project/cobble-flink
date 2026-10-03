@@ -21,7 +21,8 @@ public final class CobbleSnapshotMetadataCodec {
     /** Identifies a Cobble keyed-state payload inside a Flink metadata stream. */
     public static final int MAGIC = 0x43425348;
 
-    public static final int VERSION = 2;
+    public static final int VERSION = 3;
+    private static final int MAX_VOLUME_DIRECTORIES = 10_000;
     private static final int MAX_STATE_DESCRIPTORS = 100_000;
     public static final int MAX_SCHEMA_BYTES = 16 * 1024 * 1024;
 
@@ -75,6 +76,14 @@ public final class CobbleSnapshotMetadataCodec {
         }
         output.writeInt(schemaBytes.length);
         output.write(schemaBytes);
+        List<String> volumeDirectories = payload.volumeDirectories();
+        if (volumeDirectories.size() > MAX_VOLUME_DIRECTORIES) {
+            throw new IOException("Cobble snapshot volume directory count exceeds the limit");
+        }
+        output.writeInt(volumeDirectories.size());
+        for (String directory : volumeDirectories) {
+            output.writeUTF(directory);
+        }
     }
 
     private static CobbleSnapshotMetadataPayload readPayload(DataInputView input)
@@ -90,11 +99,18 @@ public final class CobbleSnapshotMetadataCodec {
         }
         ShardSnapshot shardSnapshot = CobbleShardSnapshotCodec.read(input);
         boolean containsCobbleTimers = input.readBoolean();
+        List<CobbleStateDescriptor> descriptors = readStateDescriptors(input);
+        StateInspectSchemaStore schemas = readSchemaPayload(input);
+        int volumeCount = input.readInt();
+        if (volumeCount < 0 || volumeCount > MAX_VOLUME_DIRECTORIES) {
+            throw new IOException("Cobble snapshot volume directory count is out of range");
+        }
+        List<String> volumeDirectories = new ArrayList<>(volumeCount);
+        for (int index = 0; index < volumeCount; index++) {
+            volumeDirectories.add(input.readUTF());
+        }
         return new CobbleSnapshotMetadataPayload(
-                shardSnapshot,
-                containsCobbleTimers,
-                readStateDescriptors(input),
-                readSchemaPayload(input));
+                volumeDirectories, shardSnapshot, containsCobbleTimers, descriptors, schemas);
     }
 
     private static void writeStateDescriptor(

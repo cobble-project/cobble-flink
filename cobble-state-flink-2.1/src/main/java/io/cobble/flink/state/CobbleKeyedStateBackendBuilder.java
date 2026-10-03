@@ -4,6 +4,7 @@ import io.cobble.Config;
 import io.cobble.RecoveryMode;
 import io.cobble.ShardSnapshot;
 import io.cobble.flink.common.CobbleNativeMetrics;
+import io.cobble.flink.common.CobbleSnapshotVolumeRoots;
 import io.cobble.flink.common.CobbleStateDescriptor;
 import io.cobble.structured.Db;
 
@@ -454,6 +455,16 @@ final class CobbleKeyedStateBackendBuilder<K> {
         // volume. Put the claimed source first before the restored DB starts writing snapshots for
         // the new job.
         volumes.addAll(0, claimedSourceVolumes);
+        List<String> inheritedRoots = new ArrayList<>();
+        for (RestoreSource source : restoreSources) {
+            inheritedRoots.addAll(source.metadata.volumeDirectories());
+        }
+        CobbleSnapshotVolumeRoots.addReadonlyVolumes(
+                volumes,
+                inheritedRoots,
+                volume ->
+                        CobbleFlinkConfigMapper.applyCheckpointVolumeOptions(
+                                volume, volume.baseDir, flinkConfig));
     }
 
     /** Fills the Cobble config object with volume, bucket, and memory settings. */
@@ -700,9 +711,9 @@ final class CobbleKeyedStateBackendBuilder<K> {
                 }
                 int[] intersectionStarts = new int[] {intersectionStart(source.keyGroupRange)};
                 int[] intersectionEnds = new int[] {intersectionEnd(source.keyGroupRange)};
-                db.expandBucket(
+                db.expandBucketFromManifest(
                         source.metadata.shardSnapshot().dbId,
-                        source.metadata.shardSnapshot().snapshotId,
+                        source.metadata.shardSnapshot().manifestPath,
                         intersectionStarts,
                         intersectionEnds,
                         io.cobble.structured.ExpandStorageMode.ADOPT_ASYNC);

@@ -1,8 +1,10 @@
 package io.cobble.flink.state;
 
 import io.cobble.CancelledError;
+import io.cobble.Config;
 import io.cobble.PendingSnapshot;
 import io.cobble.ShardSnapshot;
+import io.cobble.flink.common.CobbleSnapshotVolumeRoots;
 import io.cobble.flink.common.CobbleStateDescriptor;
 import io.cobble.flink.common.inspect.StateInspectSchemaStore;
 import io.cobble.structured.Db;
@@ -52,6 +54,7 @@ final class CobbleSnapshotStrategy
     private final Supplier<List<CobbleStateDescriptor>> stateDescriptorSupplier;
     private final Supplier<StateInspectSchemaStore> schemaStoreSupplier;
     private final UUID backendIdentifier;
+    private final List<String> volumeDirectories;
     private final Map<Long, TrackedSnapshot> trackedSnapshots;
     private final Map<Long, CobbleSnapshotResources> pendingSnapshots;
 
@@ -61,7 +64,8 @@ final class CobbleSnapshotStrategy
             Supplier<Boolean> hasRegisteredState,
             Supplier<Boolean> hasCobbleTimers,
             Supplier<List<CobbleStateDescriptor>> stateDescriptorSupplier,
-            Supplier<StateInspectSchemaStore> schemaStoreSupplier) {
+            Supplier<StateInspectSchemaStore> schemaStoreSupplier,
+            Config cobbleConfig) {
         this.cobbleDb = cobbleDb;
         this.keyGroupRange = keyGroupRange;
         this.hasRegisteredState = hasRegisteredState;
@@ -69,6 +73,7 @@ final class CobbleSnapshotStrategy
         this.stateDescriptorSupplier = stateDescriptorSupplier;
         this.schemaStoreSupplier = schemaStoreSupplier;
         this.backendIdentifier = UUID.randomUUID();
+        this.volumeDirectories = CobbleSnapshotVolumeRoots.fromConfig(cobbleConfig);
         this.trackedSnapshots = new ConcurrentHashMap<>();
         this.pendingSnapshots = new ConcurrentHashMap<>();
     }
@@ -177,6 +182,7 @@ final class CobbleSnapshotStrategy
                         "Cobble snapshot has registered state but no runtime row descriptors.");
             }
             CobbleSnapshotMetadata.fromShardSnapshot(
+                            volumeDirectories,
                             shardSnapshot,
                             hasCobbleTimers.get(),
                             stateDescriptors,
