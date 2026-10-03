@@ -20,6 +20,7 @@ const state = {
   inspectRefreshInFlight: false,
   sessionRecoveryPromise: null,
   sessionRecoveryCheckpointId: null,
+  sessionRecoveryKind: null,
   inspectAutoRefreshEnabled: false,
   inspectAutoRefreshSeconds: 5,
   errorSource: null,
@@ -45,11 +46,27 @@ const MAX_SESSION_RECOVERY_TRANSITIONS = 10
 
 const $ = (id) => document.getElementById(id)
 
+function parseExactJson(text) {
+  // Quote only unsafe integer tokens, leaving strings and ordinary JSON numbers unchanged.
+  const exact = text.replace(/"(?:[^"\\]|\\.)*"|-?(?:0|[1-9]\d*)(?:\.\d+)?(?:[eE][+-]?\d+)?/g, (token) => {
+    if (/^-?\d+$/.test(token) && !Number.isSafeInteger(Number(token))) return JSON.stringify(token)
+    return token
+  })
+  return JSON.parse(exact)
+}
+
+function requestJson(body) {
+  if (typeof body.checkpoint !== 'bigint') return JSON.stringify(body)
+  // Checkpoint selection stays a JSON number on the wire, even beyond JS's integer range.
+  return JSON.stringify({ ...body, checkpoint: null })
+    .replace('"checkpoint":null', `"checkpoint":${body.checkpoint}`)
+}
+
 async function request(path, options = {}) {
   const headers = { ...(options.headers || {}) }
   if (options.body && !headers['Content-Type']) headers['Content-Type'] = 'application/json'
   const response = await fetch(path, { ...options, headers })
-  const data = await response.json().catch(() => ({}))
+  const data = await response.text().then(parseExactJson).catch(() => ({}))
   if (!response.ok) {
     const error = new Error(data.message || `HTTP ${response.status}`)
     error.code = data.code
@@ -63,7 +80,7 @@ function post(path, body) {
   return request(path, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(body),
+    body: requestJson(body),
   })
 }
 
@@ -123,8 +140,10 @@ async function refresh() {
     const latest = catalog.checkpoints?.[0]
     if (state.selectedLatest
         && latest
-        && Number(latest.checkpoint_id) > Number(state.meta?.selected_checkpoint_id)) {
-      await replaceSession('latest', state.meta?.selected_operator_id || '', state.sourcePath, catalog)
+        && isNewerCheckpointId(selectedCheckpointId(), latest.checkpoint_id)) {
+      await replaceSession('latest', state.meta?.selected_operator_id || '', state.sourcePath, catalog,
+        { preserveTrackedLookups: true })
+      if (state.trackedLookups.length) await runLookup()
       return
     }
     const [session, overview] = await withSessionRecovery(() => Promise.all([
@@ -183,8 +202,8 @@ function renderMeta() {
 }
 
 function selectedCheckpointEntry() {
-  const selectedId = Number(state.meta?.selected_checkpoint_id)
-  return state.snapshots.find((checkpoint) => Number(checkpoint.id) === selectedId) || state.snapshots[0]
+  return state.snapshots.find((checkpoint) => sameCheckpointId(checkpoint.id, selectedCheckpointId()))
+    || state.snapshots[0]
 }
 
 function renderOperatorOptions() {
@@ -433,7 +452,7 @@ function renderSnapshots() {
   renderLatestRows(body, checkpointMode, sourceKind)
   for (const snapshot of state.snapshots) {
     const selected = state.meta?.selected_checkpoint !== 'latest'
-      && Number(state.meta?.selected_checkpoint_id) === Number(snapshot.id)
+      && sameCheckpointId(selectedCheckpointId(), snapshot.id)
     const row = document.createElement('tr')
     const label = snapshotLabel(snapshot.id, sourceKind)
     row.innerHTML = `
@@ -499,11 +518,11 @@ async function switchSource(
   }
 }
 
-// The sessions API accepts the literal 'latest' or a JSON number. Checkpoint ids reach here as
-// strings -- from a data attribute on the Open button, or from String() in the operator handler --
-// so coerce numeric ones back to numbers. Anything else is passed through for the server to reject.
+// The API requires numeric checkpoint ids; unsafe ones are serialized without rounding.
 function checkpointParam(checkpointId) {
-  if (typeof checkpointId === 'string' && /^\d+$/.test(checkpointId)) return Number(checkpointId)
+  if (typeof checkpointId === 'string' && /^\d+$/.test(checkpointId)) {
+    return Number.isSafeInteger(Number(checkpointId)) ? Number(checkpointId) : BigInt(checkpointId)
+  }
   return checkpointId
 }
 
@@ -522,9 +541,11 @@ async function replaceSession(checkpointId, operatorId, source, discovered = nul
   }
   const previousId = state.sessionId
   state.sessionId = replacement.session_id
-  state.selectedLatest = checkpointId === 'latest'
-  state.columnSelections = Object.create(null)
-  state.observedRawColumns = Object.create(null)
+  if (!options.preserveSelectionMode) state.selectedLatest = checkpointId === 'latest'
+  if (!options.preserveTrackedLookups) {
+    state.columnSelections = Object.create(null)
+    state.observedRawColumns = Object.create(null)
+  }
   closeColumnPicker()
   applySession(replacement, catalog, replacementOverview)
   resetScanState()
@@ -547,41 +568,50 @@ function fixedCheckpointError(error) {
   return error
 }
 
-async function recoverLatestSession(failedCheckpointId) {
+async function recoverSession(failedCheckpointId, expiredSessionId = null) {
+  const kind = expiredSessionId === null ? 'checkpoint' : 'session'
   if (state.sessionRecoveryPromise
-      && sameCheckpointId(state.sessionRecoveryCheckpointId, failedCheckpointId)) {
+      && sameCheckpointId(state.sessionRecoveryCheckpointId, failedCheckpointId)
+      && state.sessionRecoveryKind === kind) {
     return state.sessionRecoveryPromise
   }
   const recovery = (async () => {
     const source = state.sourcePath
     if (!source) throw new Error('The latest checkpoint source is no longer available.')
     const catalog = await post('/api/v1/discovery', { source })
-    const latestCheckpointId = catalog.checkpoints?.[0]?.checkpoint_id
-    if (!isNewerCheckpointId(failedCheckpointId, latestCheckpointId)
-        || !sameCheckpointId(selectedCheckpointId(), failedCheckpointId)) {
+    if (!sameCheckpointId(selectedCheckpointId(), failedCheckpointId)
+        || (expiredSessionId !== null && state.sessionId !== expiredSessionId)) {
+      return { changed: false, sessionChanged: expiredSessionId !== null,
+        checkpointId: selectedCheckpointId() }
+    }
+    if (expiredSessionId === null
+        && !isNewerCheckpointId(failedCheckpointId, catalog.checkpoints?.[0]?.checkpoint_id)) {
       return { changed: false, checkpointId: selectedCheckpointId() }
     }
     const replacement = await replaceSession(
-      'latest',
+      expiredSessionId === null ? 'latest' : failedCheckpointId,
       state.meta?.selected_operator_id || '',
       source,
       catalog,
-      { preserveTrackedLookups: true },
+      { preserveTrackedLookups: true, preserveSelectionMode: expiredSessionId !== null },
     )
     const checkpointId = replacement.checkpoint_id
     return {
       changed: isNewerCheckpointId(failedCheckpointId, checkpointId),
+      sessionChanged: expiredSessionId !== null,
       checkpointId,
     }
   })()
   state.sessionRecoveryPromise = recovery
   state.sessionRecoveryCheckpointId = failedCheckpointId
+  state.sessionRecoveryKind = kind
   try {
     return await recovery
   } finally {
     if (state.sessionRecoveryPromise === recovery) {
       state.sessionRecoveryPromise = null
       state.sessionRecoveryCheckpointId = null
+      state.sessionRecoveryKind = null
     }
   }
 }
@@ -605,6 +635,7 @@ function isNewerCheckpointId(current, candidate) {
 
 async function withSessionRecovery(operation) {
   const attemptedCheckpointIds = new Set()
+  const renewedCheckpointIds = new Set()
   let transitions = 0
   let lastRecoveryError = null
   while (true) {
@@ -613,11 +644,27 @@ async function withSessionRecovery(operation) {
       throw lastRecoveryError || new Error('The latest checkpoint could not be recovered.')
     }
     attemptedCheckpointIds.add(String(checkpointId))
+    const sessionId = state.sessionId
     try {
       return await operation()
     } catch (error) {
       if (!isSessionRecoveryError(error)) throw error
-      if (!state.selectedLatest) throw fixedCheckpointError(error)
+      if (error.code === 'SESSION_EXPIRED' && !renewedCheckpointIds.has(String(checkpointId))) {
+        renewedCheckpointIds.add(String(checkpointId))
+        try {
+          const renewed = await recoverSession(checkpointId, sessionId)
+          if (renewed.sessionChanged && sameCheckpointId(checkpointId, renewed.checkpointId)) {
+            attemptedCheckpointIds.delete(String(checkpointId))
+            continue
+          }
+        } catch (renewalError) {
+          if (!isSessionRecoveryError(renewalError)) throw renewalError
+          error = renewalError
+        }
+      }
+      if (!state.selectedLatest) {
+        throw error.code === 'CHECKPOINT_UNAVAILABLE' ? fixedCheckpointError(error) : error
+      }
       lastRecoveryError = error
 
       const currentCheckpointId = selectedCheckpointId()
@@ -632,7 +679,7 @@ async function withSessionRecovery(operation) {
       }
       if (transitions >= MAX_SESSION_RECOVERY_TRANSITIONS) throw error
 
-      const recovery = await recoverLatestSession(checkpointId)
+      const recovery = await recoverSession(checkpointId)
       if (!recovery.changed
           || recovery.checkpointId == null
           || !isNewerCheckpointId(checkpointId, recovery.checkpointId)
@@ -1034,14 +1081,14 @@ function scheduleInspectAutoRefresh() {
         const catalog = await post('/api/v1/discovery', { source: state.sourcePath })
         const latest = catalog.checkpoints?.[0]
         if (latest
-            && Number(latest.checkpoint_id) > Number(state.meta?.selected_checkpoint_id)) {
+            && isNewerCheckpointId(selectedCheckpointId(), latest.checkpoint_id)) {
           await replaceSession(
             'latest',
             state.meta?.selected_operator_id || '',
             state.sourcePath,
             catalog,
+            { preserveTrackedLookups: true },
           )
-          return
         }
       }
       if (state.inspectMode === 'lookup') {
@@ -1789,6 +1836,12 @@ function semanticTableValue(part, field, index) {
 
 function renderSemanticTableValue(value, displayId) {
   if (!value || typeof value !== 'object') return '<span class="muted-text">null</span>'
+  if (value.kind === 'SCALAR' && !Object.prototype.hasOwnProperty.call(value, 'value')) {
+    return '<span class="muted-text">null</span>'
+  }
+  if (value.kind === 'RAW') {
+    return value.raw_b64 ? renderCode(value.raw_b64) : '<span class="muted-text">empty bytes</span>'
+  }
   if (Object.prototype.hasOwnProperty.call(value, 'value')) {
     return renderDecodedValue(value.value)
   }
@@ -1977,14 +2030,14 @@ function decodedTableFields(decoded) {
   if (Array.isArray(decoded)) return decoded.flatMap((value) => decodedTableFields(value))
   if (!decoded || typeof decoded !== 'object') return []
   if (decoded.kind === 'ROW' && Array.isArray(decoded.fields)) return decoded.fields
-  return Object.prototype.hasOwnProperty.call(decoded, 'value') ? [decoded] : []
+  return decoded.kind || Object.prototype.hasOwnProperty.call(decoded, 'value') ? [decoded] : []
 }
 
 function renderSinkExpandedValue(decodedField) {
-  if (!decodedField || !Object.prototype.hasOwnProperty.call(decodedField, 'value')) {
+  if (!decodedField) {
     return '<span class="muted-text">null</span>'
   }
-  return renderDecodedValue(decodedField.value)
+  return renderDecodedValue(decodedField.kind ? decodedField : decodedField.value)
 }
 
 function renderSinkFields(fields = []) {
@@ -1995,7 +2048,7 @@ function renderSinkFields(fields = []) {
 function renderSinkField(field) {
   const label = field?.name ?? String(field?.index ?? '')
   const type = field?.logical_type || ''
-  const value = Object.prototype.hasOwnProperty.call(field || {}, 'value') ? field.value : null
+  const value = field?.kind ? field : field?.value ?? null
   return `
     <div class="decoded-row">
       <span class="decoded-label">${escapeHtml(label)}</span>

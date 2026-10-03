@@ -125,6 +125,11 @@
                 <directory>${project.basedir}/../cobble-flink-monitor/src/main/resources</directory>
             </resource>
         </resources>
+        <testResources>
+            <testResource>
+                <directory>${project.basedir}/../cobble-flink-monitor/src/test/js</directory>
+            </testResource>
+        </testResources>
         <pluginManagement>
             <plugins>
                 <plugin>

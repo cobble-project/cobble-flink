@@ -221,8 +221,9 @@ server is unauthenticated and binds to loopback by default.
 ## Notes
 
 - The monitor never writes to the selected datasource.
-- Each open session pins `latest` to a concrete id. Refresh opens a replacement
-  session only after a newer checkpoint or snapshot is available.
+- Each open session pins `latest` to a concrete id. Refresh follows newer
+  checkpoints or snapshots while preserving tracked rows. An expired session
+  can be reopened at the same id; exact selections never switch to a newer id.
 - Checkpoint datasources support operator discovery.
 - Cobble Tables include their schema. Flink state inspection uses schema
   metadata from the checkpoint; explicit raw inspection remains available for
