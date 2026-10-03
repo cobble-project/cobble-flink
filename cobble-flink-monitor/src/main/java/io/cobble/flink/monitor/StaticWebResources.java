@@ -22,6 +22,8 @@ final class StaticWebResources {
         for (String path : RESOURCE_PATHS) {
             resources.put(path, loadResource("/web" + path));
         }
+        resources.put(
+                "/openapi/cobble-inspect-v1.yaml", loadResource("/openapi/cobble-inspect-v1.yaml"));
         return Collections.unmodifiableMap(resources);
     }
 

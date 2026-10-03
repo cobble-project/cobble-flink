@@ -56,7 +56,10 @@ curl -sS -X DELETE "$COBBLE_MONITOR/api/v1/sessions/$SESSION_ID"
 ```
 
 Sessions also expire after the configured idle timeout. A deleted or expired
-session returns HTTP `410`.
+session returns HTTP `410 SESSION_EXPIRED`; it does not imply that the pinned
+checkpoint has expired. Reopen that same checkpoint id when it is still
+available. `CHECKPOINT_UNAVAILABLE` instead indicates that the checkpoint
+itself cannot be read. Exact selections must not silently switch ids.
 
 ## Scan
 
@@ -100,6 +103,11 @@ prefix:
 
 Use a decimal string for `INTEGER` when a 64-bit value may exceed the exact
 integer range of your JSON client.
+
+Omit `columns` to read all value columns. `columns: []` is a key-only projection
+for schema-aware Table scans and typed sink lookups. Raw scans (including an
+explicit raw prefix) and raw lookups require at least one column index and
+reject an empty projection with HTTP `400 INVALID_INPUT`.
 
 ## Exact Lookup
 

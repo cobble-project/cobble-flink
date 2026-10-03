@@ -156,6 +156,9 @@ final class InspectSessionImpl implements InspectSession {
         int limit = request.limit();
         int[] columns = target.allowsColumns ? request.columns() : null;
         validateColumns(request.columns(), target);
+        if (columns != null && columns.length == 0) {
+            throw invalid("Raw column projection must select at least one column");
+        }
         ScanPlan plan = scanPlan(request, target);
         byte[] prefix = plan.prefix;
         byte[] end = prefix.length == 0 ? MAX_KEY : prefixUpperBound(prefix);
@@ -231,6 +234,11 @@ final class InspectSessionImpl implements InspectSession {
         InspectTarget target = target(request.targetId());
         int[] columns = target.allowsColumns ? request.columns() : null;
         validateColumns(request.columns(), target);
+        if (columns != null
+                && columns.length == 0
+                && request.keys().stream().anyMatch(key -> key != null && !key.typed())) {
+            throw invalid("Key-only Table lookup requires typed keys, not raw keys");
+        }
         List<InspectRow> rows = new ArrayList<>(request.keys().size());
         boolean typedTableLookup =
                 target.tableSchema != null
@@ -897,6 +905,9 @@ final class InspectSessionImpl implements InspectSession {
         }
         if (!target.allowsColumns) {
             throw invalid("Column projection is not supported for target " + target.id);
+        }
+        if (columns.length == 0 && target.tableSchema == null) {
+            throw invalid("Raw column projection must select at least one column");
         }
         Set<Integer> seen = new HashSet<>();
         for (int column : columns) {

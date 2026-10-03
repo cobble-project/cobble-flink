@@ -12,6 +12,7 @@ import io.cobble.flink.inspect.LookupResult;
 import io.cobble.flink.inspect.ScanRequest;
 
 import com.google.gson.Gson;
+import com.google.gson.GsonBuilder;
 import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
 import com.google.gson.JsonParseException;
@@ -44,7 +45,7 @@ import java.util.concurrent.atomic.AtomicInteger;
 
 /** Loopback-first HTTP/UI adapter for the public Cobble inspect SDK. */
 public final class CobbleFlinkMonitorServer {
-    private static final Gson GSON = new Gson();
+    private static final Gson GSON = new GsonBuilder().serializeNulls().create();
 
     private CobbleFlinkMonitorServer() {}
 

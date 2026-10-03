@@ -15,6 +15,7 @@ import io.cobble.flink.common.inspect.StateInspectSchemaStore;
 import io.cobble.flink.common.inspect.StateInspectSemanticSchema;
 import io.cobble.flink.common.inspect.StateInspectType;
 import io.cobble.flink.common.table.CobbleTableRowConverter;
+import io.cobble.flink.inspect.SemanticType;
 import io.cobble.structured.Db;
 import io.cobble.table.DataField;
 import io.cobble.table.LogicalTypes;
@@ -142,6 +143,11 @@ class CobbleFlinkMonitorHttpIT {
             HttpClient secondHttp = HttpClient.newHttpClient();
 
             assertEquals(200, get(http, base.resolve("/healthz")).statusCode());
+            HttpResponse<String> openApi =
+                    get(http, base.resolve("/openapi/cobble-inspect-v1.yaml"));
+            assertEquals(200, openApi.statusCode());
+            assertTrue(openApi.headers().firstValue("Content-Type").orElse("").contains("yaml"));
+            assertTrue(openApi.body().startsWith("openapi: 3.0.3"));
             String index = get(http, base.resolve("/")).body();
             assertTrue(index.contains("COBBLE_MONITOR_INITIAL_SOURCE"));
             assertTrue(index.contains(sink.toUri().toString()));
@@ -311,6 +317,39 @@ class CobbleFlinkMonitorHttpIT {
                                                     + "\",\"limit\":1,\"prefix_b64\":\"\"}")
                                     .body());
             assertEquals(1, emptyRawPrefix.getAsJsonArray("rows").size());
+            for (String route : Arrays.asList("scan", "lookup")) {
+                String keys =
+                        "lookup".equals(route)
+                                ? ",\"keys\":[{\"kind\":\"raw\",\"bucket\":0,\"key_b64\":\"YWxwaGE=\"}]"
+                                : "";
+                HttpResponse<String> emptyProjection =
+                        post(
+                                http,
+                                base.resolve("/api/v1/sessions/" + rawId + "/" + route),
+                                "{\"target_id\":\"" + rawTarget + "\",\"columns\":[]" + keys + "}");
+                assertEquals(400, emptyProjection.statusCode(), emptyProjection.body());
+                assertEquals(
+                        "INVALID_INPUT", json(emptyProjection.body()).get("code").getAsString());
+            }
+            JsonObject keyOnly =
+                    json(
+                            post(
+                                            http,
+                                            base.resolve("/api/v1/sessions/" + sinkId + "/scan"),
+                                            "{\"target_id\":\""
+                                                    + sinkTarget
+                                                    + "\",\"columns\":[],\"limit\":2}")
+                                    .body());
+            assertEquals(2, keyOnly.getAsJsonArray("rows").size());
+            assertTrue(keyOnly.has("next_page_token"));
+            assertTrue(keyOnly.get("next_page_token").isJsonNull());
+            assertEquals(
+                    0,
+                    keyOnly.getAsJsonArray("rows")
+                            .get(0)
+                            .getAsJsonObject()
+                            .getAsJsonArray("columns_b64")
+                            .size());
             JsonObject explicitRawTable =
                     json(
                             post(
@@ -599,6 +638,13 @@ class CobbleFlinkMonitorHttpIT {
         assertTrue(contract.contains("key_b64"));
         assertTrue(contract.contains("next_page_token"));
         assertTrue(contract.contains("CHECKPOINT_UNAVAILABLE"));
+        String semanticKind =
+                contract.substring(
+                        contract.indexOf("    SemanticType:"), contract.indexOf("    Overview:"));
+        for (SemanticType.Kind kind : SemanticType.Kind.values()) {
+            assertTrue(semanticKind.contains(kind.name()), kind.name());
+        }
+        assertFalse(semanticKind.contains("SCALAR"));
     }
 
     private JsonObject createSession(HttpClient http, URI base, Path source) throws Exception {

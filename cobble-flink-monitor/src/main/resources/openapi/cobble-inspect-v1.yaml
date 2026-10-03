@@ -207,7 +207,7 @@ components:
       type: object
       required: [kind, fields]
       properties:
-        kind: {type: string, enum: [UNKNOWN, SCALAR, ROW, TUPLE, LIST, MAP]}
+        kind: {type: string, enum: [BOOLEAN, INTEGER, FLOAT, STRING, BYTES, ROW, TUPLE, LIST, MAP, UNKNOWN]}
         logical_type: {type: string, nullable: true}
         fields: {type: array, items: {$ref: '#/components/schemas/SemanticField'}}
         element_type: {$ref: '#/components/schemas/SemanticType'}
@@ -250,7 +250,10 @@ components:
         page_token: {type: string, description: Opaque and bound to session, target, filters, and projection}
         bucket: {type: integer, minimum: 0}
         prefix_b64: {type: string, format: byte}
-        columns: {type: array, items: {type: integer, minimum: 0}}
+        columns:
+          type: array
+          description: Physical value-column indexes. Omit for all columns. An empty array is key-only for typed Table targets; raw targets require at least one index.
+          items: {type: integer, minimum: 0}
         filter:
           oneOf:
             - {$ref: '#/components/schemas/SinkFilter'}
@@ -293,7 +296,10 @@ components:
       required: [target_id, keys]
       properties:
         target_id: {type: string}
-        columns: {type: array, items: {type: integer, minimum: 0}}
+        columns:
+          type: array
+          description: Physical value-column indexes. Omit for all columns. An empty array is key-only for typed Table targets; raw targets require at least one index.
+          items: {type: integer, minimum: 0}
         keys:
           type: array
           minItems: 1
