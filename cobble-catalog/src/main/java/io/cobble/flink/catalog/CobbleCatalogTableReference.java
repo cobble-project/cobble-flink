@@ -2,6 +2,7 @@ package io.cobble.flink.catalog;
 
 import io.cobble.Config;
 import io.cobble.flink.common.CobbleConnectorStorageOptions;
+import io.cobble.flink.common.CobbleFlinkStorageConfig;
 import io.cobble.flink.common.CobbleLoader;
 import io.cobble.table.CatalogTable;
 import io.cobble.table.FileCatalog;
@@ -98,6 +99,17 @@ public final class CobbleCatalogTableReference implements Serializable {
         }
     }
 
+    public CobbleCatalogTableReference withStorageConfig(CobbleFlinkStorageConfig config) {
+        return new CobbleCatalogTableReference(
+                warehouse,
+                storageId,
+                database,
+                table,
+                tableId,
+                schemaId,
+                config.resolve(warehouse, storageOptions));
+    }
+
     /** Rebuilds the catalog runtime, including the connector-scoped storage options. */
     public Config runtimeConfig() {
         Config config = new Config();
@@ -109,7 +121,7 @@ public final class CobbleCatalogTableReference implements Serializable {
                         Config.VolumeUsageKind.META,
                         Config.VolumeUsageKind.SNAPSHOT);
         storageOptions.applyTo(volume);
-        config.addVolume(volume);
+        CobbleFlinkStorageConfig.empty().register(config, volume);
         return config;
     }
 

@@ -1,6 +1,7 @@
 package io.cobble.flink.table;
 
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
@@ -19,13 +20,19 @@ import org.apache.flink.api.common.ExecutionConfig;
 import org.apache.flink.api.common.typeinfo.TypeInformation;
 import org.apache.flink.api.common.typeutils.TypeSerializer;
 import org.apache.flink.api.common.typeutils.base.IntSerializer;
+import org.apache.flink.configuration.Configuration;
 import org.apache.flink.formats.avro.typeutils.AvroSerializer;
 import org.apache.flink.runtime.state.VoidNamespaceSerializer;
 import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
 import org.apache.flink.table.api.DataTypes;
 import org.apache.flink.table.api.bridge.java.StreamTableEnvironment;
+import org.apache.flink.table.catalog.CatalogTable;
+import org.apache.flink.table.catalog.ObjectIdentifier;
+import org.apache.flink.table.catalog.ResolvedCatalogTable;
+import org.apache.flink.table.catalog.ResolvedSchema;
 import org.apache.flink.table.connector.source.DynamicTableSource;
 import org.apache.flink.table.connector.source.LookupTableSource;
+import org.apache.flink.table.factories.FactoryUtil;
 import org.apache.flink.table.runtime.typeutils.RowDataSerializer;
 import org.apache.flink.table.types.logical.IntType;
 import org.apache.flink.table.types.logical.VarCharType;
@@ -44,6 +51,58 @@ import java.util.List;
  * the (unimplemented) scan runtime is requested.
  */
 class CobbleSourceFactoryITTest {
+
+    @Test
+    void stateFactoryCapturesGlobalProviderSettingsWithoutDdlStorageOptions() throws Exception {
+        Path root = stateCheckpointRoot("state-global-provider-options");
+        Configuration global = new Configuration();
+        global.setString("s3.region", "factory-region");
+        global.setString("s3.endpoint", "localhost:9000");
+        java.util.Map<String, String> options = new java.util.HashMap<>();
+        options.put("connector", "cobble");
+        options.put("source.kind", "state");
+        options.put("path", root.toUri().toString());
+        options.put("state.name", "orders");
+        org.apache.flink.table.api.Schema schema =
+                org.apache.flink.table.api.Schema.newBuilder()
+                        .column("key", DataTypes.INT())
+                        .column("value", DataTypes.INT())
+                        .build();
+        ResolvedCatalogTable table =
+                new ResolvedCatalogTable(
+                        CatalogTable.of(schema, "", Collections.emptyList(), options),
+                        ResolvedSchema.physical(
+                                new String[] {"key", "value"},
+                                new org.apache.flink.table.types.DataType[] {
+                                    DataTypes.INT(), DataTypes.INT()
+                                }));
+        CobbleStateDynamicTableSource source =
+                (CobbleStateDynamicTableSource)
+                        new CobbleDynamicTableSourceFactory()
+                                .createDynamicTableSource(
+                                        new FactoryUtil.DefaultDynamicTableContext(
+                                                ObjectIdentifier.of("catalog", "database", "state"),
+                                                table,
+                                                Collections.emptyMap(),
+                                                global,
+                                                getClass().getClassLoader(),
+                                                false));
+        source.applyProjection(
+                new int[][] {{1}, {0}},
+                DataTypes.ROW(
+                        DataTypes.FIELD("value", DataTypes.INT()),
+                        DataTypes.FIELD("key", DataTypes.INT())));
+        java.lang.reflect.Field field =
+                CobbleStateDynamicTableSource.class.getDeclaredField("config");
+        field.setAccessible(true);
+        StateSourceConfig config = (StateSourceConfig) field.get(source.copy());
+        io.cobble.Config.VolumeDescriptor volume = new io.cobble.Config.VolumeDescriptor();
+        volume.baseDir = "s3://bucket/checkpoint";
+        config.storageConfig().fill(volume);
+        assertEquals("factory-region", volume.customOptions.get("region"));
+        assertEquals("http://localhost:9000", volume.customOptions.get("endpoint"));
+        assertEquals("value", config.projectedFields().get(0).name());
+    }
 
     @Test
     void projectedSourceCopiesKeepIndependentLookupMappings() {

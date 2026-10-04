@@ -137,21 +137,12 @@ public final class CobbleEmbeddedCheckpointReader {
     private static void addVolume(Config target, Config source, String root) {
         Config.VolumeDescriptor descriptor = new Config.VolumeDescriptor();
         descriptor.baseDir = normalize(root);
-        if (source.volumes != null && !source.volumes.isEmpty() && source.volumes.get(0) != null) {
-            Config.VolumeDescriptor inherited = source.volumes.get(0);
-            descriptor.accessId = inherited.accessId;
-            descriptor.secretKey = inherited.secretKey;
-            descriptor.customOptions =
-                    inherited.customOptions == null
-                            ? null
-                            : new LinkedHashMap<String, String>(inherited.customOptions);
-        }
         descriptor.kinds =
                 java.util.Arrays.asList(
                         Config.VolumeUsageKind.PRIMARY_DATA_PRIORITY_HIGH,
                         Config.VolumeUsageKind.META,
                         Config.VolumeUsageKind.SNAPSHOT);
-        target.addVolume(descriptor);
+        CobbleFlinkStorageConfig.empty().withRoutes(source).register(target, descriptor);
     }
 
     private static void validate(

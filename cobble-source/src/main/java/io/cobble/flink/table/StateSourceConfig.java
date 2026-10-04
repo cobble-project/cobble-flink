@@ -1,5 +1,7 @@
 package io.cobble.flink.table;
 
+import io.cobble.flink.common.CobbleFlinkStorageConfig;
+
 import java.io.Serializable;
 import java.util.ArrayList;
 import java.util.Collections;
@@ -53,6 +55,7 @@ final class StateSourceConfig implements Serializable {
     private final List<StateSourceField> outputFields;
     private final int[] outputProjection;
     private final StateSourceLookupKeyContract lookupKeyContract;
+    private final CobbleFlinkStorageConfig storageConfig;
 
     /** Detection-only placeholder: layout is known, schema is not yet resolved. */
     StateSourceConfig(String pathUri, Layout layout) {
@@ -69,6 +72,7 @@ final class StateSourceConfig implements Serializable {
         this.outputFields = Collections.emptyList();
         this.outputProjection = new int[0];
         this.lookupKeyContract = StateSourceLookupKeyContract.absent();
+        this.storageConfig = CobbleFlinkStorageConfig.empty();
     }
 
     /** Fully-resolved config ready for state scan and lookup runtimes. */
@@ -126,7 +130,8 @@ final class StateSourceConfig implements Serializable {
                 sourceBlockCacheMemoryBytes,
                 outputFields,
                 lookupKeyContract,
-                SourceProjection.all(outputFields.size()));
+                SourceProjection.all(outputFields.size()),
+                CobbleFlinkStorageConfig.empty());
     }
 
     private StateSourceConfig(
@@ -142,7 +147,8 @@ final class StateSourceConfig implements Serializable {
             long sourceBlockCacheMemoryBytes,
             List<StateSourceField> outputFields,
             StateSourceLookupKeyContract lookupKeyContract,
-            int[] outputProjection) {
+            int[] outputProjection,
+            CobbleFlinkStorageConfig storageConfig) {
         this.pathUri = pathUri;
         this.layout = layout;
         this.operatorId = operatorId;
@@ -155,6 +161,7 @@ final class StateSourceConfig implements Serializable {
         this.sourceBlockCacheMemoryBytes = sourceBlockCacheMemoryBytes;
         this.outputFields = Collections.unmodifiableList(new ArrayList<>(outputFields));
         this.outputProjection = outputProjection.clone();
+        this.storageConfig = storageConfig;
         this.lookupKeyContract =
                 lookupKeyContract == null
                         ? StateSourceLookupKeyContract.absent()
@@ -231,7 +238,30 @@ final class StateSourceConfig implements Serializable {
                 sourceBlockCacheMemoryBytes,
                 outputFields,
                 lookupKeyContract,
-                projection);
+                projection,
+                storageConfig);
+    }
+
+    StateSourceConfig withStorageConfig(CobbleFlinkStorageConfig options) {
+        return new StateSourceConfig(
+                pathUri,
+                layout,
+                operatorId,
+                stateName,
+                stateKind,
+                scanCheckpointId,
+                scanMode,
+                schemaCheckpointId,
+                bucketCount,
+                sourceBlockCacheMemoryBytes,
+                outputFields,
+                lookupKeyContract,
+                outputProjection,
+                options);
+    }
+
+    CobbleFlinkStorageConfig storageConfig() {
+        return storageConfig;
     }
 
     /** The exact-key lookup contract derived from the DDL primary key (absent when no PK). */

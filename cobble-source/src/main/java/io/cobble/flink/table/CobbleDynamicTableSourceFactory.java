@@ -1,6 +1,7 @@
 package io.cobble.flink.table;
 
 import io.cobble.flink.common.CobbleConnectorStorageOptions;
+import io.cobble.flink.common.CobbleFlinkStorageConfig;
 import io.cobble.flink.common.CobbleLoader;
 import io.cobble.flink.common.inspect.StateInspectExactLookupSupport;
 import io.cobble.flink.common.table.CobbleTableRowConverter;
@@ -70,9 +71,12 @@ public final class CobbleDynamicTableSourceFactory implements DynamicTableSource
         helper.validate();
 
         ReadableConfig options = helper.getOptions();
-        CobbleConnectorStorageOptions storageOptions =
+        CobbleConnectorStorageOptions explicitStorageOptions =
                 parseStorageOptions(context.getCatalogTable().getOptions());
         String pathUri = normalizePathToUri(options.get(CobbleSourceTableOptions.PATH));
+        CobbleConnectorStorageOptions storageOptions =
+                CobbleFlinkStorageConfig.from(context.getConfiguration())
+                        .resolve(pathUri, explicitStorageOptions);
         int bucketCount = options.getOptional(CobbleSourceTableOptions.BUCKET).orElse(-1);
         String checkpointId =
                 normalizeCheckpointId(options.get(CobbleSourceTableOptions.SCAN_CHECKPOINT_ID));
@@ -101,7 +105,7 @@ public final class CobbleDynamicTableSourceFactory implements DynamicTableSource
 
         CobbleSourceKind requestedKind =
                 CobbleSourceKind.fromUserOption(options.get(CobbleSourceTableOptions.SOURCE_KIND));
-        if (requestedKind == CobbleSourceKind.STATE && !storageOptions.isEmpty()) {
+        if (requestedKind == CobbleSourceKind.STATE && !explicitStorageOptions.isEmpty()) {
             throw new ValidationException(
                     "Connector-scoped remote storage options apply to Cobble sink-table and raw"
                             + " table roots, not Flink state checkpoint sources.");
@@ -110,7 +114,7 @@ public final class CobbleDynamicTableSourceFactory implements DynamicTableSource
                 CobbleSourceKindDetector.detect(
                         pathUri, requestedKind, isSinkShaped(resolvedSchema), storageOptions);
         if (resolvedSource.kind() == CobbleSourceKind.STATE) {
-            if (!storageOptions.isEmpty()) {
+            if (!explicitStorageOptions.isEmpty()) {
                 throw new ValidationException(
                         "Connector-scoped remote storage options apply to Cobble sink-table and"
                                 + " raw table roots, not Flink state checkpoint sources.");
@@ -274,18 +278,20 @@ public final class CobbleDynamicTableSourceFactory implements DynamicTableSource
 
         StateSourceConfig config =
                 new StateSourceConfig(
-                        pathUri,
-                        detected.layout(),
-                        resolved.operatorId(),
-                        resolved.stateName(),
-                        resolved.stateKind().wireName(),
-                        checkpointId,
-                        scanMode,
-                        resolved.schemaCheckpointId(),
-                        bucketCount,
-                        sourceBlockCacheMemory.getBytes(),
-                        resolved.outputFields(),
-                        lookupKeyContract);
+                                pathUri,
+                                detected.layout(),
+                                resolved.operatorId(),
+                                resolved.stateName(),
+                                resolved.stateKind().wireName(),
+                                checkpointId,
+                                scanMode,
+                                resolved.schemaCheckpointId(),
+                                bucketCount,
+                                sourceBlockCacheMemory.getBytes(),
+                                resolved.outputFields(),
+                                lookupKeyContract)
+                        .withStorageConfig(
+                                CobbleFlinkStorageConfig.from(context.getConfiguration()));
         return new CobbleStateDynamicTableSource(
                 config, context.getObjectIdentifier().asSummaryString());
     }

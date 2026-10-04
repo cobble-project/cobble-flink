@@ -4,6 +4,7 @@ import io.cobble.Config;
 import io.cobble.DbCoordinator;
 import io.cobble.GlobalSnapshot;
 import io.cobble.ShardSnapshot;
+import io.cobble.flink.common.CobbleFlinkStorageConfig;
 import io.cobble.flink.common.inspect.StateInspectSchema;
 import io.cobble.flink.common.inspect.StateInspectSchemaStore;
 import io.cobble.flink.common.inspect.StateInspectSemanticSchema;
@@ -439,8 +440,7 @@ final class CobbleCompletedCheckpointStore implements CompletedCheckpointStore {
         String operatorDirectory =
                 CobblePathUtils.cobbleOperatorSnapshotDirectory(externalPointer, operatorIdHex);
         Config.VolumeDescriptor volume = Config.VolumeDescriptor.singleVolume(operatorDirectory);
-        CobbleFlinkConfigMapper.applyCheckpointVolumeOptions(
-                volume, operatorDirectory, flinkConfig);
+        CobbleFlinkStorageConfig.from(flinkConfig).fill(volume);
         config.addVolume(volume);
         return config;
     }

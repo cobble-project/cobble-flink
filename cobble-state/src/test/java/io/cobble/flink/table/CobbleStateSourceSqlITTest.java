@@ -4,7 +4,9 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import io.cobble.flink.common.CobbleConnectorStorageOptions;
 import io.cobble.flink.common.CobbleEmbeddedCheckpoint;
+import io.cobble.flink.common.CobbleMetadataFileIO;
 import io.cobble.flink.common.inspect.InspectSchemaRegistryLayout;
 import io.cobble.flink.common.inspect.StateInspectSchemaStore;
 import io.cobble.flink.state.CobbleCheckpointingITSupport;
@@ -28,6 +30,7 @@ import org.apache.flink.api.common.state.ReducingStateDescriptor;
 import org.apache.flink.api.common.state.ValueState;
 import org.apache.flink.api.common.state.ValueStateDescriptor;
 import org.apache.flink.api.common.typeinfo.BasicTypeInfo;
+import org.apache.flink.api.common.typeinfo.Types;
 import org.apache.flink.api.common.typeutils.base.StringSerializer;
 import org.apache.flink.configuration.CheckpointingOptions;
 import org.apache.flink.configuration.Configuration;
@@ -35,6 +38,8 @@ import org.apache.flink.configuration.HighAvailabilityOptions;
 import org.apache.flink.configuration.JobManagerOptions;
 import org.apache.flink.configuration.MemorySize;
 import org.apache.flink.configuration.RestOptions;
+import org.apache.flink.core.fs.FileSystem;
+import org.apache.flink.core.plugin.PluginUtils;
 import org.apache.flink.runtime.jobgraph.JobGraph;
 import org.apache.flink.runtime.testutils.MiniClusterResourceConfiguration;
 import org.apache.flink.streaming.api.environment.CheckpointConfig;
@@ -43,24 +48,32 @@ import org.apache.flink.streaming.api.functions.source.RichParallelSourceFunctio
 import org.apache.flink.streaming.api.operators.AbstractStreamOperator;
 import org.apache.flink.streaming.api.operators.OneInputStreamOperator;
 import org.apache.flink.streaming.runtime.streamrecord.StreamRecord;
+import org.apache.flink.table.api.DataTypes;
+import org.apache.flink.table.api.Schema;
 import org.apache.flink.table.api.TableResult;
 import org.apache.flink.table.api.bridge.java.StreamTableEnvironment;
 import org.apache.flink.test.util.MiniClusterWithClientResource;
 import org.apache.flink.types.Row;
 import org.apache.flink.util.CloseableIterator;
+import org.junit.jupiter.api.Assumptions;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
 import java.net.URI;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.DirectoryStream;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.StandardCopyOption;
 import java.time.Duration;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Collections;
 import java.util.Comparator;
+import java.util.HashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -70,12 +83,138 @@ import java.util.concurrent.atomic.AtomicInteger;
 import java.util.stream.Stream;
 
 /** SQL-level proof that Cobble state source DDL reads real Cobble state checkpoints. */
-class CobbleStateSourceSqlITTest {
+public class CobbleStateSourceSqlITTest {
 
     private static final int PARALLELISM = 4;
     private static final int VALUES_PER_KEY = 3;
 
     @TempDir private Path tempDir;
+
+    @Test
+    void coldS3StateScanAndLookupWorkInIndependentJvm() throws Exception {
+        S3TestConfig s3 = S3TestConfig.fromEnvironment();
+        Assumptions.assumeTrue(s3 != null, "S3 fixture environment is not configured");
+
+        String checkpointRoot = s3.root("state-cold-read");
+        try {
+            Path writerLocalState = tempDir.resolve("writer-local-state");
+            Files.createDirectories(writerLocalState);
+            CheckpointInfo checkpoint =
+                    runStatefulJob(
+                            false,
+                            checkpointRoot,
+                            tempDir.resolve("remote-checkpoint-placeholder"),
+                            writerLocalState,
+                            s3.flinkConfiguration(),
+                            2);
+
+            Path hiddenWriterLocalState = tempDir.resolve("writer-local-state-hidden");
+            Files.move(
+                    writerLocalState, hiddenWriterLocalState, StandardCopyOption.REPLACE_EXISTING);
+            assertTrue(Files.isDirectory(hiddenWriterLocalState));
+
+            String testClasspath = System.getProperty("surefire.test.class.path");
+            assertTrue(testClasspath != null && !testClasspath.isEmpty());
+            Path childLog = tempDir.resolve("cold-reader.log");
+            Process reader =
+                    new ProcessBuilder(
+                                    java.nio.file.Paths.get(
+                                                    System.getProperty("java.home"), "bin", "java")
+                                            .toString(),
+                                    "-cp",
+                                    testClasspath,
+                                    CobbleStateSourceSqlITTest.class.getName(),
+                                    "s3-cold-reader",
+                                    checkpoint.rootUri,
+                                    checkpoint.operatorId,
+                                    Long.toString(checkpoint.checkpointId))
+                            .redirectErrorStream(true)
+                            .redirectOutput(childLog.toFile())
+                            .start();
+            if (!reader.waitFor(180, TimeUnit.SECONDS)) {
+                reader.destroyForcibly();
+                reader.waitFor(10, TimeUnit.SECONDS);
+                throw new AssertionError("Independent S3 state reader timed out.");
+            }
+            assertEquals(
+                    0,
+                    reader.exitValue(),
+                    "Independent S3 state reader failed: "
+                            + new String(Files.readAllBytes(childLog), StandardCharsets.UTF_8));
+        } finally {
+            try (CobbleMetadataFileIO fileIO =
+                    CobbleMetadataFileIO.open(checkpointRoot, s3.connectorOptions())) {
+                if (fileIO.exists("")) {
+                    fileIO.delete("");
+                }
+            }
+        }
+    }
+
+    /** Child-JVM entry point for the opt-in cold S3 reader check. */
+    public static void main(String[] args) throws Exception {
+        if (args.length == 4 && "s3-cold-reader".equals(args[0])) {
+            readS3StateInFreshJvm(args[1], args[2], Long.parseLong(args[3]));
+        }
+    }
+
+    private static void readS3StateInFreshJvm(
+            String checkpointRoot, String operatorId, long checkpointId) throws Exception {
+        Configuration global = S3TestConfig.fromEnvironment().flinkConfiguration();
+        FileSystem.initialize(global, PluginUtils.createPluginManagerFromRootFolder(global));
+        CheckpointInfo checkpoint = new CheckpointInfo(checkpointRoot, operatorId, checkpointId);
+
+        StreamTableEnvironment scanEnv = newTableEnv(global);
+        scanEnv.executeSql(
+                stateDdl(
+                        "cold_s3_state_scan",
+                        "key INT, `value` INT",
+                        checkpoint,
+                        "value-state",
+                        "value",
+                        Long.toString(checkpointId),
+                        true));
+        assertEquals(
+                expectedSums(), rowSet(scanEnv, "SELECT `key`, `value` FROM cold_s3_state_scan"));
+
+        StreamExecutionEnvironment lookupExecution =
+                StreamExecutionEnvironment.getExecutionEnvironment(global);
+        lookupExecution.setParallelism(1);
+        StreamTableEnvironment lookupEnv = StreamTableEnvironment.create(lookupExecution);
+        lookupEnv.executeSql(
+                "CREATE TABLE cold_s3_state_lookup ("
+                        + "`key` INT, `value` INT, PRIMARY KEY (`key`) NOT ENFORCED) WITH ("
+                        + "'connector'='cobble', 'source.kind'='state', 'path'='"
+                        + checkpointRoot
+                        + "', 'state.operator-id'='"
+                        + operatorId
+                        + "', 'state.name'='value-state', 'state.kind'='value',"
+                        + " 'scan.mode'='batch', 'scan.checkpoint-id'='"
+                        + checkpointId
+                        + "')");
+        List<Row> probes = Arrays.asList(Row.of(0), Row.of(999));
+        lookupEnv.createTemporaryView(
+                "cold_s3_probes",
+                lookupEnv.fromDataStream(
+                        lookupExecution.fromCollection(
+                                probes, Types.ROW_NAMED(new String[] {"key"}, Types.INT)),
+                        Schema.newBuilder()
+                                .column("key", DataTypes.INT())
+                                .columnByExpression("pt", "PROCTIME()")
+                                .build()));
+        String query =
+                "SELECT p.key, d.`value` FROM cold_s3_probes AS p "
+                        + "LEFT JOIN cold_s3_state_lookup FOR SYSTEM_TIME AS OF p.pt AS d "
+                        + "ON p.key = d.`key`";
+        assertTrue(lookupEnv.explainSql(query).contains("LookupJoin"));
+        List<String> actual = new ArrayList<>();
+        for (Row row : collectRows(lookupEnv, query, Duration.ofSeconds(60))) {
+            actual.add(encode(row));
+        }
+        Collections.sort(actual);
+        assertEquals(Arrays.asList("0|12", "999|null"), actual);
+        System.out.println("S3 cold STATE scan and lookup passed in independent JVM.");
+    }
 
     @Test
     void sqlReadsSupportedStateKindsFromCheckpoint() throws Exception {
@@ -232,10 +371,30 @@ class CobbleStateSourceSqlITTest {
     private CheckpointInfo runStatefulJob(boolean haWrapper) throws Exception {
         Path checkpointRoot = tempDir.resolve("checkpoints");
         Path localState = tempDir.resolve("local-state");
-        Files.createDirectories(checkpointRoot);
+        return runStatefulJob(
+                haWrapper,
+                checkpointRoot.toUri().toString(),
+                checkpointRoot,
+                localState,
+                new Configuration(),
+                1);
+    }
+
+    private CheckpointInfo runStatefulJob(
+            boolean haWrapper,
+            String checkpointRootUri,
+            Path checkpointRoot,
+            Path localState,
+            Configuration storageConfiguration,
+            int checkpointCount)
+            throws Exception {
+        if ("file".equalsIgnoreCase(URI.create(checkpointRootUri).getScheme())) {
+            Files.createDirectories(checkpointRoot);
+        }
         Files.createDirectories(localState);
 
         Configuration clusterConfiguration = new Configuration();
+        storageConfiguration.toMap().forEach(clusterConfiguration::setString);
         if (haWrapper) {
             clusterConfiguration.setString(
                     HighAvailabilityOptions.HA_MODE,
@@ -246,8 +405,11 @@ class CobbleStateSourceSqlITTest {
         clusterConfiguration.setInteger(JobManagerOptions.PORT, 6123);
         clusterConfiguration.setString(RestOptions.ADDRESS, "localhost");
         clusterConfiguration.setInteger(RestOptions.PORT, 0);
-        clusterConfiguration.set(
-                CheckpointingOptions.CHECKPOINTS_DIRECTORY, checkpointRoot.toUri().toString());
+        clusterConfiguration.setString(
+                CheckpointingOptions.CHECKPOINTS_DIRECTORY.key(), checkpointRootUri);
+        FileSystem.initialize(
+                clusterConfiguration,
+                PluginUtils.createPluginManagerFromRootFolder(clusterConfiguration));
 
         MiniClusterWithClientResource cluster =
                 new MiniClusterWithClientResource(
@@ -260,8 +422,9 @@ class CobbleStateSourceSqlITTest {
         try {
             FixedIntegerSource.reset();
             Configuration jobConfig = new Configuration();
-            jobConfig.set(
-                    CheckpointingOptions.CHECKPOINTS_DIRECTORY, checkpointRoot.toUri().toString());
+            storageConfiguration.toMap().forEach(jobConfig::setString);
+            jobConfig.setString(
+                    CheckpointingOptions.CHECKPOINTS_DIRECTORY.key(), checkpointRootUri);
             jobConfig.set(CobbleOptions.LOCAL_DIRECTORIES, localState.toString());
             jobConfig.set(CobbleOptions.MEMTABLE_BUFFER_RATIO, 0.25d);
             jobConfig.set(CobbleOptions.MEMTABLE_BUFFER_COUNT, 4);
@@ -305,8 +468,11 @@ class CobbleStateSourceSqlITTest {
                     () -> FixedIntegerSource.finishedSubtasks() == PARALLELISM,
                     Duration.ofSeconds(30),
                     "all SQL source fixtures to finish emitting");
-            CobbleCheckpointingITSupport.triggerCheckpointAndWait(cluster.getMiniCluster(), jobId);
-            if (haWrapper) {
+            for (int i = 0; i < checkpointCount; i++) {
+                CobbleCheckpointingITSupport.triggerCheckpointAndWait(
+                        cluster.getMiniCluster(), jobId);
+            }
+            if (haWrapper && "file".equalsIgnoreCase(URI.create(checkpointRootUri).getScheme())) {
                 CobbleCheckpointingITSupport.waitForCheckpointArtifacts(
                         cluster.getMiniCluster(), jobId, checkpointRoot, Duration.ofSeconds(60));
             }
@@ -320,18 +486,20 @@ class CobbleStateSourceSqlITTest {
         }
         CobbleEmbeddedCheckpoint.Location location =
                 CobbleEmbeddedCheckpoint.select(
-                        new org.apache.flink.core.fs.Path(checkpointRoot.toUri()), "latest");
+                        new org.apache.flink.core.fs.Path(checkpointRootUri), "latest");
         for (CobbleEmbeddedCheckpoint.OperatorSnapshot operator :
                 location.checkpoint().operators().values()) {
             if (operator.schemaStore().byStateName().containsKey("value-state")) {
                 assertFalse(operator.volumeDirectories().isEmpty());
-                assertFalse(
-                        Files.exists(
-                                java.nio.file.Paths.get(location.checkpointDirectory().toUri())
-                                        .resolve(
-                                                "COBBLE-SNAPSHOT-"
-                                                        + operator.operatorId()
-                                                        + "-MANIFEST")));
+                if ("file".equalsIgnoreCase(URI.create(checkpointRootUri).getScheme())) {
+                    assertFalse(
+                            Files.exists(
+                                    java.nio.file.Paths.get(location.checkpointDirectory().toUri())
+                                            .resolve(
+                                                    "COBBLE-SNAPSHOT-"
+                                                            + operator.operatorId()
+                                                            + "-MANIFEST")));
+                }
                 return new CheckpointInfo(
                         location.metadataPath().toString(),
                         operator.operatorId(),
@@ -343,6 +511,13 @@ class CobbleStateSourceSqlITTest {
 
     private static StreamTableEnvironment newTableEnv() {
         StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment();
+        env.setParallelism(2);
+        return StreamTableEnvironment.create(env);
+    }
+
+    private static StreamTableEnvironment newTableEnv(Configuration configuration) {
+        StreamExecutionEnvironment env =
+                StreamExecutionEnvironment.getExecutionEnvironment(configuration);
         env.setParallelism(2);
         return StreamTableEnvironment.create(env);
     }
@@ -810,6 +985,73 @@ class CobbleStateSourceSqlITTest {
         @Override
         public Integer merge(Integer left, Integer right) {
             return left + right;
+        }
+    }
+
+    private static final class S3TestConfig {
+        private final String endpoint;
+        private final String bucket;
+        private final String accessKey;
+        private final String secretKey;
+
+        private S3TestConfig(String endpoint, String bucket, String accessKey, String secretKey) {
+            this.endpoint = endpoint;
+            this.bucket = bucket;
+            this.accessKey = accessKey;
+            this.secretKey = secretKey;
+        }
+
+        private static S3TestConfig fromEnvironment() throws Exception {
+            String endpoint = System.getenv("COBBLE_TEST_S3_ENDPOINT");
+            String bucket = System.getenv("COBBLE_TEST_S3_BUCKET");
+            String accessKeyFile = System.getenv("COBBLE_TEST_S3_ACCESS_KEY_FILE");
+            String secretKeyFile = System.getenv("COBBLE_TEST_S3_SECRET_KEY_FILE");
+            if (endpoint == null
+                    || bucket == null
+                    || accessKeyFile == null
+                    || secretKeyFile == null) {
+                return null;
+            }
+            String accessKey =
+                    new String(
+                                    Files.readAllBytes(java.nio.file.Paths.get(accessKeyFile)),
+                                    StandardCharsets.UTF_8)
+                            .trim();
+            String secretKey =
+                    new String(
+                                    Files.readAllBytes(java.nio.file.Paths.get(secretKeyFile)),
+                                    StandardCharsets.UTF_8)
+                            .trim();
+            return new S3TestConfig(endpoint, bucket, accessKey, secretKey);
+        }
+
+        private Configuration flinkConfiguration() {
+            Configuration configuration = new Configuration();
+            configuration.setString("s3.endpoint", endpoint);
+            configuration.setString("s3.access-key", accessKey);
+            configuration.setString("s3.secret-key", secretKey);
+            configuration.setString("s3.path.style.access", "true");
+            configuration.setString("s3.region", "us-east-1");
+            return configuration;
+        }
+
+        private CobbleConnectorStorageOptions connectorOptions() {
+            Map<String, String> values = new HashMap<>();
+            values.put("s3.endpoint", endpoint);
+            values.put("s3.access-key", accessKey);
+            values.put("s3.secret-key", secretKey);
+            values.put("s3.path.style.access", "true");
+            values.put("s3.region", "us-east-1");
+            return CobbleConnectorStorageOptions.from(values);
+        }
+
+        private String root(String scenario) {
+            return "s3://"
+                    + bucket
+                    + "/cobble-flink-validation/"
+                    + scenario
+                    + "/"
+                    + java.util.UUID.randomUUID();
         }
     }
 

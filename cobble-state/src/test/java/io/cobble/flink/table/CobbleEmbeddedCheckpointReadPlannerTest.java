@@ -8,10 +8,12 @@ import io.cobble.Config;
 import io.cobble.Db;
 import io.cobble.DbCoordinator;
 import io.cobble.ShardSnapshot;
+import io.cobble.flink.common.CobbleFlinkStorageConfig;
 import io.cobble.flink.common.CobbleSnapshotMetadataCodec;
 import io.cobble.flink.common.CobbleSnapshotMetadataPayload;
 import io.cobble.table.TablePathRequest;
 
+import org.apache.flink.configuration.Configuration;
 import org.apache.flink.core.fs.Path;
 import org.apache.flink.core.memory.DataOutputViewStreamWrapper;
 import org.apache.flink.runtime.checkpoint.Checkpoints;
@@ -40,11 +42,33 @@ class CobbleEmbeddedCheckpointReadPlannerTest {
     @Test
     void keepsInheritedVolumesInTheConfigUsedByThePhysicalReader() throws Exception {
         java.nio.file.Path checkpoint = tempDir.resolve("with-old-root").resolve("chk-1");
-        writeCheckpoint(checkpoint, 1L, new OperatorID(13L, 14L));
+        writeCheckpoint(
+                checkpoint,
+                1L,
+                Arrays.asList(
+                        checkpoint.resolve("old-volume").toUri().toString(),
+                        "s3://bucket/old-checkpoint",
+                        "s3://explicit/old-checkpoint",
+                        "oss://bucket/old-checkpoint"),
+                new OperatorID(13L, 14L));
         Config config = new Config().addVolume(checkpoint.toString()).numColumns(1).totalBuckets(4);
+        Config.VolumeDescriptor explicit = new Config.VolumeDescriptor();
+        explicit.baseDir = "s3://explicit/current";
+        explicit.kinds = Collections.singletonList(Config.VolumeUsageKind.READONLY);
+        explicit.accessId = "explicit-access";
+        explicit.secretKey = "explicit-secret";
+        explicit.customOptions = Collections.singletonMap("region", "explicit-region");
+        config.addVolume(explicit);
+        Configuration global = new Configuration();
+        global.setString("s3.region", "global-region");
+        global.setString("s3.endpoint", "localhost:9000");
+        global.setString("s3.access-key", "global-access");
+        global.setString("s3.secret-key", "global-secret");
         assertTrue(
                 CobbleEmbeddedCheckpointReadPlanner.resolve(
-                                config, request(checkpoint, Collections.emptyMap()))
+                                config,
+                                request(checkpoint, Collections.emptyMap()),
+                                CobbleFlinkStorageConfig.from(global))
                         .isPresent());
         assertTrue(
                 config.volumes.stream()
@@ -54,6 +78,28 @@ class CobbleEmbeddedCheckpointReadPlannerTest {
                                                 && volume.kinds.equals(
                                                         Collections.singletonList(
                                                                 Config.VolumeUsageKind.READONLY))));
+        Config.VolumeDescriptor remote =
+                config.volumes.stream()
+                        .filter(volume -> volume.baseDir.equals("s3://bucket/old-checkpoint"))
+                        .findFirst()
+                        .get();
+        assertEquals("global-region", remote.customOptions.get("region"));
+        assertEquals("http://localhost:9000", remote.customOptions.get("endpoint"));
+        assertEquals("global-access", remote.accessId);
+        Config.VolumeDescriptor inheritedExplicit =
+                config.volumes.stream()
+                        .filter(volume -> volume.baseDir.equals("s3://explicit/old-checkpoint"))
+                        .findFirst()
+                        .get();
+        assertEquals("explicit-access", inheritedExplicit.accessId);
+        assertEquals("explicit-region", inheritedExplicit.customOptions.get("region"));
+        assertEquals(
+                null,
+                config.volumes.stream()
+                        .filter(volume -> volume.baseDir.startsWith("oss:"))
+                        .findFirst()
+                        .get()
+                        .accessId);
     }
 
     @Test
@@ -143,11 +189,20 @@ class CobbleEmbeddedCheckpointReadPlannerTest {
     private static void writeCheckpoint(
             java.nio.file.Path checkpoint, long checkpointId, OperatorID... operators)
             throws Exception {
+        writeCheckpoint(checkpoint, checkpointId, null, operators);
+    }
+
+    private static void writeCheckpoint(
+            java.nio.file.Path checkpoint,
+            long checkpointId,
+            java.util.List<String> roots,
+            OperatorID... operators)
+            throws Exception {
         Files.createDirectories(checkpoint);
         OperatorState[] states = new OperatorState[operators.length];
         for (int index = 0; index < operators.length; index++) {
             java.nio.file.Path payload = checkpoint.resolve("state-" + index);
-            writePayload(payload, "db-" + index, checkpointId);
+            writePayload(payload, "db-" + index, checkpointId, roots);
             states[index] = operatorState(operators[index], payload);
         }
         try (DataOutputStream output =
@@ -159,7 +214,11 @@ class CobbleEmbeddedCheckpointReadPlannerTest {
         }
     }
 
-    private static void writePayload(java.nio.file.Path payload, String dbId, long checkpointId)
+    private static void writePayload(
+            java.nio.file.Path payload,
+            String dbId,
+            long checkpointId,
+            java.util.List<String> roots)
             throws Exception {
         ShardSnapshot shard = new ShardSnapshot();
         shard.dbId = dbId;
@@ -183,8 +242,13 @@ class CobbleEmbeddedCheckpointReadPlannerTest {
         try (DataOutputStream output = new DataOutputStream(Files.newOutputStream(payload))) {
             CobbleSnapshotMetadataCodec.write(
                     new CobbleSnapshotMetadataPayload(
-                            Collections.singletonList(
-                                    payload.getParent().resolve("old-volume").toUri().toString()),
+                            roots == null
+                                    ? Collections.singletonList(
+                                            payload.getParent()
+                                                    .resolve("old-volume")
+                                                    .toUri()
+                                                    .toString())
+                                    : roots,
                             shard,
                             false,
                             Collections.emptyList(),

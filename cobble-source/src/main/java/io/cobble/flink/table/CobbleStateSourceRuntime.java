@@ -2,12 +2,14 @@ package io.cobble.flink.table;
 
 import io.cobble.Config;
 import io.cobble.flink.common.CobbleEmbeddedCheckpoint;
+import io.cobble.flink.common.CobbleFlinkStorageConfig;
 
 import org.apache.flink.core.fs.FileStatus;
 import org.apache.flink.core.fs.FileSystem;
 import org.apache.flink.core.fs.Path;
 
 import java.io.IOException;
+import java.util.Collections;
 import java.util.List;
 
 /** Runtime helpers for checkpoint-root Cobble state source scans. */
@@ -118,7 +120,12 @@ final class CobbleStateSourceRuntime {
 
     /** Base reader configuration shared with the fixed public state table reader. */
     static Config tableReadConfig(StateSourceConfig config) {
-        return baseConfig(config, config.bucketCount());
+        Config reader = baseConfig(config, config.bucketCount());
+        Config.VolumeDescriptor volume = new Config.VolumeDescriptor();
+        volume.baseDir = CobbleFlinkStorageConfig.nativePath(config.pathUri());
+        volume.kinds = Collections.singletonList(Config.VolumeUsageKind.READONLY);
+        config.storageConfig().register(reader, volume);
+        return reader;
     }
 
     private static Path checkpointDir(String checkpointRootUri, long checkpointId) {

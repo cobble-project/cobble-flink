@@ -7,7 +7,6 @@ import org.apache.flink.configuration.ConfigOptions;
 import org.apache.flink.configuration.Configuration;
 
 import java.io.Serializable;
-import java.net.URI;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.HashSet;
@@ -366,12 +365,12 @@ public final class CobbleConnectorStorageOptions implements Serializable {
         if (path == null) {
             return false;
         }
-        String scheme = URI.create(path).getScheme();
+        String scheme = new org.apache.flink.core.fs.Path(path).toUri().getScheme();
         return scheme != null && !"file".equalsIgnoreCase(scheme);
     }
 
     private static boolean isS3Path(String path) {
-        String scheme = URI.create(path).getScheme();
+        String scheme = new org.apache.flink.core.fs.Path(path).toUri().getScheme();
         return "s3".equalsIgnoreCase(scheme)
                 || "s3a".equalsIgnoreCase(scheme)
                 || "s3p".equalsIgnoreCase(scheme);

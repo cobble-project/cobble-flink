@@ -6,6 +6,7 @@ import io.cobble.GlobalSnapshot;
 import io.cobble.ScanPlan;
 import io.cobble.ScanSplit;
 import io.cobble.ShardSnapshot;
+import io.cobble.flink.common.CobbleFlinkStorageConfig;
 import io.cobble.flink.common.CobbleLoader;
 import io.cobble.flink.common.table.CobbleTableRowConverter;
 import io.cobble.table.TableReader;
@@ -242,7 +243,7 @@ final class CobbleSourceRuntime {
                         Config.VolumeUsageKind.META,
                         Config.VolumeUsageKind.SNAPSHOT);
         config.storageOptions().applyTo(volume);
-        scanConfig.addVolume(volume);
+        CobbleFlinkStorageConfig.empty().register(scanConfig, volume);
         return scanConfig;
     }
 
@@ -268,7 +269,7 @@ final class CobbleSourceRuntime {
                         Config.VolumeUsageKind.META,
                         Config.VolumeUsageKind.SNAPSHOT);
         config.storageOptions.applyTo(volume);
-        readerConfig.addVolume(volume);
+        CobbleFlinkStorageConfig.empty().register(readerConfig, volume);
         return readerConfig;
     }
 
@@ -322,7 +323,7 @@ final class CobbleSourceRuntime {
         volume.baseDir = config.pathUri();
         volume.kinds = Arrays.asList(Config.VolumeUsageKind.META, Config.VolumeUsageKind.SNAPSHOT);
         config.storageOptions().applyTo(volume);
-        coordinatorConfig.addVolume(volume);
+        CobbleFlinkStorageConfig.empty().register(coordinatorConfig, volume);
         return coordinatorConfig;
     }
 

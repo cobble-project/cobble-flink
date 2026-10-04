@@ -3,6 +3,7 @@ package io.cobble.flink.state;
 import io.cobble.Config;
 import io.cobble.RecoveryMode;
 import io.cobble.ShardSnapshot;
+import io.cobble.flink.common.CobbleFlinkStorageConfig;
 import io.cobble.flink.common.CobbleNativeMetrics;
 import io.cobble.flink.common.CobbleSnapshotVolumeRoots;
 import io.cobble.flink.common.CobbleStateDescriptor;
@@ -234,8 +235,7 @@ final class CobbleKeyedStateBackendBuilder<K> {
                                 : Config.VolumeUsageKind.PRIMARY_DATA_PRIORITY_HIGH,
                         Config.VolumeUsageKind.META,
                         Config.VolumeUsageKind.SNAPSHOT);
-        CobbleFlinkConfigMapper.applyCheckpointVolumeOptions(
-                checkpointVolume, normalizedCheckpointDirectory, flinkConfig);
+        CobbleFlinkStorageConfig.from(flinkConfig).fill(checkpointVolume);
 
         Config.VolumeDescriptor localVolume = new Config.VolumeDescriptor();
         localVolume.baseDir = normalizedLocalVolumePath;
@@ -391,8 +391,7 @@ final class CobbleKeyedStateBackendBuilder<K> {
                                     Config.VolumeUsageKind.META,
                                     Config.VolumeUsageKind.SNAPSHOT)
                             : Collections.singletonList(Config.VolumeUsageKind.READONLY);
-            CobbleFlinkConfigMapper.applyCheckpointVolumeOptions(
-                    sourceVolume, sourceVolumeDirectory, flinkConfig);
+            CobbleFlinkStorageConfig.from(flinkConfig).fill(sourceVolume);
             if (resumeSingleSource) {
                 claimedSourceVolumes.add(sourceVolume);
             } else {
@@ -410,9 +409,7 @@ final class CobbleKeyedStateBackendBuilder<K> {
         CobbleSnapshotVolumeRoots.addReadonlyVolumes(
                 volumes,
                 inheritedRoots,
-                volume ->
-                        CobbleFlinkConfigMapper.applyCheckpointVolumeOptions(
-                                volume, volume.baseDir, flinkConfig));
+                volume -> CobbleFlinkStorageConfig.from(flinkConfig).fill(volume));
     }
 
     /** Fills the Cobble config object with volume, bucket, and memory settings. */

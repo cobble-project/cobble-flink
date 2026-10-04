@@ -1,6 +1,7 @@
 package io.cobble.flink.table;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 
@@ -8,7 +9,10 @@ import io.cobble.Config;
 import io.cobble.GlobalSnapshot;
 import io.cobble.ShardSnapshot;
 import io.cobble.flink.common.CobbleConnectorStorageOptions;
+import io.cobble.flink.common.CobbleFlinkStorageConfig;
+import io.cobble.flink.common.CobbleSnapshotVolumeRoots;
 
+import org.apache.flink.configuration.Configuration;
 import org.junit.jupiter.api.Test;
 
 import java.util.Arrays;
@@ -18,6 +22,66 @@ import java.util.List;
 import java.util.Map;
 
 class CobbleSourceRuntimeTest {
+
+    @Test
+    void stateReaderRetainsCurrentProviderOptionsThroughProjectionAndSerialization()
+            throws Exception {
+        Configuration global = new Configuration();
+        global.setString("s3.region", "test-region");
+        global.setString("s3.endpoint", "localhost:9000");
+        global.setString("s3.access-key", "test-access");
+        global.setString("s3.secret-key", "test-secret");
+        global.setString("s3.path.style.access", "true");
+        StateSourceConfig state =
+                new StateSourceConfig(
+                                "s3a://bucket/checkpoints",
+                                StateSourceConfig.Layout.EMBEDDED_CHECKPOINT,
+                                "op",
+                                "orders",
+                                "value",
+                                "7",
+                                "batch",
+                                7L,
+                                4,
+                                0L,
+                                Arrays.asList(
+                                        new StateSourceField(
+                                                "key", "INT", StateSourceField.Group.STATE_KEY, 0),
+                                        new StateSourceField(
+                                                "value", "INT", StateSourceField.Group.VALUE, 0)))
+                        .withStorageConfig(CobbleFlinkStorageConfig.from(global))
+                        .withProjection(new int[] {1, 0});
+        java.io.ByteArrayOutputStream bytes = new java.io.ByteArrayOutputStream();
+        try (java.io.ObjectOutputStream output = new java.io.ObjectOutputStream(bytes)) {
+            output.writeObject(state);
+        }
+        try (java.io.ObjectInputStream input =
+                new java.io.ObjectInputStream(
+                        new java.io.ByteArrayInputStream(bytes.toByteArray()))) {
+            state = (StateSourceConfig) input.readObject();
+        }
+        Config nativeConfig = CobbleStateSourceRuntime.tableReadConfig(state);
+        assertNotNull(nativeConfig.volumes);
+        CobbleSnapshotVolumeRoots.addReadonlyVolumes(
+                nativeConfig,
+                Arrays.asList(
+                        "s3://bucket/older-checkpoint",
+                        "s3://other-bucket/checkpoint",
+                        "oss://bucket/checkpoint",
+                        "file:///tmp/local"));
+        Config.VolumeDescriptor sameBucket = nativeConfig.volumes.get(1);
+        assertEquals("test-region", sameBucket.customOptions.get("region"));
+        assertEquals("http://localhost:9000", sameBucket.customOptions.get("endpoint"));
+        assertEquals("false", sameBucket.customOptions.get("enable_virtual_host_style"));
+        assertEquals("test-access", sameBucket.accessId);
+        assertEquals("test-secret", sameBucket.secretKey);
+        assertEquals("s3://bucket/checkpoints", nativeConfig.volumes.get(0).baseDir);
+        for (int index = 2; index < nativeConfig.volumes.size(); index++) {
+            assertNull(nativeConfig.volumes.get(index).accessId);
+            assertNull(nativeConfig.volumes.get(index).customOptions);
+        }
+        assertEquals("value", state.projectedFields().get(0).name());
+    }
 
     @Test
     void createsStableSplitIdsFromRangeTriples() throws Exception {

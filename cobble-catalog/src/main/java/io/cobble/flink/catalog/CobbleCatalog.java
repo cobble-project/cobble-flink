@@ -2,6 +2,7 @@ package io.cobble.flink.catalog;
 
 import io.cobble.Config;
 import io.cobble.flink.common.CobbleConnectorStorageOptions;
+import io.cobble.flink.common.CobbleFlinkStorageConfig;
 import io.cobble.flink.common.CobbleLoader;
 import io.cobble.table.FileCatalog;
 import io.cobble.table.TableIdentifier;
@@ -52,6 +53,7 @@ public final class CobbleCatalog implements Catalog {
     private final String storageId;
     private final int buckets;
     private final CobbleConnectorStorageOptions storageOptions;
+    private final CobbleConnectorStorageOptions runtimeStorageOptions;
     private FileCatalog catalog;
 
     CobbleCatalog(String name, String path, String storageId, int buckets) {
@@ -64,12 +66,23 @@ public final class CobbleCatalog implements Catalog {
             String storageId,
             int buckets,
             CobbleConnectorStorageOptions storageOptions) {
+        this(name, path, storageId, buckets, storageOptions, CobbleFlinkStorageConfig.empty());
+    }
+
+    CobbleCatalog(
+            String name,
+            String path,
+            String storageId,
+            int buckets,
+            CobbleConnectorStorageOptions storageOptions,
+            CobbleFlinkStorageConfig storageConfig) {
         this.name = name;
         this.path = path;
         this.storageId = storageId;
         this.buckets = buckets;
         this.storageOptions =
                 storageOptions == null ? CobbleConnectorStorageOptions.empty() : storageOptions;
+        this.runtimeStorageOptions = storageConfig.resolve(path, this.storageOptions);
     }
 
     @Override
@@ -346,8 +359,8 @@ public final class CobbleCatalog implements Catalog {
                         Config.VolumeUsageKind.PRIMARY_DATA_PRIORITY_HIGH,
                         Config.VolumeUsageKind.META,
                         Config.VolumeUsageKind.SNAPSHOT);
-        storageOptions.applyTo(volume);
-        config.addVolume(volume);
+        runtimeStorageOptions.applyTo(volume);
+        CobbleFlinkStorageConfig.empty().register(config, volume);
         return config;
     }
 

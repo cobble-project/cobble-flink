@@ -1,6 +1,7 @@
 package io.cobble.flink.table;
 
 import io.cobble.Config;
+import io.cobble.flink.common.CobbleFlinkStorageConfig;
 import io.cobble.ShardSnapshot;
 import io.cobble.flink.common.CobbleMetadataFileIO;
 
@@ -137,7 +138,7 @@ final class CobbleSinkPaths {
         localVolume.baseDir = localDir.getAbsolutePath();
         localVolume.kinds =
                 Collections.singletonList(Config.VolumeUsageKind.PRIMARY_DATA_PRIORITY_HIGH);
-        dbConfig.addVolume(localVolume);
+        CobbleFlinkStorageConfig.empty().register(dbConfig, localVolume);
 
         // Snapshot manifests are metadata. Keep META with SNAPSHOT so a remote table contains the
         // complete shard snapshot, while active writer data can remain in local staging.
@@ -146,7 +147,7 @@ final class CobbleSinkPaths {
         tableVolume.kinds =
                 Arrays.asList(Config.VolumeUsageKind.META, Config.VolumeUsageKind.SNAPSHOT);
         config.storageOptions.applyTo(tableVolume);
-        dbConfig.addVolume(tableVolume);
+        CobbleFlinkStorageConfig.empty().register(dbConfig, tableVolume);
         return dbConfig;
     }
 
@@ -183,7 +184,7 @@ final class CobbleSinkPaths {
         coordinatorVolume.kinds =
                 Arrays.asList(Config.VolumeUsageKind.META, Config.VolumeUsageKind.SNAPSHOT);
         config.storageOptions.applyTo(coordinatorVolume);
-        coordinatorConfig.addVolume(coordinatorVolume);
+        CobbleFlinkStorageConfig.empty().register(coordinatorConfig, coordinatorVolume);
         return coordinatorConfig;
     }
 

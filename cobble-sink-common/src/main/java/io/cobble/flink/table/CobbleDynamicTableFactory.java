@@ -3,6 +3,7 @@ package io.cobble.flink.table;
 import io.cobble.flink.catalog.CobbleCatalog;
 import io.cobble.flink.catalog.CobbleCatalogTableReference;
 import io.cobble.flink.common.CobbleConnectorStorageOptions;
+import io.cobble.flink.common.CobbleFlinkStorageConfig;
 import io.cobble.flink.common.CobbleLoader;
 import io.cobble.table.CatalogTable;
 import io.cobble.table.TableSchema;
@@ -79,6 +80,7 @@ public final class CobbleDynamicTableFactory implements DynamicTableSinkFactory 
                 catalogTable
                         ? context.getCatalogTable().getOptions().get(CobbleCatalog.OPTION_PATH)
                         : normalizePathToUri(options.get(CobbleTableOptions.PATH));
+        storageOptions = CobbleFlinkStorageConfig.from(context.getConfiguration()).resolve(pathUri, storageOptions);
         Integer configuredBucketCount = options.get(CobbleTableOptions.BUCKET);
         if (configuredBucketCount == null) {
             throw new ValidationException(CobbleTableOptions.BUCKET.key() + " must be configured.");
@@ -198,7 +200,8 @@ public final class CobbleDynamicTableFactory implements DynamicTableSinkFactory 
                     CobbleCatalogTableReference.fromOptions(
                             context.getCatalogTable().getOptions(),
                             context.getObjectIdentifier().getDatabaseName(),
-                            context.getObjectIdentifier().getObjectName());
+                            context.getObjectIdentifier().getObjectName())
+                            .withStorageConfig(CobbleFlinkStorageConfig.from(context.getConfiguration()));
             try (CobbleCatalogTableReference.Opened opened = reference.openValidated()) {
                 CatalogTable nativeTable = opened.table();
                 TableSchema nativeSchema = nativeTable.schema();

@@ -1,6 +1,7 @@
 package io.cobble.flink.catalog;
 
 import io.cobble.flink.common.CobbleConnectorStorageOptions;
+import io.cobble.flink.common.CobbleFlinkStorageConfig;
 
 import org.apache.flink.configuration.ConfigOption;
 import org.apache.flink.configuration.ConfigOptions;
@@ -72,7 +73,8 @@ public final class CobbleCatalogFactory implements CatalogFactory {
                     path,
                     storageId,
                     buckets,
-                    CobbleConnectorStorageOptions.from(options));
+                    CobbleConnectorStorageOptions.from(options),
+                    CobbleFlinkStorageConfig.from(context.getConfiguration()));
         } catch (IllegalArgumentException error) {
             throw new ValidationException(error.getMessage(), error);
         }

@@ -151,7 +151,8 @@ final class CobbleStateTableReadProvider implements TableReadProvider<RowData, R
                 new TablePathRequest(
                         sourceConfig.pathUri(), sourceConfig.stateName(), null, options);
         Optional<TableReadSnapshot> embedded =
-                CobbleEmbeddedCheckpointReadPlanner.resolve(config, request);
+                CobbleEmbeddedCheckpointReadPlanner.resolve(
+                        config, request, sourceConfig.storageConfig());
         if (embedded.isPresent()) return embedded.get();
         try {
             return TableFormatPluginRegistry.resolvePath(config, request);

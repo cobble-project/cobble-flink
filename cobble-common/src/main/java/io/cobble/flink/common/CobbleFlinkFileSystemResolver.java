@@ -38,23 +38,14 @@ public final class CobbleFlinkFileSystemResolver {
             return path.getFileSystem();
         }
 
-        Throwable providerFailure;
         try {
             return resolveConnectorScoped(path, uri, storageOptions, pathUri);
         } catch (Exception | LinkageError | ServiceConfigurationError e) {
-            providerFailure = e;
-        }
-        try {
-            return path.getFileSystem();
-        } catch (IOException e) {
-            e.addSuppressed(providerFailure);
-            throw e;
-        } catch (RuntimeException e) {
-            e.addSuppressed(providerFailure);
-            throw e;
-        } catch (LinkageError | ServiceConfigurationError e) {
-            e.addSuppressed(providerFailure);
-            throw e;
+            throw new IOException(
+                    "Unable to initialize the configured storage provider for scheme '"
+                            + scheme
+                            + "'; refusing to switch to process-global credentials.",
+                    e);
         }
     }
 

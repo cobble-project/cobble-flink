@@ -1,6 +1,5 @@
 package io.cobble.flink.common;
 
-import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -12,7 +11,7 @@ import java.util.Collections;
 class CobbleFlinkFileSystemResolverTest {
 
     @Test
-    void retainsProviderFailureWhenGlobalFallbackAlsoFails() {
+    void refusesGlobalCredentialFallbackWhenConfiguredProviderFails() {
         CobbleConnectorStorageOptions storageOptions =
                 CobbleConnectorStorageOptions.fromStorageOptions(
                         Collections.singletonMap(
@@ -25,7 +24,7 @@ class CobbleFlinkFileSystemResolverTest {
                                 CobbleFlinkFileSystemResolver.resolve(
                                         "missing-provider://bucket/table", storageOptions));
 
-        assertEquals(1, error.getSuppressed().length);
-        assertTrue(error.getSuppressed()[0].getMessage().contains("connector-scoped"));
+        assertTrue(error.getMessage().contains("refusing to switch to process-global credentials"));
+        assertTrue(error.getCause().getMessage().contains("connector-scoped"));
     }
 }

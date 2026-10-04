@@ -9,7 +9,6 @@ import java.util.ArrayList;
 import java.util.Collections;
 import java.util.LinkedHashSet;
 import java.util.List;
-import java.util.Objects;
 import java.util.Set;
 import java.util.function.Consumer;
 
@@ -64,43 +63,15 @@ public final class CobbleSnapshotVolumeRoots {
      * Default Config volumes are initialized only when there are roots to add.
      */
     public static void addReadonlyVolumes(Config config, List<String> roots) {
-        if (roots.isEmpty()) {
-            return;
-        }
-        if (config.volumes == null) {
-            config.volumes = new ArrayList<>();
-        }
-        List<Config.VolumeDescriptor> templates = config.copy().volumes;
-        addReadonlyVolumes(
-                config.volumes,
-                roots,
-                volume -> {
-                    Config.VolumeDescriptor match = null;
-                    URI endpoint = URI.create(volume.baseDir);
-                    for (Config.VolumeDescriptor template : templates) {
-                        URI candidate = URI.create(pathOnly(template.baseDir));
-                        if (!Objects.equals(endpoint.getScheme(), candidate.getScheme())
-                                || !Objects.equals(
-                                        endpoint.getAuthority(), candidate.getAuthority())) {
-                            continue;
-                        }
-                        if (match != null
-                                && (!Objects.equals(match.accessId, template.accessId)
-                                        || !Objects.equals(match.secretKey, template.secretKey)
-                                        || !Objects.equals(
-                                                match.customOptions, template.customOptions))) {
-                            throw new IllegalArgumentException(
-                                    "Checkpoint volume has ambiguous current credential routes: "
-                                            + volume.baseDir);
-                        }
-                        match = template;
-                    }
-                    if (match != null) {
-                        volume.accessId = match.accessId;
-                        volume.secretKey = match.secretKey;
-                        volume.customOptions = match.customOptions;
-                    }
-                });
+        addReadonlyVolumes(config, roots, CobbleFlinkStorageConfig.empty());
+    }
+
+    public static void addReadonlyVolumes(
+            Config config, List<String> roots, CobbleFlinkStorageConfig storage) {
+        if (roots.isEmpty()) return;
+        if (config.volumes == null) config.volumes = new ArrayList<>();
+        CobbleFlinkStorageConfig current = storage.withRoutes(config);
+        addReadonlyVolumes(config.volumes, roots, current::fill);
     }
 
     private static String pathOnly(String root) {

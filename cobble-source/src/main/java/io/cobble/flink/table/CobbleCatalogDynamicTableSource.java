@@ -5,6 +5,7 @@ import io.cobble.GlobalSnapshot;
 import io.cobble.flink.catalog.CobbleCatalog;
 import io.cobble.flink.catalog.CobbleCatalogTableReference;
 import io.cobble.flink.common.CobbleConnectorStorageOptions;
+import io.cobble.flink.common.CobbleFlinkStorageConfig;
 import io.cobble.flink.common.table.CobbleTableRowConverter;
 import io.cobble.table.CatalogTable;
 import io.cobble.table.DataField;
@@ -90,9 +91,11 @@ final class CobbleCatalogDynamicTableSource
         }
         CobbleCatalogTableReference reference =
                 CobbleCatalogTableReference.fromOptions(
-                        options,
-                        context.getObjectIdentifier().getDatabaseName(),
-                        context.getObjectIdentifier().getObjectName());
+                                options,
+                                context.getObjectIdentifier().getDatabaseName(),
+                                context.getObjectIdentifier().getObjectName())
+                        .withStorageConfig(
+                                CobbleFlinkStorageConfig.from(context.getConfiguration()));
         RowType rowType =
                 (RowType)
                         context.getCatalogTable()

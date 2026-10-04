@@ -5,6 +5,7 @@ import io.cobble.GlobalSnapshot;
 import io.cobble.ShardSnapshot;
 import io.cobble.SnapshotTools;
 import io.cobble.flink.common.CobbleEmbeddedCheckpoint;
+import io.cobble.flink.common.CobbleFlinkStorageConfig;
 import io.cobble.flink.common.CobbleSnapshotVolumeRoots;
 import io.cobble.flink.common.CobbleStateReadFormatMetadata;
 import io.cobble.table.TablePathRequest;
@@ -19,7 +20,6 @@ import java.util.ArrayList;
 import java.util.Collections;
 import java.util.Comparator;
 import java.util.List;
-import java.util.Objects;
 import java.util.Optional;
 
 /** Fixed checkpoint-path planning helper owned by the Flink state table-format plugin. */
@@ -28,6 +28,12 @@ final class CobbleEmbeddedCheckpointReadPlanner {
     public static final String OPERATOR_ID_OPTION = "flink.operator-id";
 
     static Optional<TableReadSnapshot> resolve(Config config, TablePathRequest request)
+            throws Exception {
+        return resolve(config, request, CobbleFlinkStorageConfig.empty());
+    }
+
+    static Optional<TableReadSnapshot> resolve(
+            Config config, TablePathRequest request, CobbleFlinkStorageConfig storageOptions)
             throws Exception {
         Path entry;
         try {
@@ -63,6 +69,9 @@ final class CobbleEmbeddedCheckpointReadPlanner {
                             + "' has invalid maxParallelism "
                             + operator.maxParallelism());
         }
+        // Metadata may be local while the selected operator's immutable files are remote.
+        CobbleSnapshotVolumeRoots.addReadonlyVolumes(
+                config, operator.volumeDirectories(), storageOptions);
         String manifest = existingManifest(location, operatorId);
         List<ShardSnapshot> shards = operator.shards();
         GlobalSnapshot fixed =
@@ -75,7 +84,6 @@ final class CobbleEmbeddedCheckpointReadPlanner {
                                 operator.maxParallelism(),
                                 shards);
         // The caller reuses this config when opening the fixed physical reader.
-        CobbleSnapshotVolumeRoots.addReadonlyVolumes(config, operator.volumeDirectories());
         TableReadSnapshot snapshot =
                 TableReadSnapshot.forGlobal(config, fixed, request.tableName());
         if (!CobbleStateReadFormatMetadata.FORMAT_ID.equals(snapshot.formatId())) {
@@ -386,12 +394,10 @@ final class CobbleEmbeddedCheckpointReadPlanner {
     private static Config metadataConfig(Config source, String manifestPath) {
         Config config = source.copy();
         if (containsMetadataPath(config, manifestPath)) return config;
-        Config template = source.copy();
-        Config.VolumeDescriptor volume = matchingEndpointVolume(template, manifestPath);
-        if (volume == null) volume = new Config.VolumeDescriptor();
+        Config.VolumeDescriptor volume = new Config.VolumeDescriptor();
         volume.baseDir = manifestParent(manifestPath);
         volume.kinds = Collections.singletonList(Config.VolumeUsageKind.META);
-        config.addVolume(volume);
+        CobbleFlinkStorageConfig.empty().register(config, volume);
         return config;
     }
 
@@ -401,82 +407,9 @@ final class CobbleEmbeddedCheckpointReadPlanner {
             if (volume != null
                     && volume.kinds != null
                     && volume.kinds.contains(Config.VolumeUsageKind.META)
-                    && containsPath(volume.baseDir, path)) return true;
+                    && CobbleFlinkStorageConfig.containsPath(volume.baseDir, path)) return true;
         }
         return false;
-    }
-
-    private static Config.VolumeDescriptor matchingEndpointVolume(Config config, String path) {
-        if (config.volumes == null) return null;
-        Config.VolumeDescriptor result = null;
-        for (Config.VolumeDescriptor volume : config.volumes) {
-            if (volume != null && sameStorageEndpoint(volume.baseDir, path)) {
-                if (result != null) {
-                    if (!sameCredentialsAndOptions(result, volume)) {
-                        throw new IllegalArgumentException(
-                                "fixed checkpoint manifest has multiple matching storage credential "
-                                        + "routes; configure a metadata volume containing "
-                                        + path);
-                    }
-                    continue;
-                }
-                result = volume;
-            }
-        }
-        return result;
-    }
-
-    private static boolean sameCredentialsAndOptions(
-            Config.VolumeDescriptor left, Config.VolumeDescriptor right) {
-        return Objects.equals(left.accessId, right.accessId)
-                && Objects.equals(left.secretKey, right.secretKey)
-                && Objects.equals(left.customOptions, right.customOptions);
-    }
-
-    private static boolean containsPath(String base, String path) {
-        if (base == null || base.trim().isEmpty()) return false;
-        try {
-            java.net.URI baseUri = java.net.URI.create(base);
-            java.net.URI pathUri = java.net.URI.create(path);
-            if (isLocal(baseUri) && isLocal(pathUri)) {
-                java.nio.file.Path basePath =
-                        baseUri.getScheme() == null
-                                ? java.nio.file.Paths.get(base)
-                                : java.nio.file.Paths.get(baseUri);
-                java.nio.file.Path pathValue =
-                        pathUri.getScheme() == null
-                                ? java.nio.file.Paths.get(path)
-                                : java.nio.file.Paths.get(pathUri);
-                return pathValue
-                        .toAbsolutePath()
-                        .normalize()
-                        .startsWith(basePath.toAbsolutePath().normalize());
-            }
-            String normalizedBase = trimTrailingSlash(base);
-            String normalizedPath = trimTrailingSlash(path);
-            return normalizedPath.equals(normalizedBase)
-                    || normalizedPath.startsWith(normalizedBase + "/");
-        } catch (IllegalArgumentException ignored) {
-            return false;
-        }
-    }
-
-    private static boolean sameStorageEndpoint(String base, String path) {
-        if (base == null || base.trim().isEmpty()) return false;
-        try {
-            java.net.URI baseUri = java.net.URI.create(base);
-            java.net.URI pathUri = java.net.URI.create(path);
-            String baseScheme = baseUri.getScheme() == null ? "file" : baseUri.getScheme();
-            String pathScheme = pathUri.getScheme() == null ? "file" : pathUri.getScheme();
-            return baseScheme.equalsIgnoreCase(pathScheme)
-                    && Objects.equals(baseUri.getAuthority(), pathUri.getAuthority());
-        } catch (IllegalArgumentException ignored) {
-            return false;
-        }
-    }
-
-    private static boolean isLocal(java.net.URI uri) {
-        return uri.getScheme() == null || "file".equalsIgnoreCase(uri.getScheme());
     }
 
     private static String manifestParent(String value) {
