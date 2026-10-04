@@ -2,6 +2,7 @@ package io.cobble.flink.common;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 
 import io.cobble.Config;
@@ -18,6 +19,46 @@ import java.util.Arrays;
 import java.util.Collections;
 
 class CobbleSnapshotVolumeRootsTest {
+    @Test
+    void defaultConfigHasNoExplicitSnapshotRoots() {
+        Config config = new Config();
+        assertNull(config.volumes);
+        assertEquals(Collections.emptyList(), CobbleSnapshotVolumeRoots.fromConfig(config));
+        assertNull(config.volumes);
+    }
+
+    @Test
+    void defaultConfigAcceptsReadonlyRootsAndDeduplicatesThem() {
+        Config config = new Config();
+        assertNull(config.volumes);
+        CobbleSnapshotVolumeRoots.addReadonlyVolumes(
+                config,
+                Arrays.asList(
+                        "file:///tmp/checkpoint-source",
+                        "file:///tmp/checkpoint-source/",
+                        "s3://access:secret@bucket/checkpoint?token=secret#fragment"));
+        assertEquals(2, config.volumes.size());
+        assertEquals(
+                Arrays.asList("file:///tmp/checkpoint-source", "s3://bucket/checkpoint"),
+                CobbleSnapshotVolumeRoots.fromConfig(config));
+        for (Config.VolumeDescriptor volume : config.volumes) {
+            assertEquals(Collections.singletonList(Config.VolumeUsageKind.READONLY), volume.kinds);
+            assertNull(volume.accessId);
+            assertNull(volume.secretKey);
+        }
+        CobbleSnapshotVolumeRoots.addReadonlyVolumes(
+                config, Collections.singletonList("file:///tmp/checkpoint-source/"));
+        assertEquals(2, config.volumes.size());
+    }
+
+    @Test
+    void emptyReadonlyRootsLeaveDefaultConfigUnchanged() {
+        Config config = new Config();
+        assertNull(config.volumes);
+        CobbleSnapshotVolumeRoots.addReadonlyVolumes(config, Collections.emptyList());
+        assertNull(config.volumes);
+    }
+
     @Test
     void retainsPersistentAndInheritedRootsWithoutLocalWorkingDirectoriesOrCredentials() {
         Config config = new Config();

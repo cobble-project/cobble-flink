@@ -1,8 +1,10 @@
 package io.cobble.flink.table;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import io.cobble.flink.common.CobbleEmbeddedCheckpoint;
 import io.cobble.flink.common.inspect.InspectSchemaRegistryLayout;
 import io.cobble.flink.common.inspect.StateInspectSchemaStore;
 import io.cobble.flink.state.CobbleCheckpointingITSupport;
@@ -77,7 +79,7 @@ class CobbleStateSourceSqlITTest {
 
     @Test
     void sqlReadsSupportedStateKindsFromCheckpoint() throws Exception {
-        CheckpointInfo checkpoint = runStatefulJob();
+        CheckpointInfo checkpoint = runStatefulJob(true);
         StreamTableEnvironment tableEnv = newTableEnv();
 
         tableEnv.executeSql(
@@ -202,17 +204,44 @@ class CobbleStateSourceSqlITTest {
                         "SELECT `key`, namespace, `value` FROM state_namespaced_values_by_id"));
     }
 
-    private CheckpointInfo runStatefulJob() throws Exception {
+    @Test
+    void sqlReadsEmbeddedCheckpointWithoutHaWrapper() throws Exception {
+        CheckpointInfo checkpoint = runStatefulJob(false);
+        assertEquals(
+                StateSourceConfig.Layout.EMBEDDED_CHECKPOINT,
+                CobbleSourceKindDetector.detect(checkpoint.rootUri, CobbleSourceKind.AUTO, false)
+                        .stateConfig()
+                        .layout());
+        StreamTableEnvironment tableEnv = newTableEnv();
+        for (String kind : new String[] {"value", "reducing", "aggregating"}) {
+            String table = "embedded_" + kind;
+            tableEnv.executeSql(
+                    stateDdl(
+                            table,
+                            "key INT, `value` INT",
+                            checkpoint,
+                            kind + "-state",
+                            kind,
+                            Long.toString(checkpoint.checkpointId),
+                            true));
+            assertEquals(expectedSums(), rowSet(tableEnv, "SELECT `key`, `value` FROM " + table));
+        }
+        assertEquals(expectedValues(), rowList(tableEnv, "SELECT `value` FROM embedded_value"));
+    }
+
+    private CheckpointInfo runStatefulJob(boolean haWrapper) throws Exception {
         Path checkpointRoot = tempDir.resolve("checkpoints");
         Path localState = tempDir.resolve("local-state");
         Files.createDirectories(checkpointRoot);
         Files.createDirectories(localState);
 
         Configuration clusterConfiguration = new Configuration();
-        clusterConfiguration.setString(
-                HighAvailabilityOptions.HA_MODE,
-                CobbleHighAvailabilityServicesFactory.class.getName());
-        clusterConfiguration.setString("cobble.ha.delegate.type", "NONE");
+        if (haWrapper) {
+            clusterConfiguration.setString(
+                    HighAvailabilityOptions.HA_MODE,
+                    CobbleHighAvailabilityServicesFactory.class.getName());
+            clusterConfiguration.setString("cobble.ha.delegate.type", "NONE");
+        }
         clusterConfiguration.setString(JobManagerOptions.ADDRESS, "localhost");
         clusterConfiguration.setInteger(JobManagerOptions.PORT, 6123);
         clusterConfiguration.setString(RestOptions.ADDRESS, "localhost");
@@ -277,14 +306,39 @@ class CobbleStateSourceSqlITTest {
                     Duration.ofSeconds(30),
                     "all SQL source fixtures to finish emitting");
             CobbleCheckpointingITSupport.triggerCheckpointAndWait(cluster.getMiniCluster(), jobId);
-            CobbleCheckpointingITSupport.waitForCheckpointArtifacts(
-                    cluster.getMiniCluster(), jobId, checkpointRoot, Duration.ofSeconds(60));
+            if (haWrapper) {
+                CobbleCheckpointingITSupport.waitForCheckpointArtifacts(
+                        cluster.getMiniCluster(), jobId, checkpointRoot, Duration.ofSeconds(60));
+            }
             CobbleCheckpointingITSupport.cancelJobAndWait(cluster, jobId);
         } finally {
             cluster.after();
         }
 
-        return discoverOperatorAndCheckpoint(checkpointRoot);
+        if (haWrapper) {
+            return discoverOperatorAndCheckpoint(checkpointRoot);
+        }
+        CobbleEmbeddedCheckpoint.Location location =
+                CobbleEmbeddedCheckpoint.select(
+                        new org.apache.flink.core.fs.Path(checkpointRoot.toUri()), "latest");
+        for (CobbleEmbeddedCheckpoint.OperatorSnapshot operator :
+                location.checkpoint().operators().values()) {
+            if (operator.schemaStore().byStateName().containsKey("value-state")) {
+                assertFalse(operator.volumeDirectories().isEmpty());
+                assertFalse(
+                        Files.exists(
+                                java.nio.file.Paths.get(location.checkpointDirectory().toUri())
+                                        .resolve(
+                                                "COBBLE-SNAPSHOT-"
+                                                        + operator.operatorId()
+                                                        + "-MANIFEST")));
+                return new CheckpointInfo(
+                        location.metadataPath().toString(),
+                        operator.operatorId(),
+                        location.checkpoint().checkpointId());
+            }
+        }
+        throw new AssertionError("value-state missing from embedded checkpoint metadata");
     }
 
     private static StreamTableEnvironment newTableEnv() {

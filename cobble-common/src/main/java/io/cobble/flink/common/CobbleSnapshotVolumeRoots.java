@@ -18,6 +18,9 @@ public final class CobbleSnapshotVolumeRoots {
     private CobbleSnapshotVolumeRoots() {}
 
     public static List<String> fromConfig(Config config) {
+        if (config.volumes == null) {
+            return Collections.emptyList();
+        }
         List<String> roots = new ArrayList<>();
         for (Config.VolumeDescriptor volume : config.volumes) {
             if (volume.kinds.contains(Config.VolumeUsageKind.SNAPSHOT)
@@ -56,8 +59,17 @@ public final class CobbleSnapshotVolumeRoots {
         }
     }
 
-    /** Resolves credentials from the caller's current storage routes, never from a checkpoint. */
+    /**
+     * Resolves credentials from the caller's current storage routes, never from a checkpoint.
+     * Default Config volumes are initialized only when there are roots to add.
+     */
     public static void addReadonlyVolumes(Config config, List<String> roots) {
+        if (roots.isEmpty()) {
+            return;
+        }
+        if (config.volumes == null) {
+            config.volumes = new ArrayList<>();
+        }
         List<Config.VolumeDescriptor> templates = config.copy().volumes;
         addReadonlyVolumes(
                 config.volumes,
