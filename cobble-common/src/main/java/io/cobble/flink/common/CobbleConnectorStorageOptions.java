@@ -229,8 +229,14 @@ public final class CobbleConnectorStorageOptions implements Serializable {
         if (isS3Path(pathUri)) {
             copyToFlink(configuration, S3_ENDPOINT_KEY, effectiveStorageOption(ENDPOINT_OPTION));
             copyToFlink(configuration, S3_REGION_KEY, effectiveStorageOption(REGION_OPTION));
-            copyToFlink(configuration, S3_ACCESS_KEY, s3AccessId);
-            copyToFlink(configuration, S3_SECRET_KEY, s3SecretKey);
+            copyToFlink(
+                    configuration,
+                    S3_ACCESS_KEY,
+                    s3AccessId != null ? s3AccessId : effectiveStorageOption(ACCESS_KEY_OPTION));
+            copyToFlink(
+                    configuration,
+                    S3_SECRET_KEY,
+                    s3SecretKey != null ? s3SecretKey : effectiveStorageOption(SECRET_KEY_OPTION));
             String virtualHostStyle = effectiveStorageOption(VIRTUAL_HOST_STYLE_OPTION);
             if (virtualHostStyle != null) {
                 configuration.setString(

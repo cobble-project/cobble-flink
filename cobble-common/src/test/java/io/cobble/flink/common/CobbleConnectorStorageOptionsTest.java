@@ -349,6 +349,91 @@ class CobbleConnectorStorageOptionsTest {
         assertEquals("secret", configuration.getString("s3.secret-key", null));
     }
 
+    @Test
+    void mapsGenericAndAliasCredentialsToTheSameS3Configuration() {
+        Map<String, String> generic = new HashMap<>();
+        generic.put("storage.option.access_key_id", "access");
+        generic.put("storage.option.secret_access_key", "secret");
+        Map<String, String> aliases = new HashMap<>();
+        aliases.put("s3.access-key", "access");
+        aliases.put("s3.secret-key", "secret");
+
+        for (String path :
+                Arrays.asList("s3://bucket/table", "s3a://bucket/table", "s3p://bucket/table")) {
+            Configuration genericConfig =
+                    CobbleConnectorStorageOptions.from(generic).flinkConfiguration(path);
+            Configuration aliasConfig =
+                    CobbleConnectorStorageOptions.from(aliases).flinkConfiguration(path);
+            assertEquals("access", genericConfig.getString("s3.access-key", null));
+            assertEquals("secret", genericConfig.getString("s3.secret-key", null));
+            assertEquals(
+                    aliasConfig.getString("s3.access-key", null),
+                    genericConfig.getString("s3.access-key", null));
+            assertEquals(
+                    aliasConfig.getString("s3.secret-key", null),
+                    genericConfig.getString("s3.secret-key", null));
+        }
+    }
+
+    @Test
+    void combinesGenericAndAliasCredentialsWithoutChangingConflictValidation() {
+        Map<String, String> mixed = new HashMap<>();
+        mixed.put("storage.option.access_key_id", "access");
+        mixed.put("s3.secret.key", "secret");
+        Configuration configuration =
+                CobbleConnectorStorageOptions.from(mixed).flinkConfiguration("s3://bucket/table");
+        assertEquals("access", configuration.getString("s3.access-key", null));
+        assertEquals("secret", configuration.getString("s3.secret-key", null));
+
+        mixed.put("s3.access.key", "access");
+        mixed.put("storage.option.secret_access_key", "secret");
+        CobbleConnectorStorageOptions.from(mixed);
+        mixed.put("storage.option.secret_access_key", "different-secret");
+        IllegalArgumentException error =
+                assertThrows(
+                        IllegalArgumentException.class,
+                        () -> CobbleConnectorStorageOptions.from(mixed));
+        assertTrue(error.getMessage().contains("storage.option.secret_access_key"));
+        assertFalse(error.getMessage().contains("different-secret"));
+    }
+
+    @Test
+    void nativeCredentialFieldsTakePrecedenceOverGenericCustomOptions() {
+        Map<String, String> custom = new HashMap<>();
+        custom.put("access_key_id", "generic-access");
+        custom.put("secret_access_key", "generic-secret");
+        Configuration configuration =
+                CobbleConnectorStorageOptions.fromVolume("native-access", "native-secret", custom)
+                        .flinkConfiguration("s3://bucket/table");
+        assertEquals("native-access", configuration.getString("s3.access-key", null));
+        assertEquals("native-secret", configuration.getString("s3.secret-key", null));
+
+        Configuration genericOnly =
+                CobbleConnectorStorageOptions.fromVolume(null, null, custom)
+                        .flinkConfiguration("s3://bucket/table");
+        assertEquals("generic-access", genericOnly.getString("s3.access-key", null));
+        assertEquals("generic-secret", genericOnly.getString("s3.secret-key", null));
+    }
+
+    @Test
+    void doesNotInjectS3CredentialKeysIntoOtherSchemes() {
+        Map<String, String> values = new HashMap<>();
+        values.put("storage.option.access_key_id", "access");
+        values.put("storage.option.secret_access_key", "secret");
+        values.put("s3.access-key", "access");
+        values.put("s3.secret-key", "secret");
+        CobbleConnectorStorageOptions options = CobbleConnectorStorageOptions.from(values);
+        for (String path :
+                Arrays.asList(
+                        "oss://bucket/table", "vendor-fs://bucket/table", "file:///tmp/table")) {
+            Configuration configuration = options.flinkConfiguration(path);
+            assertNull(configuration.getString("s3.access-key", null));
+            assertNull(configuration.getString("s3.secret-key", null));
+            assertEquals("access", configuration.getString("access_key_id", null));
+            assertEquals("secret", configuration.getString("secret_access_key", null));
+        }
+    }
+
     private static Config.VolumeDescriptor volume(String baseDir) {
         Config.VolumeDescriptor volume = new Config.VolumeDescriptor();
         volume.baseDir = baseDir;
