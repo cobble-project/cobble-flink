@@ -10,6 +10,7 @@ import io.cobble.flink.inspect.InspectException;
 import org.junit.jupiter.api.Test;
 
 import java.io.FileNotFoundException;
+import java.io.IOException;
 import java.lang.reflect.Method;
 import java.nio.file.NoSuchFileException;
 
@@ -66,16 +67,23 @@ class CheckpointUnavailableClassifierTest {
     void exposesCheckpointUnavailableThroughTheSdkErrorCode() throws Exception {
         assertEquals(
                 InspectErrorCode.CHECKPOINT_UNAVAILABLE,
+                unreadable(new FileNotFoundException("checkpoint manifest")).errorCode());
+        assertEquals(
+                InspectErrorCode.UNREADABLE,
+                unreadable(new IOException("Permission denied while opening checkpoint"))
+                        .errorCode());
+        assertEquals(
+                InspectErrorCode.CHECKPOINT_UNAVAILABLE,
                 unreadable(new RuntimeException("native reader failed: os error 2")).errorCode());
         assertEquals(
                 InspectErrorCode.UNREADABLE,
                 unreadable(new RuntimeException("unknown column family state")).errorCode());
     }
 
-    private static InspectException unreadable(RuntimeException error) throws Exception {
+    private static InspectException unreadable(Exception error) throws Exception {
         Method method =
                 InspectSessionImpl.class.getDeclaredMethod(
-                        "unreadable", String.class, RuntimeException.class);
+                        "unreadable", String.class, Exception.class);
         method.setAccessible(true);
         return (InspectException) method.invoke(null, "Failed to scan bucket 0", error);
     }
