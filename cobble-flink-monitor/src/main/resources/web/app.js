@@ -47,9 +47,9 @@ const MAX_SESSION_RECOVERY_TRANSITIONS = 10
 const $ = (id) => document.getElementById(id)
 
 function parseExactJson(text) {
-  // Quote only unsafe integer tokens, leaving strings and ordinary JSON numbers unchanged.
+  // Preserve decimal/exponent lexemes and unsafe integers before JSON.parse can round them.
   const exact = text.replace(/"(?:[^"\\]|\\.)*"|-?(?:0|[1-9]\d*)(?:\.\d+)?(?:[eE][+-]?\d+)?/g, (token) => {
-    if (/^-?\d+$/.test(token) && !Number.isSafeInteger(Number(token))) return JSON.stringify(token)
+    if (token[0] !== '"' && (/[.eE]/.test(token) || !Number.isSafeInteger(Number(token)))) return JSON.stringify(token)
     return token
   })
   return JSON.parse(exact)

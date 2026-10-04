@@ -3,6 +3,7 @@ package io.cobble.flink.inspect.internal;
 import io.cobble.GlobalSnapshot;
 import io.cobble.flink.common.inspect.StateInspectSchema;
 import io.cobble.flink.common.inspect.StateInspectSemanticSchema;
+import io.cobble.flink.common.inspect.StateKind;
 
 import java.util.ArrayList;
 import java.util.Collections;
@@ -40,7 +41,8 @@ public final class StateInspectTargetBuilder {
 
             // State targets from schema entries that match a column family.
             for (StateInspectSchema schema : schemaResult.store.schemas()) {
-                if (columnFamilyIds.containsKey(schema.columnFamily())) {
+                if (columnFamilyIds.containsKey(schema.columnFamily())
+                        || schema.stateKind() == StateKind.TIMER) {
                     targets.add(
                             schemaTarget(
                                     schema, schemaResult.store.semanticSchema(schema.stateName())));

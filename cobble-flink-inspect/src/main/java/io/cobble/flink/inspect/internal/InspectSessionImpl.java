@@ -65,6 +65,8 @@ final class InspectSessionImpl implements InspectSession {
     private final List<io.cobble.flink.inspect.InspectTarget> targets;
     private final int totalBuckets;
     private final TableReader tableReader;
+    private final LegacyTimerSnapshot legacyTimers;
+    private final InspectException legacyTimerFailure;
     private boolean closed;
 
     InspectSessionImpl(
@@ -83,6 +85,21 @@ final class InspectSessionImpl implements InspectSession {
         this.readerSession = readerSession;
         this.sourcePath = sourceRoot;
         this.userClassLoader = userClassLoader;
+        LegacyTimerSnapshot restoredTimers;
+        InspectException timerFailure = null;
+        try {
+            restoredTimers =
+                    LegacyTimerSnapshot.read(
+                            operator == null || operator.embeddedCheckpoint == null
+                                    ? Collections.emptyList()
+                                    : operator.embeddedCheckpoint.rawKeyedState(),
+                            userClassLoader);
+        } catch (IOException error) {
+            restoredTimers = null;
+            timerFailure = unreadable("Failed to read checkpoint legacy timers", error);
+        }
+        this.legacyTimers = restoredTimers;
+        this.legacyTimerFailure = timerFailure;
 
         Reader reader = readerSession.reader();
         GlobalSnapshot snapshot = reader.currentGlobalSnapshot();
@@ -110,6 +127,14 @@ final class InspectSessionImpl implements InspectSession {
         } else {
             resolvedTargets = StateInspectTargetBuilder.build(snapshot, stateSchema);
             tableReader = null;
+        }
+        resolvedTargets = new ArrayList<>(resolvedTargets);
+        for (String name :
+                legacyTimers == null ? Collections.<String>emptySet() : legacyTimers.stateNames()) {
+            String family = StateInspectTargetBuilder.TIMER_QUEUE_COLUMN_FAMILY_PREFIX + name;
+            if (resolvedTargets.stream().noneMatch(target -> family.equals(target.columnFamily))) {
+                resolvedTargets.add(InspectTarget.timer(name, family));
+            }
         }
         this.internalTargets =
                 Collections.unmodifiableList(new ArrayList<InspectTarget>(resolvedTargets));
@@ -150,6 +175,7 @@ final class InspectSessionImpl implements InspectSession {
         ensureOpen();
         validateScan(request);
         InspectTarget target = target(request.targetId());
+        requireReadableTimers(target);
         if (target.tableSchema != null && request.prefix() == null) {
             return scanTable(request, target);
         }
@@ -195,7 +221,9 @@ final class InspectSessionImpl implements InspectSession {
                         scanOptions(
                                 target.columnFamily,
                                 columns,
-                                plan.filter == null ? limit + 1 : Integer.MAX_VALUE),
+                                plan.filter == null
+                                        ? limit + 1 + (skipPosition ? 1 : 0)
+                                        : Integer.MAX_VALUE),
                         limit + 1 - rows.size(),
                         (entryBucket, key, entryColumns) -> {
                             if (!plan.matches(key, entryColumns)) {
@@ -203,7 +231,10 @@ final class InspectSessionImpl implements InspectSession {
                             }
                             rows.add(row(target, entryBucket, key, entryColumns, columns, true));
                             return true;
-                        });
+                        },
+                        "timer".equals(target.kind)
+                                ? legacyTimers.keys(target.name, bucket)
+                                : Collections.emptyNavigableSet());
             } catch (RuntimeException error) {
                 throw unreadable("Failed to scan bucket " + bucket, error);
             }
@@ -232,6 +263,7 @@ final class InspectSessionImpl implements InspectSession {
             throw invalid("Lookup keys must not be empty");
         }
         InspectTarget target = target(request.targetId());
+        requireReadableTimers(target);
         int[] columns = target.allowsColumns ? request.columns() : null;
         validateColumns(request.columns(), target);
         if (columns != null
@@ -260,6 +292,13 @@ final class InspectSessionImpl implements InspectSession {
                     values =
                             InspectReaderOperations.lookup(
                                     readerSession.reader(), resolved.bucket, resolved.key, options);
+                    if (values == null
+                            && "timer".equals(target.kind)
+                            && legacyTimers
+                                    .keys(target.name, resolved.bucket)
+                                    .contains(resolved.key)) {
+                        values = new byte[0][];
+                    }
                 } catch (RuntimeException error) {
                     throw unreadable("Failed to look up key", error);
                 }
@@ -578,8 +617,8 @@ final class InspectSessionImpl implements InspectSession {
         if (request == null || request.targetId() == null || request.targetId().trim().isEmpty()) {
             throw invalid("Scan target is required");
         }
-        if (request.limit() <= 0) {
-            throw invalid("Scan limit must be greater than zero");
+        if (request.limit() <= 0 || request.limit() > Integer.MAX_VALUE - 2) {
+            throw invalid("Scan limit must be between 1 and " + (Integer.MAX_VALUE - 2));
         }
     }
 
@@ -754,9 +793,6 @@ final class InspectSessionImpl implements InspectSession {
             throw invalid("A state target requires a typed state key");
         }
         StateKind kind = target.schema.stateKind();
-        if (kind == StateKind.TIMER || kind == StateKind.LIST) {
-            throw invalid(kind + " state does not support typed exact lookup");
-        }
         StateInspectExactLookupSupport.Result support =
                 StateInspectExactLookupSupport.evaluate(target.schema, target.semanticSchema);
         if (!support.supported()) {
@@ -932,6 +968,12 @@ final class InspectSessionImpl implements InspectSession {
         }
     }
 
+    private void requireReadableTimers(InspectTarget target) {
+        if ("timer".equals(target.kind) && legacyTimerFailure != null) {
+            throw legacyTimerFailure;
+        }
+    }
+
     private static SchemaResolveResult resolveStateSchema(
             String sourceKind, CheckpointEntry checkpoint, OperatorEntry operator) {
         if ("data_source".equals(sourceKind)) {
@@ -962,7 +1004,8 @@ final class InspectSessionImpl implements InspectSession {
         if (columnFamily != null) {
             options.columnFamily(columnFamily);
         }
-        if (columns == null) {
+        // Empty projections are handled by TableProjection, never native ReadOptions.
+        if (columns == null || columns.length == 0) {
             options.clearColumns();
         } else {
             options.columns(columns);
@@ -1003,7 +1046,7 @@ final class InspectSessionImpl implements InspectSession {
         return new InspectException(InspectErrorCode.INVALID_INPUT, message);
     }
 
-    private static InspectException unreadable(String message, RuntimeException error) {
+    private static InspectException unreadable(String message, Exception error) {
         InspectErrorCode code =
                 CheckpointUnavailableClassifier.isCheckpointUnavailable(error)
                         ? InspectErrorCode.CHECKPOINT_UNAVAILABLE

@@ -5,7 +5,9 @@ import io.cobble.Reader;
 import io.cobble.ScanCursor;
 import io.cobble.ScanOptions;
 
-import java.util.Arrays;
+import java.util.Collections;
+import java.util.Iterator;
+import java.util.NavigableSet;
 
 /** Shared native-reader operations used by both the SDK session and the HTTP adapter. */
 public final class InspectReaderOperations {
@@ -24,38 +26,86 @@ public final class InspectReaderOperations {
             ScanOptions options,
             int maxAcceptedRows,
             EntryVisitor visitor) {
+        return scanBucket(
+                reader,
+                bucket,
+                start,
+                end,
+                startAfter,
+                options,
+                maxAcceptedRows,
+                visitor,
+                Collections.emptyNavigableSet());
+    }
+
+    static int scanBucket(
+            Reader reader,
+            int bucket,
+            byte[] start,
+            byte[] end,
+            byte[] startAfter,
+            ScanOptions options,
+            int maxAcceptedRows,
+            EntryVisitor visitor,
+            NavigableSet<byte[]> legacyKeys) {
         if (maxAcceptedRows <= 0) {
             return 0;
         }
-        final ScanCursor cursor;
+        ScanCursor cursor = null;
         try {
             cursor = reader.scanWithOptions(bucket, start, end, options);
         } catch (RuntimeException error) {
             if (isUnknownColumnFamily(error)) {
-                return 0;
+                // A legacy-only timer queue may have no native column family in this shard.
+            } else {
+                throw error;
             }
-            throw error;
         }
 
         int accepted = 0;
-        boolean skipStartAfter = startAfter != null;
+        Iterator<byte[]> legacy =
+                legacyKeys.isEmpty()
+                        ? Collections.emptyIterator()
+                        : legacyKeys.tailSet(start, true).iterator();
+        byte[] legacyKey = legacy.hasNext() ? legacy.next() : null;
         try (ScanCursor ignored = cursor) {
-            ScanCursor.Entry entry = cursor.nextEntry();
-            while (entry != null && accepted < maxAcceptedRows) {
-                if (skipStartAfter) {
-                    skipStartAfter = false;
-                    if (entry.bucket == bucket && Arrays.equals(entry.key, startAfter)) {
-                        entry = cursor.nextEntry();
-                        continue;
-                    }
+            ScanCursor.Entry entry = cursor == null ? null : cursor.nextEntry();
+            while ((entry != null || legacyKey != null) && accepted < maxAcceptedRows) {
+                if (legacyKey != null && compareKeys(legacyKey, end) >= 0) {
+                    legacyKey = null;
                 }
-                if (visitor.visit(entry.bucket, entry.key, entry.columns)) {
+                if (entry == null && legacyKey == null) {
+                    break;
+                }
+                int comparison =
+                        legacyKey == null
+                                ? 1
+                                : entry == null ? -1 : compareKeys(legacyKey, entry.key);
+                byte[] key = comparison < 0 ? legacyKey : entry.key;
+                byte[][] columns = comparison < 0 ? new byte[0][] : entry.columns;
+                if ((startAfter == null || compareKeys(key, startAfter) > 0)
+                        && visitor.visit(bucket, key, columns)) {
                     accepted++;
                 }
-                entry = cursor.nextEntry();
+                if (comparison <= 0) {
+                    legacyKey = legacy.hasNext() ? legacy.next() : null;
+                }
+                if (comparison >= 0) {
+                    entry = cursor.nextEntry();
+                }
             }
         }
         return accepted;
+    }
+
+    static int compareKeys(byte[] left, byte[] right) {
+        for (int index = 0; index < Math.min(left.length, right.length); index++) {
+            int comparison = Integer.compare(left[index] & 0xff, right[index] & 0xff);
+            if (comparison != 0) {
+                return comparison;
+            }
+        }
+        return Integer.compare(left.length, right.length);
     }
 
     public static boolean isUnknownColumnFamily(RuntimeException error) {

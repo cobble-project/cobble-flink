@@ -17,10 +17,22 @@ import io.cobble.flink.common.inspect.StateInspectSchema;
 import io.cobble.flink.common.inspect.StateInspectSchemaStore;
 import io.cobble.flink.common.inspect.StateInspectSemanticSchema;
 import io.cobble.flink.common.inspect.StateInspectType;
+import io.cobble.flink.inspect.CobbleInspectClient;
+import io.cobble.flink.inspect.InspectPage;
+import io.cobble.flink.inspect.InspectSelection;
+import io.cobble.flink.inspect.InspectSession;
+import io.cobble.flink.inspect.LookupKey;
+import io.cobble.flink.inspect.LookupRequest;
+import io.cobble.flink.inspect.PageToken;
+import io.cobble.flink.inspect.RawBytes;
+import io.cobble.flink.inspect.ScanRequest;
 import io.cobble.structured.Db;
 
 import org.apache.flink.api.common.typeutils.base.IntSerializer;
 import org.apache.flink.core.fs.Path;
+import org.apache.flink.core.io.PostVersionedIOReadableWritable;
+import org.apache.flink.core.memory.DataInputView;
+import org.apache.flink.core.memory.DataOutputSerializer;
 import org.apache.flink.core.memory.DataOutputViewStreamWrapper;
 import org.apache.flink.runtime.checkpoint.Checkpoints;
 import org.apache.flink.runtime.checkpoint.OperatorState;
@@ -30,9 +42,17 @@ import org.apache.flink.runtime.checkpoint.metadata.CheckpointMetadata;
 import org.apache.flink.runtime.jobgraph.OperatorID;
 import org.apache.flink.runtime.state.IncrementalRemoteKeyedStateHandle;
 import org.apache.flink.runtime.state.KeyGroupRange;
+import org.apache.flink.runtime.state.KeyGroupRangeOffsets;
+import org.apache.flink.runtime.state.KeyGroupsStateHandle;
 import org.apache.flink.runtime.state.KeyedStateHandle;
+import org.apache.flink.runtime.state.VoidNamespace;
 import org.apache.flink.runtime.state.VoidNamespaceSerializer;
 import org.apache.flink.runtime.state.filesystem.FileStateHandle;
+import org.apache.flink.runtime.state.memory.ByteStreamStateHandle;
+import org.apache.flink.streaming.api.operators.InternalTimersSnapshot;
+import org.apache.flink.streaming.api.operators.InternalTimersSnapshotReaderWriters;
+import org.apache.flink.streaming.api.operators.TimerHeapInternalTimer;
+import org.apache.flink.streaming.api.operators.TimerSerializer;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
@@ -47,6 +67,59 @@ import java.util.UUID;
 class CobbleEmbeddedCheckpointInspectTest {
 
     @TempDir java.nio.file.Path tempDir;
+
+    @Test
+    void timerScanMergesLegacyPrefixAndNativeTailWithStablePages() throws Exception {
+        OperatorID operatorId = new OperatorID(51L, 53L);
+        try (ReadableCheckpoint fixture = writeCheckpoint(operatorId, true);
+                CobbleInspectClient client = CobbleInspectClient.builder().totalBuckets(4).build();
+                InspectSession session =
+                        client.open(
+                                InspectSelection.checkpoint(
+                                        fixture.directory.toUri().toString(),
+                                        3L,
+                                        operatorId.toHexString()))) {
+            String target = "timer:_timer_state/event_service";
+            java.util.List<Long> times = new java.util.ArrayList<>();
+            PageToken token = null;
+            do {
+                InspectPage page = session.scan(new ScanRequest(target, 1, token));
+                assertEquals(1, page.rows().size());
+                times.add(
+                        java.nio.ByteBuffer.wrap(page.rows().get(0).key().value()).getLong()
+                                ^ Long.MIN_VALUE);
+                token = page.nextPageToken();
+            } while (token != null);
+            assertEquals(Arrays.asList(10L, 20L, 30L, 40L, 50L), times);
+            assertEquals(
+                    1,
+                    session.scan(
+                                    new ScanRequest(
+                                            target, 10, null, 0, new RawBytes(timerKey(20)), null))
+                            .rows()
+                            .size());
+            assertTrue(
+                    session.lookup(
+                                    new LookupRequest(
+                                            target,
+                                            Collections.singletonList(
+                                                    new LookupKey(0, new RawBytes(timerKey(10))))))
+                            .rows()
+                            .get(0)
+                            .found());
+            String legacyOnly = "timer:_timer_state/processing_service";
+            InspectPage page = session.scan(new ScanRequest(legacyOnly, 1, null));
+            assertEquals(1, page.rows().size());
+            assertEquals(1, page.rows().get(0).bucket());
+            assertNull(page.nextPageToken());
+            assertFalse(
+                    session.targets().stream()
+                            .filter(item -> item.id().equals(target))
+                            .findFirst()
+                            .get()
+                            .exactLookupSupported());
+        }
+    }
 
     @Test
     void discoversAndReadsEmbeddedCheckpointWithoutSidecars() throws Exception {
@@ -288,11 +361,25 @@ class CobbleEmbeddedCheckpointInspectTest {
     }
 
     private ReadableCheckpoint writeCheckpoint(OperatorID operatorId) throws Exception {
+        return writeCheckpoint(operatorId, false);
+    }
+
+    private ReadableCheckpoint writeCheckpoint(OperatorID operatorId, boolean timers)
+            throws Exception {
         java.nio.file.Path directory = Files.createDirectory(tempDir.resolve("chk-3"));
         java.nio.file.Path volume = Files.createDirectory(directory.resolve("volume"));
         Config config = nativeConfig(volume, 4);
         Db db = Db.open(config, 0, 3);
         db.put(0, utf8("key"), 0, utf8("value"));
+        if (timers) {
+            try (io.cobble.structured.PriorityQueue queue =
+                    db.newPriorityQueue("__cobble_timer___timer_state/event_service")) {
+                queue.offer(0, timerKey(20), new byte[0]);
+                queue.offer(0, timerKey(30), new byte[0]);
+                queue.offer(0, timerKey(40), new byte[0]);
+                queue.offer(0, timerKey(50), new byte[0]);
+            }
+        }
         ShardSnapshot shard = db.asyncSnapshot().get();
         db.retainSnapshot(shard.snapshotId);
 
@@ -311,6 +398,25 @@ class CobbleEmbeddedCheckpointInspectTest {
                         StateInspectType.scalar("INT"),
                         StateInspectType.unknown(),
                         StateInspectType.scalar("INT")));
+        java.util.List<StateInspectSchema> schemas =
+                new java.util.ArrayList<>(Collections.singletonList(stateSchema));
+        if (timers) {
+            for (String domain : Arrays.asList("event", "processing")) {
+                String name = "_timer_state/" + domain + "_service";
+                schemas.add(
+                        StateInspectSchema.forTimer(
+                                name,
+                                "__cobble_timer__" + name,
+                                IntSerializer.INSTANCE,
+                                VoidNamespaceSerializer.INSTANCE));
+                semantic.put(
+                        name,
+                        StateInspectSemanticSchema.forValue(
+                                StateInspectType.scalar("INT"),
+                                StateInspectType.unknown(),
+                                StateInspectType.unknown()));
+            }
+        }
         java.nio.file.Path state = directory.resolve("task-state");
         try (DataOutputStream output = new DataOutputStream(Files.newOutputStream(state))) {
             CobbleSnapshotMetadataCodec.write(
@@ -322,8 +428,7 @@ class CobbleEmbeddedCheckpointInspectTest {
                             shard,
                             false,
                             Collections.emptyList(),
-                            new StateInspectSchemaStore(
-                                    Collections.singletonList(stateSchema), semantic)),
+                            new StateInspectSchemaStore(schemas, semantic)),
                     new DataOutputViewStreamWrapper(output));
         }
         IncrementalRemoteKeyedStateHandle handle =
@@ -335,12 +440,15 @@ class CobbleEmbeddedCheckpointInspectTest {
                         Collections.emptyList(),
                         new FileStateHandle(new Path(state.toUri()), Files.size(state)));
         OperatorState operator = new OperatorState(operatorId, 1, 4);
-        operator.putState(
-                0,
+        OperatorSubtaskState.Builder subtask =
                 OperatorSubtaskState.builder()
                         .setManagedKeyedState(
-                                StateObjectCollection.<KeyedStateHandle>singleton(handle))
-                        .build());
+                                StateObjectCollection.<KeyedStateHandle>singleton(handle));
+        if (timers) {
+            subtask.setRawKeyedState(
+                    StateObjectCollection.<KeyedStateHandle>singleton(legacyTimers()));
+        }
+        operator.putState(0, subtask.build());
         try (DataOutputStream output =
                 new DataOutputStream(Files.newOutputStream(directory.resolve("_metadata")))) {
             Checkpoints.storeCheckpointMetadata(
@@ -349,6 +457,57 @@ class CobbleEmbeddedCheckpointInspectTest {
                     output);
         }
         return new ReadableCheckpoint(directory, db);
+    }
+
+    private static byte[] timerKey(long timestamp) throws Exception {
+        DataOutputSerializer output = new DataOutputSerializer(32);
+        new TimerSerializer<>(IntSerializer.INSTANCE, VoidNamespaceSerializer.INSTANCE)
+                .serialize(
+                        new TimerHeapInternalTimer<>(timestamp, 7, VoidNamespace.INSTANCE), output);
+        return output.getCopyOfBuffer();
+    }
+
+    private static KeyGroupsStateHandle legacyTimers() throws Exception {
+        DataOutputSerializer output = new DataOutputSerializer(256);
+        long[] offsets = new long[2];
+        for (int group = 0; group < 2; group++) {
+            offsets[group] = output.length();
+            new PostVersionedIOReadableWritable() {
+                @Override
+                public int getVersion() {
+                    return 2;
+                }
+
+                @Override
+                protected void read(DataInputView input, boolean wasVersioned) {
+                    throw new UnsupportedOperationException();
+                }
+            }.write(output);
+            output.writeInt(1);
+            output.writeUTF("service");
+            java.util.Set<TimerHeapInternalTimer<Integer, VoidNamespace>> event =
+                    new java.util.HashSet<>();
+            java.util.Set<TimerHeapInternalTimer<Integer, VoidNamespace>> processing =
+                    new java.util.HashSet<>();
+            if (group == 0) {
+                event.add(new TimerHeapInternalTimer<>(10L, 7, VoidNamespace.INSTANCE));
+                event.add(new TimerHeapInternalTimer<>(20L, 7, VoidNamespace.INSTANCE));
+            } else {
+                processing.add(new TimerHeapInternalTimer<>(60L, 7, VoidNamespace.INSTANCE));
+            }
+            InternalTimersSnapshot<Integer, VoidNamespace> snapshot =
+                    new InternalTimersSnapshot<>(
+                            IntSerializer.INSTANCE,
+                            VoidNamespaceSerializer.INSTANCE,
+                            event,
+                            processing);
+            InternalTimersSnapshotReaderWriters.getWriterForVersion(
+                            2, snapshot, IntSerializer.INSTANCE, VoidNamespaceSerializer.INSTANCE)
+                    .writeTimersSnapshot(output);
+        }
+        return new KeyGroupsStateHandle(
+                new KeyGroupRangeOffsets(0, 1, offsets),
+                new ByteStreamStateHandle("legacy-timers", output.getCopyOfBuffer()));
     }
 
     private Config nativeConfig(java.nio.file.Path volume, int totalBuckets) {

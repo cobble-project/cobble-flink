@@ -11,6 +11,10 @@ public final class StateInspectExactLookupSupport {
         if (schema == null || semantic == null) {
             return Result.unsupported("state semantic schema is unavailable");
         }
+        if (schema.stateKind() == StateKind.LIST || schema.stateKind() == StateKind.TIMER) {
+            return Result.unsupported(
+                    schema.stateKind() + " state does not support typed exact lookup");
+        }
         Result result = check("state key", schema.keySerializer(), semantic.stateKey());
         if (!result.supported()) {
             return result;

@@ -90,6 +90,25 @@ class InspectTypedSinkIT {
             assertEquals(
                     "one",
                     lookup.rows().get(0).decodedColumns().get(0).fields().get(0).value().scalar());
+            LookupResult keyOnly =
+                    session.lookup(
+                            new LookupRequest(
+                                    "sink",
+                                    Arrays.asList(
+                                            LookupKey.typed(
+                                                    TypedLookupKey.sink(
+                                                            Arrays.asList(
+                                                                    field("region", "us"),
+                                                                    field("id", "target-1")))),
+                                            LookupKey.typed(
+                                                    TypedLookupKey.sink(
+                                                            Arrays.asList(
+                                                                    field("region", "us"),
+                                                                    field("id", "missing"))))),
+                                    new int[0]));
+            assertTrue(keyOnly.rows().get(0).found());
+            assertTrue(keyOnly.rows().get(0).decodedColumns().isEmpty());
+            assertFalse(keyOnly.rows().get(1).found());
 
             InspectException partial =
                     assertThrows(

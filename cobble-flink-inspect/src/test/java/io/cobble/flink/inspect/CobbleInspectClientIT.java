@@ -72,6 +72,13 @@ class CobbleInspectClientIT {
                                             new ScanRequest(
                                                     target, 10, null, null, null, new int[] {-1})));
             assertEquals(InspectErrorCode.INVALID_INPUT, invalidProjection.errorCode());
+            InspectException oversizedLimit =
+                    assertThrows(
+                            InspectException.class,
+                            () ->
+                                    session.scan(
+                                            new ScanRequest(target, Integer.MAX_VALUE - 1, null)));
+            assertEquals(InspectErrorCode.INVALID_INPUT, oversizedLimit.errorCode());
 
             InspectException nullPrefix =
                     assertThrows(

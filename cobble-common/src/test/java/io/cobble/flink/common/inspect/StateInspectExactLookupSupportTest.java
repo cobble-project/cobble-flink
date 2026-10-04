@@ -23,6 +23,39 @@ import java.util.Arrays;
 class StateInspectExactLookupSupportTest {
 
     @Test
+    void listAndTimerDoNotAdvertiseTypedExactLookup() {
+        StateInspectSchema list =
+                StateInspectSchema.forList(
+                        "list",
+                        "cf",
+                        false,
+                        IntSerializer.INSTANCE,
+                        VoidNamespaceSerializer.INSTANCE,
+                        IntSerializer.INSTANCE);
+        StateInspectSchema timer =
+                StateInspectSchema.forTimer(
+                        "timer",
+                        "timer-cf",
+                        IntSerializer.INSTANCE,
+                        VoidNamespaceSerializer.INSTANCE);
+        StateInspectSemanticSchema semantic =
+                StateInspectSemanticSchema.forValue(
+                        StateInspectType.scalar("INT"),
+                        StateInspectType.unknown(),
+                        StateInspectType.scalar("INT"));
+        for (StateInspectSchema schema : Arrays.asList(list, timer)) {
+            StateInspectExactLookupSupport.Result result =
+                    StateInspectExactLookupSupport.evaluate(schema, semantic);
+            assertFalse(result.supported());
+            assertTrue(
+                    result.reason()
+                            .contains(
+                                    schema.stateKind()
+                                            + " state does not support typed exact lookup"));
+        }
+    }
+
+    @Test
     void voidNamespaceWithScalarValueKeySupportsExactLookup() {
         StateInspectExactLookupSupport.Result result =
                 StateInspectExactLookupSupport.evaluate(

@@ -15,6 +15,7 @@ import org.apache.flink.runtime.checkpoint.OperatorState;
 import org.apache.flink.runtime.checkpoint.OperatorSubtaskState;
 import org.apache.flink.runtime.checkpoint.metadata.CheckpointMetadata;
 import org.apache.flink.runtime.state.IncrementalRemoteKeyedStateHandle;
+import org.apache.flink.runtime.state.KeyGroupsStateHandle;
 import org.apache.flink.runtime.state.KeyedStateHandle;
 import org.apache.flink.runtime.state.StreamStateHandle;
 import org.slf4j.Logger;
@@ -316,7 +317,13 @@ public final class CobbleEmbeddedCheckpoint {
             List<CobbleStateDescriptor> stateDescriptors = new ArrayList<>();
             List<StateInspectSchemaStore> stores = new ArrayList<>();
             List<String> volumeDirectories = new ArrayList<>();
+            List<KeyGroupsStateHandle> rawKeyedState = new ArrayList<>();
             for (OperatorSubtaskState subtaskState : operatorState.getStates()) {
+                for (KeyedStateHandle handle : subtaskState.getRawKeyedState()) {
+                    if (handle instanceof KeyGroupsStateHandle) {
+                        rawKeyedState.add((KeyGroupsStateHandle) handle);
+                    }
+                }
                 collectCobbleHandles(
                         subtaskState.getManagedKeyedState(),
                         shards,
@@ -340,7 +347,8 @@ public final class CobbleEmbeddedCheckpoint {
                                 new ArrayList<>(shards.values()),
                                 mergeStateDescriptors(stateDescriptors),
                                 mergeSchemaStores(stores),
-                                volumeDirectories));
+                                volumeDirectories,
+                                rawKeyedState));
             }
         }
         if (operators.isEmpty()) {
@@ -562,6 +570,7 @@ public final class CobbleEmbeddedCheckpoint {
         private final List<CobbleStateDescriptor> stateDescriptors;
         private final StateInspectSchemaStore schemaStore;
         private final List<String> volumeDirectories;
+        private final List<KeyGroupsStateHandle> rawKeyedState;
 
         private OperatorSnapshot(
                 String operatorId,
@@ -569,13 +578,15 @@ public final class CobbleEmbeddedCheckpoint {
                 List<ShardSnapshot> shards,
                 List<CobbleStateDescriptor> stateDescriptors,
                 StateInspectSchemaStore schemaStore,
-                List<String> volumeDirectories) {
+                List<String> volumeDirectories,
+                List<KeyGroupsStateHandle> rawKeyedState) {
             this.operatorId = operatorId;
             this.maxParallelism = maxParallelism;
             this.shards = Collections.unmodifiableList(new ArrayList<>(shards));
             this.stateDescriptors = stateDescriptors;
             this.schemaStore = schemaStore;
             this.volumeDirectories = CobbleSnapshotVolumeRoots.unique(volumeDirectories);
+            this.rawKeyedState = Collections.unmodifiableList(new ArrayList<>(rawKeyedState));
         }
 
         public String operatorId() {
@@ -600,6 +611,11 @@ public final class CobbleEmbeddedCheckpoint {
 
         public List<String> volumeDirectories() {
             return volumeDirectories;
+        }
+
+        /** Flink's raw keyed streams containing the timer queue's prefetched prefix. */
+        public List<KeyGroupsStateHandle> rawKeyedState() {
+            return rawKeyedState;
         }
     }
 }
