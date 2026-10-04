@@ -570,6 +570,7 @@ final class CobbleKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
             long timestamp,
             @Nonnull CheckpointStreamFactory streamFactory,
             @Nonnull CheckpointOptions checkpointOptions) {
+        CobbleSnapshotStrategy.rejectSavepoint(checkpointOptions);
         try {
             flushPendingTimerWrites();
             return new SnapshotStrategyRunner<>(

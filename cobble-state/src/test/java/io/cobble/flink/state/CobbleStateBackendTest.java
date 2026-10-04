@@ -3247,6 +3247,48 @@ class CobbleStateBackendTest {
     }
 
     @Test
+    void nativeSavepointsAreRejectedBeforeSnapshotResourcesAreCreated(@TempDir Path tempDir)
+            throws Exception {
+        try (TestBackendContext context = createBackendContext(tempDir, false, null)) {
+            CobbleKeyedStateBackend<Integer> backend = context.cobbleBackend;
+            CheckpointOptions options =
+                    CheckpointOptions.alignedNoTimeout(
+                            SavepointType.savepoint(SavepointFormatType.NATIVE),
+                            CheckpointStorageLocationReference.getDefault());
+            // Empty backends must reject unsupported requests rather than return an empty handle.
+            assertThrows(
+                    UnsupportedOperationException.class,
+                    () -> backend.snapshot(40L, 0L, new MemCheckpointStreamFactory(1024), options));
+            backend.setCurrentKey(7);
+            ValueState<String> state =
+                    backend.getPartitionedState(
+                            "snapshot-ns",
+                            StringSerializer.INSTANCE,
+                            new ValueStateDescriptor<>(
+                                    "snapshot-state", StringSerializer.INSTANCE));
+            state.update("value");
+            UnsupportedOperationException error =
+                    assertThrows(
+                            UnsupportedOperationException.class,
+                            () ->
+                                    backend.snapshot(
+                                            40L,
+                                            0L,
+                                            new MemCheckpointStreamFactory(1024),
+                                            options));
+            assertTrue(error.getMessage().contains("native savepoints are not supported"));
+            assertNull(backend.snapshotIdForCheckpoint(40L));
+            assertFalse(backend.hasTrackedSnapshot(40L));
+            KeyedStateHandle checkpoint = runCheckpointSnapshot(backend, 41L);
+            assertEquals(
+                    0L,
+                    readSnapshotMetadata(checkpoint).shardSnapshot().snapshotId,
+                    "rejected savepoints must not allocate native snapshot IDs");
+            assertEquals("value", state.value());
+        }
+    }
+
+    @Test
     void shardSnapshotCheckpointUploadsMetadataIntoKeyedStateHandle(@TempDir Path tempDir)
             throws Exception {
         try (TestBackendContext context = createBackendContext(tempDir, false, null)) {

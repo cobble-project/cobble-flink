@@ -100,7 +100,7 @@ Add the version-appropriate checkpoint directory setting from Getting Started:
 The Cobble HA wrapper is recommended, not required. It materializes and maintains Cobble
 sidecars as checkpoints complete, so the monitor and state source can open them directly. Without
 the wrapper, those tools read Cobble payloads embedded in Flink `_metadata` and temporarily
-materialize a read-only view, so checkpoints and native savepoints remain inspectable.
+materialize a read-only view, so checkpoints remain inspectable.
 
 If you enable the wrapper and were already using another Flink HA mode, keep Cobble as
 `high-availability.type` and move the old value into `cobble.ha.delegate.type`.
@@ -374,7 +374,9 @@ backend to the Cobble state backend by restoring from a RocksDB **canonical
 savepoint**.
 
 Cobble can both create and restore canonical savepoints on the synchronous
-state path. Flink 2.x async-state operators use native checkpoints instead.
+state path. This version does not support native savepoints and rejects attempts
+to create them. Flink 2.x async-state operators do not support savepoints; use
+checkpoints instead.
 
 ### When to use this
 

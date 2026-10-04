@@ -1,7 +1,9 @@
 package org.apache.flink.runtime.state.v2;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
+import io.cobble.flink.common.CobbleSnapshotMetadataCodec;
 import io.cobble.flink.state.CobbleOptions;
 import io.cobble.flink.state.CobbleStateBackend;
 
@@ -22,17 +24,24 @@ import org.apache.flink.api.common.typeutils.base.IntSerializer;
 import org.apache.flink.api.common.typeutils.base.StringSerializer;
 import org.apache.flink.configuration.CheckpointingOptions;
 import org.apache.flink.configuration.Configuration;
+import org.apache.flink.core.execution.SavepointFormatType;
 import org.apache.flink.core.fs.CloseableRegistry;
+import org.apache.flink.core.fs.FSDataInputStream;
+import org.apache.flink.core.memory.DataInputViewStreamWrapper;
 import org.apache.flink.core.state.StateFutureImpl;
 import org.apache.flink.runtime.asyncprocessing.AsyncExecutionController;
 import org.apache.flink.runtime.asyncprocessing.RecordContext;
 import org.apache.flink.runtime.asyncprocessing.declare.DeclarationManager;
+import org.apache.flink.runtime.checkpoint.CheckpointOptions;
+import org.apache.flink.runtime.checkpoint.SavepointType;
 import org.apache.flink.runtime.checkpoint.StateAssignmentOperation;
 import org.apache.flink.runtime.execution.Environment;
 import org.apache.flink.runtime.mailbox.SyncMailboxExecutor;
 import org.apache.flink.runtime.state.AsyncKeyedStateBackend;
 import org.apache.flink.runtime.state.CheckpointStorage;
+import org.apache.flink.runtime.state.CheckpointStorageLocationReference;
 import org.apache.flink.runtime.state.ConfigurableStateBackend;
+import org.apache.flink.runtime.state.IncrementalRemoteKeyedStateHandle;
 import org.apache.flink.runtime.state.KeyGroupRange;
 import org.apache.flink.runtime.state.KeyGroupRangeAssignment;
 import org.apache.flink.runtime.state.KeyedStateBackendParametersImpl;
@@ -105,6 +114,52 @@ class CobbleStateBackendV2Test extends StateBackendTestV2Base<CobbleStateBackend
     @Disabled("Shared test creates inconsistent per-subtask state schemas")
     @TestTemplate
     void testAsyncStateBackendScaleDown() {}
+
+    @TestTemplate
+    void rejectsSavepointsBeforeStartingNativeSnapshots() throws Exception {
+        AsyncKeyedStateBackend<Integer> backend =
+                createAsyncKeyedBackend(
+                        0, 1, IntSerializer.INSTANCE, KeyGroupRange.of(0, 127), env);
+        AtomicReference<Throwable> asyncFailure = new AtomicReference<>();
+        AsyncExecutionController<Integer> controller = createController(backend, asyncFailure, 128);
+        backend.setup(controller);
+        try {
+            ValueState<Integer> state =
+                    backend.getOrCreateKeyedState(
+                            VoidNamespace.INSTANCE,
+                            VoidNamespaceSerializer.INSTANCE,
+                            new ValueStateDescriptor<>("value", IntSerializer.INSTANCE));
+            RecordContext<Integer> context = controller.buildContext(7, 7);
+            context.retain();
+            controller.setCurrentContext(context);
+            state.update(11);
+            context.release();
+            controller.drainInflightRecords(0);
+            for (SavepointFormatType format : SavepointFormatType.values()) {
+                CheckpointOptions options =
+                        CheckpointOptions.alignedNoTimeout(
+                                SavepointType.savepoint(format),
+                                CheckpointStorageLocationReference.getDefault());
+                assertThatThrownBy(() -> backend.snapshot(40L, 0L, createStreamFactory(), options))
+                        .isInstanceOf(UnsupportedOperationException.class)
+                        .hasMessageContaining("native savepoints are not supported");
+            }
+            IncrementalRemoteKeyedStateHandle checkpoint =
+                    (IncrementalRemoteKeyedStateHandle) snapshot(backend, 41L);
+            try (FSDataInputStream stream = checkpoint.getMetaDataStateHandle().openInputStream()) {
+                assertThat(
+                                CobbleSnapshotMetadataCodec.read(
+                                                new DataInputViewStreamWrapper(stream))
+                                        .shardSnapshot()
+                                        .snapshotId)
+                        .isZero();
+            }
+            assertThat(asyncFailure.get()).isNull();
+        } finally {
+            IOUtils.closeQuietly(backend);
+            backend.dispose();
+        }
+    }
 
     @TestTemplate
     void supportsAllV2StateKindsAndMapPutAllWireFormat() throws Exception {

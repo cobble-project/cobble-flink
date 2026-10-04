@@ -301,6 +301,7 @@ final class CobbleAsyncKeyedStateBackend<K> implements AsyncKeyedStateBackend<K>
             long timestamp,
             @Nonnull CheckpointStreamFactory streamFactory,
             @Nonnull CheckpointOptions checkpointOptions) {
+        CobbleSnapshotStrategy.rejectSavepoint(checkpointOptions);
         try {
             flushPendingTimerWrites();
             return new SnapshotStrategyRunner<>(

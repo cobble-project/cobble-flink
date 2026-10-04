@@ -91,6 +91,15 @@ final class CobbleSnapshotStrategy
         return snapshotResources;
     }
 
+    // Canonical savepoints use the separate synchronous savepoint() path.
+    static void rejectSavepoint(CheckpointOptions options) {
+        if (options.getCheckpointType().isSavepoint()) {
+            throw new UnsupportedOperationException(
+                    "Cobble native savepoints are not supported. Use canonical savepoints with "
+                            + "synchronous state, or checkpoints with async state.");
+        }
+    }
+
     @Override
     public SnapshotResultSupplier<KeyedStateHandle> asyncSnapshot(
             CobbleSnapshotResources snapshotResources,
