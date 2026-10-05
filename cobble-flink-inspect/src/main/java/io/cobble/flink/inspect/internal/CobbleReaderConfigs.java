@@ -2,6 +2,7 @@ package io.cobble.flink.inspect.internal;
 
 import io.cobble.Config;
 import io.cobble.flink.common.CobbleConnectorStorageOptions;
+import io.cobble.flink.common.CobbleFlinkFileSystemResolver;
 import io.cobble.flink.common.CobbleFlinkStorageConfig;
 import io.cobble.flink.common.CobbleLoader;
 
@@ -22,7 +23,7 @@ public final class CobbleReaderConfigs {
             CobbleConnectorStorageOptions storageOptions) {
         CobbleLoader.ensureCobbleLoaded();
         Config.VolumeDescriptor volume = Config.VolumeDescriptor.singleVolume(volumeDirectory);
-        storageOptions.applyTo(volume);
+        CobbleFlinkFileSystemResolver.applyTo(volume, storageOptions);
         CobbleFlinkStorageConfig.empty().register(cobbleConfig, volume);
     }
 

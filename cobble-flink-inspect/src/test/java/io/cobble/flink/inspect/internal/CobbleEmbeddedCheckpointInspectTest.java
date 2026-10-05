@@ -1,8 +1,10 @@
 package io.cobble.flink.inspect.internal;
 
+import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import io.cobble.Config;
@@ -10,6 +12,9 @@ import io.cobble.DbCoordinator;
 import io.cobble.ShardSnapshot;
 import io.cobble.flink.common.CobbleConnectorStorageOptions;
 import io.cobble.flink.common.CobbleEmbeddedCheckpoint;
+import io.cobble.flink.common.CobbleEmbeddedCheckpointReader;
+import io.cobble.flink.common.CobbleFlinkFileSystemResolver;
+import io.cobble.flink.common.CobbleFlinkStorageConfig;
 import io.cobble.flink.common.CobbleSnapshotMetadataCodec;
 import io.cobble.flink.common.CobbleSnapshotMetadataPayload;
 import io.cobble.flink.common.inspect.InspectSchemaRegistryLayout;
@@ -27,13 +32,18 @@ import io.cobble.flink.inspect.PageToken;
 import io.cobble.flink.inspect.RawBytes;
 import io.cobble.flink.inspect.ScanRequest;
 import io.cobble.structured.Db;
+import io.cobble.structured.PriorityQueue;
 
 import org.apache.flink.api.common.typeutils.base.IntSerializer;
+import org.apache.flink.configuration.Configuration;
+import org.apache.flink.core.fs.FileSystem;
+import org.apache.flink.core.fs.FileSystemFactory;
 import org.apache.flink.core.fs.Path;
 import org.apache.flink.core.io.PostVersionedIOReadableWritable;
 import org.apache.flink.core.memory.DataInputView;
 import org.apache.flink.core.memory.DataOutputSerializer;
 import org.apache.flink.core.memory.DataOutputViewStreamWrapper;
+import org.apache.flink.core.plugin.PluginManager;
 import org.apache.flink.runtime.checkpoint.Checkpoints;
 import org.apache.flink.runtime.checkpoint.OperatorState;
 import org.apache.flink.runtime.checkpoint.OperatorSubtaskState;
@@ -48,6 +58,7 @@ import org.apache.flink.runtime.state.KeyedStateHandle;
 import org.apache.flink.runtime.state.VoidNamespace;
 import org.apache.flink.runtime.state.VoidNamespaceSerializer;
 import org.apache.flink.runtime.state.filesystem.FileStateHandle;
+import org.apache.flink.runtime.state.filesystem.RelativeFileStateHandle;
 import org.apache.flink.runtime.state.memory.ByteStreamStateHandle;
 import org.apache.flink.streaming.api.operators.InternalTimersSnapshot;
 import org.apache.flink.streaming.api.operators.InternalTimersSnapshotReaderWriters;
@@ -57,16 +68,285 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
 import java.io.DataOutputStream;
+import java.io.File;
+import java.io.IOException;
+import java.lang.reflect.Method;
+import java.net.URI;
+import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
+import java.nio.file.Paths;
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
+import java.util.HashSet;
+import java.util.Iterator;
 import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Set;
 import java.util.UUID;
+import java.util.stream.Stream;
 
 class CobbleEmbeddedCheckpointInspectTest {
 
     @TempDir java.nio.file.Path tempDir;
+
+    @Test
+    void explicitOptionsOverrideGlobalFilesystemAndEmptyOptionsUseIt() throws Exception {
+        ClassLoader original = Thread.currentThread().getContextClassLoader();
+        PluginManager plugins =
+                new PluginManager() {
+                    @Override
+                    public <P> Iterator<P> load(Class<P> service) {
+                        return service == FileSystemFactory.class
+                                ? Collections.singletonList(
+                                                service.cast(
+                                                        new ConfiguredCheckpointFileSystem
+                                                                .Factory()))
+                                        .iterator()
+                                : Collections.emptyIterator();
+                    }
+                };
+        Configuration global = new Configuration();
+        global.setString("s3.access-key", "global-access");
+        global.setString("s3.secret-key", "global-secret");
+        global.setString("s3.endpoint", "http://global-endpoint");
+        try {
+            Thread.currentThread()
+                    .setContextClassLoader(
+                            ConfiguredCheckpointFileSystem.classLoader(tempDir, original));
+            try (ReadableCheckpoint fixture =
+                    writeCheckpoint(new OperatorID(79L, 81L), false, true)) {
+                Path metadata =
+                        ConfiguredCheckpointFileSystem.remote(
+                                fixture.directory.resolve("_metadata"));
+                FileSystem.initialize(global, plugins);
+                assertThrows(IOException.class, () -> CobbleEmbeddedCheckpoint.read(metadata));
+                assertEquals(
+                        3L,
+                        CobbleEmbeddedCheckpoint.read(
+                                        metadata, ConfiguredCheckpointFileSystem.options())
+                                .checkpointId());
+                java.nio.file.Path conf = Files.createDirectory(tempDir.resolve("flink-conf"));
+                Files.write(
+                        conf.resolve("flink-conf.yaml"),
+                        Arrays.asList(
+                                "s3.access-key: request-access", "s3.secret-key: request-secret",
+                                "s3.endpoint: http://request-endpoint",
+                                        "plugin.custom.setting: retained"),
+                        StandardCharsets.UTF_8);
+                try (CobbleInspectClient client =
+                                CobbleInspectClient.builder()
+                                        .flinkConfigPath(conf.toString())
+                                        .storageOptions(
+                                                CobbleConnectorStorageOptions.fromStorageOptions(
+                                                        Collections.singletonMap(
+                                                                "s3.region", "request-region")))
+                                        .build();
+                        InspectSession session =
+                                client.open(
+                                        InspectSelection.checkpoint(
+                                                metadata.toString(), 3L, null))) {
+                    assertEquals(1, session.scan(new ScanRequest("state", 10, null)).rows().size());
+                }
+                global.setString("s3.access-key", "request-access");
+                global.setString("s3.secret-key", "request-secret");
+                global.setString("s3.endpoint", "http://request-endpoint");
+                FileSystem.initialize(global, plugins);
+                assertEquals(3L, CobbleEmbeddedCheckpoint.read(metadata).checkpointId());
+                assertEquals(
+                        3L,
+                        CobbleEmbeddedCheckpoint.read(
+                                        metadata,
+                                        CobbleConnectorStorageOptions.fromStorageOptions(
+                                                Collections.singletonMap(
+                                                        "s3.endpoint", "http://request-endpoint")))
+                                .checkpointId());
+                try (CobbleInspectClient client = CobbleInspectClient.builder().build()) {
+                    assertEquals(
+                            3L,
+                            client.discover(metadata.toString())
+                                    .checkpoints()
+                                    .get(0)
+                                    .checkpointId());
+                }
+            }
+        } finally {
+            CobbleFlinkFileSystemResolver.initialize(new Configuration());
+            Thread.currentThread().setContextClassLoader(original);
+        }
+    }
+
+    @Test
+    void scopedCredentialsReadRemoteCheckpointReferencesAndLegacyTimers() throws Exception {
+        OperatorID operatorId = new OperatorID(71L, 73L);
+        ClassLoader original = Thread.currentThread().getContextClassLoader();
+        try {
+            Thread.currentThread()
+                    .setContextClassLoader(
+                            ConfiguredCheckpointFileSystem.classLoader(tempDir, original));
+            try (ReadableCheckpoint fixture = writeCheckpoint(operatorId, true, true);
+                    CobbleInspectClient client =
+                            CobbleInspectClient.builder()
+                                    .storageOptions(ConfiguredCheckpointFileSystem.options())
+                                    .totalBuckets(4)
+                                    .build()) {
+                String remoteRoot = ConfiguredCheckpointFileSystem.remote(tempDir).toString();
+                assertEquals(3L, client.discover(remoteRoot).checkpoints().get(0).checkpointId());
+                Path metadata =
+                        ConfiguredCheckpointFileSystem.remote(
+                                fixture.directory.resolve("_metadata"));
+                assertEquals(
+                        3L,
+                        CobbleEmbeddedCheckpoint.readLocation(
+                                        metadata, ConfiguredCheckpointFileSystem.options())
+                                .checkpoint()
+                                .checkpointId());
+                try (InspectSession session =
+                        client.open(
+                                InspectSelection.checkpoint(
+                                        remoteRoot, 3L, operatorId.toHexString()))) {
+                    assertEquals(1, session.scan(new ScanRequest("state", 10, null)).rows().size());
+                    assertEquals(
+                            5,
+                            session.scan(
+                                            new ScanRequest(
+                                                    "timer:_timer_state/event_service", 10, null))
+                                    .rows()
+                                    .size());
+                    assertEquals(
+                            1,
+                            session.scan(
+                                            new ScanRequest(
+                                                    "timer:_timer_state/processing_service",
+                                                    10,
+                                                    null))
+                                    .rows()
+                                    .size());
+                }
+            }
+        } finally {
+            Thread.currentThread().setContextClassLoader(original);
+        }
+    }
+
+    @Test
+    void scopedCredentialsStageRemoteGlobalManifestAndSchemaRegistry() throws Exception {
+        OperatorID operatorId = new OperatorID(75L, 77L);
+        ClassLoader original = Thread.currentThread().getContextClassLoader();
+        try {
+            Thread.currentThread()
+                    .setContextClassLoader(
+                            ConfiguredCheckpointFileSystem.classLoader(tempDir, original));
+            try (ReadableCheckpoint fixture = writeCheckpoint(operatorId)) {
+                CheckpointEntry local = mergedGlobalEntry(fixture, operatorId, true);
+                OperatorEntry source = local.defaultOperator();
+                Path remoteManifest =
+                        ConfiguredCheckpointFileSystem.remote(
+                                fixture.directory.resolve(
+                                        "COBBLE-SNAPSHOT-"
+                                                + operatorId.toHexString()
+                                                + "-MANIFEST"));
+                OperatorEntry remote =
+                        new OperatorEntry(
+                                source.operatorId,
+                                remoteManifest.toString(),
+                                source.operatorSnapshotDirectory,
+                                source.readerVolumeDirectories,
+                                true);
+                CheckpointEntry checkpoint =
+                        new CheckpointEntry(
+                                3L,
+                                ConfiguredCheckpointFileSystem.remote(fixture.directory).toString(),
+                                Collections.singletonList(remote));
+                writeRegistry(
+                        operatorId.toHexString(), 3L, source.embeddedCheckpoint.schemaStore());
+                SchemaResolveResult schema =
+                        MonitorInspectSchemaResolver.resolve(
+                                checkpoint, remote, ConfiguredCheckpointFileSystem.options());
+                assertEquals(SchemaResolveResult.STATUS_AVAILABLE, schema.status);
+                assertTrue(schema.eventPath.startsWith("s3://fixture"));
+                List<ShardSnapshot> globalShards;
+                try (MonitorReaderSession session =
+                        MonitorReaderSession.open(
+                                4,
+                                ConfiguredCheckpointFileSystem.options(),
+                                "checkpoint",
+                                checkpoint,
+                                remote)) {
+                    assertEquals("value", utf8(session.reader().get(0, utf8("key"), 0)));
+                    globalShards = session.reader().currentGlobalSnapshot().shardSnapshots;
+                }
+                Config readerConfig = nativeConfig(fixture.directory.resolve("volume"), 4);
+                Config.VolumeDescriptor route =
+                        Config.VolumeDescriptor.singleVolume(remoteManifest.getParent().toString());
+                ConfiguredCheckpointFileSystem.options().applyTo(route);
+                readerConfig.addVolume(route);
+                try (CobbleEmbeddedCheckpointReader.Prepared prepared =
+                        CobbleEmbeddedCheckpointReader.open(
+                                readerConfig, 3L, 4, globalShards, remoteManifest.toString())) {
+                    assertEquals("value", utf8(prepared.reader().get(0, utf8("key"), 0)));
+                }
+                // Native data remains local; exercise remote shard/schema staging separately so
+                // this filesystem fixture never pretends to provide native S3 data access.
+                ShardSnapshot shard = globalShards.get(0).copy();
+                java.nio.file.Path manifest = Paths.get(URI.create(shard.manifestPath));
+                shard.manifestPath = ConfiguredCheckpointFileSystem.remote(manifest).toString();
+                for (Class<?> owner :
+                        Arrays.asList(
+                                MonitorReaderSession.class, CobbleEmbeddedCheckpointReader.class)) {
+                    java.nio.file.Path staged = Files.createTempDirectory(tempDir, "staged-");
+                    Method copy =
+                            owner == MonitorReaderSession.class
+                                    ? owner.getDeclaredMethod(
+                                            "copyShardMetadata",
+                                            ShardSnapshot.class,
+                                            File.class,
+                                            CobbleConnectorStorageOptions.class)
+                                    : owner.getDeclaredMethod(
+                                            "copyShardMetadata",
+                                            ShardSnapshot.class,
+                                            File.class,
+                                            CobbleFlinkStorageConfig.class,
+                                            CobbleConnectorStorageOptions.class);
+                    copy.setAccessible(true);
+                    if (owner == MonitorReaderSession.class) {
+                        copy.invoke(
+                                null,
+                                shard,
+                                staged.toFile(),
+                                ConfiguredCheckpointFileSystem.options());
+                    } else {
+                        copy.invoke(
+                                null,
+                                shard,
+                                staged.toFile(),
+                                CobbleFlinkStorageConfig.empty(),
+                                ConfiguredCheckpointFileSystem.options());
+                    }
+                    assertTrue(
+                            Files.exists(
+                                    staged.resolve(shard.dbId)
+                                            .resolve("snapshot/SNAPSHOT-" + shard.snapshotId)));
+                    java.nio.file.Path schemaDirectory =
+                            manifest.getParent().getParent().resolve("schema");
+                    try (Stream<java.nio.file.Path> files = Files.list(schemaDirectory)) {
+                        for (java.nio.file.Path file :
+                                (Iterable<java.nio.file.Path>) files::iterator) {
+                            assertArrayEquals(
+                                    Files.readAllBytes(file),
+                                    Files.readAllBytes(
+                                            staged.resolve(shard.dbId)
+                                                    .resolve("schema")
+                                                    .resolve(file.getFileName())));
+                        }
+                    }
+                }
+            }
+        } finally {
+            Thread.currentThread().setContextClassLoader(original);
+        }
+    }
 
     @Test
     void timerScanMergesLegacyPrefixAndNativeTailWithStablePages() throws Exception {
@@ -80,13 +360,13 @@ class CobbleEmbeddedCheckpointInspectTest {
                                         3L,
                                         operatorId.toHexString()))) {
             String target = "timer:_timer_state/event_service";
-            java.util.List<Long> times = new java.util.ArrayList<>();
+            List<Long> times = new ArrayList<>();
             PageToken token = null;
             do {
                 InspectPage page = session.scan(new ScanRequest(target, 1, token));
                 assertEquals(1, page.rows().size());
                 times.add(
-                        java.nio.ByteBuffer.wrap(page.rows().get(0).key().value()).getLong()
+                        ByteBuffer.wrap(page.rows().get(0).key().value()).getLong()
                                 ^ Long.MIN_VALUE);
                 token = page.nextPageToken();
             } while (token != null);
@@ -141,7 +421,7 @@ class CobbleEmbeddedCheckpointInspectTest {
             assertEquals(SchemaResolveResult.STATUS_AVAILABLE, schema.status);
             assertEquals(1, schema.store.schemas().size());
 
-            java.util.List<java.io.File> temporaryDirectories;
+            List<File> temporaryDirectories;
             try (MonitorReaderSession reader =
                     MonitorReaderSession.open(
                             4,
@@ -154,7 +434,7 @@ class CobbleEmbeddedCheckpointInspectTest {
                         temporaryDirectories.get(0).getName().startsWith("cobble-embedded-read-"));
                 assertEquals("value", utf8(reader.reader().get(0, utf8("key"), 0)));
             }
-            for (java.io.File directory : temporaryDirectories) {
+            for (File directory : temporaryDirectories) {
                 assertFalse(directory.exists());
             }
         }
@@ -234,14 +514,14 @@ class CobbleEmbeddedCheckpointInspectTest {
         OperatorID operatorId = new OperatorID(29L, 31L);
         try (ReadableCheckpoint fixture = writeCheckpoint(operatorId)) {
             CheckpointEntry merged = mergedGlobalEntry(fixture, operatorId, true);
-            java.util.List<java.io.File> temporaryDirectories;
+            List<File> temporaryDirectories;
             try (MonitorReaderSession reader = openReader(merged, operatorId)) {
                 temporaryDirectories = reader.temporaryDirectories();
                 assertTrue(
                         temporaryDirectories.get(0).getName().startsWith("cobble-flink-monitor-"));
                 assertEquals("value", utf8(reader.reader().get(0, utf8("key"), 0)));
             }
-            for (java.io.File directory : temporaryDirectories) {
+            for (File directory : temporaryDirectories) {
                 assertFalse(directory.exists());
             }
         }
@@ -252,14 +532,14 @@ class CobbleEmbeddedCheckpointInspectTest {
         OperatorID operatorId = new OperatorID(33L, 35L);
         try (ReadableCheckpoint fixture = writeCheckpoint(operatorId)) {
             CheckpointEntry merged = mergedGlobalEntry(fixture, operatorId, false);
-            java.util.List<java.io.File> temporaryDirectories;
+            List<File> temporaryDirectories;
             try (MonitorReaderSession reader = openReader(merged, operatorId)) {
                 temporaryDirectories = reader.temporaryDirectories();
                 assertTrue(
                         temporaryDirectories.get(0).getName().startsWith("cobble-embedded-read-"));
                 assertEquals("value", utf8(reader.reader().get(0, utf8("key"), 0)));
             }
-            for (java.io.File directory : temporaryDirectories) {
+            for (File directory : temporaryDirectories) {
                 assertFalse(directory.exists());
             }
         }
@@ -366,13 +646,18 @@ class CobbleEmbeddedCheckpointInspectTest {
 
     private ReadableCheckpoint writeCheckpoint(OperatorID operatorId, boolean timers)
             throws Exception {
+        return writeCheckpoint(operatorId, timers, false);
+    }
+
+    private ReadableCheckpoint writeCheckpoint(
+            OperatorID operatorId, boolean timers, boolean remoteHandles) throws Exception {
         java.nio.file.Path directory = Files.createDirectory(tempDir.resolve("chk-3"));
         java.nio.file.Path volume = Files.createDirectory(directory.resolve("volume"));
         Config config = nativeConfig(volume, 4);
         Db db = Db.open(config, 0, 3);
         db.put(0, utf8("key"), 0, utf8("value"));
         if (timers) {
-            try (io.cobble.structured.PriorityQueue queue =
+            try (PriorityQueue queue =
                     db.newPriorityQueue("__cobble_timer___timer_state/event_service")) {
                 queue.offer(0, timerKey(20), new byte[0]);
                 queue.offer(0, timerKey(30), new byte[0]);
@@ -398,8 +683,7 @@ class CobbleEmbeddedCheckpointInspectTest {
                         StateInspectType.scalar("INT"),
                         StateInspectType.unknown(),
                         StateInspectType.scalar("INT")));
-        java.util.List<StateInspectSchema> schemas =
-                new java.util.ArrayList<>(Collections.singletonList(stateSchema));
+        List<StateInspectSchema> schemas = new ArrayList<>(Collections.singletonList(stateSchema));
         if (timers) {
             for (String domain : Arrays.asList("event", "processing")) {
                 String name = "_timer_state/" + domain + "_service";
@@ -438,15 +722,36 @@ class CobbleEmbeddedCheckpointInspectTest {
                         3L,
                         Collections.emptyList(),
                         Collections.emptyList(),
-                        new FileStateHandle(new Path(state.toUri()), Files.size(state)));
+                        remoteHandles
+                                ? timers
+                                        ? new RelativeFileStateHandle(
+                                                ConfiguredCheckpointFileSystem.remote(state),
+                                                "task-state",
+                                                Files.size(state))
+                                        : new FileStateHandle(
+                                                ConfiguredCheckpointFileSystem.remote(state),
+                                                Files.size(state))
+                                : new FileStateHandle(new Path(state.toUri()), Files.size(state)));
         OperatorState operator = new OperatorState(operatorId, 1, 4);
         OperatorSubtaskState.Builder subtask =
                 OperatorSubtaskState.builder()
                         .setManagedKeyedState(
                                 StateObjectCollection.<KeyedStateHandle>singleton(handle));
         if (timers) {
+            KeyGroupsStateHandle timerHandle = legacyTimers();
+            if (remoteHandles) {
+                java.nio.file.Path timerFile = directory.resolve("legacy-timers");
+                Files.write(timerFile, timerHandle.asBytesIfInMemory().get());
+                timerHandle =
+                        new KeyGroupsStateHandle(
+                                timerHandle.getGroupRangeOffsets(),
+                                new RelativeFileStateHandle(
+                                        ConfiguredCheckpointFileSystem.remote(timerFile),
+                                        "legacy-timers",
+                                        Files.size(timerFile)));
+            }
             subtask.setRawKeyedState(
-                    StateObjectCollection.<KeyedStateHandle>singleton(legacyTimers()));
+                    StateObjectCollection.<KeyedStateHandle>singleton(timerHandle));
         }
         operator.putState(0, subtask.build());
         try (DataOutputStream output =
@@ -485,10 +790,8 @@ class CobbleEmbeddedCheckpointInspectTest {
             }.write(output);
             output.writeInt(1);
             output.writeUTF("service");
-            java.util.Set<TimerHeapInternalTimer<Integer, VoidNamespace>> event =
-                    new java.util.HashSet<>();
-            java.util.Set<TimerHeapInternalTimer<Integer, VoidNamespace>> processing =
-                    new java.util.HashSet<>();
+            Set<TimerHeapInternalTimer<Integer, VoidNamespace>> event = new HashSet<>();
+            Set<TimerHeapInternalTimer<Integer, VoidNamespace>> processing = new HashSet<>();
             if (group == 0) {
                 event.add(new TimerHeapInternalTimer<>(10L, 7, VoidNamespace.INSTANCE));
                 event.add(new TimerHeapInternalTimer<>(20L, 7, VoidNamespace.INSTANCE));

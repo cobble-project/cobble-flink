@@ -62,6 +62,26 @@ public final class CobbleEmbeddedCheckpointReader {
             String existingGlobalManifestPath,
             String inputLocation)
             throws IOException {
+        return open(
+                sourceConfig,
+                globalSnapshotId,
+                totalBuckets,
+                expectedShards,
+                existingGlobalManifestPath,
+                inputLocation,
+                CobbleConnectorStorageOptions.empty());
+    }
+
+    /** Opens with the same scoped provider configuration used to discover the checkpoint. */
+    public static Prepared open(
+            Config sourceConfig,
+            long globalSnapshotId,
+            int totalBuckets,
+            List<ShardSnapshot> expectedShards,
+            String existingGlobalManifestPath,
+            String inputLocation,
+            CobbleConnectorStorageOptions storageOptions)
+            throws IOException {
         if (sourceConfig == null)
             throw new IllegalArgumentException("sourceConfig must not be null");
         if (globalSnapshotId < 0L || totalBuckets <= 0) {
@@ -75,6 +95,8 @@ public final class CobbleEmbeddedCheckpointReader {
                 Files.createTempDirectory("cobble-embedded-read-" + globalSnapshotId + "-")
                         .toFile();
         Reader bootstrap = null;
+        CobbleFlinkStorageConfig storage =
+                CobbleFlinkStorageConfig.empty().withRoutes(sourceConfig);
         try {
             if (existingGlobalManifestPath == null) {
                 Config coordinatorConfig =
@@ -89,7 +111,9 @@ public final class CobbleEmbeddedCheckpointReader {
                         workspace
                                 .toPath()
                                 .resolve("snapshot")
-                                .resolve("SNAPSHOT-" + globalSnapshotId));
+                                .resolve("SNAPSHOT-" + globalSnapshotId),
+                        storage,
+                        storageOptions);
             }
 
             Config bootstrapConfig =
@@ -100,7 +124,7 @@ public final class CobbleEmbeddedCheckpointReader {
 
             Map<String, String> shardRoots = new LinkedHashMap<String, String>();
             for (ShardSnapshot shard : snapshot.shardSnapshots) {
-                String root = copyShardMetadata(shard, workspace);
+                String root = copyShardMetadata(shard, workspace, storage, storageOptions);
                 if (root != null) shardRoots.put(root, root);
             }
             bootstrap.close();
@@ -214,7 +238,11 @@ public final class CobbleEmbeddedCheckpointReader {
         return true;
     }
 
-    private static String copyShardMetadata(ShardSnapshot shard, File workspace)
+    private static String copyShardMetadata(
+            ShardSnapshot shard,
+            File workspace,
+            CobbleFlinkStorageConfig storage,
+            CobbleConnectorStorageOptions storageOptions)
             throws IOException {
         if (shard.manifestPath == null || shard.manifestPath.trim().isEmpty()) return null;
         Path manifest = new Path(shard.manifestPath);
@@ -222,30 +250,54 @@ public final class CobbleEmbeddedCheckpointReader {
         if (snapshotDirectory == null || snapshotDirectory.getParent() == null) return null;
         Path root = snapshotDirectory.getParent();
         java.nio.file.Path localRoot = workspace.toPath().resolve(shard.dbId);
-        copyFile(manifest, localRoot.resolve("snapshot").resolve("SNAPSHOT-" + shard.snapshotId));
-        copyDirectoryIfExists(new Path(root, "schema"), localRoot.resolve("schema"));
+        copyFile(
+                manifest,
+                localRoot.resolve("snapshot").resolve("SNAPSHOT-" + shard.snapshotId),
+                storage,
+                storageOptions);
+        copyDirectoryIfExists(
+                new Path(root, "schema"), localRoot.resolve("schema"), storage, storageOptions);
         return normalize(root.toString());
     }
 
-    private static void copyDirectoryIfExists(Path source, java.nio.file.Path target)
+    private static void copyDirectoryIfExists(
+            Path source,
+            java.nio.file.Path target,
+            CobbleFlinkStorageConfig storage,
+            CobbleConnectorStorageOptions storageOptions)
             throws IOException {
-        FileSystem fs = source.getFileSystem();
+        FileSystem fs = fileSystem(source, storage, storageOptions);
         if (!fs.exists(source) || !fs.getFileStatus(source).isDir()) return;
         Files.createDirectories(target);
         FileStatus[] children = fs.listStatus(source);
         if (children == null) return;
         for (FileStatus child : children) {
             java.nio.file.Path childTarget = target.resolve(child.getPath().getName());
-            if (child.isDir()) copyDirectoryIfExists(child.getPath(), childTarget);
-            else copyFile(child.getPath(), childTarget);
+            if (child.isDir())
+                copyDirectoryIfExists(child.getPath(), childTarget, storage, storageOptions);
+            else copyFile(child.getPath(), childTarget, storage, storageOptions);
         }
     }
 
-    private static void copyFile(Path source, java.nio.file.Path target) throws IOException {
+    private static void copyFile(
+            Path source,
+            java.nio.file.Path target,
+            CobbleFlinkStorageConfig storage,
+            CobbleConnectorStorageOptions storageOptions)
+            throws IOException {
         Files.createDirectories(target.getParent());
-        try (FSDataInputStream input = source.getFileSystem().open(source)) {
+        try (FSDataInputStream input = fileSystem(source, storage, storageOptions).open(source)) {
             Files.copy(input, target, StandardCopyOption.REPLACE_EXISTING);
         }
+    }
+
+    private static FileSystem fileSystem(
+            Path source,
+            CobbleFlinkStorageConfig storage,
+            CobbleConnectorStorageOptions storageOptions)
+            throws IOException {
+        return CobbleFlinkFileSystemResolver.resolve(
+                source.toString(), storage.resolve(source.toString(), storageOptions));
     }
 
     private static String normalize(String root) {

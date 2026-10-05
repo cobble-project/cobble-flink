@@ -1,8 +1,12 @@
 package io.cobble.flink.inspect.internal;
 
+import io.cobble.flink.common.CobbleConnectorStorageOptions;
+import io.cobble.flink.common.CobbleFlinkFileSystemResolver;
+
 import org.apache.flink.api.common.typeutils.TypeSerializer;
 import org.apache.flink.api.java.tuple.Tuple2;
 import org.apache.flink.core.fs.FSDataInputStream;
+import org.apache.flink.core.fs.Path;
 import org.apache.flink.core.io.PostVersionedIOReadableWritable;
 import org.apache.flink.core.memory.DataInputView;
 import org.apache.flink.core.memory.DataOutputSerializer;
@@ -28,11 +32,17 @@ final class LegacyTimerSnapshot {
                     new TreeSet<>(InspectReaderOperations::compareKeys));
     private final Map<String, Map<Integer, NavigableSet<byte[]>>> timers = new HashMap<>();
 
-    static LegacyTimerSnapshot read(List<KeyGroupsStateHandle> handles, ClassLoader loader)
+    static LegacyTimerSnapshot read(
+            List<KeyGroupsStateHandle> handles,
+            ClassLoader loader,
+            Path checkpointDirectory,
+            CobbleConnectorStorageOptions storageOptions)
             throws IOException {
         LegacyTimerSnapshot snapshot = new LegacyTimerSnapshot();
         for (KeyGroupsStateHandle handle : handles) {
-            try (FSDataInputStream input = handle.openInputStream()) {
+            try (FSDataInputStream input =
+                    CobbleFlinkFileSystemResolver.open(
+                            handle.getDelegateStateHandle(), checkpointDirectory, storageOptions)) {
                 for (Tuple2<Integer, Long> group : handle.getGroupRangeOffsets()) {
                     if (group.f1 < 0) {
                         continue;

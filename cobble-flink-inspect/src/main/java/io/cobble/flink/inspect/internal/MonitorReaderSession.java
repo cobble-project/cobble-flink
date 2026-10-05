@@ -7,6 +7,7 @@ import io.cobble.ShardSnapshot;
 import io.cobble.flink.common.CobbleConnectorStorageOptions;
 import io.cobble.flink.common.CobbleEmbeddedCheckpoint;
 import io.cobble.flink.common.CobbleEmbeddedCheckpointReader;
+import io.cobble.flink.common.CobbleFlinkFileSystemResolver;
 
 import org.apache.flink.core.fs.FileStatus;
 import org.apache.flink.core.fs.FileSystem;
@@ -133,7 +134,7 @@ public final class MonitorReaderSession implements AutoCloseable {
                                             + "-")
                             .toFile();
             directories.add(unifiedVolume);
-            copyGlobalManifest(operator, checkpoint.id, unifiedVolume);
+            copyGlobalManifest(operator, checkpoint.id, unifiedVolume, storageOptions);
 
             Config bootstrapConfig = CobbleReaderConfigs.base(configuredTotalBuckets);
             CobbleReaderConfigs.addVolume(
@@ -147,7 +148,7 @@ public final class MonitorReaderSession implements AutoCloseable {
             Map<String, String> shardVolumes = new LinkedHashMap<>();
             if (snapshot != null && snapshot.shardSnapshots != null) {
                 for (ShardSnapshot shard : snapshot.shardSnapshots) {
-                    String root = copyShardMetadata(shard, unifiedVolume);
+                    String root = copyShardMetadata(shard, unifiedVolume, storageOptions);
                     if (root != null) {
                         shardVolumes.putIfAbsent(root, root);
                     }
@@ -210,7 +211,9 @@ public final class MonitorReaderSession implements AutoCloseable {
                             checkpoint.id,
                             embedded.maxParallelism(),
                             embedded.shards(),
-                            null));
+                            null,
+                            null,
+                            storageOptions));
         } catch (IOException | RuntimeException e) {
             if (e instanceof InspectInputException) {
                 throw (InspectInputException) e;
@@ -227,7 +230,11 @@ public final class MonitorReaderSession implements AutoCloseable {
         return Collections.emptyList();
     }
 
-    private static void copyGlobalManifest(OperatorEntry operator, long checkpointId, File volume)
+    private static void copyGlobalManifest(
+            OperatorEntry operator,
+            long checkpointId,
+            File volume,
+            CobbleConnectorStorageOptions storageOptions)
             throws IOException {
         java.nio.file.Path target =
                 volume.toPath().resolve("snapshot").resolve("SNAPSHOT-" + checkpointId);
@@ -238,13 +245,13 @@ public final class MonitorReaderSession implements AutoCloseable {
         Path source =
                 operator.manifestCopyPath == null ? fallback : new Path(operator.manifestCopyPath);
         try {
-            copyFile(source, target);
+            copyFile(source, target, storageOptions);
         } catch (IOException primaryError) {
             if (source.toString().equals(fallback.toString())) {
                 throw primaryError;
             }
             try {
-                copyFile(fallback, target);
+                copyFile(fallback, target, storageOptions);
             } catch (IOException fallbackError) {
                 throw new IOException(
                         primaryError.getMessage()
@@ -257,7 +264,9 @@ public final class MonitorReaderSession implements AutoCloseable {
         }
     }
 
-    private static String copyShardMetadata(ShardSnapshot shard, File volume) throws IOException {
+    private static String copyShardMetadata(
+            ShardSnapshot shard, File volume, CobbleConnectorStorageOptions storageOptions)
+            throws IOException {
         if (shard.manifestPath == null || shard.manifestPath.trim().isEmpty()) {
             return null;
         }
@@ -268,14 +277,17 @@ public final class MonitorReaderSession implements AutoCloseable {
         }
         Path shardRoot = snapshotDirectory.getParent();
         java.nio.file.Path localRoot = volume.toPath().resolve(shard.dbId);
-        copyDirectoryIfExists(snapshotDirectory, localRoot.resolve("snapshot"));
-        copyDirectoryIfExists(new Path(shardRoot, "schema"), localRoot.resolve("schema"));
+        copyDirectoryIfExists(snapshotDirectory, localRoot.resolve("snapshot"), storageOptions);
+        copyDirectoryIfExists(
+                new Path(shardRoot, "schema"), localRoot.resolve("schema"), storageOptions);
         return InspectPathUtils.pathToStorageString(shardRoot);
     }
 
-    private static void copyDirectoryIfExists(Path source, java.nio.file.Path target)
+    private static void copyDirectoryIfExists(
+            Path source, java.nio.file.Path target, CobbleConnectorStorageOptions storageOptions)
             throws IOException {
-        FileSystem fileSystem = source.getFileSystem();
+        FileSystem fileSystem =
+                CobbleFlinkFileSystemResolver.resolve(source.toString(), storageOptions);
         if (!fileSystem.exists(source)) {
             return;
         }
@@ -291,16 +303,20 @@ public final class MonitorReaderSession implements AutoCloseable {
         for (FileStatus child : children) {
             java.nio.file.Path childTarget = target.resolve(child.getPath().getName());
             if (child.isDir()) {
-                copyDirectoryIfExists(child.getPath(), childTarget);
+                copyDirectoryIfExists(child.getPath(), childTarget, storageOptions);
             } else {
-                copyFile(child.getPath(), childTarget);
+                copyFile(child.getPath(), childTarget, storageOptions);
             }
         }
     }
 
-    private static void copyFile(Path source, java.nio.file.Path target) throws IOException {
+    private static void copyFile(
+            Path source, java.nio.file.Path target, CobbleConnectorStorageOptions storageOptions)
+            throws IOException {
         Files.createDirectories(target.getParent());
-        try (InputStream input = source.getFileSystem().open(source)) {
+        try (InputStream input =
+                CobbleFlinkFileSystemResolver.resolve(source.toString(), storageOptions)
+                        .open(source)) {
             Files.copy(input, target, StandardCopyOption.REPLACE_EXISTING);
         }
     }

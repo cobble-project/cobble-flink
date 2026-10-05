@@ -154,9 +154,14 @@ java -jar cobble-flink-monitor/target/cobble-flink-monitor-*.jar \
 `--storage-option KEY=VALUE` is repeatable, overrides file values, and uses the
 last CLI value. These settings apply to the initial path and to datasource paths
 opened later in the UI. Provider keys are arbitrary and may contain dots. For
-another filesystem, use the keys required by its provider. Explicit file or CLI
-options take precedence over configuration loaded by `--flink-conf`. Supply
-credentials through deployment templates or secret management.
+another filesystem, use the keys required by its provider. These options apply to
+both Cobble tables and Flink checkpoints. Settings from `--flink-conf` provide
+defaults; explicit storage options override them. Supply credentials through
+deployment templates or secret management.
+
+Flink configuration is process-wide: loading `--flink-conf` replaces the defaults
+for subsequent filesystem opens. Run separate processes when different monitors
+need isolated configurations.
 
 ## Datasource Page
 

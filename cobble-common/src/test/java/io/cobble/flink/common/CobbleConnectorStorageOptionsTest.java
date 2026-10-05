@@ -10,6 +10,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import io.cobble.Config;
 
 import org.apache.flink.configuration.Configuration;
+import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 
 import java.io.ByteArrayInputStream;
@@ -22,6 +23,107 @@ import java.util.HashMap;
 import java.util.Map;
 
 class CobbleConnectorStorageOptionsTest {
+
+    @AfterEach
+    void resetDefaults() {
+        CobbleFlinkFileSystemResolver.initialize(new Configuration());
+    }
+
+    @Test
+    void effectiveConfigurationRetainsDefaultsAndExplicitPriorityForNativeAndFlink() {
+        Configuration defaults = new Configuration();
+        defaults.setString("s3.access-key", "default-access");
+        defaults.setString("s3.secret-key", "default-secret");
+        defaults.setString("s3.endpoint", "http://storage.example");
+        defaults.setString("s3.region", "default-region");
+        defaults.setString("plugin.custom.setting", "plugin-value");
+        defaults.setString("fs.s3a.connection.maximum", "17");
+        Map<String, String> explicit = new HashMap<>();
+        explicit.put("s3.access-key", "request-access");
+        explicit.put("s3.secret-key", "request-secret");
+        explicit.put("storage.option.region", "request-region");
+        CobbleFlinkFileSystemResolver.initialize(defaults);
+        CobbleConnectorStorageOptions options =
+                CobbleConnectorStorageOptions.fromStorageOptions(explicit);
+        defaults.setString("plugin.custom.setting", "changed-after-construction");
+        Config.VolumeDescriptor volume =
+                Config.VolumeDescriptor.singleVolume("s3://bucket/checkpoint");
+        CobbleFlinkFileSystemResolver.applyTo(volume, options);
+        Configuration effective =
+                CobbleFlinkFileSystemResolver.effectiveConfiguration(volume.baseDir, options);
+        assertEquals(volume.accessId, effective.getString("s3.access-key", null));
+        assertEquals(volume.secretKey, effective.getString("s3.secret-key", null));
+        assertEquals("request-access", volume.accessId);
+        assertEquals("request-secret", volume.secretKey);
+        assertEquals("request-region", effective.getString("s3.region", null));
+        assertEquals(volume.customOptions.get("region"), effective.getString("s3.region", null));
+        assertEquals("http://storage.example", effective.getString("s3.endpoint", null));
+        assertEquals("plugin-value", effective.getString("plugin.custom.setting", null));
+        assertEquals("17", effective.getString("fs.s3a.connection.maximum", null));
+        assertEquals("default-access", defaults.getString("s3.access-key", null));
+        effective.setString("s3.access-key", "changed-effective");
+        assertEquals(
+                "request-access",
+                CobbleFlinkFileSystemResolver.effectiveConfiguration(volume.baseDir, options)
+                        .getString("s3.access-key", null));
+    }
+
+    @Test
+    void partialOptionsInheritCredentialsWithoutChangingOtherSchemes() {
+        Configuration defaults = new Configuration();
+        defaults.setString("s3.access-key", "default-access");
+        defaults.setString("s3.secret-key", "default-secret");
+        defaults.setString("s3.endpoint", "http://storage.example");
+        CobbleFlinkFileSystemResolver.initialize(defaults);
+        CobbleConnectorStorageOptions options =
+                CobbleConnectorStorageOptions.fromStorageOptions(
+                        Collections.singletonMap("s3.region", "request-region"));
+        Config.VolumeDescriptor s3 = Config.VolumeDescriptor.singleVolume("s3://bucket/checkpoint");
+        CobbleFlinkFileSystemResolver.applyTo(s3, options);
+        assertEquals("default-access", s3.accessId);
+        assertEquals("default-secret", s3.secretKey);
+        assertEquals("request-region", s3.customOptions.get("region"));
+        assertEquals(
+                s3.accessId,
+                CobbleFlinkFileSystemResolver.effectiveConfiguration(s3.baseDir, options)
+                        .getString("s3.access-key", null));
+        for (String path : Arrays.asList("file:///tmp/checkpoint", "other://bucket/checkpoint")) {
+            Config.VolumeDescriptor other = Config.VolumeDescriptor.singleVolume(path);
+            CobbleFlinkFileSystemResolver.applyTo(other, options);
+            assertNull(other.accessId);
+            assertNull(other.secretKey);
+            assertTrue(other.customOptions == null || other.customOptions.isEmpty());
+        }
+        Config.VolumeDescriptor onlyDefaults = Config.VolumeDescriptor.singleVolume(s3.baseDir);
+        CobbleFlinkFileSystemResolver.applyTo(onlyDefaults, CobbleConnectorStorageOptions.empty());
+        assertEquals("default-access", onlyDefaults.accessId);
+        assertEquals("default-secret", onlyDefaults.secretKey);
+    }
+
+    @Test
+    void differentEndpointDoesNotReuseDefaultCredentialAliases() {
+        Configuration defaults = new Configuration();
+        defaults.setString("fs.s3a.access.key", "old-access");
+        defaults.setString("fs.s3a.secret.key", "old-secret");
+        defaults.setString("fs.s3a.endpoint", "http://old-endpoint");
+        CobbleFlinkFileSystemResolver.initialize(defaults);
+        CobbleConnectorStorageOptions options =
+                CobbleConnectorStorageOptions.fromStorageOptions(
+                        Collections.singletonMap("s3.endpoint", "http://new-endpoint"));
+        Config.VolumeDescriptor volume =
+                Config.VolumeDescriptor.singleVolume("s3://bucket/checkpoint");
+        CobbleFlinkFileSystemResolver.applyTo(volume, options);
+        assertNull(volume.accessId);
+        assertNull(volume.secretKey);
+        Configuration effective =
+                CobbleFlinkFileSystemResolver.effectiveConfiguration(volume.baseDir, options);
+        assertNull(effective.getString("s3.access-key", null));
+        assertNull(effective.getString("s3.secret-key", null));
+        assertNull(effective.getString("fs.s3a.access.key", null));
+        assertNull(effective.getString("fs.s3a.secret.key", null));
+        assertEquals("http://new-endpoint", effective.getString("s3.endpoint", null));
+        assertEquals("old-access", defaults.getString("fs.s3a.access.key", null));
+    }
 
     @Test
     void parsesCanonicalS3OptionsAndMapsRemoteVolume() {

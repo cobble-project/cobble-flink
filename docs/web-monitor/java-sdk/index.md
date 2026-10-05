@@ -122,7 +122,15 @@ CobbleInspectClient client = CobbleInspectClient.builder()
 ```
 
 Keep credentials in application configuration or secret management rather
-than embedding them in the source URI.
+than embedding them in the source URI. These options apply to both Cobble tables
+and Flink checkpoints. Settings from `flinkConfigPath` provide defaults; explicit
+storage options override them.
+
+Loading `flinkConfigPath` replaces the process-wide defaults for subsequent
+filesystem opens, including other clients and native filesystem callbacks.
+Already-open filesystem instances keep their configuration. Clients without
+`flinkConfigPath` leave the current defaults unchanged; use separate processes
+when configuration isolation is required.
 
 Standard semantic types are decoded without job jars when their serializer
 snapshots contain enough information. Add trusted job or dependency jars only

@@ -36,6 +36,8 @@ import io.cobble.table.TableReader;
 import io.cobble.table.TableScanCursor;
 import io.cobble.table.Value;
 
+import org.apache.flink.core.fs.Path;
+
 import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
@@ -93,7 +95,9 @@ final class InspectSessionImpl implements InspectSession {
                             operator == null || operator.embeddedCheckpoint == null
                                     ? Collections.emptyList()
                                     : operator.embeddedCheckpoint.rawKeyedState(),
-                            userClassLoader);
+                            userClassLoader,
+                            new Path(checkpoint.directory),
+                            storageOptions);
         } catch (IOException error) {
             restoredTimers = null;
             timerFailure = unreadable("Failed to read checkpoint legacy timers", error);
@@ -107,7 +111,8 @@ final class InspectSessionImpl implements InspectSession {
                 snapshot != null && snapshot.totalBuckets > 0
                         ? snapshot.totalBuckets
                         : configuredTotalBuckets;
-        SchemaResolveResult stateSchema = resolveStateSchema(sourceKind, checkpoint, operator);
+        SchemaResolveResult stateSchema =
+                resolveStateSchema(sourceKind, checkpoint, operator, storageOptions);
         List<InspectTarget> resolvedTargets;
         if ("data_source".equals(sourceKind)) {
             TableInspectSchema tableSchema =
@@ -975,13 +980,16 @@ final class InspectSessionImpl implements InspectSession {
     }
 
     private static SchemaResolveResult resolveStateSchema(
-            String sourceKind, CheckpointEntry checkpoint, OperatorEntry operator) {
+            String sourceKind,
+            CheckpointEntry checkpoint,
+            OperatorEntry operator,
+            CobbleConnectorStorageOptions storageOptions) {
         if ("data_source".equals(sourceKind)) {
             return SchemaResolveResult.unsupported(
                     "State schemas are not used for Cobble data sources");
         }
         try {
-            return MonitorInspectSchemaResolver.resolve(checkpoint, operator);
+            return MonitorInspectSchemaResolver.resolve(checkpoint, operator, storageOptions);
         } catch (Exception error) {
             return SchemaResolveResult.unavailable(
                     "Failed to resolve state schema: " + message(error));

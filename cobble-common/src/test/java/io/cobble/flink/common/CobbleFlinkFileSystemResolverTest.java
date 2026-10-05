@@ -1,6 +1,7 @@
 package io.cobble.flink.common;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -26,6 +27,25 @@ import java.util.Map;
 class CobbleFlinkFileSystemResolverTest {
 
     @TempDir Path tempDir;
+
+    @Test
+    void scopedHdfsUsesOptionalHadoopFactoryWithoutGlobalFallback() {
+        IOException error =
+                assertThrows(
+                        IOException.class,
+                        () ->
+                                CobbleFlinkFileSystemResolver.resolve(
+                                        "hdfs:///checkpoint",
+                                        CobbleConnectorStorageOptions.fromStorageOptions(
+                                                Collections.singletonMap(
+                                                        "storage.option.fs.defaultFS",
+                                                        "file:///"))));
+        assertTrue(error.getMessage().contains("refusing to switch to process-global credentials"));
+        assertTrue(
+                error.getCause().toString().contains("Hadoop")
+                        || error.getCause().toString().contains("hdfs"));
+        assertFalse(error.getCause().getMessage().contains("No connector-scoped"));
+    }
 
     @Test
     void passesGenericAndAliasCredentialsToScopedS3Provider() throws Exception {

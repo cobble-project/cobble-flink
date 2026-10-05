@@ -3,6 +3,7 @@ package io.cobble.flink.common;
 import io.cobble.Config;
 
 import org.apache.flink.configuration.ConfigOptions;
+import org.apache.flink.configuration.Configuration;
 import org.apache.flink.configuration.ReadableConfig;
 import org.apache.flink.core.fs.Path;
 
@@ -76,6 +77,16 @@ public final class CobbleFlinkStorageConfig implements Serializable {
 
     public boolean isEmpty() {
         return options.isEmpty() && routes.isEmpty();
+    }
+
+    static void clearS3ProviderOptions(Configuration configuration) {
+        for (String key : KEYS) {
+            if (key.startsWith("s3.")
+                    || key.startsWith("fs.s3a.")
+                    || key.startsWith("presto.s3.")) {
+                configuration.removeKey(key);
+            }
+        }
     }
 
     /**

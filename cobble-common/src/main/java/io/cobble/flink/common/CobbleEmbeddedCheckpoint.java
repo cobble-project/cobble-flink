@@ -25,6 +25,7 @@ import java.io.DataInputStream;
 import java.io.IOException;
 import java.lang.reflect.Method;
 import java.net.URI;
+import java.nio.file.Files;
 import java.nio.file.Paths;
 import java.util.ArrayList;
 import java.util.Collection;
@@ -70,26 +71,31 @@ public final class CobbleEmbeddedCheckpoint {
      * file, or a shard {@code SNAPSHOT-N} manifest back to readable Cobble metadata.
      */
     public static List<Location> locate(Path entry) throws IOException {
-        FileSystem fs = entry.getFileSystem();
+        return locate(entry, CobbleConnectorStorageOptions.empty());
+    }
+
+    public static List<Location> locate(Path entry, CobbleConnectorStorageOptions storageOptions)
+            throws IOException {
+        FileSystem fs = CobbleFlinkFileSystemResolver.resolve(entry.toString(), storageOptions);
         if (!fs.exists(entry)) {
             throw unsupported(entry, "path does not exist");
         }
         FileStatus status = fs.getFileStatus(entry);
         if (!status.isDir() && METADATA.equals(entry.getName())) {
-            return Collections.singletonList(readLocation(entry));
+            return Collections.singletonList(readLocation(entry, storageOptions));
         }
         if (status.isDir()) {
             Path metadata = new Path(entry, METADATA);
             if (fs.exists(metadata)) {
-                return Collections.singletonList(readLocation(metadata));
+                return Collections.singletonList(readLocation(metadata, storageOptions));
             }
-            List<Location> children = locateCheckpointChildren(fs, entry);
+            List<Location> children = locateCheckpointChildren(fs, entry, storageOptions);
             if (!children.isEmpty()) {
                 return children;
             }
         }
         if (parseSnapshotId(entry.getName()) != null) {
-            Location location = locateFromShard(entry);
+            Location location = locateFromShard(entry, storageOptions);
             if (location != null) {
                 return Collections.singletonList(location);
             }
@@ -153,10 +159,11 @@ public final class CobbleEmbeddedCheckpoint {
                         + checkpointIds(locations));
     }
 
-    private static List<Location> locateCheckpointChildren(FileSystem fs, Path root)
+    private static List<Location> locateCheckpointChildren(
+            FileSystem fs, Path root, CobbleConnectorStorageOptions storageOptions)
             throws IOException {
         List<Location> locations = new ArrayList<>();
-        collectCheckpointChildren(fs, root, 0, locations);
+        collectCheckpointChildren(fs, root, 0, locations, storageOptions);
         locations.sort(
                 Comparator.comparingLong((Location value) -> value.checkpoint().checkpointId())
                         .reversed());
@@ -190,7 +197,12 @@ public final class CobbleEmbeddedCheckpoint {
     }
 
     private static void collectCheckpointChildren(
-            FileSystem fs, Path root, int depth, List<Location> locations) throws IOException {
+            FileSystem fs,
+            Path root,
+            int depth,
+            List<Location> locations,
+            CobbleConnectorStorageOptions storageOptions)
+            throws IOException {
         if (depth > MAX_CHECKPOINT_CHILD_DEPTH) {
             return;
         }
@@ -209,14 +221,14 @@ public final class CobbleEmbeddedCheckpoint {
                     continue;
                 }
                 try {
-                    locations.add(readLocation(metadata));
+                    locations.add(readLocation(metadata, storageOptions));
                 } catch (IOException ignored) {
                     // A checkpoint may contain another backend's state; keep looking at siblings.
                 }
                 continue;
             }
             if (depth < MAX_CHECKPOINT_CHILD_DEPTH && !skipCheckpointChild(childPath.getName())) {
-                collectCheckpointChildren(fs, childPath, depth + 1, locations);
+                collectCheckpointChildren(fs, childPath, depth + 1, locations, storageOptions);
             }
         }
     }
@@ -228,12 +240,15 @@ public final class CobbleEmbeddedCheckpoint {
                 || "snapshot".equals(name);
     }
 
-    private static Location locateFromShard(Path snapshotManifest) throws IOException {
+    private static Location locateFromShard(
+            Path snapshotManifest, CobbleConnectorStorageOptions storageOptions)
+            throws IOException {
         Path ancestor = snapshotManifest.getParent();
         for (int depth = 0; ancestor != null && depth < MAX_SHARD_ANCESTORS; depth++) {
             Map<String, Location> matching = new LinkedHashMap<>();
-            FileSystem fs = ancestor.getFileSystem();
-            for (Location location : locationsAtOrBelow(fs, ancestor)) {
+            FileSystem fs =
+                    CobbleFlinkFileSystemResolver.resolve(ancestor.toString(), storageOptions);
+            for (Location location : locationsAtOrBelow(fs, ancestor, storageOptions)) {
                 if (referencesShardManifest(location.checkpoint(), snapshotManifest)) {
                     matching.putIfAbsent(location.checkpointDirectory().toString(), location);
                 }
@@ -248,17 +263,19 @@ public final class CobbleEmbeddedCheckpoint {
         return null;
     }
 
-    private static List<Location> locationsAtOrBelow(FileSystem fs, Path root) throws IOException {
+    private static List<Location> locationsAtOrBelow(
+            FileSystem fs, Path root, CobbleConnectorStorageOptions storageOptions)
+            throws IOException {
         List<Location> locations = new ArrayList<>();
         Path metadata = new Path(root, METADATA);
         if (fs.exists(metadata)) {
             try {
-                locations.add(readLocation(metadata));
+                locations.add(readLocation(metadata, storageOptions));
             } catch (IOException ignored) {
                 // This ancestor can be a non-Cobble checkpoint. Continue the bounded search.
             }
         }
-        locations.addAll(locateCheckpointChildren(fs, root));
+        locations.addAll(locateCheckpointChildren(fs, root, storageOptions));
         return locations;
     }
 
@@ -294,22 +311,30 @@ public final class CobbleEmbeddedCheckpoint {
 
     /** Strictly decodes one selected completed Flink checkpoint metadata file. */
     public static Location readLocation(Path metadataPath) throws IOException {
-        CobbleEmbeddedCheckpoint checkpoint = read(metadataPath);
+        return readLocation(metadataPath, CobbleConnectorStorageOptions.empty());
+    }
+
+    public static Location readLocation(
+            Path metadataPath, CobbleConnectorStorageOptions storageOptions) throws IOException {
+        CobbleEmbeddedCheckpoint checkpoint = read(metadataPath, storageOptions);
         return new Location(metadataPath.getParent(), metadataPath, checkpoint);
     }
 
     /** Reads a concrete Flink {@code _metadata} file containing Cobble keyed-state handles. */
     public static CobbleEmbeddedCheckpoint read(Path metadataPath) throws IOException {
+        return read(metadataPath, CobbleConnectorStorageOptions.empty());
+    }
+
+    public static CobbleEmbeddedCheckpoint read(
+            Path metadataPath, CobbleConnectorStorageOptions storageOptions) throws IOException {
         if (!METADATA.equals(metadataPath.getName())) {
             throw new IOException("Expected a Flink _metadata file, got " + metadataPath + ".");
         }
         CheckpointMetadata metadata;
-        try (FSDataInputStream input = metadataPath.getFileSystem().open(metadataPath)) {
-            metadata =
-                    Checkpoints.loadCheckpointMetadata(
-                            new DataInputStream(input),
-                            Thread.currentThread().getContextClassLoader(),
-                            metadataPath.getParent().toUri().toString());
+        try (FSDataInputStream input =
+                CobbleFlinkFileSystemResolver.resolve(metadataPath.toString(), storageOptions)
+                        .open(metadataPath)) {
+            metadata = loadMetadata(input, metadataPath, storageOptions);
         }
         Map<String, OperatorSnapshot> operators = new LinkedHashMap<>();
         for (OperatorState operatorState : metadata.getOperatorStates()) {
@@ -329,13 +354,17 @@ public final class CobbleEmbeddedCheckpoint {
                         shards,
                         stateDescriptors,
                         stores,
-                        volumeDirectories);
+                        volumeDirectories,
+                        metadataPath.getParent(),
+                        storageOptions);
                 collectCobbleHandles(
                         subtaskState.getRawKeyedState(),
                         shards,
                         stateDescriptors,
                         stores,
-                        volumeDirectories);
+                        volumeDirectories,
+                        metadataPath.getParent(),
+                        storageOptions);
             }
             if (!shards.isEmpty()) {
                 String operatorId = operatorState.getOperatorID().toHexString();
@@ -358,12 +387,51 @@ public final class CobbleEmbeddedCheckpoint {
         return new CobbleEmbeddedCheckpoint(metadata.getCheckpointId(), operators);
     }
 
+    private static CheckpointMetadata loadMetadata(
+            FSDataInputStream input,
+            Path metadataPath,
+            CobbleConnectorStorageOptions storageOptions)
+            throws IOException {
+        String scheme = metadataPath.toUri().getScheme();
+        if (storageOptions == null
+                || !storageOptions.hasExplicitOptions()
+                || scheme == null
+                || "file".equalsIgnoreCase(scheme)) {
+            return Checkpoints.loadCheckpointMetadata(
+                    new DataInputStream(input),
+                    Thread.currentThread().getContextClassLoader(),
+                    metadataPath.getParent().toString());
+        }
+        // Flink resolves relative handles through its global filesystem during decoding.
+        // Stage metadata locally, then resolve relative files against the original directory at
+        // open.
+        java.nio.file.Path directory = Files.createTempDirectory("cobble-checkpoint-metadata-");
+        java.nio.file.Path staged = directory.resolve(METADATA);
+        try {
+            Files.copy(input, staged);
+            try (DataInputStream local = new DataInputStream(Files.newInputStream(staged))) {
+                return Checkpoints.loadCheckpointMetadata(
+                        local,
+                        Thread.currentThread().getContextClassLoader(),
+                        directory.toUri().toString());
+            }
+        } finally {
+            try {
+                Files.deleteIfExists(staged);
+            } finally {
+                Files.deleteIfExists(directory);
+            }
+        }
+    }
+
     private static void collectCobbleHandles(
             Collection<KeyedStateHandle> handles,
             Map<String, ShardSnapshot> shards,
             List<CobbleStateDescriptor> stateDescriptors,
             List<StateInspectSchemaStore> stores,
-            List<String> volumeDirectories)
+            List<String> volumeDirectories,
+            Path checkpointDirectory,
+            CobbleConnectorStorageOptions storageOptions)
             throws IOException {
         for (KeyedStateHandle handle : handles) {
             if (!(handle instanceof IncrementalRemoteKeyedStateHandle)) {
@@ -376,7 +444,9 @@ public final class CobbleEmbeddedCheckpoint {
                 continue;
             }
             CobbleSnapshotMetadataPayload payload;
-            try (FSDataInputStream input = metadataHandle.openInputStream()) {
+            try (FSDataInputStream input =
+                    CobbleFlinkFileSystemResolver.open(
+                            metadataHandle, checkpointDirectory, storageOptions)) {
                 payload =
                         CobbleSnapshotMetadataCodec.readIfPresent(
                                 new DataInputViewStreamWrapper(input));

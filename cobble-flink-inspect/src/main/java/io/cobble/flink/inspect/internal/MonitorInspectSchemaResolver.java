@@ -1,5 +1,7 @@
 package io.cobble.flink.inspect.internal;
 
+import io.cobble.flink.common.CobbleConnectorStorageOptions;
+import io.cobble.flink.common.CobbleFlinkFileSystemResolver;
 import io.cobble.flink.common.inspect.InspectSchemaRegistryLayout;
 import io.cobble.flink.common.inspect.StateInspectSchemaStore;
 
@@ -48,9 +50,16 @@ public final class MonitorInspectSchemaResolver {
      * registry.
      */
     public static SchemaResolveResult resolve(CheckpointEntry checkpoint, OperatorEntry operator) {
+        return resolve(checkpoint, operator, CobbleConnectorStorageOptions.empty());
+    }
+
+    public static SchemaResolveResult resolve(
+            CheckpointEntry checkpoint,
+            OperatorEntry operator,
+            CobbleConnectorStorageOptions storageOptions) {
         SchemaResolveResult registry =
                 operator.globalSnapshotLayout
-                        ? resolveRegistry(checkpoint, operator)
+                        ? resolveRegistry(checkpoint, operator, storageOptions)
                         : SchemaResolveResult.unsupported(
                                 "Schema registry resolution is not available for non-global-snapshot operators.");
         if (registry.hasSchema()) {
@@ -60,7 +69,9 @@ public final class MonitorInspectSchemaResolver {
     }
 
     private static SchemaResolveResult resolveRegistry(
-            CheckpointEntry checkpoint, OperatorEntry operator) {
+            CheckpointEntry checkpoint,
+            OperatorEntry operator,
+            CobbleConnectorStorageOptions storageOptions) {
         Path checkpointRoot;
         try {
             checkpointRoot = checkpointRoot(checkpoint);
@@ -79,7 +90,7 @@ public final class MonitorInspectSchemaResolver {
                         EVENTS);
         FileSystem fs;
         try {
-            fs = eventsDir.getFileSystem();
+            fs = CobbleFlinkFileSystemResolver.resolve(eventsDir.toString(), storageOptions);
         } catch (Exception e) {
             LOG.debug("Failed to open filesystem for schema events: {}", e.getMessage());
             return SchemaResolveResult.unavailable(

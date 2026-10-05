@@ -2,6 +2,7 @@ package io.cobble.flink.inspect.internal;
 
 import io.cobble.flink.common.CobbleConnectorStorageOptions;
 import io.cobble.flink.common.CobbleEmbeddedCheckpoint;
+import io.cobble.flink.common.CobbleFlinkFileSystemResolver;
 
 import org.apache.flink.core.fs.FileStatus;
 import org.apache.flink.core.fs.FileSystem;
@@ -28,9 +29,10 @@ public final class InspectCatalogDiscovery {
 
     public static Result discover(String source, CobbleConnectorStorageOptions storageOptions) {
         try {
-            return discoverCheckpoint(source);
+            return discoverCheckpoint(source, storageOptions);
         } catch (InspectInputException checkpointFailure) {
-            if (hasCheckpointSignal(new Path(InspectPathUtils.normalizeStorageDirectory(source)))) {
+            if (hasCheckpointSignal(
+                    new Path(InspectPathUtils.normalizeStorageDirectory(source)), storageOptions)) {
                 throw checkpointFailure;
             }
             try {
@@ -48,12 +50,14 @@ public final class InspectCatalogDiscovery {
         }
     }
 
-    private static Result discoverCheckpoint(String source) {
+    private static Result discoverCheckpoint(
+            String source, CobbleConnectorStorageOptions storageOptions) {
         Path requested = new Path(InspectPathUtils.normalizeStorageDirectory(source));
         FileSystem fileSystem;
         FileStatus requestedStatus;
         try {
-            fileSystem = requested.getFileSystem();
+            fileSystem =
+                    CobbleFlinkFileSystemResolver.resolve(requested.toString(), storageOptions);
             requestedStatus = fileSystem.getFileStatus(requested);
         } catch (IOException e) {
             throw new InspectInputException(
@@ -61,11 +65,11 @@ public final class InspectCatalogDiscovery {
         }
 
         if (!requestedStatus.isDir()) {
-            return embeddedResult(locate(requested));
+            return embeddedResult(locate(requested, storageOptions), storageOptions);
         }
         if (hasMetadata(fileSystem, requested)) {
             try {
-                return embeddedResult(locate(requested));
+                return embeddedResult(locate(requested, storageOptions), storageOptions);
             } catch (InspectInputException ignored) {
                 // Non-Cobble metadata can still accompany a valid sidecar checkpoint.
             }
@@ -103,7 +107,7 @@ public final class InspectCatalogDiscovery {
                 directoriesById,
                 checkpointsById,
                 discoverSharedSnapshotOperators(fileSystem, root));
-        addEmbeddedCheckpointEntries(requested, checkpointsById);
+        addEmbeddedCheckpointEntries(requested, checkpointsById, storageOptions);
 
         List<CheckpointEntry> checkpoints = new ArrayList<>(checkpointsById.values());
         checkpoints.sort(Comparator.comparingLong((CheckpointEntry value) -> value.id).reversed());
@@ -117,14 +121,16 @@ public final class InspectCatalogDiscovery {
         return new Result("checkpoint", InspectPathUtils.pathToStorageString(root), checkpoints);
     }
 
-    private static Result embeddedResult(List<CobbleEmbeddedCheckpoint.Location> locations) {
+    private static Result embeddedResult(
+            List<CobbleEmbeddedCheckpoint.Location> locations,
+            CobbleConnectorStorageOptions storageOptions) {
         if (locations.isEmpty()) {
             throw new InspectInputException(
                     "No readable Cobble embedded checkpoint metadata found");
         }
         List<CheckpointEntry> checkpoints = new ArrayList<>();
         for (CobbleEmbeddedCheckpoint.Location location : locations) {
-            checkpoints.add(embeddedCheckpointEntry(location));
+            checkpoints.add(embeddedCheckpointEntry(location, storageOptions));
         }
         checkpoints.sort(Comparator.comparingLong((CheckpointEntry value) -> value.id).reversed());
         Path root = locations.get(0).checkpointDirectory().getParent();
@@ -134,9 +140,10 @@ public final class InspectCatalogDiscovery {
         return new Result("checkpoint", InspectPathUtils.pathToStorageString(root), checkpoints);
     }
 
-    private static List<CobbleEmbeddedCheckpoint.Location> locate(Path path) {
+    private static List<CobbleEmbeddedCheckpoint.Location> locate(
+            Path path, CobbleConnectorStorageOptions storageOptions) {
         try {
-            return CobbleEmbeddedCheckpoint.locate(path);
+            return CobbleEmbeddedCheckpoint.locate(path, storageOptions);
         } catch (IOException | RuntimeException e) {
             throw new InspectInputException(
                     "Failed to read Cobble embedded checkpoint metadata from "
@@ -147,10 +154,13 @@ public final class InspectCatalogDiscovery {
     }
 
     private static CheckpointEntry embeddedCheckpointEntry(
-            CobbleEmbeddedCheckpoint.Location location) {
+            CobbleEmbeddedCheckpoint.Location location,
+            CobbleConnectorStorageOptions storageOptions) {
         Path checkpointDirectory = location.checkpointDirectory();
         try {
-            FileSystem fileSystem = checkpointDirectory.getFileSystem();
+            FileSystem fileSystem =
+                    CobbleFlinkFileSystemResolver.resolve(
+                            checkpointDirectory.toString(), storageOptions);
             Path root = checkpointDirectory.getParent();
             List<OperatorEntry> sidecars =
                     discoverOperators(
@@ -179,16 +189,18 @@ public final class InspectCatalogDiscovery {
     }
 
     private static void addEmbeddedCheckpointEntries(
-            Path requested, Map<Long, CheckpointEntry> checkpointsById) {
+            Path requested,
+            Map<Long, CheckpointEntry> checkpointsById,
+            CobbleConnectorStorageOptions storageOptions) {
         try {
             for (CobbleEmbeddedCheckpoint.Location location :
-                    CobbleEmbeddedCheckpoint.locate(requested)) {
+                    CobbleEmbeddedCheckpoint.locate(requested, storageOptions)) {
                 long checkpointId = location.checkpoint().checkpointId();
                 CheckpointEntry existing = checkpointsById.get(checkpointId);
                 checkpointsById.put(
                         checkpointId,
                         existing == null
-                                ? embeddedCheckpointEntry(location)
+                                ? embeddedCheckpointEntry(location, storageOptions)
                                 : mergeEmbeddedCheckpoint(existing, location));
             }
         } catch (IOException | RuntimeException ignored) {
@@ -669,9 +681,10 @@ public final class InspectCatalogDiscovery {
         }
     }
 
-    private static boolean hasCheckpointSignal(Path entry) {
+    private static boolean hasCheckpointSignal(
+            Path entry, CobbleConnectorStorageOptions storageOptions) {
         try {
-            FileSystem fs = entry.getFileSystem();
+            FileSystem fs = CobbleFlinkFileSystemResolver.resolve(entry.toString(), storageOptions);
             if (!fs.exists(entry)) {
                 return false;
             }

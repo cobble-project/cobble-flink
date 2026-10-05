@@ -1,10 +1,10 @@
 package io.cobble.flink.inspect.internal;
 
+import io.cobble.flink.common.CobbleFlinkFileSystemResolver;
 import io.cobble.flink.common.CobbleLoader;
 
 import org.apache.flink.configuration.Configuration;
 import org.apache.flink.configuration.GlobalConfiguration;
-import org.apache.flink.core.fs.FileSystem;
 
 import java.io.File;
 
@@ -19,7 +19,7 @@ public final class FlinkInspectFileSystems {
         File path = new File(flinkConfPath);
         String configDirectory = path.isFile() ? path.getParent() : flinkConfPath;
         Configuration flinkConfiguration = GlobalConfiguration.loadConfiguration(configDirectory);
-        FileSystem.initialize(flinkConfiguration);
+        CobbleFlinkFileSystemResolver.initialize(flinkConfiguration);
         CobbleLoader.ensureCobbleLoaded();
     }
 }
