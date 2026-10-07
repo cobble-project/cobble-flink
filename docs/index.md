@@ -8,67 +8,65 @@ nav_order: 1
 
 <p align="center"><img src="{{ '/assets/images/logos/cobble-horizontal-1024.png' | relative_url }}" style="max-width: 60%; height: auto;" alt="Cobble Project logo" /></p>
 
-Cobble Flink integrates [Cobble](https://github.com/cobble-project/cobble) with
-[Apache Flink®](https://flink.apache.org/), so you can use Cobble as a Flink
-state backend, SQL source, and SQL sink.
+**Cobble Flink** is unified storage for Apache Flink: write processing results,
+read stored data, and manage streaming state through the same
+[Cobble core](https://github.com/cobble-project/cobble).
 
-## Features
+## Watch the Introduction
 
-Cobble Flink currently provides:
+<video controls preload="metadata" playsinline style="width: 100%; height: auto;" poster="{{ '/assets/videos/cobble-flink-intro-cover.jpg' | relative_url }}">
+  <source src="{{ '/assets/videos/cobble-flink-intro-en.mp4' | relative_url }}" type="video/mp4">
+  <a href="{{ '/assets/videos/cobble-flink-intro-en.mp4' | relative_url }}">Download the introduction video</a>.
+</video>
 
-- a **state backend** for stateful Flink jobs
-- a **SQL source** for reading Cobble data in Flink SQL
-- a **SQL sink** for writing Flink SQL results into Cobble
-- a bundled **runtime jar** for Flink cluster deployment
-- a **web monitor** for inspecting checkpoint and sink snapshots
+[Watch or download the introduction (2 min 44 sec)]({{ '/assets/videos/cobble-flink-intro-en.mp4' | relative_url }}).
 
-Cobble Flink supports Flink `1.17` and later. See
-[Getting Started](getting-started/) for the version matrix.
+## Use Cases
 
-## Why Cobble Flink
+### Balance storage cost and state performance
 
-Flink state is essential to a stateful job, but it is often visible only to the
-running job and restore tooling. Cobble Flink provides a state backend built for
-performance, elastic storage, and a more open state experience:
+Separate storage from compute, starting with Flink 1.17. Choose hybrid storage
+or local caching to balance capacity, cost, and performance.
 
-- **High performance for stateful workloads.** Cobble combines adaptive
-  in-memory structures, efficient state operations, and an LSM engine designed
-  for streaming workloads. On Flink 2.0 and later, it also supports the
-  asynchronous state API introduced by Flink. See the current
-  [state backend benchmarks](https://cobble-project.github.io/cobble-flink/latest/state-backend/benchmark)
-  for Nexmark and Flink state-operation results.
-- **Storage-compute separation with a local fast path.** Durable state can live
-  on shared or object storage for recovery and rescale, while the local volume
-  remains the high-priority active tier by default. Normal processing therefore
-  uses local storage first without giving up shared-state elasticity.
-- **Key-value separation for large state values.** Values above a configurable
-  threshold are stored in Cobble's value log instead of being repeatedly
-  rewritten with SST keys and indexes. Value-log files can also be assigned to
-  a lower-priority primary tier when required by the deployment.
-- **Observe persisted state.** The web monitor can browse checkpoint and sink
-  snapshots by operator and state, decode keys and values into semantic fields,
-  and surface generated SQL examples.
-- **Consume state as data.** The SQL source can scan or look up Cobble sink
-  tables and supported keyed state directly, including structured semantic
-  columns. Persisted state is no longer useful only for job recovery.
+<p align="center">
+  <img src="{{ '/assets/images/use-cases/flexible-storage.svg' | relative_url }}" width="100%" alt="Cobble core manages local and remote storage with hybrid or local-cache policies." />
+</p>
 
-State backend, source, sink, metrics, and remote storage support work together
-as one storage layer. Managed state remains part of the Flink runtime while
-becoming observable and consumable; tables written by the Cobble sink gain the
-same inspection and source capabilities.
+[Explore the state backend](state-backend/)
+· [See benchmarks](state-backend/benchmark)
 
-## Showcase
+### Share compaction capacity across jobs
 
-The diagram shows how Cobble connects Flink storage and consumption paths:
+Offload compaction from processing jobs and share CPU capacity across their peaks.
 
-- Flink jobs can persist managed state or sink tables in Cobble while
-  processing streams such as Kafka topics.
-- Other Flink jobs can scan or continuously read the persisted data, or use it
-  for exact-key lookup joins.
-- The web monitor reads the same snapshots so users can inspect keys, values,
-  and semantic columns without modifying the running job.
+<p align="center">
+  <img src="{{ '/assets/images/use-cases/remote-compaction.svg' | relative_url }}" width="100%" alt="Illustrative remote compaction sizing: six provisioned CPUs become four with staggered peaks." />
+</p>
 
-<p align="center"><img src="assets/images/cobble-flink-showcase.jpg" style="max-width: 60%; height: auto;" alt="Cobble Flink state, source, sink, lookup, and web monitor workflows" /></p>
+[Configure remote compaction](state-backend/#remote-compaction)
+
+### Write once, reuse across jobs
+
+Let another job scan stored results or look up a key for enrichment. Supported
+keyed state is reusable too.
+
+<p align="center">
+  <img src="{{ '/assets/images/use-cases/data-reuse.svg' | relative_url }}" width="100%" alt="A Flink writer publishes Cobble snapshots for other jobs to scan or look up by key." />
+</p>
+
+[Write with the sink](sink/)
+· [Scan and look up data](source/)
+
+### See what changed in your state
+
+Look up state and sink records, inspect business fields, and track changes
+across snapshots to debug your job.
+
+<p align="center">
+  <img src="{{ '/assets/images/use-cases/state-inspection.svg' | relative_url }}" width="100%" alt="Web Monitor illustration showing a customer record changing between completed checkpoints." />
+</p>
+
+[Explore the Web Monitor](web-monitor/)
 
 ## Documentation Structure
 
