@@ -11,20 +11,11 @@
 read stored data, and manage streaming state through the same
 [Cobble core](https://github.com/cobble-project/cobble).
 
-<div align="center">
-  <video src="https://github.com/cobble-project/cobble-flink/raw/refs/heads/main/docs/assets/videos/cobble-flink-intro-en.mp4"
-         poster="docs/assets/videos/cobble-flink-intro-cover.jpg"
-         width="800"
-         controls
-         loop
-         muted>
-    <a href="https://github.com/cobble-project/cobble-flink/raw/refs/heads/main/docs/assets/videos/cobble-flink-intro-en.mp4">Watch the Cobble Flink introduction</a>
-  </video>
-  <p><em>Cobble Flink: flexible storage, reusable data, and visible state.</em></p>
-</div>
+https://github.com/user-attachments/assets/5b9406ff-4d18-4247-899d-6d10d8685c70
 
-[Watch or download the video (2 min 44 sec)](https://github.com/cobble-project/cobble-flink/raw/refs/heads/main/docs/assets/videos/cobble-flink-intro-en.mp4)
-· [Documentation](https://cobble-project.github.io/cobble-flink/latest/)
+*Cobble Flink: flexible storage, reusable data, and visible state.*
+
+[Documentation](https://cobble-project.github.io/cobble-flink/latest/)
 · [Getting started](https://cobble-project.github.io/cobble-flink/latest/getting-started/)
 
 ## Use Cases

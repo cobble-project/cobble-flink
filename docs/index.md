@@ -19,8 +19,6 @@ read stored data, and manage streaming state through the same
   <a href="{{ '/assets/videos/cobble-flink-intro-en.mp4' | relative_url }}">Download the introduction video</a>.
 </video>
 
-[Watch or download the introduction (2 min 44 sec)]({{ '/assets/videos/cobble-flink-intro-en.mp4' | relative_url }}).
-
 ## Use Cases
 
 ### Balance storage cost and state performance
