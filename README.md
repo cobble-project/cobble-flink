@@ -1,4 +1,4 @@
-<p align="center"><img src="https://github.com/cobble-project/cobble/raw/main/logo.png" width="60%" alt="Cobble logo" /></p>
+<p align="center"><img src="https://github.com/cobble-project/cobble-flink/raw/HEAD/docs/assets/images/logos/cobble-horizontal-1024.png" width="60%" alt="Cobble Project logo" /></p>
 <p align="center">
   <a href="https://central.sonatype.com/artifact/io.github.cobble-project/cobble-flink-state"><img alt="Maven Central" src="https://img.shields.io/maven-central/v/io.github.cobble-project/cobble-flink-state?logo=apachemaven" /></a>
   <a href="https://github.com/cobble-project/cobble-flink/blob/main/LICENSE"><img alt="GitHub License" src="https://img.shields.io/github/license/cobble-project/cobble-flink" /></a>

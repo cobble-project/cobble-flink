@@ -6,6 +6,8 @@ nav_order: 1
 
 # Introduction
 
+<p align="center"><img src="{{ '/assets/images/logos/cobble-horizontal-1024.png' | relative_url }}" style="max-width: 60%; height: auto;" alt="Cobble Project logo" /></p>
+
 Cobble Flink integrates [Cobble](https://github.com/cobble-project/cobble) with
 [Apache Flink®](https://flink.apache.org/), so you can use Cobble as a Flink
 state backend, SQL source, and SQL sink.
