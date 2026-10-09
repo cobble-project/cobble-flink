@@ -27,6 +27,7 @@ import org.apache.flink.api.common.state.MapStateDescriptor;
 import org.openjdk.jmh.annotations.Benchmark;
 import org.openjdk.jmh.annotations.OperationsPerInvocation;
 import org.openjdk.jmh.annotations.Setup;
+import org.openjdk.jmh.infra.BenchmarkParams;
 import org.openjdk.jmh.infra.Blackhole;
 import org.openjdk.jmh.runner.Runner;
 import org.openjdk.jmh.runner.RunnerException;
@@ -53,7 +54,8 @@ public class MapStateBenchmark extends StateBenchmarkBase {
     }
 
     @Setup
-    public void setUp() throws Exception {
+    public void setUp(BenchmarkParams params, Blackhole bh) throws Exception {
+        configureBenchmark(params);
         keyedStateBackend = createKeyedStateBackend();
         mapState =
                 StateBackendBenchmarkUtils.getMapState(
@@ -67,6 +69,11 @@ public class MapStateBenchmark extends StateBenchmarkBase {
             keyedStateBackend.setCurrentKey((long) i);
             for (int j = 0; j < MAP_KEY_COUNT; j++) {
                 mapState.put(MAP_KEYS.get(j), random.nextDouble());
+            }
+            if (readDuringSetup && (i + 1) * MAP_KEY_COUNT % SETUP_WRITES_PER_READ == 0) {
+                long mapKey =
+                        MAP_KEYS.get((i * MAP_KEY_COUNT / SETUP_WRITES_PER_READ) % MAP_KEY_COUNT);
+                readDuringSetup(i, mapKey, bh);
             }
         }
         keyIndex = new AtomicInteger();
@@ -85,24 +92,28 @@ public class MapStateBenchmark extends StateBenchmarkBase {
     }
 
     @Benchmark
+    @ReadOperation
     public Double mapGet(KeyValue keyValue) throws Exception {
         keyedStateBackend.setCurrentKey(keyValue.setUpKey);
         return mapState.get(keyValue.mapKey);
     }
 
     @Benchmark
+    @ReadOperation
     public boolean mapContains(KeyValue keyValue) throws Exception {
         keyedStateBackend.setCurrentKey(keyValue.setUpKey);
         return mapState.contains(keyValue.mapKey << 1);
     }
 
     @Benchmark
+    @ReadOperation
     public boolean mapIsEmpty(KeyValue keyValue) throws Exception {
         keyedStateBackend.setCurrentKey(keyValue.setUpKey);
         return mapState.isEmpty();
     }
 
     @Benchmark
+    @ReadOperation
     @OperationsPerInvocation(MAP_KEY_COUNT)
     public void mapKeys(KeyValue keyValue, Blackhole bh) throws Exception {
         keyedStateBackend.setCurrentKey(keyValue.setUpKey);
@@ -112,6 +123,7 @@ public class MapStateBenchmark extends StateBenchmarkBase {
     }
 
     @Benchmark
+    @ReadOperation
     @OperationsPerInvocation(MAP_KEY_COUNT)
     public void mapValues(KeyValue keyValue, Blackhole bh) throws Exception {
         keyedStateBackend.setCurrentKey(keyValue.setUpKey);
@@ -121,6 +133,7 @@ public class MapStateBenchmark extends StateBenchmarkBase {
     }
 
     @Benchmark
+    @ReadOperation
     @OperationsPerInvocation(MAP_KEY_COUNT)
     public void mapEntries(KeyValue keyValue, Blackhole bh) throws Exception {
         keyedStateBackend.setCurrentKey(keyValue.setUpKey);
@@ -134,6 +147,7 @@ public class MapStateBenchmark extends StateBenchmarkBase {
     }
 
     @Benchmark
+    @ReadOperation
     @OperationsPerInvocation(MAP_KEY_COUNT)
     public void mapIterator(KeyValue keyValue, Blackhole bh) throws Exception {
         keyedStateBackend.setCurrentKey(keyValue.setUpKey);

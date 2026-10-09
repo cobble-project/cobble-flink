@@ -29,6 +29,7 @@ import org.openjdk.jmh.annotations.Benchmark;
 import org.openjdk.jmh.annotations.Level;
 import org.openjdk.jmh.annotations.Setup;
 import org.openjdk.jmh.annotations.TearDown;
+import org.openjdk.jmh.infra.BenchmarkParams;
 import org.openjdk.jmh.infra.Blackhole;
 import org.openjdk.jmh.runner.Runner;
 import org.openjdk.jmh.runner.RunnerException;
@@ -57,7 +58,8 @@ public class ListStateBenchmark extends StateBenchmarkBase {
     }
 
     @Setup
-    public void setUp() throws Exception {
+    public void setUp(BenchmarkParams params) throws Exception {
+        configureBenchmark(params);
         keyedStateBackend = createKeyedStateBackend();
         listState = StateBackendBenchmarkUtils.getListState(keyedStateBackend, stateDesc);
         dummyLists = new ArrayList<>(LIST_VALUE_COUNT);
@@ -68,16 +70,18 @@ public class ListStateBenchmark extends StateBenchmarkBase {
     }
 
     @Setup(Level.Iteration)
-    public void setUpPerIteration() throws Exception {
+    public void setUpPerIteration(Blackhole bh) throws Exception {
         if (backendType == StateBackendBenchmarkUtils.StateBackendType.COBBLE) {
             StateBackendBenchmarkUtils.cleanUp(benchmarkBackend);
-            benchmarkBackend = StateBackendBenchmarkUtils.createKeyedStateBackend(backendType);
-            keyedStateBackend = benchmarkBackend.getKeyedStateBackend();
+            keyedStateBackend = createKeyedStateBackend();
             listState = StateBackendBenchmarkUtils.getListState(keyedStateBackend, stateDesc);
         }
         for (int i = 0; i < SETUP_KEY_COUNT; ++i) {
             keyedStateBackend.setCurrentKey((long) i);
             listState.add(random.nextLong());
+            if (readDuringSetup && (i + 1) % SETUP_WRITES_PER_READ == 0) {
+                readDuringSetup(i, 0, bh);
+            }
         }
         compactState(keyedStateBackend, stateDesc);
     }
@@ -119,12 +123,14 @@ public class ListStateBenchmark extends StateBenchmarkBase {
     }
 
     @Benchmark
+    @ReadOperation
     public Iterable<Long> listGet(KeyValue keyValue) throws Exception {
         keyedStateBackend.setCurrentKey(keyValue.setUpKey);
         return listState.get();
     }
 
     @Benchmark
+    @ReadOperation
     public void listGetAndIterate(KeyValue keyValue, Blackhole bh) throws Exception {
         keyedStateBackend.setCurrentKey(keyValue.setUpKey);
         Iterable<Long> iterable = listState.get();

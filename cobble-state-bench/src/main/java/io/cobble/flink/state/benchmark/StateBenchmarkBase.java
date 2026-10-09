@@ -35,7 +35,15 @@ import org.openjdk.jmh.annotations.Scope;
 import org.openjdk.jmh.annotations.Setup;
 import org.openjdk.jmh.annotations.State;
 import org.openjdk.jmh.annotations.TearDown;
+import org.openjdk.jmh.infra.BenchmarkParams;
+import org.openjdk.jmh.infra.Blackhole;
 
+import java.lang.annotation.ElementType;
+import java.lang.annotation.Retention;
+import java.lang.annotation.RetentionPolicy;
+import java.lang.annotation.Target;
+import java.lang.reflect.InvocationTargetException;
+import java.lang.reflect.Method;
 import java.util.Collections;
 import java.util.List;
 import java.util.concurrent.ThreadLocalRandom;
@@ -43,6 +51,8 @@ import java.util.concurrent.atomic.AtomicInteger;
 
 /** Base implementation for the state benchmarks. */
 public class StateBenchmarkBase extends BenchmarkBase {
+    protected static final int SETUP_WRITES_PER_READ = 50;
+
     protected static AtomicInteger keyIndex;
     protected final ThreadLocalRandom random = ThreadLocalRandom.current();
 
@@ -51,9 +61,77 @@ public class StateBenchmarkBase extends BenchmarkBase {
 
     protected StateBackendBenchmarkUtils.BenchmarkBackend benchmarkBackend;
     protected AbstractKeyedStateBackend<Long> keyedStateBackend;
+    protected boolean readDuringSetup;
+    private Method setupReadMethod;
+    private final KeyValue setupKeyValue = new KeyValue();
+
+    /** Trains adaptive state during setup by invoking this read benchmark itself. */
+    @Retention(RetentionPolicy.RUNTIME)
+    @Target(ElementType.METHOD)
+    public @interface ReadOperation {}
+
+    /** Pure writes pin skiplist; read workloads train adaptive with matching setup queries. */
+    protected void configureBenchmark(BenchmarkParams params) {
+        Method method = resolveBenchmarkMethod(getClass(), params.getBenchmark());
+        readDuringSetup = method != null && method.isAnnotationPresent(ReadOperation.class);
+        setupReadMethod = readDuringSetup ? method : null;
+    }
+
+    static Method resolveBenchmarkMethod(Class<?> benchmarkClass, String benchmark) {
+        String name = benchmark.substring(benchmark.lastIndexOf('.') + 1);
+        Method selected = null;
+        for (Method method : benchmarkClass.getMethods()) {
+            if (!method.getName().equals(name)) {
+                continue;
+            }
+            if (selected != null) {
+                return null;
+            }
+            selected = method;
+        }
+        if (selected == null) {
+            return null;
+        }
+        Class<?>[] parameters = selected.getParameterTypes();
+        if ((parameters.length != 1 && parameters.length != 2)
+                || parameters[0] != KeyValue.class
+                || (parameters.length == 2 && parameters[1] != Blackhole.class)) {
+            return null;
+        }
+        return selected;
+    }
+
+    /** Setup-only invocation: use known populated keys, not invocation setup's global key index. */
+    protected void readDuringSetup(long stateKey, long mapKey, Blackhole bh) throws Exception {
+        if (setupReadMethod == null) {
+            return;
+        }
+        setupKeyValue.setUpKey = stateKey;
+        setupKeyValue.mapKey = mapKey;
+        try {
+            Object result =
+                    setupReadMethod.getParameterCount() == 1
+                            ? setupReadMethod.invoke(this, setupKeyValue)
+                            : setupReadMethod.invoke(this, setupKeyValue, bh);
+            if (setupReadMethod.getReturnType() != void.class) {
+                bh.consume(result);
+            }
+        } catch (InvocationTargetException error) {
+            Throwable cause = error.getCause();
+            if (cause instanceof Exception) {
+                throw (Exception) cause;
+            }
+            if (cause instanceof Error) {
+                throw (Error) cause;
+            }
+            throw new IllegalStateException("Benchmark setup read failed", cause);
+        }
+    }
 
     protected AbstractKeyedStateBackend<Long> createKeyedStateBackend() throws Exception {
-        benchmarkBackend = StateBackendBenchmarkUtils.createKeyedStateBackend(backendType);
+        benchmarkBackend =
+                StateBackendBenchmarkUtils.createKeyedStateBackend(
+                        backendType, readDuringSetup ? "adaptive" : "skiplist");
         keyedStateBackend = benchmarkBackend.getKeyedStateBackend();
         return keyedStateBackend;
     }

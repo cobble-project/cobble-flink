@@ -24,6 +24,8 @@ import org.apache.flink.api.common.state.ValueState;
 import org.apache.flink.api.common.state.ValueStateDescriptor;
 import org.openjdk.jmh.annotations.Benchmark;
 import org.openjdk.jmh.annotations.Setup;
+import org.openjdk.jmh.infra.BenchmarkParams;
+import org.openjdk.jmh.infra.Blackhole;
 import org.openjdk.jmh.runner.Runner;
 import org.openjdk.jmh.runner.RunnerException;
 import org.openjdk.jmh.runner.options.OptionsBuilder;
@@ -45,7 +47,8 @@ public class ValueStateBenchmark extends StateBenchmarkBase {
     }
 
     @Setup
-    public void setUp() throws Exception {
+    public void setUp(BenchmarkParams params, Blackhole bh) throws Exception {
+        configureBenchmark(params);
         keyedStateBackend = createKeyedStateBackend();
         valueState =
                 StateBackendBenchmarkUtils.getValueState(
@@ -53,6 +56,9 @@ public class ValueStateBenchmark extends StateBenchmarkBase {
         for (int i = 0; i < SETUP_KEY_COUNT; ++i) {
             keyedStateBackend.setCurrentKey((long) i);
             valueState.update(random.nextLong());
+            if (readDuringSetup && (i + 1) % SETUP_WRITES_PER_READ == 0) {
+                readDuringSetup(i, 0, bh);
+            }
         }
         keyIndex = new AtomicInteger();
     }
@@ -70,6 +76,7 @@ public class ValueStateBenchmark extends StateBenchmarkBase {
     }
 
     @Benchmark
+    @ReadOperation
     public Long valueGet(KeyValue keyValue) throws Exception {
         keyedStateBackend.setCurrentKey(keyValue.setUpKey);
         return valueState.value();

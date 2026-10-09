@@ -82,8 +82,8 @@ public final class StateBackendBenchmarkUtils {
         COBBLE
     }
 
-    public static BenchmarkBackend createKeyedStateBackend(StateBackendType backendType)
-            throws Exception {
+    public static BenchmarkBackend createKeyedStateBackend(
+            StateBackendType backendType, String memtableType) throws Exception {
         File benchmarkRoot = prepareDirectory("backend-root");
         File workingDir = new File(benchmarkRoot, "tm-working-dir");
         Files.createDirectories(workingDir.toPath());
@@ -103,7 +103,8 @@ public final class StateBackendBenchmarkUtils {
                     break;
                 case COBBLE:
                     keyedStateBackend =
-                            createCobbleBackend(environment, cancelStreamRegistry, benchmarkRoot);
+                            createCobbleBackend(
+                                    environment, cancelStreamRegistry, benchmarkRoot, memtableType);
                     break;
                 default:
                     throw new IllegalArgumentException("Unsupported state backend: " + backendType);
@@ -327,14 +328,17 @@ public final class StateBackendBenchmarkUtils {
     }
 
     private static AbstractKeyedStateBackend<Long> createCobbleBackend(
-            MockEnvironment environment, CloseableRegistry cancelStreamRegistry, File benchmarkRoot)
+            MockEnvironment environment,
+            CloseableRegistry cancelStreamRegistry,
+            File benchmarkRoot,
+            String memtableType)
             throws Exception {
         Configuration configuration = new Configuration();
         configuration.set(CobbleOptions.USE_MANAGED_MEMORY, true);
         configuration.set(
                 CobbleOptions.LOCAL_DIRECTORIES,
                 new File(benchmarkRoot, "cobble-local").getAbsolutePath());
-        configuration.set(CobbleOptions.MEMTABLE_TYPE, "skiplist");
+        configuration.set(CobbleOptions.MEMTABLE_TYPE, memtableType);
         String pinnedMetadataMaxLevel =
                 System.getProperty("cobble.state.bench.sst.pinned-metadata.max-level");
         if (pinnedMetadataMaxLevel != null && !pinnedMetadataMaxLevel.isEmpty()) {
