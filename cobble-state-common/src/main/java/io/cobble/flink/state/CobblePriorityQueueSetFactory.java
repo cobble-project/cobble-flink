@@ -1,5 +1,6 @@
 package io.cobble.flink.state;
 
+import io.cobble.Config;
 import io.cobble.structured.Db;
 import io.cobble.structured.PriorityQueue;
 
@@ -14,6 +15,8 @@ import org.apache.flink.runtime.state.RegisteredPriorityQueueStateBackendMetaInf
 import org.apache.flink.runtime.state.heap.HeapPriorityQueueElement;
 import org.apache.flink.util.FlinkRuntimeException;
 import org.apache.flink.util.StateMigrationException;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import java.io.IOException;
 import java.util.HashMap;
@@ -30,6 +33,7 @@ import java.util.function.BiConsumer;
  */
 final class CobblePriorityQueueSetFactory implements PriorityQueueSetFactory {
 
+    private static final Logger LOG = LoggerFactory.getLogger(CobblePriorityQueueSetFactory.class);
     private static final String TIMER_QUEUE_COLUMN_FAMILY_PREFIX = "__cobble_timer__";
 
     private final Db cobbleDb;
@@ -39,11 +43,13 @@ final class CobblePriorityQueueSetFactory implements PriorityQueueSetFactory {
     private final BiConsumer<String, TypeSerializer<?>> schemaRegistration;
     private final Map<String, RegisteredPriorityQueueStateBackendMetaInfo<?>> metaInfos;
     private final Map<String, CobbleTimerPriorityQueue<?>> queues;
+    private boolean adaptiveMemtableNeedsPinning;
 
     CobblePriorityQueueSetFactory(
             Db cobbleDb,
             KeyGroupRange keyGroupRange,
             int totalKeyGroups,
+            Config.MemtableType configuredMemtableType,
             boolean restoredNativeQueuesMayContainEntries,
             BiConsumer<String, TypeSerializer<?>> schemaRegistration) {
         this.cobbleDb = cobbleDb;
@@ -53,6 +59,7 @@ final class CobblePriorityQueueSetFactory implements PriorityQueueSetFactory {
         this.schemaRegistration = schemaRegistration;
         this.metaInfos = new HashMap<>();
         this.queues = new HashMap<>();
+        this.adaptiveMemtableNeedsPinning = configuredMemtableType == Config.MemtableType.ADAPTIVE;
     }
 
     @Override
@@ -97,6 +104,15 @@ final class CobblePriorityQueueSetFactory implements PriorityQueueSetFactory {
         // must therefore provide a byte-compatible timer serializer before opening the queue.
         if (allowFutureMetadataUpdates) {
             metaInfo = metaInfo.withSerializerUpgradesAllowed();
+        }
+        // Native timer queues repeatedly scan for their head. Pin only when a job actually
+        // registers one, and preserve explicitly configured concrete memtable types.
+        if (adaptiveMemtableNeedsPinning) {
+            cobbleDb.switchMemtableType(Config.MemtableType.SKIPLIST, true);
+            adaptiveMemtableNeedsPinning = false;
+            LOG.info(
+                    "Pinned adaptive Cobble memtable to SKIPLIST for native timer queue '{}'.",
+                    stateName);
         }
         PriorityQueue nativeQueue =
                 cobbleDb.getOrNewPriorityQueue(timerQueueColumnFamilyName(stateName));

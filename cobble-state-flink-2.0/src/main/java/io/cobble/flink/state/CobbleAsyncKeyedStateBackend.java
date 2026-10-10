@@ -666,6 +666,7 @@ final class CobbleAsyncKeyedStateBackend<K> implements AsyncKeyedStateBackend<K>
                         cobbleDb,
                         keyContext.getKeyGroupRange(),
                         keyContext.getNumberOfKeyGroups(),
+                        cobbleConfig.memtableType,
                         restoredNativeQueuesMayContainEntries,
                         this::registerTimerSchema);
             default:

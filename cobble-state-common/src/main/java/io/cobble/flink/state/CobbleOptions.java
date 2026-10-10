@@ -69,6 +69,7 @@ public final class CobbleOptions {
      * <p>When set to {@code adaptive} (the default), the native Cobble engine monitors access
      * patterns and switches the memtable type automatically: {@code vec} for write-heavy workloads,
      * {@code hash} for point-read-heavy workloads, and {@code skiplist} for mixed workloads.
+     * Registering a native Cobble timer queue pins adaptive mode to {@code skiplist} for that DB.
      */
     public static final ConfigOption<String> MEMTABLE_TYPE =
             ConfigOptions.key("state.backend.cobble.memtable.type")
@@ -77,7 +78,9 @@ public final class CobbleOptions {
                     .withDescription(
                             "The memtable implementation used by Cobble. Supported values: hash, "
                                     + "skiplist, vec, adaptive. adaptive (default) monitors access "
-                                    + "patterns and switches automatically.");
+                                    + "patterns and switches automatically. Registering a native Cobble "
+                                    + "timer queue pins adaptive mode to skiplist for that DB; heap "
+                                    + "timers and explicitly configured concrete types are unchanged.");
 
     /** Compaction policy used by Cobble (round_robin, min_overlap, score_priority). */
     public static final ConfigOption<String> COMPACTION_POLICY =
