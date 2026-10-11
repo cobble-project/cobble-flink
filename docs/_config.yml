@@ -1,7 +1,7 @@
-title: Cobble Flink Docs
+title: Cobble Flink
 description: Documentation for using Cobble as a Flink state backend, SQL source, and SQL sink
 theme: just-the-docs
-logo: /assets/images/logos/cobble-horizontal-512.png
+logo: false
 docs_root_label: latest
 docs_commit_label: ""
 

@@ -6,8 +6,6 @@ nav_order: 1
 
 # Introduction
 
-<p align="center"><img src="{{ '/assets/images/logos/cobble-horizontal-1024.png' | relative_url }}" style="max-width: 60%; height: auto;" alt="Cobble Project logo" /></p>
-
 **Cobble Flink** is unified storage for Apache Flink: write processing results,
 read stored data, and manage streaming state through the same
 [Cobble core](https://github.com/cobble-project/cobble).
