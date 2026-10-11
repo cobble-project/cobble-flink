@@ -37,16 +37,16 @@ Build the monitor from the repository:
 ```
 
 The command above builds the 1.17 monitor. For checkpoints produced by newer
-Flink lines, select the matching module from the [development monitor
-matrix](../getting-started/#development-monitor-versions), for example:
+Flink lines, select the matching module from the [monitor
+matrix](../getting-started/#monitor-versions), for example:
 
 ```bash
 ./mvnw -pl cobble-flink-monitor-flink-2.1 -am package -DskipTests
 ```
 
 The runnable jar is written under the selected module's `target/` directory.
-The current development variants are not yet published releases. The launch
-examples below use the 1.17 path; substitute your selected module's jar path.
+Source builds append `-SNAPSHOT` to the `0.5.1-1` release-line versions. The
+launch examples below use the 1.17 path; substitute your selected module's jar path.
 
 ## Start The Monitor
 

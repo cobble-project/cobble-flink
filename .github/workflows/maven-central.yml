@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
     inputs:
       release_tag:
-        description: Existing release tag to publish, for example v0.3.0-1
+        description: Existing release tag to publish, for example v0.5.1-1
         required: true
         type: string
 
@@ -51,7 +51,7 @@ jobs:
           set -euo pipefail
           release_base="${RELEASE_TAG#v}"
           if [[ ! "${release_base}" =~ ^[0-9]+\.[0-9]+\.[0-9]+-[0-9]+$ ]]; then
-            echo "Release tag must look like v0.3.0-1; got ${RELEASE_TAG}." >&2
+            echo "Release tag must look like v0.5.1-1; got ${RELEASE_TAG}." >&2
             exit 1
           fi
           echo "RELEASE_BASE=${release_base}" >> "${GITHUB_ENV}"

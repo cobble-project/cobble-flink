@@ -18,7 +18,7 @@ ${cobble-version}-{patch-version}-flink-{flink-minor-version}
 Example:
 
 ```text
-0.4.0-1-flink-1.17
+0.5.1-1-flink-1.17
 ```
 
 Use the matrix below to choose the `<version>` value for each dependency in
@@ -26,33 +26,35 @@ your `pom.xml` or for the runtime jar you copy into Flink `lib/`:
 
 | Flink cluster version | Dist bundle jar version | State dependency version | Sink dependency version | Source dependency version |
 | --- | --- | --- | --- | --- |
-| 1.17, 1.18 | `0.4.0-1-flink-1.17` | `0.4.0-1-flink-1.17` | `0.4.0-1-flink-1.17` | `0.4.0-1-flink-1.17` |
-| 1.19, 1.20 | `0.4.0-1-flink-1.19` | `0.4.0-1-flink-1.19` | `0.4.0-1-flink-1.17` | `0.4.0-1-flink-1.17` |
-| 2.0 | `0.4.0-1-flink-2.0` | `0.4.0-1-flink-2.0` | `0.4.0-1-flink-2.0` | `0.4.0-1-flink-1.17` |
-| 2.1 and above | `0.4.0-1-flink-2.1` | `0.4.0-1-flink-2.1` | `0.4.0-1-flink-2.0` | `0.4.0-1-flink-1.17` |
+| 1.17, 1.18 | `0.5.1-1-flink-1.17` | `0.5.1-1-flink-1.17` | `0.5.1-1-flink-1.17` | `0.5.1-1-flink-1.17` |
+| 1.19, 1.20 | `0.5.1-1-flink-1.19` | `0.5.1-1-flink-1.19` | `0.5.1-1-flink-1.17` | `0.5.1-1-flink-1.17` |
+| 2.0 | `0.5.1-1-flink-2.0` | `0.5.1-1-flink-2.0` | `0.5.1-1-flink-2.0` | `0.5.1-1-flink-1.17` |
+| 2.1 and above | `0.5.1-1-flink-2.1` | `0.5.1-1-flink-2.1` | `0.5.1-1-flink-2.0` | `0.5.1-1-flink-1.17` |
+
+The `0.5.1-1` release line uses Cobble core `0.5.1`. Development builds from
+source append `-SNAPSHOT` to the Cobble Flink versions shown here; the release
+workflow removes that suffix for tagged releases.
 
 The dist bundle jar is a single artifact that contains all three parts, it is the recommended way to use Cobble Flink.
 The other three parts are separate artifacts that can be used as job-side Maven dependencies.
 ArtifactIds stay the same across Flink versions. Choose the artifactId from
 the section you are using, then choose the `<version>` from the table.
 
-## Development Monitor Versions
+## Monitor Versions
 
-The matrix above remains the published `0.4.0-1` release matrix. The current
-`0.6.0` development tree builds the following standalone monitor variants;
-these new variants are not yet published releases:
+The standalone monitor variants follow the same `0.5.1-1` release line:
 
-| Checkpoint producer line | Bundled Flink runtime | Build module | Development monitor version |
+| Checkpoint producer line | Bundled Flink runtime | Build module | Monitor version |
 | --- | --- | --- | --- |
-| 1.17 | 1.17.2 | `cobble-flink-monitor` | `0.6.0-1-flink-1.17-SNAPSHOT` |
-| 1.19 | 1.19.3 | `cobble-flink-monitor-flink-1.19` | `0.6.0-1-flink-1.19-SNAPSHOT` |
-| 2.0 | 2.0.2 | `cobble-flink-monitor-flink-2.0` | `0.6.0-1-flink-2.0-SNAPSHOT` |
-| 2.1 | 2.1.1 | `cobble-flink-monitor-flink-2.1` | `0.6.0-1-flink-2.1-SNAPSHOT` |
+| 1.17 | 1.17.2 | `cobble-flink-monitor` | `0.5.1-1-flink-1.17` |
+| 1.19 | 1.19.3 | `cobble-flink-monitor-flink-1.19` | `0.5.1-1-flink-1.19` |
+| 2.0 | 2.0.2 | `cobble-flink-monitor-flink-2.0` | `0.5.1-1-flink-2.0` |
+| 2.1 | 2.1.1 | `cobble-flink-monitor-flink-2.1` | `0.5.1-1-flink-2.1` |
 
 All use artifactId `cobble-flink-monitor` and the same source code and web UI.
 Match the monitor to the checkpoint producer line; the 1.17 runtime cannot
 read all newer `_metadata` formats. Flink 2.2 and later are outside this
-development monitor matrix. See [Web Monitor](../web-monitor/) for building.
+monitor matrix. See [Web Monitor](../web-monitor/) for building.
 
 Make sure the version matches:
 
@@ -90,7 +92,7 @@ the Flink distribution's `lib/` directory. For example, on Flink 1.17 or 1.18:
 
 ```bash
 export FLINK_HOME=/path/to/flink-1.17.x
-cp cobble-flink-dist-0.4.0-1-flink-1.17.jar "$FLINK_HOME/lib/"
+cp cobble-flink-dist-0.5.1-1-flink-1.17.jar "$FLINK_HOME/lib/"
 ```
 
 If you are not using a released jar yet and want to build from source, you can
@@ -148,7 +150,7 @@ Flink cluster version. For Flink 1.19 or 1.20:
 <dependency>
   <groupId>io.github.cobble-project</groupId>
   <artifactId>cobble-flink-dist</artifactId>
-  <version>0.4.0-1-flink-1.19</version>
+  <version>0.5.1-1-flink-1.19</version>
 </dependency>
 ```
 
@@ -165,19 +167,19 @@ and source can use the 1.17-compatible artifact version:
   <dependency>
     <groupId>io.github.cobble-project</groupId>
     <artifactId>cobble-flink-state</artifactId>
-    <version>0.4.0-1-flink-1.19</version>
+    <version>0.5.1-1-flink-1.19</version>
   </dependency>
 
   <dependency>
     <groupId>io.github.cobble-project</groupId>
     <artifactId>cobble-flink-source</artifactId>
-    <version>0.4.0-1-flink-1.17</version>
+    <version>0.5.1-1-flink-1.17</version>
   </dependency>
 
   <dependency>
     <groupId>io.github.cobble-project</groupId>
     <artifactId>cobble-flink-sink</artifactId>
-    <version>0.4.0-1-flink-1.17</version>
+    <version>0.5.1-1-flink-1.17</version>
   </dependency>
 </dependencies>
 ```
