@@ -2136,6 +2136,224 @@ class CobbleStateBackendTest {
     }
 
     @Test
+    void pendingTimersCoveredByReloadSurviveExplicitFlush(@TempDir Path tempDir) throws Exception {
+        assertPendingTimersCoveredByReloadSurviveFlush(tempDir, false);
+    }
+
+    @Test
+    void pendingTimersCoveredByReloadSurviveOtherBucketCapacityFlush(@TempDir Path tempDir)
+            throws Exception {
+        assertPendingTimersCoveredByReloadSurviveFlush(tempDir, true);
+    }
+
+    private void assertPendingTimersCoveredByReloadSurviveFlush(Path tempDir, boolean capacityFlush)
+            throws Exception {
+        int key = findKeyForGroup(0);
+        int otherKey = findKeyForGroup(1);
+        try (TestBackendContext context = createBackendContext(tempDir, false, null);
+                PriorityQueue nativeQueue =
+                        context.cobbleBackend
+                                .getCobbleDb()
+                                .getOrNewPriorityQueue("reload-ownership")) {
+            CobbleTimerSerializationContext<TestTimerElement> serialization =
+                    new CobbleTimerSerializationContext<>(new TestTimerElementSerializer());
+            CobbleTimerWriteBuffer<TestTimerElement> buffer =
+                    new CobbleTimerWriteBuffer<>(
+                            4, (bucket, bytes) -> nativeQueue.offer(bucket, bytes, new byte[0]));
+            TestTimerElement first = new TestTimerElement(10L, key);
+            TestTimerElement pending = new TestTimerElement(50L, key);
+            TestTimerElement boundary = new TestTimerElement(100L, key);
+            TestTimerElement outside = new TestTimerElement(200L, key);
+            for (TestTimerElement timer : Arrays.asList(first, boundary)) {
+                nativeQueue.offer(
+                        0, serialization.serializeElementKey(timer).heapBytes, new byte[0]);
+            }
+            CobbleCachingPriorityQueueSet<TestTimerElement> queue =
+                    new CobbleCachingPriorityQueueSet<>(
+                            context.cobbleBackend.getCobbleDb(),
+                            nativeQueue,
+                            serialization,
+                            buffer,
+                            0,
+                            true);
+            assertTrue(queue.add(pending));
+            assertFalse(queue.add(boundary));
+            assertFalse(queue.add(outside));
+            buffer.get(0, serialization.serializeElementKey(pending).heapBytes).cachedElement =
+                    pending;
+            assertEquals(4, queue.size(), "native and pending duplicates count only once");
+            assertEquals(first, queue.peek());
+            assertEquals(
+                    4, queue.size(), "reload transfers ownership without changing logical size");
+
+            CobbleCachingPriorityQueueSet<TestTimerElement> otherQueue =
+                    new CobbleCachingPriorityQueueSet<>(
+                            context.cobbleBackend.getCobbleDb(),
+                            nativeQueue,
+                            serialization,
+                            buffer,
+                            1,
+                            false);
+            if (capacityFlush) {
+                for (int timestamp : new int[] {20, 30, 40}) {
+                    otherQueue.add(new TestTimerElement(timestamp, otherKey));
+                }
+            } else {
+                buffer.flushPendingWrites();
+            }
+
+            assertEquals(first, queue.poll());
+            TestTimerElement polledPending = queue.poll();
+            assertEquals(
+                    50L, polledPending.timestamp, "flush must not skip a covered pending timer");
+            assertSame(
+                    pending, polledPending, "reload must retain a pending timer's cached object");
+            assertEquals(boundary, queue.poll());
+            assertEquals(outside, queue.poll());
+            assertNull(queue.poll());
+            assertEquals(0, queue.size());
+            if (capacityFlush) {
+                for (int timestamp : new int[] {20, 30, 40}) {
+                    assertEquals(new TestTimerElement(timestamp, otherKey), otherQueue.poll());
+                }
+                assertNull(otherQueue.poll());
+            }
+        }
+    }
+
+    @Test
+    void pendingTimersCoveredByLaterReloadKeepFlinkChildHeadsAndOrder(@TempDir Path tempDir)
+            throws Exception {
+        int key = findKeyForGroup(0);
+        int otherKey = findKeyForGroup(1);
+        try (TestBackendContext context = createBackendContext(tempDir, false, null);
+                PriorityQueue nativeQueue =
+                        context.cobbleBackend
+                                .getCobbleDb()
+                                .getOrNewPriorityQueue("reload-rounds")) {
+            CobbleTimerSerializationContext<TestTimerElement> serialization =
+                    new CobbleTimerSerializationContext<>(new TestTimerElementSerializer());
+            for (int timestamp = 0; timestamp <= 4096; timestamp += 2) {
+                nativeQueue.offer(
+                        0,
+                        serialization.serializeElementKey(new TestTimerElement(timestamp, key))
+                                .heapBytes,
+                        new byte[0]);
+            }
+            CobbleTimerPriorityQueue<TestTimerElement> queue =
+                    new CobbleTimerPriorityQueue<>(
+                            context.cobbleBackend.getCobbleDb(),
+                            nativeQueue,
+                            new TestTimerElementSerializer(),
+                            KeyGroupRange.of(0, 1),
+                            16,
+                            true);
+            for (int timestamp : new int[] {1, 2047, 2049, 4094, 4095, 5000}) {
+                queue.add(new TestTimerElement(timestamp, key));
+            }
+            queue.add(new TestTimerElement(3001, otherKey));
+            assertEquals(new TestTimerElement(0, key), queue.poll());
+            assertEquals(new TestTimerElement(1, key), queue.poll());
+            for (int timestamp = 2; timestamp <= 2046; timestamp += 2) {
+                assertEquals(new TestTimerElement(timestamp, key), queue.poll());
+            }
+            // The next native batch now covers older pending timers and a native duplicate.
+            assertEquals(new TestTimerElement(2047, key), queue.peek());
+            queue.flushPendingWrites();
+            for (int timestamp : new int[] {2047, 2048, 2049}) {
+                assertEquals(new TestTimerElement(timestamp, key), queue.poll());
+            }
+            for (int timestamp = 2050; timestamp <= 4094; timestamp += 2) {
+                assertEquals(new TestTimerElement(timestamp, key), queue.poll());
+                if (timestamp == 3000) {
+                    assertEquals(new TestTimerElement(3001, otherKey), queue.poll());
+                }
+            }
+            for (int timestamp : new int[] {4095, 4096, 5000}) {
+                assertEquals(new TestTimerElement(timestamp, key), queue.poll());
+            }
+            assertNull(queue.poll());
+            assertEquals(0, queue.size());
+        }
+    }
+
+    @Test
+    void pendingTimersCoveredByReloadSurviveSnapshotAdvanceAndRestore(@TempDir Path tempDir)
+            throws Exception {
+        int key = findKeyForGroup(0);
+        String checkpointDirectory = tempDir.resolve("checkpoints").toString();
+        String stateName = "reload-snapshot";
+        String queueName = CobblePriorityQueueSetFactory.timerQueueColumnFamilyName(stateName);
+        List<TestTimerElement> overlaySnapshot;
+        KeyedStateHandle snapshotHandle;
+        try (TestBackendContext context =
+                        createBackendContext(
+                                tempDir.resolve("source"), false, checkpointDirectory);
+                PriorityQueue nativeQueue =
+                        context.cobbleBackend.getCobbleDb().getOrNewPriorityQueue(queueName)) {
+            CobbleTimerSerializationContext<TestTimerElement> serialization =
+                    new CobbleTimerSerializationContext<>(new TestTimerElementSerializer());
+            CobbleTimerWriteBuffer<TestTimerElement> buffer =
+                    new CobbleTimerWriteBuffer<>(nativeQueue);
+            context.cobbleBackend.create(stateName, new TestTimerElementSerializer());
+            for (int timestamp : new int[] {10, 100}) {
+                nativeQueue.offer(
+                        0,
+                        serialization.serializeElementKey(new TestTimerElement(timestamp, key))
+                                .heapBytes,
+                        new byte[0]);
+            }
+            CobbleCachingPriorityQueueSet<TestTimerElement> queue =
+                    new CobbleCachingPriorityQueueSet<>(
+                            context.cobbleBackend.getCobbleDb(),
+                            nativeQueue,
+                            serialization,
+                            buffer,
+                            0,
+                            true);
+            for (int timestamp : new int[] {50, 100, 200}) {
+                queue.add(new TestTimerElement(timestamp, key));
+            }
+            assertEquals(new TestTimerElement(10, key), queue.peek());
+            buffer.flushPendingWrites();
+            queue.advancePrefetchedBatch();
+            overlaySnapshot = queue.overlaySnapshotElements();
+            assertEquals(
+                    Arrays.asList(
+                            new TestTimerElement(10, key),
+                            new TestTimerElement(50, key),
+                            new TestTimerElement(100, key)),
+                    overlaySnapshot);
+            snapshotHandle = runCheckpointSnapshot(context.cobbleBackend, 96L);
+        }
+        try (TestBackendContext context =
+                        createBackendContext(
+                                tempDir.resolve("restored"),
+                                false,
+                                checkpointDirectory,
+                                null,
+                                TtlTimeProvider.DEFAULT,
+                                false,
+                                Collections.singletonList(snapshotHandle));
+                PriorityQueue nativeQueue =
+                        context.cobbleBackend.getCobbleDb().getOrNewPriorityQueue(queueName)) {
+            CobbleCachingPriorityQueueSet<TestTimerElement> queue =
+                    new CobbleCachingPriorityQueueSet<>(
+                            context.cobbleBackend.getCobbleDb(),
+                            nativeQueue,
+                            new CobbleTimerSerializationContext<>(new TestTimerElementSerializer()),
+                            0,
+                            true);
+            queue.addAll(overlaySnapshot);
+            assertEquals(4, queue.size());
+            for (int timestamp : new int[] {10, 50, 100, 200}) {
+                assertEquals(new TestTimerElement(timestamp, key), queue.poll());
+            }
+            assertNull(queue.poll());
+        }
+    }
+
+    @Test
     void pendingTimerEarlierThanNativeTimerBecomesVisibleImmediately(@TempDir Path tempDir)
             throws Exception {
         int key = findKeyForGroup(0);

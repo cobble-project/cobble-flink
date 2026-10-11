@@ -2,6 +2,8 @@ package io.cobble.flink.state;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -64,6 +66,67 @@ class CobbleTimerWriteBufferTest {
         buffer.flushPendingWrites();
 
         assertEquals(Arrays.asList("1:1", "1:2", "1:1", "1:2", "2:3"), writes);
+        assertEquals(0, buffer.size());
+    }
+
+    @Test
+    void drainThroughTransfersOnlyTheOrderedBucketPrefixAndRetainsCachedElements() {
+        List<String> writes = new ArrayList<>();
+        CobbleTimerWriteBuffer<Object> buffer =
+                new CobbleTimerWriteBuffer<>(8, (bucket, key) -> writes.add(write(bucket, key)));
+        buffer.add(4, key(9));
+        buffer.add(4, key(2));
+        buffer.add(4, key(5));
+        buffer.add(5, key(1));
+        Object cached = new Object();
+        CobbleTimerWriteBuffer.PendingTimer<Object> timer = buffer.get(4, key(5));
+        timer.cachedElement = cached;
+        List<CobbleTimerWriteBuffer.PendingTimer<Object>> moved = new ArrayList<>();
+
+        buffer.drainThrough(4, key(5), moved::add);
+
+        assertEquals(2, moved.size());
+        assertEquals(2, moved.get(0).serializedKey[0]);
+        assertSame(timer, moved.get(1));
+        assertSame(cached, moved.get(1).cachedElement);
+        assertNull(buffer.get(4, key(5)));
+        assertEquals(9, buffer.first(4).serializedKey[0]);
+        assertEquals(1, buffer.first(5).serializedKey[0]);
+        assertEquals(2, buffer.size());
+        assertTrue(writes.isEmpty());
+
+        buffer.drainThrough(4, key(9), moved::add);
+        buffer.drainThrough(4, key(99), moved::add);
+        assertNull(buffer.first(4));
+        assertEquals(1, buffer.size());
+        buffer.flushPendingWrites();
+        assertEquals(Arrays.asList("5:1"), writes);
+    }
+
+    @Test
+    void failedDrainReceiverLeavesUnacceptedTimersPending() {
+        CobbleTimerWriteBuffer<Object> buffer =
+                new CobbleTimerWriteBuffer<>(8, (bucket, key) -> {});
+        buffer.add(4, key(2));
+        buffer.add(4, key(5));
+        List<CobbleTimerWriteBuffer.PendingTimer<Object>> moved = new ArrayList<>();
+        assertThrows(
+                IllegalStateException.class,
+                () ->
+                        buffer.drainThrough(
+                                4,
+                                key(5),
+                                timer -> {
+                                    if (timer.serializedKey[0] == 5) {
+                                        throw new IllegalStateException(
+                                                "injected transfer failure");
+                                    }
+                                    moved.add(timer);
+                                }));
+        assertEquals(1, moved.size());
+        assertEquals(1, buffer.size());
+        assertEquals(5, buffer.first(4).serializedKey[0]);
+        buffer.drainThrough(4, key(5), moved::add);
         assertEquals(0, buffer.size());
     }
 

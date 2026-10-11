@@ -370,6 +370,18 @@ final class CobbleCachingPriorityQueueSet<T>
                 lastKey = heapKey;
             }
 
+            // Advancing this boundary will hide native writes too. Transfer covered pending
+            // timers now, before a later shared-buffer flush can put them behind that cursor.
+            writeBuffer.drainThrough(
+                    bucket,
+                    lastKey,
+                    pending -> {
+                        OverlayTimer<T> timer = new OverlayTimer<>(pending.serializedKey);
+                        timer.cachedElement = pending.cachedElement;
+                        if (!overlay.add(timer) && pending.cachedElement != null) {
+                            overlay.ceiling(timer).cachedElement = pending.cachedElement;
+                        }
+                    });
             pendingAdvanceKey = lastKey;
             nativeExhausted = false;
         }

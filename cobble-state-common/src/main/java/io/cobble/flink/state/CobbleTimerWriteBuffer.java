@@ -8,11 +8,13 @@ import java.nio.Buffer;
 import java.nio.ByteBuffer;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
 import java.util.NavigableSet;
 import java.util.TreeMap;
 import java.util.TreeSet;
+import java.util.function.Consumer;
 
 /**
  * Timer-state-wide pending native writes, partitioned by key-group bucket.
@@ -114,6 +116,30 @@ final class CobbleTimerWriteBuffer<T> {
         return pending == null
                 ? Collections.emptyList()
                 : new ArrayList<>(pending);
+    }
+
+    /** Transfers this bucket's pending keys through the inclusive upper bound to the receiver. */
+    void drainThrough(int bucket, byte[] upperBound, Consumer<PendingTimer<T>> receiver) {
+        NavigableSet<PendingTimer<T>> pending = pendingByBucket.get(bucket);
+        if (pending == null) {
+            return;
+        }
+        Iterator<PendingTimer<T>> iterator = pending.iterator();
+        while (iterator.hasNext()) {
+            PendingTimer<T> timer = iterator.next();
+            if (CobbleTimerSerializationContext.compareSerializedKeys(
+                            timer.serializedKey, upperBound)
+                    > 0) {
+                break;
+            }
+            // Keep the pending owner until the receiver has accepted this timer.
+            receiver.accept(timer);
+            iterator.remove();
+            pendingWriteCount--;
+        }
+        if (pending.isEmpty()) {
+            pendingByBucket.remove(bucket);
+        }
     }
 
     int size() {
