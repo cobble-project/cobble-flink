@@ -49,7 +49,7 @@ not need both at the same time.
 
 Download the released runtime jar from a Maven repository and put it into
 Flink's `lib/` directory. Use the version matrix in
-[Getting Started](../getting-started/) to choose the artifact that matches your
+[Versions](../getting-started/versions.html) to choose the artifact that matches your
 Flink version. For example, on Flink 1.19 or 1.20:
 
 ```bash
@@ -70,7 +70,7 @@ the job itself:
 ```
 
 Use `cobble-flink-state` for every supported Flink version. Select the
-version value from the state column in [Getting Started](../getting-started/).
+version value from the state column in [Versions](../getting-started/versions.html).
 
 Most users do not need this if the runtime jar is already present in Flink
 `lib/`.

@@ -38,7 +38,7 @@ Build the monitor from the repository:
 
 The command above builds the 1.17 monitor. For checkpoints produced by newer
 Flink lines, select the matching module from the [monitor
-matrix](../getting-started/#monitor-versions), for example:
+matrix](../getting-started/versions.html#monitor-versions), for example:
 
 ```bash
 ./mvnw -pl cobble-flink-monitor-flink-2.1 -am package -DskipTests

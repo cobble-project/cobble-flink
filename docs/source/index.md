@@ -36,7 +36,7 @@ not need both at the same time.
 
 Download the released runtime jar from a Maven repository and put it into
 Flink's `lib/` directory. Use the version matrix in
-[Getting Started](../getting-started/) to choose the artifact that matches your
+[Versions](../getting-started/versions.html) to choose the artifact that matches your
 Flink version. For example, on Flink 1.17 or 1.18; use the matrix for later versions:
 
 ```bash
@@ -59,7 +59,7 @@ with the job itself:
 Most users do not need this if the runtime jar is already present in Flink
 `lib/`. `cobble-flink-source` is currently the source dependency for all
 supported Flink versions; the matching runtime jar is still selected from the
-matrix in [Getting Started](../getting-started/).
+matrix in [Versions](../getting-started/versions.html).
 
 ### Choose the source kind
 
