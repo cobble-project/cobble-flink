@@ -12,7 +12,9 @@ import org.apache.flink.runtime.testutils.MiniClusterResourceConfiguration;
 import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
 import org.apache.flink.test.util.MiniClusterWithClientResource;
 
+import java.io.UncheckedIOException;
 import java.nio.file.Files;
+import java.nio.file.NoSuchFileException;
 import java.nio.file.Path;
 import java.time.Duration;
 import java.util.Arrays;
@@ -246,6 +248,15 @@ public final class CobbleCheckpointingITSupport {
                                 && path.getParent().getFileName() != null
                                 && "events".equals(path.getParent().getFileName().toString());
             }
+        } catch (NoSuchFileException e) {
+            return false;
+        } catch (UncheckedIOException e) {
+            // Files.walk reads lazily; checkpoint cleanup may remove files mid-traversal.
+            // Retry the readiness check, but do not hide other storage failures.
+            if (e.getCause() instanceof NoSuchFileException) {
+                return false;
+            }
+            throw e;
         }
         return manifestFound && schemaEventFound;
     }
