@@ -45,7 +45,7 @@ matrix](../getting-started/#monitor-versions), for example:
 ```
 
 The runnable jar is written under the selected module's `target/` directory.
-Source builds append `-SNAPSHOT` to the `0.5.1-1` release-line versions. The
+Source builds append `-SNAPSHOT` to the `0.5.2-1` release-line versions. The
 launch examples below use the 1.17 path; substitute your selected module's jar path.
 
 ## Start The Monitor

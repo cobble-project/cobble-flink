@@ -16,7 +16,7 @@ Java application. No HTTP server is required.
 <dependency>
   <groupId>io.github.cobble-project</groupId>
   <artifactId>cobble-flink-inspect</artifactId>
-  <version>0.5.1-1-flink-1.17</version>
+  <version>0.5.2-1-flink-1.17</version>
 </dependency>
 ```
 

@@ -53,7 +53,7 @@ Flink's `lib/` directory. Use the version matrix in
 Flink version. For example, on Flink 1.19 or 1.20:
 
 ```bash
-cp cobble-flink-dist-0.5.1-1-flink-1.19.jar "$FLINK_HOME/lib/"
+cp cobble-flink-dist-0.5.2-1-flink-1.19.jar "$FLINK_HOME/lib/"
 ```
 
 ### Option B: use a job-side dependency
@@ -262,11 +262,11 @@ fn main() -> cobble::Result<()> {
 }
 ```
 
-You can also start it from the [cobble-java](https://repo1.maven.org/maven2/io/github/cobble-project/cobble/0.5.1/) artifact, which bundles
+You can also start it from the [cobble-java](https://repo1.maven.org/maven2/io/github/cobble-project/cobble/0.5.2/) artifact, which bundles
 `cobble-cli`:
 
 ```bash
-java -jar cobble-0.5.1.jar remote-compactor \
+java -jar cobble-0.5.2.jar remote-compactor \
   --config ./cobble-compactor.yaml \
   --bind 0.0.0.0:18888
 ```
@@ -275,7 +275,7 @@ If you already use a Cobble Flink dist bundle, the same bundled CLI entrypoint
 is available there too. Pick the dist jar that matches your Flink version:
 
 ```bash
-java -jar cobble-flink-dist-0.5.1-1-flink-1.17.jar remote-compactor \
+java -jar cobble-flink-dist-0.5.2-1-flink-1.17.jar remote-compactor \
   --config ./cobble-compactor.yaml \
   --bind 0.0.0.0:18888
 ```
@@ -348,7 +348,7 @@ controls the number of concurrent compaction executors:
 ```bash
 bin/flink run \
   -c io.cobble.flink.compaction.CobbleDedicatedCompactionJob \
-  cobble-flink-dist-0.5.1-1-flink-1.17.jar \
+  cobble-flink-dist-0.5.2-1-flink-1.17.jar \
   --config ./cobble-dedicated-compactor.yaml \
   --path s3://state-bucket/flink-checkpoints \
   --parallelism 4
