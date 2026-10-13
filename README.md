@@ -11,7 +11,7 @@
 read stored data, and manage streaming state through the same
 [Cobble core](https://github.com/cobble-project/cobble).
 
-https://github.com/user-attachments/assets/5b9406ff-4d18-4247-899d-6d10d8685c70
+https://github.com/user-attachments/assets/09f4e0fc-4605-497e-9161-9a69f92dab5c
 
 *Cobble Flink: flexible storage, reusable data, and visible state.*
 
