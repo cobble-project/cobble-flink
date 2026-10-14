@@ -12,10 +12,15 @@ import org.apache.flink.core.fs.FSDataOutputStream;
 import org.apache.flink.core.fs.FileStatus;
 import org.apache.flink.core.fs.FileSystem;
 import org.apache.flink.core.fs.Path;
+import org.apache.flink.core.fs.SafetyNetWrapperFileSystem;
+import org.apache.flink.core.fs.local.LocalFileSystem;
 
+import java.io.FileNotFoundException;
 import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.nio.channels.ClosedChannelException;
+import java.nio.file.Files;
+import java.nio.file.StandardCopyOption;
 import java.util.Arrays;
 import java.util.Objects;
 import java.util.ServiceConfigurationError;
@@ -85,10 +90,27 @@ public final class CobbleFlinkFileSystems {
     static final class FlinkCustomFileSystem implements CustomFileSystem {
         private final FileSystem fileSystem;
         private final Path rootPath;
+        private final LocalFileSystem atomicLocalFileSystem;
 
         FlinkCustomFileSystem(FileSystem fileSystem, Path rootPath) {
             this.fileSystem = Objects.requireNonNull(fileSystem, "fileSystem");
             this.rootPath = Objects.requireNonNull(rootPath, "rootPath");
+            this.atomicLocalFileSystem = atomicLocalFileSystem(fileSystem);
+        }
+
+        private static LocalFileSystem atomicLocalFileSystem(FileSystem fileSystem) {
+            // Only this known wrapper delegates rename without changing its semantics.
+            while (fileSystem.getClass() == SafetyNetWrapperFileSystem.class) {
+                fileSystem = ((SafetyNetWrapperFileSystem) fileSystem).getWrappedDelegate();
+            }
+            return fileSystem.getClass() == LocalFileSystem.class
+                    ? (LocalFileSystem) fileSystem
+                    : null;
+        }
+
+        @Override
+        public boolean supportsAtomicReplace() {
+            return atomicLocalFileSystem != null;
         }
 
         @Override
@@ -193,7 +215,23 @@ public final class CobbleFlinkFileSystems {
         @Override
         public void rename(String from, String to) {
             try {
-                fileSystem.rename(resolve(from), resolve(to));
+                if (atomicLocalFileSystem != null) {
+                    java.nio.file.Path source =
+                            atomicLocalFileSystem.pathToFile(resolve(from)).toPath();
+                    java.nio.file.Path destination =
+                            atomicLocalFileSystem.pathToFile(resolve(to)).toPath();
+                    if (destination.getParent() != null) {
+                        Files.createDirectories(destination.getParent());
+                    }
+                    // Do not fall back: callers rely on the advertised atomic capability.
+                    Files.move(
+                            source,
+                            destination,
+                            StandardCopyOption.ATOMIC_MOVE,
+                            StandardCopyOption.REPLACE_EXISTING);
+                } else if (!fileSystem.rename(resolve(from), resolve(to))) {
+                    throw new IOException("Filesystem provider returned false for rename");
+                }
             } catch (IOException e) {
                 throw new IllegalStateException(
                         "Failed to rename path from " + from + " to " + to, e);
@@ -210,6 +248,9 @@ public final class CobbleFlinkFileSystems {
                 return Arrays.stream(statuses)
                         .map(status -> status.getPath().getName())
                         .toArray(String[]::new);
+            } catch (FileNotFoundException e) {
+                // Match Cobble's native listing contract for an absent directory.
+                return new String[0];
             } catch (IOException e) {
                 throw new IllegalStateException("Failed to list path " + path, e);
             }

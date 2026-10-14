@@ -2,6 +2,7 @@ package io.cobble.flink.common;
 
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
@@ -15,15 +16,20 @@ import io.cobble.ProcessFileSystemRequest;
 import io.cobble.ShardSnapshot;
 
 import org.apache.flink.configuration.Configuration;
+import org.apache.flink.core.fs.CobbleSafetyNetTestAccess;
 import org.apache.flink.core.fs.FSDataInputStream;
+import org.apache.flink.core.fs.FileStatus;
 import org.apache.flink.core.fs.FileSystem;
 import org.apache.flink.core.fs.FileSystemFactory;
+import org.apache.flink.core.fs.SafetyNetCloseableRegistry;
+import org.apache.flink.core.fs.SafetyNetWrapperFileSystem;
 import org.apache.flink.core.fs.local.LocalFileSystem;
 import org.apache.flink.core.plugin.PluginManager;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
 import java.io.File;
+import java.io.FileNotFoundException;
 import java.io.IOException;
 import java.net.URI;
 import java.net.URL;
@@ -38,6 +44,145 @@ import java.util.Map;
 class CobbleFlinkFileSystemsTest {
 
     @TempDir Path tempDir;
+
+    @Test
+    void builtInLocalFilesystemAtomicallyReplacesExistingDestination() throws Exception {
+        CobbleFlinkFileSystems.FlinkCustomFileSystem bridge =
+                new CobbleFlinkFileSystems.FlinkCustomFileSystem(
+                        new LocalFileSystem(), new org.apache.flink.core.fs.Path(tempDir.toUri()));
+        assertTrue(bridge.supportsAtomicReplace());
+        Files.write(tempDir.resolve("source"), new byte[] {7, 8, 9});
+        Files.write(tempDir.resolve("destination"), new byte[] {1});
+        bridge.rename("source", "destination");
+        assertArrayEquals(new byte[] {7, 8, 9}, Files.readAllBytes(tempDir.resolve("destination")));
+        assertFalse(Files.exists(tempDir.resolve("source")));
+        Files.write(tempDir.resolve("another-source"), new byte[] {10});
+        bridge.rename("another-source", "new-parent/destination");
+        assertArrayEquals(
+                new byte[] {10}, Files.readAllBytes(tempDir.resolve("new-parent/destination")));
+    }
+
+    @Test
+    void knownSafetyNetWrapperPreservesLocalAtomicReplace() throws Exception {
+        try (SafetyNetCloseableRegistry registry = CobbleSafetyNetTestAccess.newRegistry()) {
+            FileSystem wrapped = new SafetyNetWrapperFileSystem(new LocalFileSystem(), registry);
+            CobbleFlinkFileSystems.FlinkCustomFileSystem bridge =
+                    new CobbleFlinkFileSystems.FlinkCustomFileSystem(
+                            wrapped, new org.apache.flink.core.fs.Path(tempDir.toUri()));
+            assertTrue(bridge.supportsAtomicReplace());
+            Files.write(tempDir.resolve("source"), new byte[] {7, 8, 9});
+            Files.write(tempDir.resolve("destination"), new byte[] {1});
+            bridge.rename("source", "destination");
+            assertArrayEquals(
+                    new byte[] {7, 8, 9}, Files.readAllBytes(tempDir.resolve("destination")));
+        }
+    }
+
+    @Test
+    void customLocalAndWrapperSubclassesDoNotGainAtomicReplace() throws Exception {
+        LocalFileSystem custom = new LocalFileSystem() {};
+        try (SafetyNetCloseableRegistry registry = CobbleSafetyNetTestAccess.newRegistry()) {
+            FileSystem[] providers = {
+                custom,
+                new SafetyNetWrapperFileSystem(custom, registry),
+                new SafetyNetWrapperFileSystem(new LocalFileSystem(), registry) {}
+            };
+            for (FileSystem provider : providers) {
+                CobbleFlinkFileSystems.FlinkCustomFileSystem bridge =
+                        new CobbleFlinkFileSystems.FlinkCustomFileSystem(
+                                provider, new org.apache.flink.core.fs.Path(tempDir.toUri()));
+                assertFalse(bridge.supportsAtomicReplace());
+            }
+        }
+    }
+
+    @Test
+    void renameRejectsProviderFalseAndIOException() {
+        for (boolean throwIo : new boolean[] {false, true}) {
+            LocalFileSystem provider =
+                    new LocalFileSystem() {
+                        @Override
+                        public boolean rename(
+                                org.apache.flink.core.fs.Path from,
+                                org.apache.flink.core.fs.Path to)
+                                throws IOException {
+                            if (throwIo) {
+                                throw new IOException("provider failure");
+                            }
+                            return false;
+                        }
+                    };
+            CobbleFlinkFileSystems.FlinkCustomFileSystem bridge =
+                    new CobbleFlinkFileSystems.FlinkCustomFileSystem(
+                            provider, new org.apache.flink.core.fs.Path(tempDir.toUri()));
+            assertFalse(bridge.supportsAtomicReplace());
+            IllegalStateException error =
+                    assertThrows(
+                            IllegalStateException.class,
+                            () -> bridge.rename("source", "destination"));
+            assertTrue(error.getMessage().contains("source"));
+            assertTrue(error.getMessage().contains("destination"));
+            assertTrue(error.getCause() instanceof IOException);
+            assertEquals(
+                    throwIo ? "provider failure" : "Filesystem provider returned false for rename",
+                    error.getCause().getMessage());
+        }
+    }
+
+    @Test
+    void renameMovesFilesWhenProviderSucceeds() throws Exception {
+        Files.write(tempDir.resolve("source"), new byte[] {7, 8, 9});
+        CustomFileSystem bridge =
+                new CobbleFlinkFileSystems.FlinkCustomFileSystem(
+                        new LocalFileSystem() {},
+                        new org.apache.flink.core.fs.Path(tempDir.toUri()));
+        assertFalse(bridge.supportsAtomicReplace());
+        bridge.rename("source", "destination");
+        assertArrayEquals(new byte[] {7, 8, 9}, Files.readAllBytes(tempDir.resolve("destination")));
+        assertFalse(Files.exists(tempDir.resolve("source")));
+    }
+
+    @Test
+    void listingMissingDirectoryReturnsEmpty() {
+        CustomFileSystem bridge =
+                new CobbleFlinkFileSystems.FlinkCustomFileSystem(
+                        new LocalFileSystem(), new org.apache.flink.core.fs.Path(tempDir.toUri()));
+        assertArrayEquals(new String[0], bridge.list("missing"));
+    }
+
+    @Test
+    void listingProviderFileNotFoundReturnsEmpty() {
+        LocalFileSystem provider =
+                new LocalFileSystem() {
+                    @Override
+                    public FileStatus[] listStatus(org.apache.flink.core.fs.Path path)
+                            throws IOException {
+                        throw new FileNotFoundException("missing directory");
+                    }
+                };
+        CustomFileSystem bridge =
+                new CobbleFlinkFileSystems.FlinkCustomFileSystem(
+                        provider, new org.apache.flink.core.fs.Path(tempDir.toUri()));
+        assertArrayEquals(new String[0], bridge.list("missing"));
+    }
+
+    @Test
+    void listingKeepsOtherProviderErrors() {
+        LocalFileSystem provider =
+                new LocalFileSystem() {
+                    @Override
+                    public FileStatus[] listStatus(org.apache.flink.core.fs.Path path)
+                            throws IOException {
+                        throw new IOException("provider failure");
+                    }
+                };
+        CustomFileSystem bridge =
+                new CobbleFlinkFileSystems.FlinkCustomFileSystem(
+                        provider, new org.apache.flink.core.fs.Path(tempDir.toUri()));
+        IllegalStateException error =
+                assertThrows(IllegalStateException.class, () -> bridge.list("directory"));
+        assertEquals("provider failure", error.getCause().getMessage());
+    }
 
     @Test
     void nativeRegistryAndMetadataReadsShareFullProcessDefaultsAndRequestOverrides()
