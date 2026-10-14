@@ -8,19 +8,23 @@ import org.apache.flink.core.fs.FileSystem;
 import org.apache.flink.core.fs.FileSystemFactory;
 import org.apache.flink.core.fs.Path;
 import org.apache.flink.core.fs.PluginFileSystemFactory;
+import org.apache.flink.core.fs.SafetyNetWrapperFileSystem;
 import org.apache.flink.core.plugin.PluginManager;
-import org.apache.flink.core.plugin.PluginUtils;
 import org.apache.flink.runtime.fs.hdfs.HadoopFsFactory;
 import org.apache.flink.runtime.state.StreamStateHandle;
 import org.apache.flink.runtime.state.filesystem.FileStateHandle;
 import org.apache.flink.runtime.state.filesystem.RelativeFileStateHandle;
+import org.apache.flink.util.TemporaryClassLoaderContext;
+import org.apache.flink.util.WrappingProxy;
 
 import java.io.IOException;
 import java.net.URI;
 import java.util.ArrayList;
 import java.util.HashSet;
+import java.util.IdentityHashMap;
 import java.util.Iterator;
 import java.util.List;
+import java.util.Map;
 import java.util.ServiceConfigurationError;
 import java.util.ServiceLoader;
 import java.util.Set;
@@ -31,18 +35,24 @@ import java.util.Set;
 public final class CobbleFlinkFileSystemResolver {
 
     private static volatile Configuration defaults = new Configuration();
+    private static final CobbleScopedFileSystemCache RESOURCES = new CobbleScopedFileSystemCache();
+    private static PluginManager initializedPluginManager;
 
     private CobbleFlinkFileSystemResolver() {}
 
     /** Replaces process-wide Flink filesystem defaults. Callers own process isolation. */
-    public static void initialize(Configuration configuration) {
-        initialize(configuration, PluginUtils.createPluginManagerFromRootFolder(configuration));
+    public static synchronized void initialize(Configuration configuration) {
+        initialize(configuration, RESOURCES.pluginManager(configuration));
     }
 
     static synchronized void initialize(Configuration configuration, PluginManager pluginManager) {
         Configuration copy = new Configuration(configuration);
+        if (copy.equals(defaults) && initializedPluginManager == pluginManager) {
+            return;
+        }
         FileSystem.initialize(copy, pluginManager);
         defaults = new Configuration(copy);
+        initializedPluginManager = pluginManager;
     }
 
     /** Applies explicit options before current Flink provider defaults to a native volume. */
@@ -119,11 +129,26 @@ public final class CobbleFlinkFileSystemResolver {
     private static FileSystem resolveConnectorScoped(
             Path path, URI uri, CobbleConnectorStorageOptions storageOptions, String pathUri)
             throws IOException {
+        FileSystem fileSystem = getOrCreateScopedFileSystem(uri, storageOptions, pathUri);
+        // Validate every path, including cache hits, without serializing remote I/O across callers.
+        fileSystem.exists(path);
+        return fileSystem;
+    }
+
+    private static synchronized FileSystem getOrCreateScopedFileSystem(
+            URI uri, CobbleConnectorStorageOptions storageOptions, String pathUri)
+            throws IOException {
         Configuration configuration = effectiveConfiguration(pathUri, storageOptions);
-        List<FileSystemFactory> matching = findFactories(uri.getScheme(), configuration);
+        PluginManager manager =
+                initializedPluginManager != null
+                                && CobbleScopedFileSystemCache.samePluginConfiguration(
+                                        configuration, defaults)
+                        ? initializedPluginManager
+                        : RESOURCES.pluginManager(configuration);
+        List<FactoryCandidate> matching = findFactories(uri.getScheme(), manager);
         if (matching.isEmpty() && "hdfs".equalsIgnoreCase(uri.getScheme())) {
             try {
-                matching.add(new HadoopFsFactory());
+                matching.add(new FactoryCandidate(new HadoopFsFactory(), true));
             } catch (LinkageError missingHadoop) {
                 throw new IOException(
                         "Scoped HDFS access requires Flink Hadoop filesystem and Hadoop classes.",
@@ -142,28 +167,47 @@ public final class CobbleFlinkFileSystemResolver {
                             + uri.getScheme()
                             + "'.");
         }
-        FileSystemFactory factory = PluginFileSystemFactory.of(matching.get(0));
-        factory.configure(configuration);
-        FileSystem fileSystem = factory.create(uri);
-        // Missing sink roots are valid; provider configuration errors must surface before native
-        // Cobble I/O starts.
-        fileSystem.exists(path);
+        FactoryCandidate candidate = matching.get(0);
+        FileSystem fileSystem =
+                candidate.processOwned
+                        ? RESOURCES.getOrCheckCapacity(
+                                candidate.factory.getClass(), manager, uri, configuration)
+                        : null;
+        if (fileSystem != null) {
+            return fileSystem;
+        }
+        // Do not let a shared provider capture a task's context loader in client threads. Keep
+        // configure/create together: injected managers may return the same mutable factory.
+        try (TemporaryClassLoaderContext ignored =
+                TemporaryClassLoaderContext.of(
+                        candidate.processOwned
+                                ? candidate.factory.getClass().getClassLoader()
+                                : Thread.currentThread().getContextClassLoader())) {
+            FileSystemFactory factory = PluginFileSystemFactory.of(candidate.factory);
+            factory.configure(configuration);
+            fileSystem = factory.create(uri);
+            if (candidate.processOwned && !containsSafetyNet(fileSystem)) {
+                // Retain clients even when a path/credential probe fails: future attempts must
+                // revalidate, but must not abandon another client on every failed probe.
+                RESOURCES.put(
+                        candidate.factory.getClass(), manager, uri, configuration, fileSystem);
+            }
+        }
         return fileSystem;
     }
 
-    private static List<FileSystemFactory> findFactories(
-            String scheme, Configuration configuration) {
-        List<FileSystemFactory> matches = new ArrayList<FileSystemFactory>();
+    private static List<FactoryCandidate> findFactories(
+            String scheme, PluginManager pluginManager) {
+        List<FactoryCandidate> matches = new ArrayList<>();
         Set<String> classes = new HashSet<String>();
         ClassLoader contextClassLoader = Thread.currentThread().getContextClassLoader();
         collect(
                 ServiceLoader.load(FileSystemFactory.class, contextClassLoader).iterator(),
                 scheme,
                 classes,
-                matches);
-
-        PluginManager pluginManager = PluginUtils.createPluginManagerFromRootFolder(configuration);
-        collect(pluginManager.load(FileSystemFactory.class), scheme, classes, matches);
+                matches,
+                false);
+        collect(pluginManager.load(FileSystemFactory.class), scheme, classes, matches, true);
         return matches;
     }
 
@@ -171,13 +215,58 @@ public final class CobbleFlinkFileSystemResolver {
             Iterator<FileSystemFactory> factories,
             String scheme,
             Set<String> classes,
-            List<FileSystemFactory> output) {
+            List<FactoryCandidate> output,
+            boolean pluginOwned) {
         while (factories.hasNext()) {
             FileSystemFactory factory = factories.next();
-            if (scheme.equalsIgnoreCase(factory.getScheme())
-                    && classes.add(factory.getClass().getName())) {
-                output.add(factory);
+            if (!scheme.equalsIgnoreCase(factory.getScheme())) {
+                continue;
             }
+            if (classes.add(factory.getClass().getName())) {
+                output.add(
+                        new FactoryCandidate(
+                                factory,
+                                pluginOwned || parentOwned(factory.getClass().getClassLoader())));
+            } else if (pluginOwned) {
+                for (FactoryCandidate candidate : output) {
+                    if (candidate.factory.getClass() == factory.getClass()) {
+                        candidate.processOwned = true;
+                    }
+                }
+            }
+        }
+    }
+
+    private static boolean parentOwned(ClassLoader loader) {
+        for (ClassLoader parent = CobbleFlinkFileSystemResolver.class.getClassLoader();
+                parent != null;
+                parent = parent.getParent()) {
+            if (parent == loader) return true;
+        }
+        return loader == null;
+    }
+
+    private static boolean containsSafetyNet(FileSystem fileSystem) {
+        Map<FileSystem, Boolean> seen = new IdentityHashMap<>();
+        while (seen.put(fileSystem, Boolean.TRUE) == null) {
+            if (fileSystem instanceof SafetyNetWrapperFileSystem) return true;
+            if (!(fileSystem instanceof WrappingProxy)) return false;
+            Object delegate = ((WrappingProxy<?>) fileSystem).getWrappedDelegate();
+            if (!(delegate instanceof FileSystem)) return false;
+            fileSystem = (FileSystem) delegate;
+        }
+        return true;
+    }
+
+    private static final class FactoryCandidate {
+        private final FileSystemFactory factory;
+        // A task-defined provider is deliberately not retained by the process cache. A matching
+        // class from the installed plugin manager establishes stable ownership even via TCCL.
+        private boolean processOwned;
+
+        private FactoryCandidate(FileSystemFactory factory, boolean processOwned) {
+            this.factory = factory;
+            this.processOwned = processOwned;
         }
     }
 }

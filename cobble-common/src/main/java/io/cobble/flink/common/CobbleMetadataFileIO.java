@@ -104,6 +104,10 @@ public final class CobbleMetadataFileIO implements AutoCloseable {
         fileSystem.delete(resolve(relativePath), true);
     }
 
+    /**
+     * The resolver owns shared filesystem clients for the process lifetime; Flink exposes no
+     * generic filesystem close operation. Streams opened by this facade are closed per operation.
+     */
     @Override
     public void close() {}
 
