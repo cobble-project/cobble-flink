@@ -102,6 +102,11 @@ public final class CobbleFlinkFileSystemResolver {
         return handle.openInputStream();
     }
 
+    /**
+     * Resolves the configured provider without probing a path. Credentials and path permissions are
+     * checked by the caller's actual filesystem operation; failures never select global
+     * credentials.
+     */
     public static FileSystem resolve(String pathUri, CobbleConnectorStorageOptions storageOptions)
             throws IOException {
         Path path = new Path(pathUri);
@@ -116,7 +121,7 @@ public final class CobbleFlinkFileSystemResolver {
         }
 
         try {
-            return resolveConnectorScoped(path, uri, storageOptions, pathUri);
+            return getOrCreateScopedFileSystem(uri, storageOptions, pathUri);
         } catch (Exception | LinkageError | ServiceConfigurationError e) {
             throw new IOException(
                     "Unable to initialize the configured storage provider for scheme '"
@@ -124,15 +129,6 @@ public final class CobbleFlinkFileSystemResolver {
                             + "'; refusing to switch to process-global credentials.",
                     e);
         }
-    }
-
-    private static FileSystem resolveConnectorScoped(
-            Path path, URI uri, CobbleConnectorStorageOptions storageOptions, String pathUri)
-            throws IOException {
-        FileSystem fileSystem = getOrCreateScopedFileSystem(uri, storageOptions, pathUri);
-        // Validate every path, including cache hits, without serializing remote I/O across callers.
-        fileSystem.exists(path);
-        return fileSystem;
     }
 
     private static synchronized FileSystem getOrCreateScopedFileSystem(
@@ -187,8 +183,8 @@ public final class CobbleFlinkFileSystemResolver {
             factory.configure(configuration);
             fileSystem = factory.create(uri);
             if (candidate.processOwned && !containsSafetyNet(fileSystem)) {
-                // Retain clients even when a path/credential probe fails: future attempts must
-                // revalidate, but must not abandon another client on every failed probe.
+                // Retain clients even if a later caller operation fails, rather than abandoning
+                // another client on every repeated request with the same configuration.
                 RESOURCES.put(
                         candidate.factory.getClass(), manager, uri, configuration, fileSystem);
             }

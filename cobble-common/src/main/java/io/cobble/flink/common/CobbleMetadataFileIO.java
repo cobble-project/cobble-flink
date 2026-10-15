@@ -7,6 +7,7 @@ import org.apache.flink.core.fs.FileSystem;
 import org.apache.flink.core.fs.Path;
 
 import java.io.ByteArrayOutputStream;
+import java.io.FileNotFoundException;
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -45,10 +46,15 @@ public final class CobbleMetadataFileIO implements AutoCloseable {
 
     /** Returns direct child names, or an empty list when the directory is absent. */
     public List<String> list(String relativePath) throws IOException {
-        if (!exists(relativePath)) {
+        final FileStatus[] statuses;
+        try {
+            statuses = fileSystem.listStatus(resolve(relativePath));
+        } catch (FileNotFoundException missing) {
             return Collections.emptyList();
         }
-        FileStatus[] statuses = fileSystem.listStatus(resolve(relativePath));
+        if (statuses == null) {
+            return Collections.emptyList();
+        }
         List<String> names = new ArrayList<String>(statuses.length);
         for (FileStatus status : statuses) {
             names.add(status.getPath().getName());

@@ -22,6 +22,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.io.DataInputStream;
+import java.io.FileNotFoundException;
 import java.io.IOException;
 import java.lang.reflect.Method;
 import java.net.URI;
@@ -77,10 +78,7 @@ public final class CobbleEmbeddedCheckpoint {
     public static List<Location> locate(Path entry, CobbleConnectorStorageOptions storageOptions)
             throws IOException {
         FileSystem fs = CobbleFlinkFileSystemResolver.resolve(entry.toString(), storageOptions);
-        if (!fs.exists(entry)) {
-            throw unsupported(entry, "path does not exist");
-        }
-        FileStatus status = fs.getFileStatus(entry);
+        FileStatus status = entryStatus(fs, entry);
         if (!status.isDir() && METADATA.equals(entry.getName())) {
             return Collections.singletonList(readLocation(entry, storageOptions));
         }
@@ -110,10 +108,7 @@ public final class CobbleEmbeddedCheckpoint {
      */
     public static List<MetadataLocation> locateMetadataPaths(Path entry) throws IOException {
         FileSystem fs = entry.getFileSystem();
-        if (!fs.exists(entry)) {
-            throw unsupported(entry, "path does not exist");
-        }
-        FileStatus status = fs.getFileStatus(entry);
+        FileStatus status = entryStatus(fs, entry);
         if (!status.isDir() && METADATA.equals(entry.getName())) {
             return Collections.singletonList(new MetadataLocation(entry.getParent(), entry));
         }
@@ -130,6 +125,14 @@ public final class CobbleEmbeddedCheckpoint {
             throw unsupported(entry, "no completed checkpoint metadata was found");
         }
         return locations;
+    }
+
+    private static FileStatus entryStatus(FileSystem fs, Path entry) throws IOException {
+        try {
+            return fs.getFileStatus(entry);
+        } catch (FileNotFoundException missing) {
+            throw unsupported(entry, "path does not exist");
+        }
     }
 
     /** Selects {@code latest} or an exact checkpoint id from {@link #locate(Path)}. */

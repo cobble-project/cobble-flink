@@ -8,6 +8,7 @@ import org.apache.flink.core.fs.FileStatus;
 import org.apache.flink.core.fs.FileSystem;
 import org.apache.flink.core.fs.Path;
 
+import java.io.FileNotFoundException;
 import java.io.IOException;
 import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
@@ -624,7 +625,9 @@ public final class InspectCatalogDiscovery {
 
     private static boolean fileExists(FileSystem fs, Path path) {
         try {
-            return fs.exists(path) && !fs.getFileStatus(path).isDir();
+            return !fs.getFileStatus(path).isDir();
+        } catch (FileNotFoundException missing) {
+            return false;
         } catch (IOException e) {
             throw new InspectInputException("Failed to inspect " + path + ": " + e.getMessage());
         }
@@ -632,7 +635,9 @@ public final class InspectCatalogDiscovery {
 
     private static boolean directoryExists(FileSystem fs, Path path) {
         try {
-            return fs.exists(path) && fs.getFileStatus(path).isDir();
+            return fs.getFileStatus(path).isDir();
+        } catch (FileNotFoundException missing) {
+            return false;
         } catch (IOException e) {
             throw new InspectInputException("Failed to inspect " + path + ": " + e.getMessage());
         }
@@ -685,9 +690,6 @@ public final class InspectCatalogDiscovery {
             Path entry, CobbleConnectorStorageOptions storageOptions) {
         try {
             FileSystem fs = CobbleFlinkFileSystemResolver.resolve(entry.toString(), storageOptions);
-            if (!fs.exists(entry)) {
-                return false;
-            }
             FileStatus status = fs.getFileStatus(entry);
             if (!status.isDir()) {
                 return "_metadata".equals(entry.getName())

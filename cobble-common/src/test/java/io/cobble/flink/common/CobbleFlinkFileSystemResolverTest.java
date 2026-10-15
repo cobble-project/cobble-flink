@@ -75,20 +75,20 @@ class CobbleFlinkFileSystemResolverTest {
                         fileSystem.exists(new org.apache.flink.core.fs.Path("s3://bucket/table")));
             }
 
+            FileSystem missingCredentials =
+                    CobbleFlinkFileSystemResolver.resolve(
+                            "s3://bucket/table",
+                            CobbleConnectorStorageOptions.fromStorageOptions(
+                                    Collections.singletonMap(
+                                            "storage.option.endpoint", "http://storage.example")));
             IOException error =
                     assertThrows(
                             IOException.class,
                             () ->
-                                    CobbleFlinkFileSystemResolver.resolve(
-                                            "s3://bucket/table",
-                                            CobbleConnectorStorageOptions.fromStorageOptions(
-                                                    Collections.singletonMap(
-                                                            "storage.option.endpoint",
-                                                            "http://storage.example"))));
-            assertTrue(
-                    error.getMessage()
-                            .contains("refusing to switch to process-global credentials"));
-            assertTrue(error.getCause().getMessage().contains("Missing scoped credentials"));
+                                    missingCredentials.exists(
+                                            new org.apache.flink.core.fs.Path(
+                                                    "s3://bucket/table")));
+            assertTrue(error.getMessage().contains("Missing scoped credentials"));
         } finally {
             Thread.currentThread().setContextClassLoader(original);
         }
@@ -110,6 +110,36 @@ class CobbleFlinkFileSystemResolverTest {
                 return super.getResources(name);
             }
         };
+    }
+
+    @Test
+    void explicitBadCredentialsFailActualIoWithoutFallingBackToGoodDefaults() throws Exception {
+        ClassLoader original = Thread.currentThread().getContextClassLoader();
+        try {
+            Thread.currentThread().setContextClassLoader(scopedS3ClassLoader(original));
+            Configuration defaults = new Configuration();
+            defaults.setString("s3.access-key", "access");
+            defaults.setString("s3.secret-key", "secret");
+            defaults.setString("s3.endpoint", "http://storage.example");
+            CobbleFlinkFileSystemResolver.initialize(defaults);
+            org.apache.flink.core.fs.Path path =
+                    new org.apache.flink.core.fs.Path("s3://bucket/table");
+            FileSystem global = CobbleFlinkFileSystemResolver.resolve(path.toString(), null);
+            assertTrue(global.exists(path));
+            Map<String, String> bad = new HashMap<>();
+            bad.put("s3.access-key", "wrong");
+            bad.put("s3.secret-key", "wrong");
+            bad.put("s3.endpoint", "http://storage.example");
+            FileSystem scoped =
+                    CobbleFlinkFileSystemResolver.resolve(
+                            path.toString(), CobbleConnectorStorageOptions.fromStorageOptions(bad));
+            IOException error = assertThrows(IOException.class, () -> scoped.exists(path));
+            assertTrue(error.getMessage().contains("Missing scoped credentials"));
+            assertTrue(global.exists(path));
+        } finally {
+            Thread.currentThread().setContextClassLoader(original);
+            CobbleFlinkFileSystemResolver.initialize(new Configuration());
+        }
     }
 
     public static final class ScopedS3Factory implements FileSystemFactory {

@@ -71,6 +71,14 @@ public final class CobbleFlinkFileSystems {
                             request.accessId(), request.secretKey(), request.customOptions());
             Path rootPath = new Path(baseDir);
             FileSystem fileSystem = CobbleFlinkFileSystemResolver.resolve(baseDir, storageOptions);
+            String scheme = rootPath.toUri().getScheme();
+            if (storageOptions.hasExplicitOptions()
+                    && scheme != null
+                    && !"file".equalsIgnoreCase(scheme)) {
+                // Native registers a returned bridge without another access probe. Keep the
+                // explicit-provider validation here; a missing root (false) remains valid.
+                fileSystem.exists(rootPath);
+            }
             return new FlinkCustomFileSystem(fileSystem, rootPath);
         } catch (IOException
                 | RuntimeException

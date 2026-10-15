@@ -126,6 +126,14 @@ class CobbleEmbeddedCheckpointTest {
                 CobbleEmbeddedCheckpoint.select(new Path(manifest.toUri()), "3")
                         .checkpoint()
                         .checkpointId());
+
+        java.nio.file.Path checkpointFive = Files.createDirectory(root.resolve("chk-5"));
+        java.nio.file.Path stateFive = checkpointFive.resolve("task-state");
+        writePayload(stateFive, "db-5", 0, 3);
+        writeMetadata(checkpointFive, 5L, stateFive, new OperatorID(17L, 18L));
+        assertEquals(
+                5L,
+                CobbleEmbeddedCheckpoint.select(rootPath, "latest").checkpoint().checkpointId());
     }
 
     @Test

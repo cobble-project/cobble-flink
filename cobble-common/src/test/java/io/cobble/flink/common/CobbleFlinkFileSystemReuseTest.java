@@ -54,7 +54,7 @@ class CobbleFlinkFileSystemReuseTest {
     }
 
     @Test
-    void stableProviderIsSharedAcrossTaskLoadersAndEveryPathIsValidated() throws Exception {
+    void stableProviderIsSharedAcrossTaskLoadersWithoutPathProbes() throws Exception {
         RecordingFactory factory = new RecordingFactory();
         CobbleFlinkFileSystemResolver.initialize(new Configuration(), manager(factory));
         ClassLoader original = Thread.currentThread().getContextClassLoader();
@@ -68,7 +68,7 @@ class CobbleFlinkFileSystemReuseTest {
             assertSame(first, resolve("bucket", "a"));
             assertSame(secondTask, Thread.currentThread().getContextClassLoader());
             assertEquals(1, factory.creates.get());
-            assertEquals(2, factory.probes.get());
+            assertEquals(0, factory.probes.get());
             assertSame(RecordingFactory.class.getClassLoader(), factory.creationContext);
         } finally {
             Thread.currentThread().setContextClassLoader(original);
@@ -109,20 +109,24 @@ class CobbleFlinkFileSystemReuseTest {
     }
 
     @Test
-    void probeFailureRetainsClientAndRevalidatesButCreateFailureIsRetried() throws Exception {
+    void operationFailureRetainsClientButCreateFailureIsRetried() throws Exception {
         RecordingFactory factory = new RecordingFactory();
         CobbleFlinkFileSystemResolver.initialize(new Configuration(), manager(factory));
         CobbleConnectorStorageOptions probeFailure = options("probe-fail", "true");
+        FileSystem client =
+                CobbleFlinkFileSystemResolver.resolve("reuse://bucket/path", probeFailure);
         for (int i = 0; i < 2; i++) {
+            assertSame(
+                    client,
+                    CobbleFlinkFileSystemResolver.resolve("reuse://bucket/path", probeFailure));
             IOException error =
                     assertThrows(
                             IOException.class,
                             () ->
-                                    CobbleFlinkFileSystemResolver.resolve(
-                                            "reuse://bucket/path", probeFailure));
-            assertTrue(
-                    error.getMessage()
-                            .contains("refusing to switch to process-global credentials"));
+                                    client.exists(
+                                            new org.apache.flink.core.fs.Path(
+                                                    "reuse://bucket/path")));
+            assertEquals("probe failure", error.getMessage());
         }
         assertEquals(1, factory.creates.get());
         assertEquals(2, factory.probes.get());
@@ -248,7 +252,13 @@ class CobbleFlinkFileSystemReuseTest {
 
     private static void repeatResolve(String identity) {
         try {
-            for (int i = 0; i < 20; i++) resolve("concurrent", identity);
+            for (int i = 0; i < 20; i++) {
+                FileSystem client = resolve("concurrent", identity);
+                assertTrue(
+                        client.exists(
+                                new org.apache.flink.core.fs.Path(
+                                        "reuse://concurrent/" + identity)));
+            }
         } catch (IOException error) {
             throw new AssertionError(error);
         }
