@@ -3,6 +3,7 @@ package io.cobble.flink.table;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 
 import io.cobble.Config;
@@ -15,6 +16,7 @@ import io.cobble.flink.common.CobbleSnapshotVolumeRoots;
 import org.apache.flink.configuration.Configuration;
 import org.junit.jupiter.api.Test;
 
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.HashMap;
@@ -22,6 +24,18 @@ import java.util.List;
 import java.util.Map;
 
 class CobbleSourceRuntimeTest {
+
+    @Test
+    void pruningKeepsEntireOriginalSplitWhenItSpansSeveralBuckets() {
+        CobbleSourceSplit wide = CobbleSourceSplit.forSnapshot(0, 7, 16, 1);
+        List<CobbleSourceSplit> splits =
+                new ArrayList<>(Arrays.asList(wide, CobbleSourceSplit.forSnapshot(8, 15, 16, 1)));
+        CobbleSourceRuntime.retainBucketSplits(splits, 2);
+        assertEquals(1, splits.size());
+        assertSame(wide, splits.get(0));
+        assertEquals(0, splits.get(0).rangeStartBucket);
+        assertEquals(7, splits.get(0).rangeEndBucket);
+    }
 
     @Test
     void stateReaderRetainsCurrentProviderOptionsThroughProjectionAndSerialization()

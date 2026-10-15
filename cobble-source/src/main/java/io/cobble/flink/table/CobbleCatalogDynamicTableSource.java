@@ -18,8 +18,10 @@ import org.apache.flink.table.connector.source.DynamicTableSource;
 import org.apache.flink.table.connector.source.LookupTableSource;
 import org.apache.flink.table.connector.source.ScanTableSource;
 import org.apache.flink.table.connector.source.SourceProvider;
+import org.apache.flink.table.connector.source.abilities.SupportsFilterPushDown;
 import org.apache.flink.table.connector.source.abilities.SupportsProjectionPushDown;
 import org.apache.flink.table.connector.source.lookup.LookupFunctionProvider;
+import org.apache.flink.table.expressions.ResolvedExpression;
 import org.apache.flink.table.factories.DynamicTableSourceFactory;
 import org.apache.flink.table.types.DataType;
 import org.apache.flink.table.types.logical.RowType;
@@ -33,12 +35,16 @@ import java.util.Set;
 
 /** Catalog-aware readers use native table identities and schema transforms. */
 final class CobbleCatalogDynamicTableSource
-        implements ScanTableSource, LookupTableSource, SupportsProjectionPushDown {
+        implements ScanTableSource,
+                LookupTableSource,
+                SupportsProjectionPushDown,
+                SupportsFilterPushDown {
     final CobbleCatalogTableReference reference;
     final RowType rowType;
     final String snapshot;
     final int[] primaryPositions;
     private int[] outputProjection;
+    private SourceKeyFilter keyFilter;
 
     private CobbleCatalogDynamicTableSource(
             CobbleCatalogTableReference reference,
@@ -176,7 +182,8 @@ final class CobbleCatalogDynamicTableSource
     @Override
     public ScanRuntimeProvider getScanRuntimeProvider(ScanContext context) {
         return SourceProvider.of(
-                new CobbleCatalogScanSource(reference, rowType, snapshot, outputProjection));
+                new CobbleCatalogScanSource(
+                        reference, rowType, snapshot, outputProjection, keyFilter));
     }
 
     @Override
@@ -211,8 +218,11 @@ final class CobbleCatalogDynamicTableSource
 
     @Override
     public DynamicTableSource copy() {
-        return new CobbleCatalogDynamicTableSource(
-                reference, rowType, snapshot, primaryPositions, outputProjection);
+        CobbleCatalogDynamicTableSource copy =
+                new CobbleCatalogDynamicTableSource(
+                        reference, rowType, snapshot, primaryPositions, outputProjection);
+        copy.keyFilter = keyFilter;
+        return copy;
     }
 
     @Override
@@ -223,6 +233,14 @@ final class CobbleCatalogDynamicTableSource
     @Override
     public void applyProjection(int[][] projectedFields, DataType producedDataType) {
         outputProjection = SourceProjection.indexes(projectedFields, rowType.getFieldCount());
+    }
+
+    @Override
+    public Result applyFilters(List<ResolvedExpression> filters) {
+        SourceKeyFilter.Selection selection =
+                SourceKeyFilter.select(filters, rowType, outputProjection, primaryPositions);
+        keyFilter = selection.filter;
+        return selection.result;
     }
 
     @Override

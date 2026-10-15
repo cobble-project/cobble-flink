@@ -63,6 +63,7 @@ final class CobbleSourceRuntime {
         boolean[] coveredBuckets = new boolean[bucketCount];
         List<CobbleSourceSplit> splits = new ArrayList<>();
         List<ShardSnapshot.Range> plannedRanges = new ArrayList<>();
+        Integer selectedBucket = null;
         if (config instanceof CobbleDynamicTableSource.SerializableConfig) {
             try (TableReader reader =
                     TableReader.open(
@@ -72,6 +73,9 @@ final class CobbleSourceRuntime {
                 for (TableScanSplit plannedSplit : reader.scanPlan().splits()) {
                     plannedRanges.add(extractSplitRange(plannedSplit));
                 }
+                SourceKeyFilter filter =
+                        ((CobbleDynamicTableSource.SerializableConfig) config).keyFilter;
+                if (filter != null) selectedBucket = filter.bucket(reader);
             }
         } else {
             for (ScanSplit plannedSplit : ScanPlan.fromGlobalSnapshot(snapshot).splits()) {
@@ -90,7 +94,14 @@ final class CobbleSourceRuntime {
                             splitRange.start, splitRange.end, bucketCount, snapshot.id));
         }
         ensureCompleteBucketCoverage(coveredBuckets, snapshot.id);
+        if (selectedBucket != null) {
+            retainBucketSplits(splits, selectedBucket);
+        }
         return splits;
+    }
+
+    static void retainBucketSplits(List<CobbleSourceSplit> splits, int bucket) {
+        splits.removeIf(split -> bucket < split.rangeStartBucket || bucket > split.rangeEndBucket);
     }
 
     private static ShardSnapshot.Range extractSplitRange(TableScanSplit split) throws IOException {
@@ -198,6 +209,16 @@ final class CobbleSourceRuntime {
                             + snapshotId
                             + ".");
         }
+    }
+
+    static void validatePlanCoverage(TableScanPlan plan) throws IOException {
+        boolean[] covered = new boolean[plan.totalBuckets()];
+        for (TableScanSplit split : plan.splits()) {
+            for (ShardSnapshot.Range range : split.shardSnapshot().ranges) {
+                markCoveredBuckets(range, plan.totalBuckets(), covered, plan.snapshotId());
+            }
+        }
+        ensureCompleteBucketCoverage(covered, plan.snapshotId());
     }
 
     private static ShardSnapshot.Range extractSplitRange(ScanSplit split) throws IOException {

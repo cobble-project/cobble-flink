@@ -1,6 +1,8 @@
 package io.cobble.flink.table;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import io.cobble.GlobalSnapshot;
 
@@ -16,9 +18,15 @@ import org.apache.flink.metrics.groups.OperatorIOMetricGroup;
 import org.apache.flink.metrics.groups.SourceReaderMetricGroup;
 import org.apache.flink.metrics.groups.UnregisteredMetricsGroup;
 import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
+import org.apache.flink.table.api.DataTypes;
+import org.apache.flink.table.api.EnvironmentSettings;
+import org.apache.flink.table.api.TableEnvironment;
 import org.apache.flink.table.api.TableResult;
 import org.apache.flink.table.api.bridge.java.StreamTableEnvironment;
 import org.apache.flink.table.data.RowData;
+import org.apache.flink.table.expressions.ValueLiteralExpression;
+import org.apache.flink.types.Row;
+import org.apache.flink.util.CloseableIterator;
 import org.apache.flink.util.SimpleUserCodeClassLoader;
 import org.apache.flink.util.UserCodeClassLoader;
 import org.junit.jupiter.api.Test;
@@ -37,6 +45,93 @@ import java.util.concurrent.TimeUnit;
 class CobbleSourceReaderITTest {
 
     @TempDir private Path tempDir;
+
+    private static CobbleDynamicTableSource.SerializableConfig withIdFilter(
+            CobbleDynamicTableSource.SerializableConfig config) {
+        return config.withFilter(
+                SourceKeyFilter.select(
+                                Collections.singletonList(
+                                        SourceKeyFilterTest.equals(
+                                                SourceKeyFilterTest.field(
+                                                        "id", DataTypes.BIGINT(), 0),
+                                                new ValueLiteralExpression(1L))),
+                                config.rowType(),
+                                config.outputProjection,
+                                new int[] {0})
+                        .filter);
+    }
+
+    @Test
+    void fullKeyFilterPrunesBucketsKeepsCollisionsAndRestoresProgress() throws Exception {
+        Path path = tempDir.resolve("filtered-buckets");
+        long snapshotId = writeRows(path, 8, rows("filter", 1000, 128));
+        CobbleDynamicTableSource.SerializableConfig full =
+                sourceConfig(path, 8, Long.toString(snapshotId), "batch");
+        SourceKeyFilter filter =
+                SourceKeyFilter.select(
+                                Collections.singletonList(
+                                        SourceKeyFilterTest.equals(
+                                                SourceKeyFilterTest.field(
+                                                        "id", DataTypes.BIGINT(), 0),
+                                                new ValueLiteralExpression(1L))),
+                                full.rowType(),
+                                full.outputProjection,
+                                new int[] {0})
+                        .filter;
+        CobbleDynamicTableSource.SerializableConfig filtered = full.withFilter(filter);
+        GlobalSnapshot snapshot = CobbleSourceRuntime.loadSnapshotById(full, snapshotId);
+        List<CobbleSourceSplit> splits = CobbleSourceRuntime.createSourceSplits(filtered, snapshot);
+        assertEquals(1, splits.size());
+        CapturingSourceMetrics metrics = new CapturingSourceMetrics();
+        CollectingOutput first = new CollectingOutput();
+        List<CobbleSourceSplit> checkpoint;
+        try (CobbleSourceReader reader =
+                new CobbleSourceReader(filtered, new TestingContext(metrics.group()))) {
+            reader.addSplits(splits);
+            reader.notifyNoMoreSplits();
+            pollUntilRowCount(reader, first, 1);
+            checkpoint = reader.snapshotState(1);
+        }
+        CollectingOutput rest = new CollectingOutput();
+        try (CobbleSourceReader reader =
+                new CobbleSourceReader(filtered, new TestingContext(metrics.group()))) {
+            reader.addSplits(checkpoint);
+            reader.notifyNoMoreSplits();
+            while (reader.pollNext(rest) != InputStatus.END_OF_INPUT) {}
+        }
+        List<RowData> combined = new ArrayList<>(first.rows);
+        combined.addAll(rest.rows);
+        assertEquals(
+                combined.size(), combined.stream().map(row -> row.getLong(0)).distinct().count());
+        assertTrue(combined.stream().anyMatch(row -> row.getLong(0) == 1));
+        assertTrue(combined.size() > 1 && combined.size() < 128);
+        assertEquals(combined.size(), metrics.count("cobble.nativeEntriesReadTotal"));
+        CapturingSourceMetrics baselineMetrics = new CapturingSourceMetrics();
+        try (CobbleSourceReader reader =
+                new CobbleSourceReader(full, new TestingContext(baselineMetrics.group()))) {
+            reader.addSplits(CobbleSourceRuntime.createSourceSplits(full, snapshot));
+            reader.notifyNoMoreSplits();
+            while (reader.pollNext(new CollectingOutput()) != InputStatus.END_OF_INPUT) {}
+        }
+        assertEquals(128, baselineMetrics.count("cobble.nativeEntriesReadTotal"));
+        assertTrue(
+                metrics.count("cobble.nativeBytesReadTotal")
+                        < baselineMetrics.count("cobble.nativeBytesReadTotal"));
+
+        TableEnvironment tables = TableEnvironment.create(EnvironmentSettings.inBatchMode());
+        tables.getConfig().getConfiguration().setInteger("parallelism.default", 1);
+        tables.executeSql(
+                "CREATE TABLE filtered (id BIGINT, name STRING, score INT, PRIMARY KEY (id) NOT ENFORCED) WITH ('connector'='cobble','path'='"
+                        + escape(path)
+                        + "','bucket'='8')");
+        try (CloseableIterator<Row> rows =
+                tables.executeSql(
+                                "SELECT name FROM filtered WHERE id = CAST(1 AS BIGINT) AND score > 1000")
+                        .collect()) {
+            assertEquals("+I[reader-filter-1]", rows.next().toString());
+            assertFalse(rows.hasNext());
+        }
+    }
 
     @Test
     void boundedNoMoreSplitsWakesAnIdleReader() throws Exception {
@@ -279,7 +374,7 @@ class CobbleSourceReaderITTest {
         long snapshot1Id = writeRows(tablePath, 1, rangedRows("v1", 1000, 101, 200));
 
         CobbleDynamicTableSource.SerializableConfig config =
-                sourceConfig(tablePath, 1, "latest", "streaming");
+                withIdFilter(sourceConfig(tablePath, 1, "latest", "streaming"));
         GlobalSnapshot snapshot1 = CobbleSourceRuntime.loadSnapshotById(config, snapshot1Id);
         List<CobbleSourceSplit> initialSplits =
                 CobbleSourceRuntime.createSourceSplits(config, snapshot1);

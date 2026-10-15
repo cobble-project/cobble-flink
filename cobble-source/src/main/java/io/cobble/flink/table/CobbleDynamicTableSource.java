@@ -11,8 +11,10 @@ import org.apache.flink.table.connector.source.DynamicTableSource;
 import org.apache.flink.table.connector.source.LookupTableSource;
 import org.apache.flink.table.connector.source.ScanTableSource;
 import org.apache.flink.table.connector.source.SourceProvider;
+import org.apache.flink.table.connector.source.abilities.SupportsFilterPushDown;
 import org.apache.flink.table.connector.source.abilities.SupportsProjectionPushDown;
 import org.apache.flink.table.connector.source.lookup.LookupFunctionProvider;
+import org.apache.flink.table.expressions.ResolvedExpression;
 import org.apache.flink.table.types.DataType;
 
 import java.io.Serializable;
@@ -23,7 +25,10 @@ import java.util.List;
 
 /** Flink SQL source that reads rows from committed Cobble Tables. */
 final class CobbleDynamicTableSource
-        implements ScanTableSource, LookupTableSource, SupportsProjectionPushDown {
+        implements ScanTableSource,
+                LookupTableSource,
+                SupportsProjectionPushDown,
+                SupportsFilterPushDown {
 
     private SerializableConfig config;
     private final String summary;
@@ -64,6 +69,16 @@ final class CobbleDynamicTableSource
         config =
                 config.withProjection(
                         SourceProjection.indexes(projectedFields, config.totalFieldCount()));
+    }
+
+    @Override
+    public Result applyFilters(List<ResolvedExpression> filters) {
+        int[] primary = new int[config.keyFields.size()];
+        for (int i = 0; i < primary.length; i++) primary[i] = config.keyFields.get(i).rowIndex;
+        SourceKeyFilter.Selection selection =
+                SourceKeyFilter.select(filters, config.rowType(), config.outputProjection, primary);
+        config = config.withFilter(selection.filter);
+        return selection.result;
     }
 
     @Override
@@ -116,6 +131,7 @@ final class CobbleDynamicTableSource
         final List<SerializableField> keyFields;
         final List<SerializableField> valueFields;
         final int[] outputProjection;
+        final SourceKeyFilter keyFilter;
 
         SerializableConfig(
                 String pathUri,
@@ -158,7 +174,8 @@ final class CobbleDynamicTableSource
                     keyFields,
                     valueFields,
                     storageOptions,
-                    SourceProjection.all(keyFields.size() + valueFields.size()));
+                    SourceProjection.all(keyFields.size() + valueFields.size()),
+                    null);
         }
 
         private SerializableConfig(
@@ -171,7 +188,8 @@ final class CobbleDynamicTableSource
                 List<SerializableField> keyFields,
                 List<SerializableField> valueFields,
                 CobbleConnectorStorageOptions storageOptions,
-                int[] outputProjection) {
+                int[] outputProjection,
+                SourceKeyFilter keyFilter) {
             this.pathUri = pathUri;
             this.storageOptions = storageOptions;
             this.bucketCount = bucketCount;
@@ -182,6 +200,7 @@ final class CobbleDynamicTableSource
             this.keyFields = Collections.unmodifiableList(new ArrayList<>(keyFields));
             this.valueFields = Collections.unmodifiableList(new ArrayList<>(valueFields));
             this.outputProjection = outputProjection.clone();
+            this.keyFilter = keyFilter;
         }
 
         SerializableConfig copy() {
@@ -195,7 +214,8 @@ final class CobbleDynamicTableSource
                     keyFields,
                     valueFields,
                     storageOptions,
-                    outputProjection);
+                    outputProjection,
+                    keyFilter);
         }
 
         SerializableConfig withProjection(int[] projection) {
@@ -209,7 +229,23 @@ final class CobbleDynamicTableSource
                     keyFields,
                     valueFields,
                     storageOptions,
-                    projection);
+                    projection,
+                    keyFilter);
+        }
+
+        SerializableConfig withFilter(SourceKeyFilter filter) {
+            return new SerializableConfig(
+                    pathUri,
+                    bucketCount,
+                    scanCheckpointId,
+                    scanMode,
+                    pollIntervalMillis,
+                    sourceBlockCacheMemoryBytes,
+                    keyFields,
+                    valueFields,
+                    storageOptions,
+                    outputProjection,
+                    filter);
         }
 
         @Override

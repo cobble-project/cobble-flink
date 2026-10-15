@@ -295,6 +295,17 @@ PRIMARY KEY (customer_id, namespace, order_id) NOT ENFORCED
 | `ListState` | supported | not supported | none |
 | Timer state | not supported | not supported | none |
 
+## Query Pruning
+
+For sink tables and Catalog tables, equality conditions on every primary-key
+column can skip scan splits that do not contain the matching bucket. This
+currently supports integer and boolean keys. Flink still evaluates the complete
+filter, including any other conditions. A split spanning several buckets may
+still read those buckets.
+
+Partial-key conditions, other key types, and state/raw sources are filtered by
+Flink without this pruning. No extra configuration is required.
+
 ## Complete Configuration Reference
 
 This section lists the main configuration keys for the Cobble source.

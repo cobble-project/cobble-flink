@@ -42,16 +42,19 @@ final class CobbleCatalogScanSource
     private final RowType rowType;
     private final String snapshot;
     private final int[] outputProjection;
+    private final SourceKeyFilter keyFilter;
 
     CobbleCatalogScanSource(
             CobbleCatalogTableReference reference,
             RowType rowType,
             String snapshot,
-            int[] outputProjection) {
+            int[] outputProjection,
+            SourceKeyFilter keyFilter) {
         this.reference = reference;
         this.rowType = rowType;
         this.snapshot = snapshot;
         this.outputProjection = outputProjection.clone();
+        this.keyFilter = keyFilter;
     }
 
     @Override
@@ -66,14 +69,21 @@ final class CobbleCatalogScanSource
 
     @Override
     public SplitEnumerator<Split, List<Split>> createEnumerator(
-            SplitEnumeratorContext<Split> context) {
+            SplitEnumeratorContext<Split> context) throws Exception {
         List<Split> splits = new ArrayList<>();
         try (TableReader reader = CobbleCatalogDynamicTableSource.openReader(reference, snapshot)) {
             if (reader != null) {
                 List<String> selected = new ArrayList<>(outputProjection.length);
                 for (int index : outputProjection) selected.add(rowType.getFieldNames().get(index));
                 TableScanPlan plan = reader.scanPlan().project(selected);
+                CobbleSourceRuntime.validatePlanCoverage(plan);
+                Integer bucket = keyFilter == null ? null : keyFilter.bucket(reader);
                 for (TableScanSplit nativeSplit : plan.splits()) {
+                    if (bucket != null
+                            && nativeSplit.shardSnapshot().ranges.stream()
+                                    .noneMatch(
+                                            range -> range.start <= bucket && range.end >= bucket))
+                        continue;
                     splits.add(
                             new Split(
                                     Integer.toString(splits.size()),

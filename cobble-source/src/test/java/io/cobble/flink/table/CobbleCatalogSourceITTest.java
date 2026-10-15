@@ -42,6 +42,26 @@ import java.util.List;
 @Timeout(120)
 class CobbleCatalogSourceITTest {
     @Test
+    void sqlRetainsEqualityAndResidualAfterBucketPruning(@TempDir Path directory) throws Exception {
+        TableEnvironment tables = createCatalog(directory);
+        tables.executeSql("INSERT INTO items VALUES (1, 'one'), (2, 'two'), (3, 'three')").await();
+        assertEquals(
+                Collections.singletonList("+I[one]"),
+                collect(tables, "SELECT v FROM items WHERE id = 1 AND v <> 'two'"));
+        assertEquals(
+                Collections.emptyList(),
+                collect(tables, "SELECT v FROM items WHERE id = 1 AND v = 'two'"));
+        assertEquals(
+                Arrays.asList("+I[one]", "+I[two]"),
+                collect(tables, "SELECT v FROM items WHERE id = 1 OR id = 2"));
+        assertEquals(
+                Collections.emptyList(), collect(tables, "SELECT v FROM items WHERE id = 999"));
+        assertEquals(
+                Collections.emptyList(),
+                collect(tables, "SELECT v FROM items WHERE id = 1 AND id = 2"));
+    }
+
+    @Test
     void sqlPreservesDeclaredCompositeKeyOrder(@TempDir Path directory) throws Exception {
         TableEnvironment tables = createCatalog(directory);
         tables.executeSql(
@@ -100,7 +120,7 @@ class CobbleCatalogSourceITTest {
                                         DataTypes.FIELD("v", DataTypes.STRING()))
                                 .getLogicalType();
         CobbleCatalogScanSource source =
-                new CobbleCatalogScanSource(reference, rowType, "latest", new int[] {0});
+                new CobbleCatalogScanSource(reference, rowType, "latest", new int[] {0}, null);
         CobbleCatalogScanSource.Split split;
         try (io.cobble.table.TableReader nativeReader =
                 CobbleCatalogDynamicTableSource.openReader(reference, "latest")) {
