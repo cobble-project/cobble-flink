@@ -94,6 +94,11 @@ include join state and some deduplicate or sort state. If Flink has already
 discarded the original SQL aliases, Cobble still exposes typed fallback columns
 such as `f0`, `f1`, and `value`.
 
+Nested state values with known semantic types are exposed as `ROW`, `ARRAY`, and
+`MAP` columns. Top-level row and tuple fields remain separate columns. Unknown
+types cannot be declared as typed source columns. State lookup keys must still
+use supported scalar fields; nested values do not change that requirement.
+
 For MapState, the semantic table shape is:
 
 - state key columns;

@@ -1,5 +1,6 @@
 package io.cobble.flink.table;
 
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -15,7 +16,6 @@ import org.apache.flink.api.common.typeutils.base.StringSerializer;
 import org.apache.flink.configuration.Configuration;
 import org.apache.flink.runtime.state.VoidNamespaceSerializer;
 import org.apache.flink.table.api.DataTypes;
-import org.apache.flink.table.api.ValidationException;
 import org.apache.flink.table.catalog.Column;
 import org.apache.flink.table.catalog.ResolvedSchema;
 import org.apache.flink.table.types.DataType;
@@ -28,21 +28,13 @@ import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.Map;
 
-/**
- * Verifies that a nested {@link StateInspectType.Kind#MAP} value type (a {@code Map<K,V>} wrapper
- * serializer used as a MapState value) is safely rejected by the source schema resolver and lookup
- * key encoder with clear errors, rather than causing an NPE or silent data loss.
- *
- * <p>MAP here is the value-type shape from a nested {@link MapSerializer}, not Flink {@code
- * MapState}. The resolver and encoder cannot flatten a nested MAP into SQL columns, so they must
- * reject it explicitly.
- */
+/** Nested MAP values are readable SQL columns; nested MAP lookup keys remain unsupported. */
 class MapSemanticTypeSafetyTest {
 
     @TempDir private Path tempDir;
 
     @Test
-    void resolverRejectsNestedMapValueTypeWithValidationException() throws Exception {
+    void resolverAcceptsNestedMapValueColumn() throws Exception {
         // A map-state whose user value is itself Map<String, Integer>.
         StateInspectType nestedMapValue =
                 StateInspectType.map(
@@ -67,25 +59,18 @@ class MapSemanticTypeSafetyTest {
         writeRegistry(tempDir, "op-a", 100L, store(schema, "nested-map-state", semantic));
 
         StateSourceOptions opts = opts("nested-map-state", "op-a", "map");
-        ValidationException ex =
-                assertThrows(
-                        ValidationException.class,
-                        () ->
-                                StateSourceSchemaResolver.resolve(
-                                        uri(tempDir),
-                                        opts,
-                                        "latest",
-                                        schema(
-                                                physical("key", DataTypes.INT()),
-                                                physical("map_key", DataTypes.INT()),
-                                                physical(
-                                                        "map_value",
-                                                        DataTypes.MAP(
-                                                                DataTypes.STRING(),
-                                                                DataTypes.INT())))));
-        assertTrue(
-                ex.getMessage().contains("MAP"),
-                "error should mention MAP, got: " + ex.getMessage());
+        StateSourceResolvedSchema resolved =
+                StateSourceSchemaResolver.resolve(
+                        uri(tempDir),
+                        opts,
+                        "latest",
+                        schema(
+                                physical("key", DataTypes.INT()),
+                                physical("map_key", DataTypes.INT()),
+                                physical(
+                                        "map_value",
+                                        DataTypes.MAP(DataTypes.STRING(), DataTypes.INT()))));
+        assertEquals("MAP<VARCHAR(2147483647), INT>", resolved.outputFields().get(2).logicalType());
     }
 
     @Test

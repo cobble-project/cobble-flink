@@ -1,5 +1,7 @@
 package io.cobble.flink.common.inspect;
 
+import org.apache.flink.table.types.logical.utils.LogicalTypeParser;
+
 /** Single-source exact-lookup eligibility for semantic state keys. */
 public final class StateInspectExactLookupSupport {
     private static final String VOID_NAMESPACE_SERIALIZER =
@@ -38,6 +40,20 @@ public final class StateInspectExactLookupSupport {
         if (type.kind() == StateInspectTypeKind.TUPLE) {
             return Result.unsupported(label + " Tuple reconstruction is not supported");
         }
+        if (type.kind() != StateInspectTypeKind.SCALAR && type.kind() != StateInspectTypeKind.ROW) {
+            return Result.unsupported(
+                    label + " requires a scalar or flat scalar ROW for exact lookup");
+        }
+        if (type.kind() == StateInspectTypeKind.SCALAR && !isScalar(type)) {
+            return Result.unsupported(label + " has a non-scalar logical type");
+        }
+        if (type.kind() == StateInspectTypeKind.ROW) {
+            for (StateInspectField field : type.fields()) {
+                if (!isScalar(field.type())) {
+                    return Result.unsupported(label + " contains a nested non-scalar field");
+                }
+            }
+        }
         InspectDecoderDescriptor descriptor =
                 serializer == null ? null : serializer.decoderDescriptor();
         if (type.kind() == StateInspectTypeKind.ROW
@@ -47,6 +63,19 @@ public final class StateInspectExactLookupSupport {
                     "classless " + (descriptor.isPojo() ? "POJO" : "Avro") + " " + label);
         }
         return Result.allowed();
+    }
+
+    private static boolean isScalar(StateInspectType type) {
+        if (type.kind() != StateInspectTypeKind.SCALAR) return false;
+        try {
+            return LogicalTypeParser.parse(
+                            type.logicalType(),
+                            StateInspectExactLookupSupport.class.getClassLoader())
+                    .getChildren()
+                    .isEmpty();
+        } catch (RuntimeException unsupported) {
+            return false;
+        }
     }
 
     private static boolean isVoidNamespace(SerializerInspectSchema serializer) {

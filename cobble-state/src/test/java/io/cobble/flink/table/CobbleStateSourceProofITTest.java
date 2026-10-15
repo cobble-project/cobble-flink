@@ -38,8 +38,18 @@ import org.apache.flink.runtime.testutils.MiniClusterResourceConfiguration;
 import org.apache.flink.streaming.api.environment.CheckpointConfig;
 import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
 import org.apache.flink.streaming.api.functions.source.RichParallelSourceFunction;
+import org.apache.flink.table.api.DataTypes;
+import org.apache.flink.table.api.bridge.java.StreamTableEnvironment;
+import org.apache.flink.table.data.GenericArrayData;
+import org.apache.flink.table.data.GenericMapData;
+import org.apache.flink.table.data.GenericRowData;
 import org.apache.flink.table.data.RowData;
+import org.apache.flink.table.data.StringData;
+import org.apache.flink.table.runtime.typeutils.InternalTypeInfo;
+import org.apache.flink.table.types.logical.RowType;
 import org.apache.flink.test.util.MiniClusterWithClientResource;
+import org.apache.flink.types.Row;
+import org.apache.flink.util.CloseableIterator;
 import org.apache.flink.util.SimpleUserCodeClassLoader;
 import org.apache.flink.util.UserCodeClassLoader;
 import org.junit.jupiter.api.Test;
@@ -67,6 +77,64 @@ class CobbleStateSourceProofITTest {
     private static final int PARALLELISM = 4;
 
     @TempDir private Path tempDir;
+
+    @Test
+    void sqlScansProjectsAndLooksUpNestedStateValues() throws Exception {
+        Tuple2<String, Long> discovered = runStatefulJob();
+        String operatorId = discovered.f0.split("@", 2)[0];
+        String root = discovered.f0.split("@", 2)[1];
+        StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment();
+        env.setParallelism(1);
+        StreamTableEnvironment tables = StreamTableEnvironment.create(env);
+        tables.executeSql(
+                "CREATE TABLE nested_state (`key` INT NOT NULL, details ROW<label STRING, code INT>, tags ARRAY<INT>, attributes MAP<STRING, ARRAY<INT>>, PRIMARY KEY (`key`) NOT ENFORCED) WITH ("
+                        + "'connector'='cobble','path'='"
+                        + root
+                        + "','state.name'='nested-state','state.operator-id'='"
+                        + operatorId
+                        + "','scan.checkpoint-id'='"
+                        + discovered.f1
+                        + "')");
+        assertEquals(
+                java.util.Collections.singletonList("+I[nested, 7, 9]"),
+                sqlRows(
+                        tables,
+                        "SELECT details.label, tags[1], attributes['scores'][1] FROM nested_state WHERE `key` = 0"));
+        tables.executeSql(
+                "CREATE TEMPORARY VIEW probes AS SELECT id, PROCTIME() AS pt FROM (VALUES (0), (999)) AS p(id)");
+        String lookup =
+                "SELECT d.details.label, d.tags[1], d.attributes['scores'][1] FROM probes AS p LEFT JOIN nested_state FOR SYSTEM_TIME AS OF p.pt AS d ON p.id = d.`key`";
+        assertTrue(tables.explainSql(lookup).contains("LookupJoin"));
+        assertEquals(
+                Arrays.asList("+I[nested, 7, 9]", "+I[null, null, null]"), sqlRows(tables, lookup));
+    }
+
+    private static List<String> sqlRows(StreamTableEnvironment tables, String query)
+            throws Exception {
+        List<String> result = new ArrayList<>();
+        try (CloseableIterator<Row> rows = tables.executeSql(query).collect()) {
+            while (rows.hasNext()) result.add(rows.next().toString());
+        }
+        java.util.Collections.sort(result);
+        return result;
+    }
+
+    private static RowType nestedType() {
+        return (RowType)
+                DataTypes.ROW(
+                                DataTypes.FIELD(
+                                        "details",
+                                        DataTypes.ROW(
+                                                DataTypes.FIELD("label", DataTypes.STRING()),
+                                                DataTypes.FIELD("code", DataTypes.INT()))),
+                                DataTypes.FIELD("tags", DataTypes.ARRAY(DataTypes.INT())),
+                                DataTypes.FIELD(
+                                        "attributes",
+                                        DataTypes.MAP(
+                                                DataTypes.STRING(),
+                                                DataTypes.ARRAY(DataTypes.INT()))))
+                        .getLogicalType();
+    }
 
     @Test
     void readsValueStateCheckpoint() throws Exception {
@@ -603,9 +671,15 @@ class CobbleStateSourceProofITTest {
         private static final AtomicInteger PROCESSED_RECORDS = new AtomicInteger();
         private transient ValueState<Integer> valueState;
         private transient ListState<Integer> listState;
+        private transient ValueState<RowData> nestedState;
 
         @Override
         public void open(Configuration parameters) throws Exception {
+            nestedState =
+                    getRuntimeContext()
+                            .getState(
+                                    new ValueStateDescriptor<>(
+                                            "nested-state", InternalTypeInfo.of(nestedType())));
             valueState =
                     getRuntimeContext()
                             .getState(
@@ -620,6 +694,14 @@ class CobbleStateSourceProofITTest {
 
         @Override
         public Integer map(Integer value) throws Exception {
+            nestedState.update(
+                    GenericRowData.of(
+                            GenericRowData.of(StringData.fromString("nested"), 42),
+                            new GenericArrayData(new Integer[] {7, null}),
+                            new GenericMapData(
+                                    java.util.Collections.singletonMap(
+                                            StringData.fromString("scores"),
+                                            new GenericArrayData(new Integer[] {9, null})))));
             Integer current = valueState.value();
             valueState.update(current == null ? value : current + value);
             listState.add(value);

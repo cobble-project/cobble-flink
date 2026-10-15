@@ -14,6 +14,40 @@ public final class StateSourceSchemaLayout {
 
     private StateSourceSchemaLayout() {}
 
+    /**
+     * SQL type for one semantic value; top-level structured groups remain expanded into columns.
+     */
+    public static String logicalType(StateInspectType type) {
+        if (type == null) throw new IllegalArgumentException("Missing semantic type");
+        switch (type.kind()) {
+            case SCALAR:
+                if ("VARCHAR".equals(type.logicalType())) return "VARCHAR(2147483647)";
+                if ("VARBINARY".equals(type.logicalType())) return "VARBINARY(2147483647)";
+                return type.logicalType();
+            case LIST:
+                return "ARRAY<" + logicalType(type.elementType()) + ">";
+            case MAP:
+                return "MAP<"
+                        + logicalType(type.keyType())
+                        + ", "
+                        + logicalType(type.valueType())
+                        + ">";
+            case ROW:
+            case TUPLE:
+                List<String> fields = new ArrayList<>();
+                for (StateInspectField field : type.fields()) {
+                    fields.add(
+                            "`"
+                                    + field.name().replace("`", "``")
+                                    + "` "
+                                    + logicalType(field.type()));
+                }
+                return "ROW<" + String.join(", ", fields) + ">";
+            default:
+                throw new IllegalArgumentException("Unsupported semantic type " + type.kind());
+        }
+    }
+
     public static List<Field> derive(
             StateInspectSchema stateSchema, StateInspectSemanticSchema semanticSchema) {
         Objects.requireNonNull(stateSchema, "stateSchema");
@@ -133,12 +167,9 @@ public final class StateSourceSchemaLayout {
                     addStructuredFields(group, type);
                     return;
                 case LIST:
-                    throw new IllegalArgumentException(
-                            "Cobble state '"
-                                    + stateName
-                                    + "' "
-                                    + groupLabel(group)
-                                    + " is a nested list, which is not supported as a SQL source column yet.");
+                case MAP:
+                    addField(group, scalarName, logicalType(type), 0);
+                    return;
                 default:
                     throw new IllegalArgumentException(
                             "Cobble state '"
@@ -155,17 +186,13 @@ public final class StateSourceSchemaLayout {
             List<StateInspectField> structured = type.fields();
             for (int index = 0; index < structured.size(); index++) {
                 StateInspectField field = structured.get(index);
-                if (field.type().kind() != StateInspectTypeKind.SCALAR) {
-                    throw new IllegalArgumentException(
-                            "Cobble state '"
-                                    + stateName
-                                    + "' "
-                                    + groupLabel(group)
-                                    + " field '"
-                                    + field.name()
-                                    + "' has a nested non-scalar type, which is not supported as a SQL source column yet.");
-                }
-                addField(group, field.name(), field.type().logicalType(), index);
+                addField(
+                        group,
+                        field.name(),
+                        field.type().kind() == StateInspectTypeKind.SCALAR
+                                ? field.type().logicalType()
+                                : logicalType(field.type()),
+                        index);
             }
         }
 

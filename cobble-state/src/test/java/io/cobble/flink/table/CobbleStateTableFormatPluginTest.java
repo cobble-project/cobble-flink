@@ -30,9 +30,21 @@ import io.cobble.table.TableReader;
 import io.cobble.table.TableScanPlan;
 import io.cobble.table.Value;
 
+import org.apache.avro.Schema;
+import org.apache.avro.generic.GenericData;
+import org.apache.avro.generic.GenericRecord;
+import org.apache.flink.api.common.ExecutionConfig;
+import org.apache.flink.api.common.typeinfo.Types;
+import org.apache.flink.api.common.typeutils.TypeSerializer;
 import org.apache.flink.api.common.typeutils.base.IntSerializer;
+import org.apache.flink.api.common.typeutils.base.ListSerializer;
 import org.apache.flink.api.common.typeutils.base.StringSerializer;
+import org.apache.flink.api.java.typeutils.ListTypeInfo;
+import org.apache.flink.api.java.typeutils.MapTypeInfo;
+import org.apache.flink.api.java.typeutils.PojoField;
+import org.apache.flink.api.java.typeutils.PojoTypeInfo;
 import org.apache.flink.core.memory.DataOutputSerializer;
+import org.apache.flink.formats.avro.typeutils.AvroSerializer;
 import org.apache.flink.runtime.state.VoidNamespaceSerializer;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
@@ -41,14 +53,175 @@ import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
 import java.io.ObjectInputStream;
 import java.io.ObjectOutputStream;
+import java.nio.ByteBuffer;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
+import java.util.Map;
 
 class CobbleStateTableFormatPluginTest {
     @TempDir Path directory;
+
+    @Test
+    void nativeSnapshotReadsNestedAvroWithProjectionAndLookup() throws Exception {
+        Schema schema =
+                new Schema.Parser()
+                        .parse(
+                                "{\"type\":\"record\",\"name\":\"Nested\",\"fields\":["
+                                        + "{\"name\":\"details\",\"type\":{\"type\":\"record\",\"name\":\"Details\",\"fields\":[{\"name\":\"code\",\"type\":\"int\"},{\"name\":\"label\",\"type\":\"string\"}]}},"
+                                        + "{\"name\":\"labels\",\"type\":{\"type\":\"array\",\"items\":[\"null\",\"string\"]}},"
+                                        + "{\"name\":\"attributes\",\"type\":{\"type\":\"map\",\"values\":{\"type\":\"array\",\"items\":[\"null\",\"int\"]}}},"
+                                        + "{\"name\":\"payload\",\"type\":\"bytes\"}]}");
+        GenericRecord value = new GenericData.Record(schema);
+        GenericRecord detail = new GenericData.Record(schema.getField("details").schema());
+        detail.put("code", 42);
+        detail.put("label", "long-label");
+        value.put("details", detail);
+        value.put("labels", Arrays.asList("first", null));
+        value.put("attributes", Collections.singletonMap("scores", Arrays.asList(9, null)));
+        value.put("payload", ByteBuffer.wrap(new byte[] {1, 2, 3}));
+        Fixture fixture =
+                writeNestedSnapshot(new AvroSerializer<>(GenericRecord.class, schema), value);
+        List<Value> row = read(fixture, "nested").get(0);
+        assertEquals(
+                Value.struct(Arrays.asList(Value.int32(42), Value.string("long-label"))),
+                row.get(1));
+        assertEquals(
+                Value.list(Arrays.asList(Value.string("first"), Value.nullValue())), row.get(2));
+        assertEquals(Value.binary(new byte[] {1, 2, 3}), row.get(4));
+        try (TableReader reader = TableReader.open(fixture.config, "nested", fixture.snapshot.id)) {
+            assertTrue(reader.capabilities().exactLookup());
+            assertEquals(
+                    row,
+                    reader.lookup(Collections.singletonList(Value.int32(7)))
+                            .iterator()
+                            .next()
+                            .value());
+            TableScanPlan projected =
+                    reader.scanPlan().project(Collections.singletonList("details"));
+            try (TableReadCursor<List<Value>> cursor =
+                    projected.scan(fixture.config, new TableReadRange(0, 0), null)) {
+                assertEquals(Collections.singletonList(row.get(1)), cursor.next().value());
+                assertNull(cursor.next());
+            }
+        }
+    }
+
+    @Test
+    void nativeSnapshotReadsNestedPojoCollections() throws Exception {
+        PojoTypeInfo<NestedPojo> info =
+                new PojoTypeInfo<>(
+                        NestedPojo.class,
+                        Arrays.asList(
+                                new PojoField(
+                                        NestedPojo.class.getField("labels"),
+                                        new ListTypeInfo<>(Types.STRING)),
+                                new PojoField(
+                                        NestedPojo.class.getField("attributes"),
+                                        new MapTypeInfo<>(
+                                                Types.STRING, new ListTypeInfo<>(Types.INT)))));
+        NestedPojo value = new NestedPojo();
+        value.labels = Collections.singletonList("first");
+        value.attributes = Collections.singletonMap("scores", Collections.singletonList(9));
+        Fixture fixture = writeNestedSnapshot(info.createSerializer(new ExecutionConfig()), value);
+        try (TableReader reader = TableReader.open(fixture.config, "nested", fixture.snapshot.id)) {
+            List<Value> row =
+                    reader.lookup(Collections.singletonList(Value.int32(7)))
+                            .iterator()
+                            .next()
+                            .value();
+            assertEquals(3, row.size());
+            assertEquals(Value.Kind.MAP, row.get(1).kind());
+            assertEquals(Value.list(Collections.singletonList(Value.string("first"))), row.get(2));
+            assertEquals(row, read(fixture, "nested").get(0));
+        }
+    }
+
+    private <T> Fixture writeNestedSnapshot(TypeSerializer<T> serializer, T value)
+            throws Exception {
+        return writeStateSnapshot(IntSerializer.INSTANCE, 7, serializer, value);
+    }
+
+    @Test
+    void nestedKeyCanScanButDoesNotAdvertiseOrExecuteLookup() throws Exception {
+        Fixture fixture =
+                writeStateSnapshot(
+                        new ListSerializer<>(IntSerializer.INSTANCE),
+                        Arrays.asList(3, 4),
+                        IntSerializer.INSTANCE,
+                        70);
+        try (TableReader reader = TableReader.open(fixture.config, "nested", fixture.snapshot.id)) {
+            assertFalse(reader.capabilities().exactLookup());
+            assertEquals(
+                    Arrays.asList(
+                            Value.list(Arrays.asList(Value.int32(3), Value.int32(4))),
+                            Value.int32(70)),
+                    read(fixture, "nested").get(0));
+            assertThrows(
+                    UnsupportedOperationException.class,
+                    () ->
+                            reader.lookup(
+                                    Collections.singletonList(
+                                            Value.list(
+                                                    Arrays.asList(
+                                                            Value.int32(3), Value.int32(4))))));
+        }
+    }
+
+    private <K, T> Fixture writeStateSnapshot(
+            TypeSerializer<K> keySerializer, K keyValue, TypeSerializer<T> serializer, T value)
+            throws Exception {
+        Config config = new Config().addVolume(directory.toString()).totalBuckets(1).numColumns(1);
+        StateInspectSchema schema =
+                StateInspectSchema.forValue(
+                        "nested",
+                        "nested",
+                        false,
+                        keySerializer,
+                        VoidNamespaceSerializer.INSTANCE,
+                        serializer);
+        StateInspectSemanticSchema semantic =
+                StateInspectSemanticSchema.forValue(
+                        schema.keySerializer().inspectType(),
+                        null,
+                        schema.valueSerializer().inspectType());
+        try (Db db = Db.open(config);
+                SchemaBuilder builder = db.updateSchema()) {
+            builder.setColumnFamilyOptions(
+                    "nested",
+                    ColumnFamilyOptions.defaults()
+                            .valueHasTtl(false)
+                            .metadata(
+                                    CobbleStateReadFormatMetadata.encode(
+                                            CobbleStateDescriptor.forKeyValue(
+                                                    "nested",
+                                                    "nested",
+                                                    CobbleStateDescriptor.StateKind.VALUE),
+                                            schema,
+                                            semantic)));
+            builder.addColumn("nested", 0, null, null);
+            builder.commit();
+            DataOutputSerializer bytes = new DataOutputSerializer(128);
+            serializer.serialize(value, bytes);
+            DataOutputSerializer keyBytes = new DataOutputSerializer(32);
+            keySerializer.serialize(keyValue, keyBytes);
+            keyBytes.writeByte(0);
+            db.put(0, keyBytes.getCopyOfBuffer(), "nested", 0, bytes.getCopyOfBuffer());
+            try (DbCoordinator coordinator = DbCoordinator.open(config)) {
+                return new Fixture(
+                        config,
+                        coordinator.materializeGlobalSnapshot(
+                                1, 1, Collections.singletonList(db.snapshot())));
+            }
+        }
+    }
+
+    public static class NestedPojo {
+        public List<String> labels;
+        public Map<String, List<Integer>> attributes;
+    }
 
     @Test
     void serviceReadsValueMapAndListFromSnapshotEmbeddedMetadata() throws Exception {

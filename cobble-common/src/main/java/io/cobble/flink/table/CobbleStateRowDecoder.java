@@ -3,36 +3,22 @@ package io.cobble.flink.table;
 import io.cobble.flink.common.inspect.DescriptorCapability;
 import io.cobble.flink.common.inspect.InspectDecoderDescriptor;
 import io.cobble.flink.common.inspect.SerializerInspectSchema;
-import io.cobble.flink.common.inspect.StateInspectField;
 import io.cobble.flink.common.inspect.StateInspectSchema;
 import io.cobble.flink.common.inspect.StateInspectSemanticSchema;
 import io.cobble.flink.common.inspect.StateInspectType;
-import io.cobble.flink.common.inspect.StateInspectTypeKind;
 import io.cobble.flink.common.inspect.StateKind;
 import io.cobble.flink.common.inspect.decode.ClasslessDecodeFailureException;
-import io.cobble.flink.common.inspect.decode.ClasslessPojoValue;
 import io.cobble.flink.common.inspect.decode.ClasslessValueDecoder;
 
-import org.apache.avro.generic.GenericEnumSymbol;
-import org.apache.avro.generic.GenericFixed;
-import org.apache.avro.generic.IndexedRecord;
-import org.apache.avro.util.Utf8;
 import org.apache.flink.api.common.typeutils.TypeSerializer;
-import org.apache.flink.api.java.tuple.Tuple;
 import org.apache.flink.core.memory.DataInputViewStreamWrapper;
 import org.apache.flink.table.data.GenericRowData;
 import org.apache.flink.table.data.RowData;
-import org.apache.flink.table.data.conversion.DataStructureConverter;
-import org.apache.flink.table.data.conversion.DataStructureConverters;
-import org.apache.flink.table.types.logical.LogicalType;
-import org.apache.flink.table.types.logical.utils.LogicalTypeParser;
-import org.apache.flink.table.types.utils.TypeConversions;
 import org.apache.flink.types.RowKind;
 
 import java.io.ByteArrayInputStream;
 import java.io.IOException;
 import java.io.PushbackInputStream;
-import java.nio.ByteBuffer;
 import java.util.ArrayList;
 import java.util.EnumMap;
 import java.util.EnumSet;
@@ -471,13 +457,11 @@ public final class CobbleStateRowDecoder {
 
     private static final class GroupDecoder {
         private final StateSourceField.Group group;
-        private final StateInspectType type;
         private final SerializerInspectSchema serializerSchema;
         private final InspectDecoderDescriptor descriptor;
         private final boolean preferClassless;
         private TypeSerializer<Object> serializer;
-        private final List<DataStructureConverter<Object, Object>> converters;
-        private final List<LogicalType> logicalTypes;
+        private final StateSemanticValueConverter converter;
         private final boolean[] selectedIndexes;
 
         private GroupDecoder(
@@ -487,25 +471,15 @@ public final class CobbleStateRowDecoder {
                 List<StateSourceField> outputFields)
                 throws IOException {
             this.group = group;
-            this.type = type;
             this.serializerSchema = serializerSchema;
             this.descriptor =
                     serializerSchema == null ? null : serializerSchema.decoderDescriptor();
             this.preferClassless =
                     ClasslessValueDecoder.shouldPreferClasslessSemanticDecode(descriptor);
-            this.logicalTypes = flattenedLogicalTypes(type);
-            this.selectedIndexes = new boolean[logicalTypes.size()];
+            this.converter = new StateSemanticValueConverter(type);
+            this.selectedIndexes = new boolean[converter.flattenedArity()];
             for (StateSourceField field : outputFields) {
                 if (field.group() == group) selectedIndexes[field.groupFieldIndex()] = true;
-            }
-            this.converters = new ArrayList<>(logicalTypes.size());
-            for (int index = 0; index < logicalTypes.size(); index++) {
-                this.converters.add(
-                        selectedIndexes[index]
-                                ? DataStructureConverters.getConverter(
-                                        TypeConversions.fromLogicalToDataType(
-                                                logicalTypes.get(index)))
-                                : null);
             }
         }
 
@@ -632,128 +606,15 @@ public final class CobbleStateRowDecoder {
         }
 
         private Object[] decodeObject(Object value) throws IOException {
-            switch (type.kind()) {
-                case SCALAR:
-                    return new Object[] {toInternal(0, value)};
-                case ROW:
-                    return decodeRow(value);
-                case TUPLE:
-                    return decodeTuple(value);
-                default:
-                    throw new IOException(
-                            "Unsupported semantic type " + type.kind() + " for " + group);
+            try {
+                return converter.flatten(value, selectedIndexes);
+            } catch (RuntimeException error) {
+                throw new IOException("Failed to convert " + group + " semantic value", error);
             }
         }
 
         private Object[] nullValues() {
-            return new Object[logicalTypes.size()];
-        }
-
-        private Object[] decodeRow(Object value) throws IOException {
-            Object[] output = new Object[type.fields().size()];
-            if (value == null) {
-                return output;
-            }
-            if (value instanceof ClasslessPojoValue) {
-                ClasslessPojoValue pojo = (ClasslessPojoValue) value;
-                if (pojo.isNull()) {
-                    return output;
-                }
-                for (int index = 0; index < type.fields().size(); index++) {
-                    if (!selectedIndexes[index]) continue;
-                    StateInspectField field = type.fields().get(index);
-                    if (!pojo.fields().containsKey(field.name())) {
-                        throw new IOException(
-                                "Classless POJO field '"
-                                        + field.name()
-                                        + "' is missing for "
-                                        + group);
-                    }
-                    output[index] = toInternal(index, pojo.fields().get(field.name()));
-                }
-                return output;
-            }
-            if (value instanceof IndexedRecord) {
-                IndexedRecord record = (IndexedRecord) value;
-                for (int index = 0; index < type.fields().size(); index++) {
-                    if (!selectedIndexes[index]) continue;
-                    output[index] = toInternal(index, record.get(index));
-                }
-                return output;
-            }
-            if (!(value instanceof RowData)) {
-                throw new IOException(
-                        "Expected RowData for " + group + " but got " + value.getClass().getName());
-            }
-            RowData row = (RowData) value;
-            for (int index = 0; index < type.fields().size(); index++) {
-                if (!selectedIndexes[index]) continue;
-                Object field =
-                        RowData.createFieldGetter(logicalTypes.get(index), index)
-                                .getFieldOrNull(row);
-                output[index] = field;
-            }
-            return output;
-        }
-
-        private Object[] decodeTuple(Object value) throws IOException {
-            Object[] output = new Object[type.fields().size()];
-            if (value == null) {
-                return output;
-            }
-            if (!(value instanceof Tuple)) {
-                throw new IOException(
-                        "Expected Tuple for " + group + " but got " + value.getClass().getName());
-            }
-            Tuple tuple = (Tuple) value;
-            for (int index = 0; index < type.fields().size(); index++) {
-                if (!selectedIndexes[index]) continue;
-                output[index] = toInternal(index, tuple.getField(index));
-            }
-            return output;
-        }
-
-        private Object toInternal(int index, Object value) throws IOException {
-            if (!selectedIndexes[index] || value == null) {
-                return null;
-            }
-            try {
-                return converters.get(index).toInternalOrNull(normalizeAvroScalar(value));
-            } catch (RuntimeException e) {
-                String fieldName =
-                        type.kind() == StateInspectTypeKind.SCALAR
-                                ? "value"
-                                : type.fields().get(index).name();
-                throw new IOException(
-                        "Failed to convert "
-                                + group
-                                + " field '"
-                                + fieldName
-                                + "' to internal logical type "
-                                + logicalTypes.get(index).asSummaryString()
-                                + " from "
-                                + value.getClass().getName(),
-                        e);
-            }
-        }
-
-        private static Object normalizeAvroScalar(Object value) {
-            if (value instanceof Utf8) {
-                return value.toString();
-            }
-            if (value instanceof GenericEnumSymbol) {
-                return value.toString();
-            }
-            if (value instanceof ByteBuffer) {
-                ByteBuffer buffer = ((ByteBuffer) value).duplicate();
-                byte[] bytes = new byte[buffer.remaining()];
-                buffer.get(bytes);
-                return bytes;
-            }
-            if (value instanceof GenericFixed) {
-                return ((GenericFixed) value).bytes();
-            }
-            return value;
+            return new Object[selectedIndexes.length];
         }
 
         @SuppressWarnings("unchecked")
@@ -773,33 +634,6 @@ public final class CobbleStateRowDecoder {
                         "Failed to restore serializer " + serializerSchema.serializerClassName());
             }
             return serializer;
-        }
-
-        private static List<LogicalType> flattenedLogicalTypes(StateInspectType type)
-                throws IOException {
-            if (type == null || type.kind() == StateInspectTypeKind.UNKNOWN) {
-                throw new IOException("Missing semantic type");
-            }
-            List<LogicalType> types = new ArrayList<>();
-            if (type.kind() == StateInspectTypeKind.SCALAR) {
-                types.add(parse(type.logicalType()));
-            } else if (type.kind() == StateInspectTypeKind.ROW
-                    || type.kind() == StateInspectTypeKind.TUPLE) {
-                for (StateInspectField field : type.fields()) {
-                    if (field.type().kind() != StateInspectTypeKind.SCALAR) {
-                        throw new IOException("Nested non-scalar semantic field is unsupported");
-                    }
-                    types.add(parse(field.type().logicalType()));
-                }
-            } else {
-                throw new IOException("Unsupported semantic type " + type.kind());
-            }
-            return types;
-        }
-
-        private static LogicalType parse(String logicalType) {
-            return LogicalTypeParser.parse(
-                    logicalType, CobbleStateRowDecoder.class.getClassLoader());
         }
     }
 

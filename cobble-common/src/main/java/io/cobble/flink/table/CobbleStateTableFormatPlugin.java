@@ -4,6 +4,7 @@ import io.cobble.Config;
 import io.cobble.GlobalSnapshot;
 import io.cobble.flink.common.CobbleStateDescriptor;
 import io.cobble.flink.common.CobbleStateReadFormatMetadata;
+import io.cobble.flink.common.inspect.StateInspectExactLookupSupport;
 import io.cobble.flink.common.inspect.StateInspectSchema;
 import io.cobble.flink.common.inspect.StateInspectSemanticSchema;
 import io.cobble.flink.common.inspect.StateKind;
@@ -355,8 +356,7 @@ public final class CobbleStateTableFormatPlugin implements TableFormatPlugin {
     }
 
     private static List<StateSourceField> lookupFields(Layout layout) {
-        if (layout.schema.stateKind() == StateKind.LIST
-                || layout.schema.stateKind() == StateKind.TIMER) {
+        if (!StateInspectExactLookupSupport.evaluate(layout.schema, layout.semantic).supported()) {
             return Collections.emptyList();
         }
         List<StateSourceField> fields = new ArrayList<StateSourceField>();

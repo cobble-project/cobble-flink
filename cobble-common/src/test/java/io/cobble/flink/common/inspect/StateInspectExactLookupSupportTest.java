@@ -23,6 +23,37 @@ import java.util.Arrays;
 class StateInspectExactLookupSupportTest {
 
     @Test
+    void nestedKeysAreScanOnlyWhileNestedValuesRemainLookupEligible() {
+        StateInspectSchema schema =
+                StateInspectSchema.forValue(
+                        "nested",
+                        "nested",
+                        false,
+                        IntSerializer.INSTANCE,
+                        VoidNamespaceSerializer.INSTANCE,
+                        IntSerializer.INSTANCE);
+        StateInspectType integer = StateInspectType.scalar("INT");
+        for (StateInspectType key :
+                Arrays.asList(
+                        StateInspectType.list(integer),
+                        StateInspectType.map(integer, integer),
+                        StateInspectType.scalar("ARRAY<INT>"),
+                        StateInspectType.row(
+                                Arrays.asList(
+                                        new StateInspectField(
+                                                "items", StateInspectType.list(integer)))))) {
+            assertFalse(
+                    StateInspectExactLookupSupport.evaluate(
+                                    schema, StateInspectSemanticSchema.forValue(key, null, integer))
+                            .supported());
+            assertTrue(
+                    StateInspectExactLookupSupport.evaluate(
+                                    schema, StateInspectSemanticSchema.forValue(integer, null, key))
+                            .supported());
+        }
+    }
+
+    @Test
     void listAndTimerDoNotAdvertiseTypedExactLookup() {
         StateInspectSchema list =
                 StateInspectSchema.forList(

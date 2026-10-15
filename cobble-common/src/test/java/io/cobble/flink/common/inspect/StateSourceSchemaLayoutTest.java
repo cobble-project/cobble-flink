@@ -60,7 +60,7 @@ class StateSourceSchemaLayoutTest {
     }
 
     @Test
-    void rejectsNestedAndDuplicateStructuredFields() {
+    void derivesNestedAndRejectsDuplicateStructuredFields() {
         StateInspectSchema schema =
                 StateInspectSchema.forValue(
                         "bad",
@@ -75,17 +75,31 @@ class StateSourceSchemaLayoutTest {
                                 new StateInspectField(
                                         "nested",
                                         StateInspectType.list(StateInspectType.scalar("INT")))));
-        IllegalArgumentException nestedError =
-                assertThrows(
-                        IllegalArgumentException.class,
-                        () ->
-                                StateSourceSchemaLayout.derive(
-                                        schema,
-                                        StateInspectSemanticSchema.forValue(
-                                                StateInspectType.scalar("INT"),
-                                                StateInspectType.unknown(),
-                                                nested)));
-        assertTrue(nestedError.getMessage().contains("nested non-scalar"));
+        List<StateSourceSchemaLayout.Field> fields =
+                StateSourceSchemaLayout.derive(
+                        schema,
+                        StateInspectSemanticSchema.forValue(
+                                StateInspectType.scalar("INT"),
+                                StateInspectType.unknown(),
+                                nested));
+        assertEquals("ARRAY<INT>", fields.get(1).logicalType());
+        assertEquals(
+                "MAP<VARCHAR(2147483647), ROW<`a``b` ARRAY<INT>>>",
+                StateSourceSchemaLayout.logicalType(
+                        StateInspectType.map(
+                                StateInspectType.scalar("VARCHAR"),
+                                StateInspectType.row(
+                                        Arrays.asList(
+                                                new StateInspectField(
+                                                        "a`b",
+                                                        StateInspectType.list(
+                                                                StateInspectType.scalar(
+                                                                        "INT"))))))));
+        assertThrows(
+                IllegalArgumentException.class,
+                () ->
+                        StateSourceSchemaLayout.logicalType(
+                                StateInspectType.list(StateInspectType.unknown())));
 
         StateInspectType duplicate =
                 StateInspectType.row(

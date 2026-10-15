@@ -18,12 +18,77 @@ import io.cobble.table.TableSchema;
 import org.apache.flink.api.common.typeutils.base.IntSerializer;
 import org.apache.flink.api.common.typeutils.base.StringSerializer;
 import org.apache.flink.runtime.state.VoidNamespaceSerializer;
+import org.apache.flink.table.api.EnvironmentSettings;
+import org.apache.flink.table.api.TableEnvironment;
 import org.junit.jupiter.api.Test;
 
 import java.util.Arrays;
 import java.util.Collections;
 
 class InspectOverviewGeneratorTest {
+    @Test
+    void nestedStateDdlParsesAndNestedKeysRemainScanOnly() {
+        StateInspectSchema schema =
+                StateInspectSchema.forValue(
+                        "nested",
+                        "nested",
+                        false,
+                        IntSerializer.INSTANCE,
+                        VoidNamespaceSerializer.INSTANCE,
+                        IntSerializer.INSTANCE);
+        StateInspectType nested =
+                StateInspectType.row(
+                        Arrays.asList(
+                                new StateInspectField(
+                                        "payload",
+                                        StateInspectType.map(
+                                                StateInspectType.scalar("VARCHAR"),
+                                                StateInspectType.list(
+                                                        StateInspectType.row(
+                                                                Arrays.asList(
+                                                                        new StateInspectField(
+                                                                                "a`b",
+                                                                                StateInspectType
+                                                                                        .scalar(
+                                                                                                "VARBINARY")))))))));
+        TableEnvironment tables = TableEnvironment.create(EnvironmentSettings.inBatchMode());
+        InspectOverviewItem value =
+                only(
+                        InspectOverviewGenerator.generate(
+                                "file:///unused",
+                                1L,
+                                "op",
+                                Collections.singletonList(
+                                        stateTarget(
+                                                schema,
+                                                StateInspectSemanticSchema.forValue(
+                                                        StateInspectType.scalar("INT"),
+                                                        null,
+                                                        nested)))));
+        assertTrue(value.sourceSql().batchScanSupported());
+        assertTrue(value.sourceSql().exactLookupSupported());
+        assertTrue(value.sourceSql().ddl().contains("VARBINARY(2147483647)"));
+        tables.executeSql(value.sourceSql().ddl());
+        InspectOverviewItem key =
+                only(
+                        InspectOverviewGenerator.generate(
+                                "file:///unused",
+                                1L,
+                                "op",
+                                Collections.singletonList(
+                                        stateTarget(
+                                                schema,
+                                                StateInspectSemanticSchema.forValue(
+                                                        nested,
+                                                        null,
+                                                        StateInspectType.scalar("INT"))))));
+        assertTrue(key.sourceSql().batchScanSupported());
+        assertFalse(key.sourceSql().exactLookupSupported());
+        assertFalse(key.sourceSql().ddl().contains("PRIMARY KEY"));
+        TableEnvironment.create(EnvironmentSettings.inBatchMode())
+                .executeSql(key.sourceSql().ddl());
+    }
+
     @Test
     void tableDdlUsesPhysicalOrderPrimaryKeyAndPinnedSnapshot() {
         TableSchema schema =
