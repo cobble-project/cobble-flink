@@ -19,11 +19,11 @@ artifact for your Flink version on the [Versions](versions.html) page.
 3. Copy it into `$FLINK_HOME/lib/` on each Flink node, then restart Flink.
 
 For example, for Flink 1.17 or 1.18, download
-[cobble-flink-dist-0.5.2-1-flink-1.17.jar](https://repo.maven.apache.org/maven2/io/github/cobble-project/cobble-flink-dist/0.5.2-1-flink-1.17/cobble-flink-dist-0.5.2-1-flink-1.17.jar):
+[cobble-flink-dist-0.5.3-1-flink-1.17.jar](https://repo.maven.apache.org/maven2/io/github/cobble-project/cobble-flink-dist/0.5.3-1-flink-1.17/cobble-flink-dist-0.5.3-1-flink-1.17.jar):
 
 ```bash
 export FLINK_HOME=/path/to/flink
-cp ~/Downloads/cobble-flink-dist-0.5.2-1-flink-1.17.jar "$FLINK_HOME/lib/"
+cp ~/Downloads/cobble-flink-dist-0.5.3-1-flink-1.17.jar "$FLINK_HOME/lib/"
 ```
 
 The bundle includes the state backend, SQL source, and SQL sink. Install only
@@ -40,7 +40,7 @@ state/source/sink dependencies.
 <dependency>
   <groupId>io.github.cobble-project</groupId>
   <artifactId>cobble-flink-dist</artifactId>
-  <version>0.5.2-1-flink-1.17</version>
+  <version>0.5.3-1-flink-1.17</version>
 </dependency>
 ```
 

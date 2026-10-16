@@ -15,7 +15,7 @@ ${cobble-version}-{patch-version}-flink-{flink-minor-version}
 Example:
 
 ```text
-0.5.2-1-flink-1.17
+0.5.3-1-flink-1.17
 ```
 
 Use the matrix below to choose the `<version>` value for each dependency in
@@ -23,12 +23,12 @@ your `pom.xml` or for the runtime jar you copy into Flink `lib/`:
 
 | Flink cluster version | Dist bundle jar version | State dependency version | Sink dependency version | Source dependency version |
 | --- | --- | --- | --- | --- |
-| 1.17, 1.18 | `0.5.2-1-flink-1.17` | `0.5.2-1-flink-1.17` | `0.5.2-1-flink-1.17` | `0.5.2-1-flink-1.17` |
-| 1.19, 1.20 | `0.5.2-1-flink-1.19` | `0.5.2-1-flink-1.19` | `0.5.2-1-flink-1.17` | `0.5.2-1-flink-1.17` |
-| 2.0 | `0.5.2-1-flink-2.0` | `0.5.2-1-flink-2.0` | `0.5.2-1-flink-2.0` | `0.5.2-1-flink-1.17` |
-| 2.1 and above | `0.5.2-1-flink-2.1` | `0.5.2-1-flink-2.1` | `0.5.2-1-flink-2.0` | `0.5.2-1-flink-1.17` |
+| 1.17, 1.18 | `0.5.3-1-flink-1.17` | `0.5.3-1-flink-1.17` | `0.5.3-1-flink-1.17` | `0.5.3-1-flink-1.17` |
+| 1.19, 1.20 | `0.5.3-1-flink-1.19` | `0.5.3-1-flink-1.19` | `0.5.3-1-flink-1.17` | `0.5.3-1-flink-1.17` |
+| 2.0 | `0.5.3-1-flink-2.0` | `0.5.3-1-flink-2.0` | `0.5.3-1-flink-2.0` | `0.5.3-1-flink-1.17` |
+| 2.1 and above | `0.5.3-1-flink-2.1` | `0.5.3-1-flink-2.1` | `0.5.3-1-flink-2.0` | `0.5.3-1-flink-1.17` |
 
-The `0.5.2-1` release line uses Cobble core `0.5.2`. Use the bundled
+The `0.5.3-1` release line uses Cobble core `0.5.3`. Use the bundled
 `cobble-flink-dist` jar for a complete installation. For job-side dependencies,
 use the state, sink, or source column with the corresponding artifact below.
 All artifacts use groupId `io.github.cobble-project`.
@@ -42,14 +42,14 @@ All artifacts use groupId `io.github.cobble-project`.
 
 ## Monitor Versions
 
-The standalone monitor variants follow the same `0.5.2-1` release line:
+The standalone monitor variants follow the same `0.5.3-1` release line:
 
 | Checkpoint producer line | Bundled Flink runtime | Monitor version |
 | --- | --- | --- |
-| 1.17 | 1.17.2 | `0.5.2-1-flink-1.17` |
-| 1.19 | 1.19.3 | `0.5.2-1-flink-1.19` |
-| 2.0 | 2.0.2 | `0.5.2-1-flink-2.0` |
-| 2.1 and above | 2.1.1 | `0.5.2-1-flink-2.1` |
+| 1.17 | 1.17.2 | `0.5.3-1-flink-1.17` |
+| 1.19 | 1.19.3 | `0.5.3-1-flink-1.19` |
+| 2.0 | 2.0.2 | `0.5.3-1-flink-2.0` |
+| 2.1 and above | 2.1.1 | `0.5.3-1-flink-2.1` |
 
 Download the runnable jar from [Maven Central](https://repo.maven.apache.org/maven2/io/github/cobble-project/cobble-flink-monitor/).
 
