@@ -62,9 +62,10 @@ final class SerializerSnapshotInspectTypeExtractor {
         // Other primitives
         map.put("BooleanSerializerSnapshot", "BOOLEAN");
         map.put("CharSerializerSnapshot", "CHAR");
-        // String
+        // Strings and byte arrays
         map.put("StringSerializerSnapshot", "VARCHAR");
         map.put("StringValueSerializerSnapshot", "VARCHAR");
+        map.put("BytePrimitiveArraySerializerSnapshot", "VARBINARY");
         // Null/void
         map.put("VoidSerializerSnapshot", "NULL");
         map.put("NullValueSerializerSnapshot", "NULL");

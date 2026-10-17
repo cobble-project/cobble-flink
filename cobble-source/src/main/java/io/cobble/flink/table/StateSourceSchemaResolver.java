@@ -504,12 +504,13 @@ final class StateSourceSchemaResolver {
 
     /**
      * Compares an expected type (an inspect logical-type string) with a DDL column type.
-     * Nullability is ignored. Coarse semantic {@code VARCHAR} is accepted for concrete DDL {@code
-     * VARCHAR(...)} because some Flink TypeInformation serializers do not retain string precision.
+     * Nullability is ignored. Coarse semantic {@code VARCHAR} and {@code VARBINARY} accept concrete
+     * lengths in the same family because serializer snapshots do not retain those lengths.
      */
     private static boolean typesMatch(String expectedLogicalType, LogicalType actualType) {
         String actualSerializable = actualType.copy(true).asSerializableString();
-        if ("VARCHAR".equals(expectedLogicalType) && actualSerializable.startsWith("VARCHAR")) {
+        if (("VARCHAR".equals(expectedLogicalType) || "VARBINARY".equals(expectedLogicalType))
+                && expectedLogicalType.equals(actualType.getTypeRoot().name())) {
             return true;
         }
         try {

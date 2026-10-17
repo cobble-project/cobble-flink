@@ -577,6 +577,20 @@ class CobbleEmbeddedCheckpointInspectTest {
 
             assertFalse(operator.globalSnapshotLayout);
             assertTrue(operator.embeddedCheckpoint != null);
+            try (CobbleInspectClient client = CobbleInspectClient.builder().build();
+                    InspectSession session =
+                            client.open(
+                                    InspectSelection.latest(
+                                            fixture.directory
+                                                    .resolve("_metadata")
+                                                    .toUri()
+                                                    .toString(),
+                                            null))) {
+                String ddl = session.overview().items().get(0).sourceSql().ddl();
+                assertTrue(
+                        ddl.contains("'path' = '" + catalog.checkpoints.get(0).directory + "'"),
+                        ddl);
+            }
         }
     }
 

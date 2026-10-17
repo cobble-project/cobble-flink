@@ -46,6 +46,55 @@ class StateSourceSchemaResolverTest {
     // ------------------------------------------------------------------------------------------
 
     @Test
+    void coarseBinarySchemaAcceptsOnlyVarbinaryLengths() throws Exception {
+        Path root = tempDir.resolve("binary-value");
+        StateInspectSchema binary =
+                StateInspectSchema.forValue(
+                        "bytes",
+                        "bytes",
+                        false,
+                        IntSerializer.INSTANCE,
+                        VoidNamespaceSerializer.INSTANCE,
+                        org.apache.flink.api.common.typeutils.base.array
+                                .BytePrimitiveArraySerializer.INSTANCE);
+        writeRegistry(
+                root,
+                "op-a",
+                100L,
+                store(
+                        binary,
+                        "bytes",
+                        StateInspectSemanticSchema.forValue(
+                                scalar("INT"), unknown(), scalar("VARBINARY"))));
+        for (DataType accepted :
+                Arrays.asList(
+                        DataTypes.BYTES(),
+                        DataTypes.VARBINARY(4096),
+                        DataTypes.VARBINARY(16).notNull())) {
+            StateSourceResolvedSchema resolved =
+                    StateSourceSchemaResolver.resolve(
+                            uri(root),
+                            opts("bytes", null, null),
+                            "latest",
+                            schema(physical("key", DataTypes.INT()), physical("value", accepted)));
+            assertEquals("VARBINARY", resolved.outputFields().get(1).logicalType());
+        }
+        for (DataType rejected :
+                Arrays.asList(DataTypes.BINARY(4096), DataTypes.STRING(), DataTypes.INT())) {
+            assertThrows(
+                    ValidationException.class,
+                    () ->
+                            StateSourceSchemaResolver.resolve(
+                                    uri(root),
+                                    opts("bytes", null, null),
+                                    "latest",
+                                    schema(
+                                            physical("key", DataTypes.INT()),
+                                            physical("value", rejected))));
+        }
+    }
+
+    @Test
     void resolvesScalarValueStateWithVoidNamespace() throws Exception {
         Path root = tempDir.resolve("scalar-value");
         writeRegistry(

@@ -63,6 +63,10 @@ class SerializerSnapshotInspectTypeExtractorTest {
         assertScalar(DoubleSerializer.INSTANCE, "DOUBLE");
         assertScalar(CharSerializer.INSTANCE, "CHAR");
         assertScalar(StringSerializer.INSTANCE, "VARCHAR");
+        assertScalar(
+                org.apache.flink.api.common.typeutils.base.array.BytePrimitiveArraySerializer
+                        .INSTANCE,
+                "VARBINARY");
         assertScalar(VoidSerializer.INSTANCE, "NULL");
     }
 

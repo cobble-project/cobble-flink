@@ -85,7 +85,12 @@ final class InspectSessionImpl implements InspectSession {
         this.catalog = catalog;
         this.selection = selection;
         this.readerSession = readerSession;
-        this.sourcePath = sourceRoot;
+        this.sourcePath =
+                operator != null
+                                && !operator.globalSnapshotLayout
+                                && operator.embeddedCheckpoint != null
+                        ? checkpoint.directory
+                        : sourceRoot;
         this.userClassLoader = userClassLoader;
         LegacyTimerSnapshot restoredTimers;
         InspectException timerFailure = null;
