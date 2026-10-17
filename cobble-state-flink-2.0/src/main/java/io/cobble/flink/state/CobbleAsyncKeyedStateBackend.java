@@ -105,6 +105,7 @@ final class CobbleAsyncKeyedStateBackend<K> implements AsyncKeyedStateBackend<K>
             File volumePath,
             Path configPath,
             Config cobbleConfig,
+            CobbleSnapshotConfig snapshotConfig,
             Db cobbleDb,
             CobbleNativeMetrics.Monitor nativeMetricsMonitor,
             int asyncReadThreads,
@@ -158,7 +159,8 @@ final class CobbleAsyncKeyedStateBackend<K> implements AsyncKeyedStateBackend<K>
                         this::hasCobblePriorityQueues,
                         this::stateDescriptorSnapshot,
                         this::buildSchemaStore,
-                        cobbleConfig);
+                        cobbleConfig,
+                        snapshotConfig);
         this.resourcesClosed = new AtomicBoolean(false);
     }
 
@@ -301,7 +303,7 @@ final class CobbleAsyncKeyedStateBackend<K> implements AsyncKeyedStateBackend<K>
             long timestamp,
             @Nonnull CheckpointStreamFactory streamFactory,
             @Nonnull CheckpointOptions checkpointOptions) {
-        CobbleSnapshotStrategy.rejectSavepoint(checkpointOptions);
+        CobbleSnapshotStrategy.validateSnapshotType(checkpointOptions);
         try {
             flushPendingTimerWrites();
             return new SnapshotStrategyRunner<>(

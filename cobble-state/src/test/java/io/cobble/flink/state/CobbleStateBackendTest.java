@@ -3465,13 +3465,12 @@ class CobbleStateBackendTest {
     }
 
     @Test
-    void nativeSavepointsAreRejectedBeforeSnapshotResourcesAreCreated(@TempDir Path tempDir)
-            throws Exception {
+    void canonicalSavepointsUseTheSeparateSavepointPath(@TempDir Path tempDir) throws Exception {
         try (TestBackendContext context = createBackendContext(tempDir, false, null)) {
             CobbleKeyedStateBackend<Integer> backend = context.cobbleBackend;
             CheckpointOptions options =
                     CheckpointOptions.alignedNoTimeout(
-                            SavepointType.savepoint(SavepointFormatType.NATIVE),
+                            SavepointType.savepoint(SavepointFormatType.CANONICAL),
                             CheckpointStorageLocationReference.getDefault());
             // Empty backends must reject unsupported requests rather than return an empty handle.
             assertThrows(
@@ -3494,7 +3493,8 @@ class CobbleStateBackendTest {
                                             0L,
                                             new MemCheckpointStreamFactory(1024),
                                             options));
-            assertTrue(error.getMessage().contains("native savepoints are not supported"));
+            assertTrue(
+                    error.getMessage().contains("canonical savepoints require synchronous state"));
             assertNull(backend.snapshotIdForCheckpoint(40L));
             assertFalse(backend.hasTrackedSnapshot(40L));
             KeyedStateHandle checkpoint = runCheckpointSnapshot(backend, 41L);

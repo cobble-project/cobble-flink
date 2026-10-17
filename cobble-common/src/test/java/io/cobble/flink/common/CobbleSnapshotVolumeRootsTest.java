@@ -16,11 +16,36 @@ import org.apache.flink.core.memory.DataOutputSerializer;
 import org.junit.jupiter.api.Test;
 
 import java.io.IOException;
+import java.net.URI;
 import java.nio.ByteBuffer;
 import java.util.Arrays;
 import java.util.Collections;
 
 class CobbleSnapshotVolumeRootsTest {
+    @Test
+    void remoteRootsRemainNativeUrisWithoutAuthorityAndWithoutCredentials() {
+        assertEquals(
+                Collections.singletonList("custom:///tmp/save%20point/literal%2520"),
+                CobbleSnapshotVolumeRoots.unique(
+                        Collections.singletonList(
+                                "custom:/tmp/save%20point/literal%2520?secret_key=secret#fragment")));
+        assertEquals(
+                Collections.singletonList("custom://host/tmp/save%20point"),
+                CobbleSnapshotVolumeRoots.unique(
+                        Collections.singletonList("custom://user:secret@host/tmp/save%20point")));
+        Config config = new Config();
+        CobbleSnapshotVolumeRoots.addReadonlyVolumes(
+                config, Collections.singletonList("custom:/tmp/savepoint"));
+        assertEquals("custom:///tmp/savepoint", config.volumes.get(0).baseDir);
+        assertEquals(
+                "s3:///tmp/savepoint",
+                CobbleFlinkStorageConfig.nativePath(URI.create("s3a:/tmp/savepoint")));
+        assertEquals("s3://bucket/path", CobbleFlinkStorageConfig.nativePath("s3a://bucket/path"));
+        assertEquals(
+                "file:/tmp/savepoint", CobbleFlinkStorageConfig.nativePath("file:/tmp/savepoint"));
+        assertEquals("/tmp/save point", CobbleFlinkStorageConfig.nativePath("/tmp/save point"));
+    }
+
     @Test
     void resolvesProviderDefaultsRoutesAndExplicitIdentityWithoutLeakingAcrossProviders()
             throws Exception {
@@ -235,6 +260,10 @@ class CobbleSnapshotVolumeRootsTest {
         DataOutputSerializer output = new DataOutputSerializer(256);
         CobbleSnapshotMetadataCodec.write(payload, output);
         byte[] encoded = output.getCopyOfBuffer();
+        assertEquals(3, ByteBuffer.wrap(encoded).getInt(4));
+        assertFalse(
+                CobbleSnapshotMetadataCodec.read(new DataInputDeserializer(encoded))
+                        .exportedSavepoint());
         assertFalse(
                 new String(encoded, java.nio.charset.StandardCharsets.UTF_8).contains("secret"));
         assertEquals(
@@ -242,7 +271,7 @@ class CobbleSnapshotVolumeRootsTest {
                 CobbleSnapshotMetadataCodec.read(new DataInputDeserializer(encoded))
                         .volumeDirectories());
         byte[] old = encoded.clone();
-        ByteBuffer.wrap(old).putInt(4, CobbleSnapshotMetadataCodec.VERSION - 1);
+        ByteBuffer.wrap(old).putInt(4, 2);
         assertThrows(
                 IOException.class,
                 () -> CobbleSnapshotMetadataCodec.read(new DataInputDeserializer(old)));
@@ -255,6 +284,35 @@ class CobbleSnapshotVolumeRootsTest {
         assertThrows(
                 IllegalArgumentException.class,
                 () -> CobbleSnapshotVolumeRoots.unique(Collections.singletonList("")));
+    }
+
+    @Test
+    void nativeSavepointOwnershipUsesVersionFour() throws Exception {
+        ShardSnapshot shard = new ShardSnapshot();
+        shard.dbId = "exported";
+        shard.manifestPath = "file:///savepoint/cobble/exported/snapshot/SNAPSHOT-1";
+        CobbleSnapshotMetadataPayload payload =
+                new CobbleSnapshotMetadataPayload(
+                        Collections.singletonList("file:///savepoint/cobble"),
+                        shard,
+                        false,
+                        Collections.emptyList(),
+                        StateInspectSchemaStore.empty(),
+                        true);
+        DataOutputSerializer output = new DataOutputSerializer(256);
+        CobbleSnapshotMetadataCodec.write(payload, output);
+        byte[] encoded = output.getCopyOfBuffer();
+        assertEquals(4, ByteBuffer.wrap(encoded).getInt(4));
+        CobbleSnapshotMetadataPayload restored =
+                CobbleSnapshotMetadataCodec.read(new DataInputDeserializer(encoded));
+        assertTrue(restored.exportedSavepoint());
+        assertEquals(shard.manifestPath, restored.shardSnapshot().manifestPath);
+        assertThrows(
+                IOException.class,
+                () ->
+                        CobbleSnapshotMetadataCodec.read(
+                                new DataInputDeserializer(
+                                        java.util.Arrays.copyOf(encoded, encoded.length - 1))));
     }
 
     private static Config.VolumeDescriptor volume(String root, Config.VolumeUsageKind kind) {

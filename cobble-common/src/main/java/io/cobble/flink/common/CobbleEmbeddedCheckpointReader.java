@@ -308,7 +308,7 @@ public final class CobbleEmbeddedCheckpointReader {
         } catch (IllegalArgumentException ignored) {
             // Native config accepts plain paths unchanged.
         }
-        return root;
+        return CobbleFlinkStorageConfig.nativePath(root);
     }
 
     private static boolean sameLocation(String first, String second) {

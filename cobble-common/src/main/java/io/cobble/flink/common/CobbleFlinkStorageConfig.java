@@ -9,6 +9,7 @@ import org.apache.flink.core.fs.Path;
 
 import java.io.Serializable;
 import java.net.URI;
+import java.net.URISyntaxException;
 import java.net.URLDecoder;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
@@ -338,9 +339,28 @@ public final class CobbleFlinkStorageConfig implements Serializable {
         }
     }
 
-    /** Match the native S3 spelling already used by the checkpoint writer. */
+    /** Match native scheme routing while preserving ordinary local path spelling. */
     public static String nativePath(String path) {
-        String scheme = storageUri(path).getScheme();
+        URI uri = storageUri(path);
+        if (uri.getScheme() == null || "file".equalsIgnoreCase(uri.getScheme())) return path;
+        return nativePath(uri);
+    }
+
+    /** Converts a Flink URI to a native volume path, including an explicit empty authority. */
+    public static String nativePath(URI uri) {
+        String scheme = uri.getScheme();
+        if (scheme == null || "file".equalsIgnoreCase(scheme)) return uri.getPath();
+        String path = uri.toASCIIString();
+        if (uri.getAuthority() == null) {
+            try {
+                // Native volume routing recognizes remote paths by ://, not just the URI scheme.
+                path =
+                        new URI(scheme, "", uri.getPath(), uri.getQuery(), uri.getFragment())
+                                .toASCIIString();
+            } catch (URISyntaxException error) {
+                throw new IllegalArgumentException("Invalid native storage URI: " + uri, error);
+            }
+        }
         if ("s3".equalsIgnoreCase(scheme)
                 || "s3a".equalsIgnoreCase(scheme)
                 || "s3p".equalsIgnoreCase(scheme)) {

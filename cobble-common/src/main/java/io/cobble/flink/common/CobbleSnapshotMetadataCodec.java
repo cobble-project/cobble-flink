@@ -21,7 +21,11 @@ public final class CobbleSnapshotMetadataCodec {
     /** Identifies a Cobble keyed-state payload inside a Flink metadata stream. */
     public static final int MAGIC = 0x43425348;
 
-    public static final int VERSION = 3;
+    /** Ownership extension for independently exported native savepoints. */
+    public static final int VERSION = 4;
+    /** Ordinary checkpoints retain the released version-3 wire layout. */
+    private static final int CHECKPOINT_VERSION = 3;
+
     private static final int MAX_VOLUME_DIRECTORIES = 10_000;
     private static final int MAX_STATE_DESCRIPTORS = 100_000;
     public static final int MAX_SCHEMA_BYTES = 16 * 1024 * 1024;
@@ -52,7 +56,7 @@ public final class CobbleSnapshotMetadataCodec {
             throws IOException {
         ShardSnapshot shardSnapshot = payload.shardSnapshot();
         output.writeInt(MAGIC);
-        output.writeInt(VERSION);
+        output.writeInt(payload.exportedSavepoint() ? VERSION : CHECKPOINT_VERSION);
         CobbleShardSnapshotCodec.write(shardSnapshot, output);
         output.writeBoolean(payload.containsCobbleTimers());
 
@@ -84,12 +88,13 @@ public final class CobbleSnapshotMetadataCodec {
         for (String directory : volumeDirectories) {
             output.writeUTF(directory);
         }
+        if (payload.exportedSavepoint()) output.writeBoolean(true);
     }
 
     private static CobbleSnapshotMetadataPayload readPayload(DataInputView input)
             throws IOException {
         int version = input.readInt();
-        if (version != VERSION) {
+        if (version != VERSION && version != CHECKPOINT_VERSION) {
             throw new IOException(
                     "Unsupported Cobble snapshot metadata version: "
                             + version
@@ -110,7 +115,12 @@ public final class CobbleSnapshotMetadataCodec {
             volumeDirectories.add(input.readUTF());
         }
         return new CobbleSnapshotMetadataPayload(
-                volumeDirectories, shardSnapshot, containsCobbleTimers, descriptors, schemas);
+                volumeDirectories,
+                shardSnapshot,
+                containsCobbleTimers,
+                descriptors,
+                schemas,
+                version == VERSION && input.readBoolean());
     }
 
     private static void writeStateDescriptor(

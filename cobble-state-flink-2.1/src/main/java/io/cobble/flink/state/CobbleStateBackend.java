@@ -143,13 +143,15 @@ public class CobbleStateBackend extends AbstractManagedMemoryStateBackend
                         priorityQueueStateType, "priorityQueueStateType must not be null");
     }
 
-    /** Cobble restore currently takes ownership of its source snapshot volumes. */
+    /** Checkpoint restore follows Flink's CLAIM lifecycle; NO_CLAIM is not supported. */
     @Override
     public boolean supportsNoClaimRestoreMode() {
         return false;
     }
 
-    /** Savepoint format is delegated to Flink's default operator-state handling for now. */
+    /**
+     * Native savepoints export independent files; canonical savepoints require synchronous state.
+     */
     @Override
     public boolean supportsSavepointFormat(SavepointFormatType formatType) {
         return true;

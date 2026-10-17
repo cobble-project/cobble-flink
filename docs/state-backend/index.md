@@ -367,16 +367,29 @@ Flink-managed compaction service is not needed.
 
 When state TTL is enabled, keep TaskManager and compactor host clocks synchronized.
 
+## Native Savepoints
+
+Native savepoints are supported by both synchronous and Flink 2.x asynchronous
+state. Native files are independently exported beneath the savepoint location,
+so deleting the source checkpoint and local backend directories does not invalidate
+the savepoint. Restore uses `CLAIM` mode but imports into a new backend rather than
+resuming the exported database in place. Restore requires read/write access to the
+savepoint directory. `CLAIM` transfers ownership to Flink, which may clean up the
+savepoint after subsequent checkpoints; retain a separate savepoint for another restore.
+Credentials are never persisted in savepoint metadata.
+Canonical savepoints remain unsupported by asynchronous state.
+
+```bash
+flink savepoint --type native <job-id> <savepoint-directory>
+flink run -s <savepoint-path> -restoreMode claim <job.jar>
+```
+
 ## Restore From A RocksDB Canonical Savepoint
 
 This section explains how to migrate a stateful Flink job from the RocksDB state
 backend to the Cobble state backend by restoring from a RocksDB **canonical
-savepoint**.
-
-Cobble can both create and restore canonical savepoints on the synchronous
-state path. This version does not support native savepoints and rejects attempts
-to create them. Flink 2.x async-state operators do not support savepoints; use
-checkpoints instead.
+savepoint**. Cobble can create and restore canonical savepoints on the synchronous
+state path.
 
 ### When to use this
 

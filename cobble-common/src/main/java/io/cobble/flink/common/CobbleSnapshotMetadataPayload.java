@@ -16,6 +16,7 @@ public final class CobbleSnapshotMetadataPayload {
     private final List<CobbleStateDescriptor> stateDescriptors;
     private final StateInspectSchemaStore schemaStore;
     private final List<String> volumeDirectories;
+    private final boolean exportedSavepoint;
 
     public CobbleSnapshotMetadataPayload(
             List<String> volumeDirectories,
@@ -23,6 +24,22 @@ public final class CobbleSnapshotMetadataPayload {
             boolean containsCobbleTimers,
             List<CobbleStateDescriptor> stateDescriptors,
             StateInspectSchemaStore schemaStore) {
+        this(
+                volumeDirectories,
+                shardSnapshot,
+                containsCobbleTimers,
+                stateDescriptors,
+                schemaStore,
+                false);
+    }
+
+    public CobbleSnapshotMetadataPayload(
+            List<String> volumeDirectories,
+            ShardSnapshot shardSnapshot,
+            boolean containsCobbleTimers,
+            List<CobbleStateDescriptor> stateDescriptors,
+            StateInspectSchemaStore schemaStore,
+            boolean exportedSavepoint) {
         this.shardSnapshot = Objects.requireNonNull(shardSnapshot, "shardSnapshot");
         this.containsCobbleTimers = containsCobbleTimers;
         this.stateDescriptors =
@@ -31,6 +48,7 @@ public final class CobbleSnapshotMetadataPayload {
                                 Objects.requireNonNull(stateDescriptors, "stateDescriptors")));
         this.schemaStore = schemaStore == null ? StateInspectSchemaStore.empty() : schemaStore;
         this.volumeDirectories = CobbleSnapshotVolumeRoots.unique(volumeDirectories);
+        this.exportedSavepoint = exportedSavepoint;
     }
 
     public ShardSnapshot shardSnapshot() {
@@ -51,5 +69,9 @@ public final class CobbleSnapshotMetadataPayload {
 
     public List<String> volumeDirectories() {
         return volumeDirectories;
+    }
+
+    public boolean exportedSavepoint() {
+        return exportedSavepoint;
     }
 }

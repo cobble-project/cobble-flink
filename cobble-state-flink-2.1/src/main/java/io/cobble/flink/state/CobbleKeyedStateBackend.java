@@ -119,6 +119,7 @@ final class CobbleKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
             File volumePath,
             Path configPath,
             Config cobbleConfig,
+            CobbleSnapshotConfig snapshotConfig,
             Db cobbleDb,
             CobbleNativeMetrics.Monitor nativeMetricsMonitor,
             boolean manualTtlTimeProviderForTests,
@@ -178,7 +179,8 @@ final class CobbleKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
                         this::hasCobblePriorityQueues,
                         this::stateDescriptorSnapshot,
                         this::buildSchemaStore,
-                        cobbleConfig);
+                        cobbleConfig,
+                        snapshotConfig);
         this.resourcesClosed = new AtomicBoolean(false);
         this.manualTtlTimeProviderForTests = manualTtlTimeProviderForTests;
         this.canonicalMetadata = new CobbleCanonicalSavepointMetadata();
@@ -570,7 +572,7 @@ final class CobbleKeyedStateBackend<K> extends AbstractKeyedStateBackend<K> {
             long timestamp,
             @Nonnull CheckpointStreamFactory streamFactory,
             @Nonnull CheckpointOptions checkpointOptions) {
-        CobbleSnapshotStrategy.rejectSavepoint(checkpointOptions);
+        CobbleSnapshotStrategy.validateSnapshotType(checkpointOptions);
         try {
             flushPendingTimerWrites();
             return new SnapshotStrategyRunner<>(

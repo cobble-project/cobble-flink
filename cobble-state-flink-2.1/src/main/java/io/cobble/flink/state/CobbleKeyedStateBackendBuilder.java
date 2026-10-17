@@ -154,6 +154,15 @@ final class CobbleKeyedStateBackendBuilder<K> {
                             resources.volumePath,
                             resources.configPath,
                             resources.config,
+                            new CobbleSnapshotConfig(
+                                    CobbleFlinkStorageConfig.from(flinkConfig)
+                                            .withRoutes(resources.config),
+                                    flinkConfig
+                                            .get(
+                                                    org.apache.flink.configuration
+                                                            .CheckpointingOptions
+                                                            .CHECKPOINTING_TIMEOUT)
+                                            .toMillis()),
                             resources.db,
                             resources.nativeMetricsMonitor,
                             manualTtlTimeProviderForTests,
@@ -200,6 +209,15 @@ final class CobbleKeyedStateBackendBuilder<K> {
                             resources.volumePath,
                             resources.configPath,
                             resources.config,
+                            new CobbleSnapshotConfig(
+                                    CobbleFlinkStorageConfig.from(flinkConfig)
+                                            .withRoutes(resources.config),
+                                    flinkConfig
+                                            .get(
+                                                    org.apache.flink.configuration
+                                                            .CheckpointingOptions
+                                                            .CHECKPOINTING_TIMEOUT)
+                                            .toMillis()),
                             resources.db,
                             resources.nativeMetricsMonitor,
                             positiveAsyncThreadCount(CobbleOptions.ASYNC_READ_THREADS),
@@ -573,6 +591,7 @@ final class CobbleKeyedStateBackendBuilder<K> {
 
     private boolean canResumeSingleSource(List<RestoreSource> restoreSources) {
         return restoreSources.size() == 1
+                && !restoreSources.get(0).metadata.exportedSavepoint()
                 && keyGroupRange.equals(restoreSources.get(0).keyGroupRange);
     }
 
@@ -714,6 +733,14 @@ final class CobbleKeyedStateBackendBuilder<K> {
                         intersectionStarts,
                         intersectionEnds,
                         io.cobble.structured.ExpandStorageMode.ADOPT_ASYNC);
+            }
+            if (relevantSources.stream().anyMatch(source -> source.metadata.exportedSavepoint())) {
+                db.waitForExpandAdoption(
+                        flinkConfig
+                                .get(
+                                        org.apache.flink.configuration.CheckpointingOptions
+                                                .CHECKPOINTING_TIMEOUT)
+                                .toMillis());
             }
             success = true;
             return db;

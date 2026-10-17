@@ -116,13 +116,14 @@ class CobbleStateBackendV2Test extends StateBackendTestV2Base<CobbleStateBackend
     void testAsyncStateBackendScaleDown() {}
 
     @TestTemplate
-    void rejectsSavepointsBeforeStartingNativeSnapshots() throws Exception {
+    void canonicalSavepointsAreRejectedAndNativeSavepointsRestoreIndependently() throws Exception {
         AsyncKeyedStateBackend<Integer> backend =
                 createAsyncKeyedBackend(
                         0, 1, IntSerializer.INSTANCE, KeyGroupRange.of(0, 127), env);
         AtomicReference<Throwable> asyncFailure = new AtomicReference<>();
         AsyncExecutionController<Integer> controller = createController(backend, asyncFailure, 128);
         backend.setup(controller);
+        KeyedStateHandle exported;
         try {
             ValueState<Integer> state =
                     backend.getOrCreateKeyedState(
@@ -135,15 +136,13 @@ class CobbleStateBackendV2Test extends StateBackendTestV2Base<CobbleStateBackend
             state.update(11);
             context.release();
             controller.drainInflightRecords(0);
-            for (SavepointFormatType format : SavepointFormatType.values()) {
-                CheckpointOptions options =
-                        CheckpointOptions.alignedNoTimeout(
-                                SavepointType.savepoint(format),
-                                CheckpointStorageLocationReference.getDefault());
-                assertThatThrownBy(() -> backend.snapshot(40L, 0L, createStreamFactory(), options))
-                        .isInstanceOf(UnsupportedOperationException.class)
-                        .hasMessageContaining("native savepoints are not supported");
-            }
+            CheckpointOptions options =
+                    CheckpointOptions.alignedNoTimeout(
+                            SavepointType.savepoint(SavepointFormatType.CANONICAL),
+                            CheckpointStorageLocationReference.getDefault());
+            assertThatThrownBy(() -> backend.snapshot(40L, 0L, createStreamFactory(), options))
+                    .isInstanceOf(UnsupportedOperationException.class)
+                    .hasMessageContaining("canonical savepoints require synchronous state");
             IncrementalRemoteKeyedStateHandle checkpoint =
                     (IncrementalRemoteKeyedStateHandle) snapshot(backend, 41L);
             try (FSDataInputStream stream = checkpoint.getMetaDataStateHandle().openInputStream()) {
@@ -154,10 +153,59 @@ class CobbleStateBackendV2Test extends StateBackendTestV2Base<CobbleStateBackend
                                         .snapshotId)
                         .isZero();
             }
+            java.util.concurrent.RunnableFuture<SnapshotResult<KeyedStateHandle>> nativeFuture =
+                    backend.snapshot(
+                            42L,
+                            0L,
+                            createStreamFactory(),
+                            CheckpointOptions.alignedNoTimeout(
+                                    SavepointType.savepoint(SavepointFormatType.NATIVE),
+                                    org.apache.flink.runtime.state.filesystem
+                                            .AbstractFsCheckpointStorageAccess
+                                            .encodePathAsReference(
+                                                    new org.apache.flink.core.fs.Path(
+                                                            tempDirectory
+                                                                    .resolve("savepoints")
+                                                                    .toUri()))));
+            nativeFuture.run();
+            exported = nativeFuture.get().getJobManagerOwnedSnapshot();
             assertThat(asyncFailure.get()).isNull();
         } finally {
             IOUtils.closeQuietly(backend);
             backend.dispose();
+        }
+        org.apache.flink.util.FileUtils.deleteDirectory(checkpointDirectory().toFile());
+        org.apache.flink.util.FileUtils.deleteDirectory(localDirectory().toFile());
+        for (int attempt = 0; attempt < 2; attempt++) {
+            AsyncKeyedStateBackend<Integer> restored =
+                    restoreAsyncKeyedBackend(
+                            0,
+                            1,
+                            IntSerializer.INSTANCE,
+                            KeyGroupRange.of(0, 127),
+                            Collections.singletonList(exported),
+                            env);
+            AsyncExecutionController<Integer> restoredController =
+                    createController(restored, asyncFailure, 128);
+            restored.setup(restoredController);
+            try {
+                ValueState<Integer> state =
+                        restored.getOrCreateKeyedState(
+                                VoidNamespace.INSTANCE,
+                                VoidNamespaceSerializer.INSTANCE,
+                                new ValueStateDescriptor<>("value", IntSerializer.INSTANCE));
+                RecordContext<Integer> context = restoredController.buildContext(7, 7);
+                context.retain();
+                restoredController.setCurrentContext(context);
+                assertThat(state.value()).isEqualTo(11);
+                context.release();
+                restoredController.drainInflightRecords(0);
+                assertThat(snapshot(restored, 50L + attempt)).isNotNull();
+                assertThat(asyncFailure.get()).isNull();
+            } finally {
+                IOUtils.closeQuietly(restored);
+                restored.dispose();
+            }
         }
     }
 

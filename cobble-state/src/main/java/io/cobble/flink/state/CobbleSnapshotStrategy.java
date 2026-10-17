@@ -9,9 +9,11 @@ import io.cobble.flink.common.CobbleStateDescriptor;
 import io.cobble.flink.common.inspect.StateInspectSchemaStore;
 import io.cobble.structured.Db;
 
+import org.apache.flink.core.execution.SavepointFormatType;
 import org.apache.flink.core.fs.CloseableRegistry;
 import org.apache.flink.core.memory.DataOutputViewStreamWrapper;
 import org.apache.flink.runtime.checkpoint.CheckpointOptions;
+import org.apache.flink.runtime.checkpoint.SavepointType;
 import org.apache.flink.runtime.state.CheckpointBoundKeyedStateHandle;
 import org.apache.flink.runtime.state.CheckpointStreamFactory;
 import org.apache.flink.runtime.state.CheckpointStreamWithResultProvider;
@@ -55,6 +57,7 @@ final class CobbleSnapshotStrategy
     private final Supplier<StateInspectSchemaStore> schemaStoreSupplier;
     private final UUID backendIdentifier;
     private final List<String> volumeDirectories;
+    private final CobbleSnapshotConfig snapshotConfig;
     private final Map<Long, TrackedSnapshot> trackedSnapshots;
     private final Map<Long, CobbleSnapshotResources> pendingSnapshots;
 
@@ -65,7 +68,8 @@ final class CobbleSnapshotStrategy
             Supplier<Boolean> hasCobbleTimers,
             Supplier<List<CobbleStateDescriptor>> stateDescriptorSupplier,
             Supplier<StateInspectSchemaStore> schemaStoreSupplier,
-            Config cobbleConfig) {
+            Config cobbleConfig,
+            CobbleSnapshotConfig snapshotConfig) {
         this.cobbleDb = cobbleDb;
         this.keyGroupRange = keyGroupRange;
         this.hasRegisteredState = hasRegisteredState;
@@ -74,6 +78,7 @@ final class CobbleSnapshotStrategy
         this.schemaStoreSupplier = schemaStoreSupplier;
         this.backendIdentifier = UUID.randomUUID();
         this.volumeDirectories = CobbleSnapshotVolumeRoots.fromConfig(cobbleConfig);
+        this.snapshotConfig = snapshotConfig;
         this.trackedSnapshots = new ConcurrentHashMap<>();
         this.pendingSnapshots = new ConcurrentHashMap<>();
     }
@@ -92,11 +97,12 @@ final class CobbleSnapshotStrategy
     }
 
     // Canonical savepoints use the separate synchronous savepoint() path.
-    static void rejectSavepoint(CheckpointOptions options) {
-        if (options.getCheckpointType().isSavepoint()) {
+    static void validateSnapshotType(CheckpointOptions options) {
+        if (options.getCheckpointType().isSavepoint()
+                && ((SavepointType) options.getCheckpointType()).getFormatType()
+                        != SavepointFormatType.NATIVE) {
             throw new UnsupportedOperationException(
-                    "Cobble native savepoints are not supported. Use canonical savepoints with "
-                            + "synchronous state, or checkpoints with async state.");
+                    "Cobble canonical savepoints require synchronous state.");
         }
     }
 
@@ -111,7 +117,12 @@ final class CobbleSnapshotStrategy
             return registry -> SnapshotResult.empty();
         }
         return registry ->
-                materializeSnapshot(snapshotResources, checkpointId, streamFactory, registry);
+                materializeSnapshot(
+                        snapshotResources,
+                        checkpointId,
+                        streamFactory,
+                        checkpointOptions,
+                        registry);
     }
 
     void notifyCheckpointComplete(long checkpointId) {
@@ -174,6 +185,7 @@ final class CobbleSnapshotStrategy
             CobbleSnapshotResources snapshotResources,
             long checkpointId,
             CheckpointStreamFactory streamFactory,
+            CheckpointOptions options,
             CloseableRegistry snapshotCloseableRegistry)
             throws Exception {
         CheckpointStreamWithResultProvider streamProvider =
@@ -182,20 +194,37 @@ final class CobbleSnapshotStrategy
         snapshotCloseableRegistry.registerCloseable(streamProvider);
 
         SnapshotResult<StreamStateHandle> streamResult = null;
+        CobbleNativeSavepoint export = null;
+        boolean nativeSavepoint = options.getCheckpointType().isSavepoint();
         boolean success = false;
         try {
             ShardSnapshot shardSnapshot = snapshotResources.awaitSnapshot();
+            List<String> snapshotVolumes = volumeDirectories;
+            if (nativeSavepoint) {
+                export =
+                        new CobbleNativeSavepoint(
+                                cobbleDb,
+                                shardSnapshot.snapshotId,
+                                options,
+                                snapshotConfig.storage);
+                snapshotResources.attachExport(export);
+                snapshotCloseableRegistry.registerCloseable(export);
+                shardSnapshot = export.await(snapshotConfig.exportTimeoutMillis);
+                snapshotVolumes = export.volumeDirectories();
+                snapshotResources.cleanupSource(checkpointId);
+            }
             List<CobbleStateDescriptor> stateDescriptors = stateDescriptorSupplier.get();
             if (stateDescriptors.isEmpty()) {
                 throw new IOException(
                         "Cobble snapshot has registered state but no runtime row descriptors.");
             }
             CobbleSnapshotMetadata.fromShardSnapshot(
-                            volumeDirectories,
+                            snapshotVolumes,
                             shardSnapshot,
                             hasCobbleTimers.get(),
                             stateDescriptors,
-                            schemaStoreSupplier.get())
+                            schemaStoreSupplier.get(),
+                            nativeSavepoint)
                     .write(
                             new DataOutputViewStreamWrapper(
                                     streamProvider.getCheckpointOutputStream()));
@@ -213,7 +242,14 @@ final class CobbleSnapshotStrategy
                                 + " produced no metadata stream handle.");
             }
 
-            trackedSnapshots.put(checkpointId, new TrackedSnapshot(shardSnapshot.snapshotId));
+            if (export != null) {
+                if (!snapshotCloseableRegistry.unregisterCloseable(export)) {
+                    throw new IOException("Cobble savepoint export already unregistered.");
+                }
+                export.markPublished();
+            } else {
+                trackedSnapshots.put(checkpointId, new TrackedSnapshot(shardSnapshot.snapshotId));
+            }
             pendingSnapshots.remove(checkpointId);
             snapshotResources.markPublished();
             success = true;
@@ -229,14 +265,19 @@ final class CobbleSnapshotStrategy
                             metaHandle.getStateSize() + shardSnapshot.incrementalDataSizeBytes,
                             metaHandle.getStateSize() + shardSnapshot.dataSizeBytes));
         } finally {
-            if (!success) {
-                pendingSnapshots.remove(checkpointId);
-            }
-            if (!success) {
-                if (streamResult != null) {
-                    StateUtil.discardStateObjectQuietly(streamResult);
-                } else if (snapshotCloseableRegistry.unregisterCloseable(streamProvider)) {
-                    streamProvider.close();
+            try {
+                if (export != null) {
+                    snapshotCloseableRegistry.unregisterCloseable(export);
+                    export.close();
+                }
+            } finally {
+                if (!success) {
+                    pendingSnapshots.remove(checkpointId);
+                    if (streamResult != null) {
+                        StateUtil.discardStateObjectQuietly(streamResult);
+                    } else if (snapshotCloseableRegistry.unregisterCloseable(streamProvider)) {
+                        streamProvider.close();
+                    }
                 }
             }
         }
@@ -266,6 +307,7 @@ final class CobbleSnapshotStrategy
         private final AtomicBoolean published;
         private final AtomicBoolean retained;
         private final AtomicBoolean cleanupHandled;
+        private CobbleNativeSavepoint export;
 
         private CobbleSnapshotResources(
                 Db cobbleDb, long snapshotId, CompletableFuture<ShardSnapshot> snapshotFuture) {
@@ -307,7 +349,30 @@ final class CobbleSnapshotStrategy
             published.set(true);
         }
 
-        void cleanupAfterAbort(long checkpointId) {
+        synchronized void attachExport(CobbleNativeSavepoint export) throws IOException {
+            this.export = export;
+            if (released.get() || cleanupHandled.get()) {
+                export.close();
+                throw new IOException("Cobble savepoint cancelled before export.");
+            }
+        }
+
+        synchronized void cleanupAfterAbort(long checkpointId) {
+            try {
+                if (export != null) {
+                    try {
+                        export.close();
+                    } catch (IOException e) {
+                        throw new IllegalStateException(
+                                "Failed to clean Cobble savepoint export.", e);
+                    }
+                }
+            } finally {
+                cleanupSource(checkpointId);
+            }
+        }
+
+        void cleanupSource(long checkpointId) {
             if (!cleanupHandled.compareAndSet(false, true) || snapshotId < 0 || cobbleDb == null) {
                 return;
             }
@@ -339,8 +404,15 @@ final class CobbleSnapshotStrategy
         }
 
         @Override
-        public void release() {
+        public synchronized void release() {
             released.set(true);
+            if (export != null) {
+                try {
+                    export.close();
+                } catch (IOException ignored) {
+                    // Best effort during backend shutdown.
+                }
+            }
             if (snapshotId >= 0
                     && !published.get()
                     && cobbleDb != null

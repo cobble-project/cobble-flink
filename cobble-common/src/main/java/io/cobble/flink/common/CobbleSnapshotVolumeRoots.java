@@ -92,7 +92,7 @@ public final class CobbleSnapshotVolumeRoots {
             } else if ("file".equalsIgnoreCase(uri.getScheme())) {
                 normalized = Paths.get(uri).toAbsolutePath().normalize().toUri().toString();
             } else {
-                normalized = uri.toString();
+                normalized = CobbleFlinkStorageConfig.nativePath(uri);
             }
             while (normalized.endsWith("/") && URI.create(normalized).getPath().length() > 1) {
                 normalized = normalized.substring(0, normalized.length() - 1);
